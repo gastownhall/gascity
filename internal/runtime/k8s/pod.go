@@ -15,11 +15,18 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const (
 	podManagedDoltHost = "dolt.gc.svc.cluster.local"
 	podManagedDoltPort = "3307"
+
+	// podWorkspaceRoot is the pod-side projection of the city root. It is the
+	// only directory guaranteed to exist when the container starts — it is the
+	// "ws" EmptyDir mount point for staged pods and the image WORKDIR for
+	// prebaked ones — so it is what the pod spec's WorkingDir may safely name.
+	podWorkspaceRoot = "/workspace"
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -45,12 +52,15 @@ func remapControllerPathToPod(val, ctrlCity string) string {
 	return val
 }
 
+// projectedPodWorkDir maps the controller-side WorkDir onto its pod-side path.
+// For a pool or workflow worker this is a per-bead directory
+// (<rig>/<beadID>-<slug>) that does not exist until the entrypoint creates it.
 func projectedPodWorkDir(cfg runtime.Config) string {
-	podWorkDir := "/workspace"
+	podWorkDir := podWorkspaceRoot
 	ctrlCity := controllerCityPath(cfg.Env)
 	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
+			podWorkDir = podWorkspaceRoot + "/" + rel
 		}
 	}
 	return podWorkDir
@@ -250,19 +260,33 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
 	}
 
+	// The pod spec's WorkingDir names the workspace root, because the kubelet
+	// chdirs into it before this command runs and a per-bead workDir does not
+	// exist yet. Create and enter the real working directory here instead.
+	//
+	// Placement matters twice over. It must come *after* wsWait, because until
+	// staging signals ready the workspace content is still being written and a
+	// shell sitting in a subdirectory of it is standing on shifting ground. And
+	// it must come *before* preStartCmds, because pre_start previously ran in
+	// podWorkDir (the container's WorkingDir) and must keep doing so.
+	enterWorkDir := fmt.Sprintf("mkdir -p %s && cd %s && ",
+		shellquote.Quote(podWorkDir), shellquote.Quote(podWorkDir))
+
 	var tmuxCmd string
 	if linuxUsername != "" {
-		// Run tmux session as the dynamic user via su.
+		// Run tmux session as the dynamic user via su. userSetup already created
+		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
+		// puts pre_start in the right directory.
 		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
+			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
 				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
-			userSetup, credCopy, wsWait, preStartCmds, cmdB64,
+			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
 			linuxUsername, podWorkDir, tmuxSession,
 		)
 	} else {
 		tmuxCmd = fmt.Sprintf(
-			"%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-			credCopy, wsWait, preStartCmds, cmdB64, tmuxSession,
+			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
+			credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64, tmuxSession,
 		)
 	}
 
@@ -335,7 +359,11 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				Name:            "agent",
 				Image:           p.image,
 				ImagePullPolicy: corev1.PullAlways,
-				WorkingDir:      podWorkDir,
+				// Not podWorkDir: the kubelet chdirs here before the entrypoint
+				// runs, so naming a per-bead directory that nothing has created
+				// yet fails the container outright. The entrypoint creates and
+				// enters podWorkDir itself.
+				WorkingDir:      podWorkspaceRoot,
 				Command:         []string{"/bin/sh", "-c"},
 				Args:            []string{tmuxCmd},
 				Env:             env,

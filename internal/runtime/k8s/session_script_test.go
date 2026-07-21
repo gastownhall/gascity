@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -118,8 +119,16 @@ func TestSessionScriptStartRigManifestUsesPodPaths(t *testing.T) {
 	if got := result.manifestEnv["GC_DIR"]; got != "/workspace/frontend" {
 		t.Fatalf("manifest GC_DIR = %q, want /workspace/frontend", got)
 	}
-	if got := result.containerWorkingDir; got != "/workspace/frontend" {
-		t.Fatalf("container workingDir = %q, want /workspace/frontend", got)
+	// The manifest's workingDir is the workspace root, which always exists: the
+	// kubelet chdirs there before the entrypoint runs, so naming a directory
+	// that nothing has created yet (a per-bead pool/workflow workDir) would fail
+	// the container outright. The entrypoint enters the pod-mapped agent dir.
+	if got := result.containerWorkingDir; got != podWorkspaceRoot {
+		t.Fatalf("container workingDir = %q, want %q", got, podWorkspaceRoot)
+	}
+	if got := result.containerArgs; !strings.Contains(got, "mkdir -p '/workspace/frontend'") ||
+		!strings.Contains(got, "cd '/workspace/frontend'") {
+		t.Fatalf("entrypoint should create and enter the pod-mapped agent dir; got: %s", got)
 	}
 	if got := result.manifestMounts["ws"]; got != "/workspace" {
 		t.Fatalf("ws mount = %q, want /workspace", got)
@@ -144,6 +153,7 @@ type sessionScriptStartResult struct {
 	manifestEnv         map[string]string
 	manifestMounts      map[string]string
 	containerWorkingDir string
+	containerArgs       string
 	callLog             string
 	output              string
 	err                 error
@@ -227,12 +237,14 @@ exit 1
 	manifestEnv := map[string]string{}
 	manifestMounts := map[string]string{}
 	containerWorkingDir := ""
+	containerArgs := ""
 	manifestBytes, readManifestErr := os.ReadFile(manifestPath)
 	if readManifestErr == nil && len(manifestBytes) > 0 {
 		var manifest struct {
 			Spec struct {
 				Containers []struct {
-					WorkingDir string `json:"workingDir"`
+					WorkingDir string   `json:"workingDir"`
+					Args       []string `json:"args"`
 					Env        []struct {
 						Name  string `json:"name"`
 						Value string `json:"value"`
@@ -249,6 +261,7 @@ exit 1
 		}
 		if len(manifest.Spec.Containers) > 0 {
 			containerWorkingDir = manifest.Spec.Containers[0].WorkingDir
+			containerArgs = strings.Join(manifest.Spec.Containers[0].Args, " ")
 			for _, item := range manifest.Spec.Containers[0].Env {
 				manifestEnv[item.Name] = item.Value
 			}
@@ -269,6 +282,7 @@ exit 1
 		manifestEnv:         manifestEnv,
 		manifestMounts:      manifestMounts,
 		containerWorkingDir: containerWorkingDir,
+		containerArgs:       containerArgs,
 		callLog:             string(callLogBytes),
 		output:              string(out),
 		err:                 err,
