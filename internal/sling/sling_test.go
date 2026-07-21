@@ -2468,11 +2468,11 @@ func TestInstantiateSlingFormulaForceReplacesGraphV2Root(t *testing.T) {
 	opts := molecule.Options{Vars: vars}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
-	first, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps)
+	first, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, LaunchScope{})
 	if err != nil {
 		t.Fatalf("first InstantiateSlingFormula: %v", err)
 	}
-	second, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, true)
+	second, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, LaunchScope{}, true)
 	if err != nil {
 		t.Fatalf("force InstantiateSlingFormula: %v", err)
 	}

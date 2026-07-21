@@ -102,6 +102,14 @@ func newSlingTestStore() *slingTestStore {
 	return &slingTestStore{Store: beads.NewMemStore(), synthetic: map[string]beads.Bead{}}
 }
 
+// ConditionalWritesResolveTarget exposes the embedded MemStore's optional
+// capabilities (notably MetadataCASWriter) through this interface-embedding
+// wrapper. Without it the anonymous beads.Store field promotes only the base
+// Store methods, so a faithful production store's metadata-CAS capability would
+// be invisible here and a target-scope declaration would wrongly fail closed —
+// the exact way real wrapper stores (CachingStore) forward the capability.
+func (s *slingTestStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
 func (s *slingTestStore) ensureSynthetic(id string) beads.Bead {
 	b, ok := s.synthetic[id]
 	if !ok {

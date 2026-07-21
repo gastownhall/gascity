@@ -78,6 +78,25 @@ func PrepareLaunch(recipe *formula.Recipe, scope Scope, members []Member) error 
 	return StampRoot(recipe, scope)
 }
 
+// DeclaresVar reports whether a resolved formula declares a variable, which is
+// what makes it a carrier the formula actually consumes.
+//
+// Carrier presence is derived from the RESOLVED FORMULA'S DECLARED VARS, never
+// from the formula-name predicates. The predicates model what routing injects
+// today and are the right authority for that layer alone; a formula that
+// declares base_branch without matching a name pattern still consumes it.
+//
+// Every boundary shares this one implementation, because two boundaries
+// disagreeing about which carrier a formula consumes is exactly how the scope
+// object and the substituted text drift apart.
+func DeclaresVar(f *formula.Formula, name string) bool {
+	if f == nil || len(f.Vars) == 0 {
+		return false
+	}
+	_, ok := f.Vars[name]
+	return ok
+}
+
 // FormulaDefaultVars extracts the [vars.*].default layer as a plain map.
 //
 // This layer is a trusted source (§3a, lowest precedence) and including it is

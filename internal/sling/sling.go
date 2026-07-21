@@ -1351,7 +1351,15 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
 // graph routing if the formula is a graph.v2 workflow.
-func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
+//
+// THE LAUNCH SCOPE IS A REQUIRED PARAMETER, not an option. §5 requires every
+// Ready-visible launch to be scoped, and the defence against a boundary that
+// silently forgets is not diligence at five call sites — it is that there is no
+// unscoped entry point to call. A caller with nothing to declare passes the
+// zero LaunchScope, which stamps the valid field-empty object (§2c "unknown"):
+// that is a deliberate state suppressing the cwd writers, and it is NOT the
+// same as writing nothing.
+func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, launch LaunchScope, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
 	compileStart := time.Now()
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
@@ -1360,6 +1368,14 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		return nil, err
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+	// Declare every member, then stamp the root — both strictly before the
+	// instantiate call below materializes anything. An error here is a launch
+	// REJECTION: it costs a launch, whereas the same rejection after the root
+	// exists costs an orphaned graph.
+	if err := launch.PrepareLaunchScope(recipe); err != nil {
+		SlingTracef("instantiate scope-rejected formula=%s err=%v", formulaName, err)
+		return nil, err
+	}
 	return InstantiateCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, a, deps, forceGraphV2Replace...)
 }
 
