@@ -3077,11 +3077,27 @@ func ensureManagedDoltPublishedForRuntime(
 	if !owned {
 		return
 	}
-	if portFn(cityPath) != "" {
+	if port := portFn(cityPath); port != "" {
+		// Adopt path: the managed Dolt is already live (e.g. it survived a
+		// supervisor restart), so keep the supervisor's ambient env aligned
+		// with the resolved port instead of only exporting when this process
+		// starts the server itself.
+		exportSupervisorAmbientDoltPortEnv(port)
 		return
 	}
 	if err := healthFn(cityPath); err != nil {
+		// Nothing to re-resolve: the port lookup below is expensive (ownership
+		// resolution, a TCP dial, a /proc fd sweep) and a preflight that just
+		// failed will not have produced a fresh port. Matches the pre-export
+		// control flow, which ended here.
 		fmt.Fprintf(stderr, "%s: managed dolt health preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	// The health preflight may have started or recovered the managed Dolt;
+	// re-resolve so the fresh port lands in the ambient env on this tick
+	// rather than the next one.
+	if port := portFn(cityPath); port != "" {
+		exportSupervisorAmbientDoltPortEnv(port)
 	}
 }
 

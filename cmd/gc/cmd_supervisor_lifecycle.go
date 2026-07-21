@@ -460,6 +460,7 @@ var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
 	defaultSupervisorBeadsActor()
+	enableSupervisorAmbientDoltPortExport()
 	return runSupervisorFunc(stdout, stderr)
 }
 

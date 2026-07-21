@@ -81,6 +81,11 @@ func TestEventActorAfterSupervisorDefault(t *testing.T) {
 // indirection lets the test substitute a no-op loop, observe the
 // pre-loop env state, and confirm the helper executed.
 func TestDoSupervisorRunInvokesDefaultBeadsActor(t *testing.T) {
+	// doSupervisorRun also arms the ambient Dolt port export gate, asserted
+	// below. Pinning it here is what keeps that process-global from latching
+	// on for the rest of the binary and failing whichever disabled-gate test
+	// happens to run after this one.
+	setSupervisorAmbientDoltPortExportForTest(t, false)
 	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "GC_SESSION_ID", "BEADS_ACTOR"} {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
@@ -102,5 +107,11 @@ func TestDoSupervisorRunInvokesDefaultBeadsActor(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_ACTOR"); got != "controller" {
 		t.Fatalf("BEADS_ACTOR after doSupervisorRun = %q, want %q", got, "controller")
+	}
+	// The second pre-loop effect: ambient export is armed before the run loop,
+	// so city-runtime ticks may project the live managed Dolt port into the
+	// supervisor's own env.
+	if !supervisorAmbientDoltPortExportEnabled.Load() {
+		t.Fatal("doSupervisorRun did not arm the ambient dolt port export gate")
 	}
 }
