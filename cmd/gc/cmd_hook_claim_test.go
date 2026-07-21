@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -110,6 +112,90 @@ func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
 	if capturedName != "bd" || len(capturedArgs) < 3 ||
 		!reflect.DeepEqual(capturedArgs[:3], []string{"update", "--json", "session-1"}) {
 		t.Fatalf("bd command = %q %#v, want bd update --json session-1", capturedName, capturedArgs)
+	}
+}
+
+func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	var calls [][]string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			calls = append(calls, append([]string(nil), args...))
+			switch {
+			case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
+			case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker","gc.root_bead_id":"root-1","gc.continuation_group":"review"}}]`), nil
+			default:
+				t.Fatalf("unexpected bd args: %#v", args)
+				return nil, nil
+			}
+		}
+	}
+
+	claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1")
+	if err != nil {
+		t.Fatalf("hookClaimWithBdStore: %v", err)
+	}
+	if !ok {
+		t.Fatal("hookClaimWithBdStore ok = false, want true")
+	}
+	if claimed.Metadata["gc.root_bead_id"] != "root-1" || claimed.Metadata["gc.continuation_group"] != "review" {
+		t.Fatalf("claimed metadata = %#v, want canonical root and continuation group", claimed.Metadata)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want claim update followed by canonical show", calls)
+	}
+}
+
+func TestDoHookClaimStopsAfterCommittedClaimReadbackFailure(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+			{"id":"work-2","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts []string
+	drained := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Assignee: assignee}, true, errors.New("canonical read failed")
+		},
+		DrainAck: func(io.Writer) error {
+			drained = true
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1", code)
+	}
+	if got := strings.Join(attempts, ","); got != "work-1" {
+		t.Fatalf("claim attempts = %q, want only committed work-1", got)
+	}
+	if drained {
+		t.Fatal("drain acknowledged after committed claim readback failure")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+		t.Fatalf("stderr = %q, want committed-claim diagnostic", stderr.String())
 	}
 }
 

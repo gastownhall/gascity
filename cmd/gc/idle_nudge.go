@@ -59,81 +59,79 @@ const (
 //   - Bounded per assignment: observe (grace) → nudge → backoff retries → give
 //     up. It never spams a tick and never loops forever.
 //   - Pool slots only.
+//
+// This is a thin predicate wrapper (poolClaimBackstop) over the shared
+// grace→nudge→backoff→give-up engine in nudge_backstop.go; the pacing,
+// looping, and delivery mechanics live there so a second predicate (e.g. for
+// named/direct startup kickoff) can reuse them without duplicating this state
+// machine.
 func nudgeStalledPoolClaims(
 	sp runtime.Provider,
 	cfg *config.City,
-	sessStore beads.SessionStore,
+	store beads.Store,
 	sessionBeads []beads.Bead,
 	assignedWork []beads.Bead,
 	now time.Time,
 	stdout io.Writer,
 ) {
-	if sp == nil || cfg == nil || sessStore.Store == nil {
+	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	workByID := make(map[string]beads.Bead, len(assignedWork))
-	for _, w := range assignedWork {
-		workByID[w.ID] = w
+	runNudgeBackstop(sp, store, sessionBeads, assignedWork, now, stdout, "idle-claim-nudge", poolClaimBackstop{cfg: cfg})
+}
+
+// poolClaimBackstop is the backstopPredicate for pool-managed slots: it
+// re-delivers the claim nudge to a slot whose assigned trigger bead is still
+// unclaimed. See nudgeStalledPoolClaims for the full rationale and scope.
+type poolClaimBackstop struct {
+	cfg *config.City
+}
+
+func (p poolClaimBackstop) governs(s beads.Bead) bool {
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+}
+
+// outstandingID acts only while the trigger bead is genuinely unclaimed. A
+// claimed bead is in_progress (or closed) — either way the slot is doing its
+// job and must not be disturbed. If the bead is absent from the assigned-work
+// snapshot it's been claimed/closed/moved.
+func (p poolClaimBackstop) outstandingID(s beads.Bead, work map[string]beads.Bead, sessName string) (string, bool) {
+	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if triggerID == "" {
+		return "", false
 	}
-
-	for i := range sessionBeads {
-		s := &sessionBeads[i]
-		if strings.TrimSpace(s.Metadata["pool_managed"]) != "true" {
-			continue // pool slots only
-		}
-		sessName := strings.TrimSpace(s.Metadata["session_name"])
-		if sessName == "" || !sp.IsRunning(sessName) {
-			continue
-		}
-		triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
-		if triggerID == "" {
-			continue
-		}
-
-		// Act only while the trigger bead is genuinely unclaimed. A claimed bead
-		// is in_progress (or closed) — either way the slot is doing its job and
-		// must not be disturbed. If the bead is absent from the assigned-work
-		// snapshot it's been claimed/closed/moved; clear any stale marker.
-		w, ok := workByID[triggerID]
-		if !ok || !isUnclaimedTrigger(w, sessName) {
-			clearIdleClaimMarker(sessStore, s, stdout)
-			continue
-		}
-
-		markedTrigger := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
-		attempts := atoiOr0(s.Metadata[idleClaimNudgeCountKey])
-		last := parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
-
-		// First observation of this assignment: start the grace clock, don't
-		// nudge yet — a normal claim almost always lands within the grace window.
-		if markedTrigger != triggerID {
-			writeIdleClaimMarker(sessStore, s, triggerID, 0, now, stdout)
-			continue
-		}
-		switch {
-		case attempts == 0:
-			if now.Sub(last) < idleClaimNudgeGrace {
-				continue // still inside the observe-first grace
-			}
-		case attempts >= idleClaimNudgeMaxAttempts:
-			continue // gave up; manual re-nudge is the escape hatch
-		default:
-			if now.Sub(last) < idleClaimNudgeBackoff {
-				continue // waiting out the backoff before the next retry
-			}
-		}
-
-		nudge := claimNudgeFor(cfg, *s)
-		if nudge == "" {
-			continue
-		}
-		if err := sp.Nudge(sessName, runtime.TextContent(nudge)); err != nil {
-			fmt.Fprintf(stdout, "idle-claim-nudge: %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
-			continue
-		}
-		fmt.Fprintf(stdout, "idle-claim-nudge: nudged %s to claim %s (attempt %d/%d)\n", sessName, triggerID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
-		writeIdleClaimMarker(sessStore, s, triggerID, attempts+1, now, stdout)
+	w, ok := work[triggerID]
+	if !ok || !isUnclaimedTrigger(w, sessName) {
+		return "", false
 	}
+	return triggerID, true
+}
+
+func (p poolClaimBackstop) state(s beads.Bead, id string) (same bool, attempts int, last time.Time) {
+	marked := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
+	return marked == id, atoiOr0(s.Metadata[idleClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
+}
+
+func (p poolClaimBackstop) content(s beads.Bead) string {
+	return claimNudgeFor(p.cfg, s)
+}
+
+func (p poolClaimBackstop) observe(store beads.Store, s *beads.Bead, id string, now time.Time, stdout io.Writer) {
+	writeIdleClaimMarker(store, s, id, 0, now, stdout)
+}
+
+func (p poolClaimBackstop) record(store beads.Store, s *beads.Bead, id string, attempts int, now time.Time, stdout io.Writer) {
+	writeIdleClaimMarker(store, s, id, attempts, now, stdout)
+}
+
+// exhausted is a deliberate no-op: manual re-nudge remains the pool escape
+// hatch, and leaving the marker untouched at the cap (rather than clearing or
+// rewriting it) is what keeps this predicate silent on every subsequent tick.
+func (p poolClaimBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
+}
+
+func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	clearIdleClaimMarker(store, s, stdout)
 }
 
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still
@@ -166,13 +164,13 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 // writeIdleClaimMarker persists the backstop state machine onto the session
 // bead and mirrors it into the in-memory snapshot so the rest of this tick
 // reads the just-written values.
-func writeIdleClaimMarker(sessStore beads.SessionStore, s *beads.Bead, triggerID string, attempts int, now time.Time, stdout io.Writer) {
+func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, attempts int, now time.Time, stdout io.Writer) {
 	kvs := map[string]string{
 		idleClaimNudgeTriggerKey: triggerID,
 		idleClaimNudgeCountKey:   strconv.Itoa(attempts),
 		idleClaimNudgeAtKey:      now.UTC().Format(time.RFC3339),
 	}
-	if err := sessStore.SetMetadataBatch(s.ID, kvs); err != nil {
+	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
 		return
 	}
@@ -187,7 +185,7 @@ func writeIdleClaimMarker(sessStore beads.SessionStore, s *beads.Bead, triggerID
 // clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
 // work, so the next assignment starts its grace clock fresh. No-op (no store
 // write) when there is nothing to clear, so steady-state ticks stay silent.
-func clearIdleClaimMarker(sessStore beads.SessionStore, s *beads.Bead, stdout io.Writer) {
+func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if s.Metadata[idleClaimNudgeTriggerKey] == "" &&
 		s.Metadata[idleClaimNudgeCountKey] == "" &&
 		s.Metadata[idleClaimNudgeAtKey] == "" {
@@ -198,7 +196,7 @@ func clearIdleClaimMarker(sessStore beads.SessionStore, s *beads.Bead, stdout io
 		idleClaimNudgeCountKey:   "",
 		idleClaimNudgeAtKey:      "",
 	}
-	if err := sessStore.SetMetadataBatch(s.ID, kvs); err != nil {
+	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -457,6 +458,79 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	}
 	if got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
+type storeHealthCounterStore struct {
+	beads.Store
+	count     int
+	countErr  error
+	gotQuery  *beads.ListQuery
+	listCalls int
+}
+
+func (s *storeHealthCounterStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
+	s.gotQuery = &query
+	return s.count, s.countErr
+}
+
+func (s *storeHealthCounterStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.List(query)
+}
+
+func TestCountBeadStoreRowsPrefersCounterWithoutHydration(t *testing.T) {
+	store := &storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 41252 {
+		t.Fatalf("countBeadStoreRows = %d, want Counter result 41252", got)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List called %d times, want 0 (Counter path must not hydrate)", store.listCalls)
+	}
+	if store.gotQuery == nil || !store.gotQuery.IncludeClosed || !store.gotQuery.AllowScan {
+		t.Fatalf("Count query = %+v, want AllowScan and IncludeClosed set", store.gotQuery)
+	}
+}
+
+func TestCountBeadStoreRowsFallsBackWhenCountUnsupported(t *testing.T) {
+	store := &storeHealthCounterStore{
+		Store:    beads.NewMemStore(),
+		countErr: fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported),
+	}
+	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("countBeadStoreRows = %d, want 1 from List fallback", got)
+	}
+	if store.listCalls == 0 {
+		t.Fatal("List never called, want hydrating fallback on ErrCountUnsupported")
+	}
+}
+
+func TestCountBeadStoreRowsReturnsCounterError(t *testing.T) {
+	wantErr := errors.New("store health count failed")
+	store := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: wantErr}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows = %d, want zero value on Counter error", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("countBeadStoreRows error = %v, want %v", err, wantErr)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List called %d times after non-unsupported Counter error, want 0", store.listCalls)
 	}
 }
 

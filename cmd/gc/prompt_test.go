@@ -630,6 +630,23 @@ func TestBuildTemplateDataEmptyEnv(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateDataRigAlias(t *testing.T) {
+	// Regression: {{.Rig}} is the documented rig-name template variable, but
+	// buildTemplateData only set "RigName". With Option("missingkey=zero")
+	// every {{.Rig}} in a prompt template silently rendered empty, dropping
+	// the --rig from rig-scoped agents' commands (e.g. the project-lead's
+	// triage queries). "Rig" must alias the rig name, matching the work_dir
+	// and work_query rendering paths that already expand {{.Rig}}.
+	ctx := PromptContext{RigName: "demo"}
+	data := buildTemplateData(ctx)
+	if data["Rig"] != "demo" {
+		t.Errorf("Rig = %q, want %q", data["Rig"], "demo")
+	}
+	if data["RigName"] != "demo" {
+		t.Errorf("RigName = %q, want %q", data["RigName"], "demo")
+	}
+}
+
 func TestRenderPromptSharedTemplates(t *testing.T) {
 	f := fsys.NewFake()
 	// Shared template defines a named block.

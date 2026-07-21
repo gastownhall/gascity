@@ -125,16 +125,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if strayPane != "" && strayPane != info.PaneID {
 		_ = p.c.closePane(ctx, strayPane)
 	}
-	// Deliver the agent's first turn. Two mutually-exclusive sources: a pool/sling
-	// slot carries its claim instruction in cfg.Nudge; a named always-awake Claude
-	// session carries its behavioral prime in cfg.PromptSuffix (PromptMode=arg).
-	// herdr launches via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg
-	// slot to ride PromptSuffix onto, so without this it would drop the prime, boot
-	// a bare `claude` REPL, and (because the resolver already set
+	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
+	// a named always-awake Claude session carries its behavioral prime in
+	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
+	// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
+	// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
+	// ride PromptSuffix onto, so without this it would drop the prime, boot a
+	// bare `claude` REPL, and (because the resolver already set
 	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
-	// prime) leave the agent wholly unprimed and idle. Route both through the one
-	// hardened post-idle paste+submit path; cfg.Nudge takes precedence so the
-	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
+	// prime) leave the agent wholly unprimed and idle. startupDeliveryText
+	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
+	// returned unchanged. Route it through the one hardened post-idle
+	// paste+submit path. See startupDeliveryText.
 	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening. The paste buffers and survives that window,
@@ -158,20 +160,39 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 // startupDeliveryText resolves the first-turn text Start delivers to a freshly
-// spawned agent. A pool/sling slot carries its claim instruction in cfg.Nudge and
-// is delivered unchanged (it takes precedence, so the working pool path is
-// untouched). A named always-awake Claude session instead carries its behavioral
-// prime in cfg.PromptSuffix (PromptMode=arg, shell-quoted for argv use that herdr's
-// exec launch has no slot for); unquote it — mirroring the parts[0] round-trip used
-// on the resume path in session_lifecycle_parallel.go — and deliver it through the
-// same post-idle paste+submit path. Returns "" when there is nothing to deliver
-// (deterministic workers, suppressed startup prompt). Falls back to the raw string
-// if PromptSuffix somehow fails to unquote: delivering something beats stranding the
-// agent idle.
+// spawned agent. Two independent sources, mirroring the tmux provider — which
+// rides the behavioral prime on the launch arg (buildLaunchCommand) and sends the
+// nudge as a separate Step-6 keystroke:
+//
+//   - a named always-awake Claude session carries its behavioral prime in
+//     cfg.PromptSuffix (PromptMode=arg, shell-quoted for argv use that herdr's
+//     exec launch has no slot for); startupPrimeText unquotes it.
+//   - a pool/sling slot carries its claim instruction in cfg.Nudge.
+//
+// A session may carry BOTH — a named session whose pack also configures a startup
+// nudge (e.g. an oversight tick). Deliver the prime first (the behavioral prompt)
+// then the nudge (the first task): returning only the nudge left such sessions
+// unprimed, because the prime was dropped and GC_STARTUP_PROMPT_DELIVERED=1 also
+// suppresses the SessionStart hook's fallback copy of the prime. A pool slot has
+// no prime, so its claim nudge is returned byte-for-byte unchanged. Returns ""
+// when there is nothing to deliver (deterministic workers, suppressed prompt).
 func startupDeliveryText(cfg runtime.Config) string {
-	if cfg.Nudge != "" {
+	prime := startupPrimeText(cfg)
+	if prime == "" {
 		return cfg.Nudge
 	}
+	if cfg.Nudge == "" {
+		return prime
+	}
+	return prime + "\n\n" + cfg.Nudge
+}
+
+// startupPrimeText recovers the behavioral prime from cfg.PromptSuffix, which is
+// shell-quoted for the launch-arg slot that herdr's exec launch lacks — mirroring
+// the parts[0] round-trip used on the resume path in session_lifecycle_parallel.go.
+// Falls back to the raw string if it somehow fails to unquote: delivering
+// something beats stranding the agent idle. Returns "" when no prime is set.
+func startupPrimeText(cfg runtime.Config) string {
 	if cfg.PromptSuffix == "" {
 		return ""
 	}

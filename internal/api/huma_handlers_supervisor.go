@@ -761,11 +761,12 @@ func supervisorEventCursorFromMux(mux *events.Multiplexer) (string, error) {
 // which now replays a city's entire retained history across archives.
 //
 // With no resume cursor — a head-start client or the attach-only precheck —
-// every city starts from its latest cursor. With a resume cursor, cities the
-// cursor omits are floored to their latest cursor so a cursor that predates a
-// newly registered city cannot trigger a full-history flood for it. It fails
-// closed on a LatestCursor error rather than letting unresolved cities default
-// to cursor 0. The returned map is always non-nil on success.
+// every city starts from its latest cursor. The literal cursor "0" explicitly
+// requests replay from zero for every current provider. With any other resume
+// cursor, cities the cursor omits are floored to their latest cursor so a cursor
+// that predates a newly registered city cannot trigger a full-history flood for
+// it. It fails closed on a LatestCursor error rather than letting unresolved
+// cities default to cursor 0. The returned map is always non-nil on success.
 func resolveGlobalStreamCursors(mux *events.Multiplexer, resumeCursor string) (map[string]uint64, error) {
 	resumeCursor = strings.TrimSpace(resumeCursor)
 	if resumeCursor == "" {
@@ -787,6 +788,10 @@ func resolveGlobalStreamCursors(mux *events.Multiplexer, resumeCursor string) (m
 		return nil, err
 	}
 	for city, seq := range latest {
+		if resumeCursor == "0" {
+			cursors[city] = 0
+			continue
+		}
 		if _, ok := cursors[city]; !ok {
 			cursors[city] = seq
 		}

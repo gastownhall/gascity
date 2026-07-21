@@ -113,17 +113,34 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // countBeadStoreRows returns the number of retained beads in store, including
 // open and closed beads. A nil store and measurement failures are returned as
 // errors so callers do not mistake an unavailable denominator for zero.
-// The closed-inclusive query is never answerable from the in-memory cache,
-// so this path always hydrates; counting closed history without
-// hydration needs backend support (#1896 follow-up). Because it always
-// hydrates, this is the store-health block's exposure to ga-cdmx6x's
-// bd-child leak; statusListStoreWithTimeout's state.ScopedStoreLike wiring
-// covers it the same way as the work-count fallback.
+// The closed-inclusive query is never answerable from the in-memory cache, so
+// the count prefers the hydration-free beads.Counter path (the #1896
+// follow-up): hydrating tens of thousands of closed rows cannot finish inside
+// statusStoreReadTimeout on a long-lived city, which left store_health
+// permanently absent. The hydrating List fallback remains for stores without
+// a Counter and for shapes Count reports as unsupported; that path is the
+// store-health block's exposure to ga-cdmx6x's bd-child leak, covered by
+// statusListStoreWithTimeout's state.ScopedStoreLike wiring the same way as
+// the work-count fallback.
 func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (int, error) {
 	if store == nil {
 		return 0, errors.New("counting retained bead rows: store unavailable")
 	}
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
+	if counter, ok := store.(beads.Counter); ok {
+		// cachedStoreHealth strips the request deadline, so bound the count
+		// here the same way the status handler bounds its store reads.
+		reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+		n, err := counter.Count(reqCtx, query)
+		cancel()
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, beads.ErrCountUnsupported) {
+			return 0, fmt.Errorf("counting retained bead rows: %w", err)
+		}
+	}
+	list, err := statusListStoreWithTimeout(ctx, state, store, query)
 	if err != nil {
 		return 0, fmt.Errorf("counting retained bead rows: %w", err)
 	}

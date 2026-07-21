@@ -714,8 +714,21 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		if !strings.EqualFold(cfg.Rigs[i].Name, rigName) {
 			continue
 		}
-		cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
-		cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		// An inherited rig must not carry the deprecated per-rig
+		// dolt_host/dolt_port in city.toml. A stamped target makes the beads
+		// reconciler treat the rig as an explicit override and churn its
+		// .beads/config.yaml back to `explicit` (dropping the inherited
+		// dolt.user) on every city start, and drifts into a hard error if the
+		// city endpoint later changes (validateCanonicalCompatDoltDrift). Clear
+		// it so the rig truly inherits — matching the managed-city path.
+		// Explicit and self targets keep their host/port.
+		if state.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			cfg.Rigs[i].DoltHost = ""
+			cfg.Rigs[i].DoltPort = ""
+		} else {
+			cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
+			cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		}
 		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)

@@ -58,3 +58,9 @@ func (s *seamBackedProvider) CheckImage(image string) error {
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
 }
+
+// Capabilities preserves the raw provider's complete handshake-derived
+// capability set through the production seam-backed composition.
+func (s *seamBackedProvider) Capabilities() runtime.ProviderCapabilities {
+	return s.raw.Capabilities()
+}

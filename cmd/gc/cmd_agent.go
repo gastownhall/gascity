@@ -273,12 +273,16 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
 // 3-step resolution:
-//  1. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
-//  2. Contextual: if input has no "/" and currentRigDir is set, try
-//     "{currentRigDir}/{input}" to resolve rig-scoped agents from context.
+//  1. Contextual: if input has no "/" and currentRigDir is set, try
+//     "{currentRigDir}/{input}" first. This includes binding-qualified but
+//     scope-unqualified inputs such as "core.control-dispatcher".
+//  2. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
 //  3. Unambiguous bare name: scan all agents by Name (ignoring Dir).
 //     Succeeds only when exactly one configured agent matches. Pool
 //     members are synthesized when the input uses {name}-{N}.
+//
+// This context sensitivity is for interactive CLI input. Persisted routes such
+// as gc.routed_to must already be canonical and must not be re-resolved here.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
