@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/warmup"
 )
 
 // scrubAmbientPostgresEnv ensures resolver tier 3/5 (process env) cannot
@@ -348,5 +349,64 @@ func TestHumanSourceLabel(t *testing.T) {
 				t.Fatalf("humanSourceLabel(%v) = %q; want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPostgresAuthCheck_WarmupEligible_True locks the warm-up opt-in:
+// postgres-auth failures must be caught before agents EAUTH on first
+// bd-write, so the check participates in the `gc start` warm-up scan.
+func TestPostgresAuthCheck_WarmupEligible_True(t *testing.T) {
+	check := NewPostgresAuthCheck(t.TempDir(), &config.City{})
+	if !check.WarmupEligible() {
+		t.Fatal("WarmupEligible() = false; want true")
+	}
+}
+
+// TestPostgresAuthCheck_SoleFailureMail_MultiScope regresses the bug
+// where SoleFailureMail rendered report.Failures (one aggregate entry
+// per check) instead of the per-scope c.results, collapsing multi-scope
+// failures into a single line with the wrong count.
+func TestPostgresAuthCheck_SoleFailureMail_MultiScope(t *testing.T) {
+	scrubAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
+
+	// Two PG scopes, both failing (no creds).
+	rigAPath := filepath.Join(cityPath, "rigs", "alpha")
+	writePGMetadata(t, rigAPath)
+	rigBPath := filepath.Join(cityPath, "rigs", "beta")
+	writePGMetadata(t, rigBPath)
+
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "alpha", Path: "rigs/alpha"},
+		{Name: "beta", Path: "rigs/beta"},
+	}}
+	check := NewPostgresAuthCheck(cityPath, cfg)
+	// Run populates c.results, which SoleFailureMail renders from.
+	check.Run(&doctor.CheckContext{CityPath: cityPath})
+
+	subject, body := check.SoleFailureMail(warmup.WarmupReport{})
+
+	if subject != WarmupMailSubject {
+		t.Fatalf("subject = %q; want %q", subject, WarmupMailSubject)
+	}
+	if !strings.Contains(body, "2 PG-backed scope(s) failed") {
+		t.Fatalf("body missing multi-scope count:\n%s", body)
+	}
+	// A distinct per-scope line for each failing scope's display.
+	for _, want := range []string{
+		"rigs/alpha (db.example.test:5432)",
+		"rigs/beta (db.example.test:5432)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing per-scope line %q:\n%s", want, body)
+		}
+	}
+	// Must not fall back to the aggregate Run() message phrasing.
+	if strings.Contains(body, "postgres-backed scope(s); first issue:") {
+		t.Fatalf("body used aggregate Run() phrasing:\n%s", body)
+	}
+	// No password value leaks (none were written, but guard the invariant).
+	if strings.Contains(body, "devpw") || strings.Contains(body, "shellpw") {
+		t.Fatalf("body leaked a password value:\n%s", body)
 	}
 }

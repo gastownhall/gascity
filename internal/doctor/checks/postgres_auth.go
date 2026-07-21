@@ -134,23 +134,44 @@ const WarmupMailSubject = "postgres-auth alert during city warm-up"
 // warnings) then by scope name ascending, so multi-scope failures read
 // worst-first and are deterministic across runs.
 func (c *PostgresAuthCheck) SoleFailureMail(report warmup.WarmupReport) (subject, body string) {
-	failures := append([]warmup.WarmupCheckResult(nil), report.Failures...)
-	sort.SliceStable(failures, func(i, j int) bool {
-		if failures[i].Status != failures[j].Status {
-			return failures[i].Status > failures[j].Status
+	// Per-scope failed rows come from the check's own resolver results
+	// (populated by Run during the warm-up scan). report.Failures carries
+	// one aggregate entry PER CHECK, not per scope, so rendering it directly
+	// collapses multi-scope failures into a single line with the wrong count.
+	var failed []perScopeReport
+	for _, res := range c.results {
+		p := classifyPostgresAuthResult(res)
+		if p.status == doctor.StatusWarning || p.status == doctor.StatusError {
+			failed = append(failed, p)
 		}
-		return failures[i].Scope < failures[j].Scope
-	})
+	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d PG-backed scope(s) failed credential resolution before agents started:\n", len(failures))
-	b.WriteByte('\n')
-	for _, f := range failures {
-		glyph := "✗"
-		if f.Status == doctor.StatusWarning {
-			glyph = "⚠"
+	if len(failed) > 0 {
+		sortPerScopeReports(failed) // severity desc, then scope root asc
+		fmt.Fprintf(&b, "%d PG-backed scope(s) failed credential resolution before agents started:\n", len(failed))
+		b.WriteByte('\n')
+		for _, p := range failed {
+			fmt.Fprintf(&b, "%s %s — %s\n", statusGlyph(p.status), p.scope.display, p.message)
 		}
-		fmt.Fprintf(&b, "%s %s — %s\n", glyph, f.Scope, f.Message)
+	} else {
+		// Fallback: c.results not populated (timeout / panic / empty result).
+		failures := append([]warmup.WarmupCheckResult(nil), report.Failures...)
+		sort.SliceStable(failures, func(i, j int) bool {
+			if failures[i].Status != failures[j].Status {
+				return failures[i].Status > failures[j].Status
+			}
+			return failures[i].Scope < failures[j].Scope
+		})
+		fmt.Fprintf(&b, "%d PG-backed scope(s) failed credential resolution before agents started:\n", len(failures))
+		b.WriteByte('\n')
+		for _, f := range failures {
+			glyph := "✗"
+			if f.Status == doctor.StatusWarning {
+				glyph = "⚠"
+			}
+			fmt.Fprintf(&b, "%s %s — %s\n", glyph, f.Scope, f.Message)
+		}
 	}
 	b.WriteByte('\n')
 	b.WriteString("Run `gc doctor --explain-postgres-auth` for the resolution table per scope.\n")
