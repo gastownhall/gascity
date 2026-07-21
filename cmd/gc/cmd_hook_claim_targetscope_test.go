@@ -138,3 +138,38 @@ func TestTargetScopeKeyName(t *testing.T) {
 		t.Fatal("target scope key must live in the gc. namespace")
 	}
 }
+
+// THE WIRING ASSERTION. Every test above injects a resolver by hand, so they
+// all pass even if production never installs one — and production did not:
+// claimHookWork builds a bare hookClaimOps{}, so a nil ResolveTargetScope made
+// hookClaimMayStampCwdBranch permit the cwd stamp unconditionally and the whole
+// claim-side guard was dead code in the only configuration that ships.
+//
+// The guard is only real if applyDefaults installs the store-backed resolver,
+// exactly as it installs every other production op.
+func TestApplyDefaultsInstallsTargetScopeResolver(t *testing.T) {
+	ops := hookClaimOps{}
+	ops.applyDefaults()
+
+	if ops.ResolveTargetScope == nil {
+		t.Fatal("applyDefaults left ResolveTargetScope nil; the claim-time cwd guard is inert in production")
+	}
+}
+
+// applyDefaults must not clobber an injected resolver — tests and callers that
+// supply one keep it.
+func TestApplyDefaultsKeepsInjectedTargetScopeResolver(t *testing.T) {
+	called := false
+	ops := hookClaimOps{
+		ResolveTargetScope: func(string, []string, beads.Bead) targetscope.Resolution {
+			called = true
+			return targetscope.Resolution{State: targetscope.StateAbsent}
+		},
+	}
+	ops.applyDefaults()
+	ops.ResolveTargetScope("/dir", nil, beads.Bead{})
+
+	if !called {
+		t.Fatal("applyDefaults replaced an injected ResolveTargetScope")
+	}
+}

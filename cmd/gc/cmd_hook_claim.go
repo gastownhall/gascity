@@ -210,6 +210,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
+	if ops.ResolveTargetScope == nil {
+		ops.ResolveTargetScope = hookResolveTargetScope
+	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
 	}
@@ -598,6 +601,21 @@ func hookClaimMayStampCwdBranch(ops hookClaimOps, opts hookClaimOptions, bead be
 	default:
 		return true
 	}
+}
+
+// hookResolveTargetScope is the production ResolveTargetScope op: it resolves
+// the declared scope through the inherited walk against the same bd store the
+// rest of the claim path talks to, bound to the claiming worktree's dir/env.
+//
+// The walk is store-backed on purpose (see ResolveTargetScope's doc): a
+// formula-generated stage carries only gc.root_bead_id, so the scope governing
+// it lives on the root, not on the bead in hand.
+//
+// Read-only, so it needs no actor attribution. A store that cannot answer makes
+// ResolveInherited report INVALID, which suppresses the cwd stamp rather than
+// silently reopening the defect.
+func hookResolveTargetScope(dir string, env []string, bead beads.Bead) targetscope.Resolution {
+	return targetscope.ResolveInherited(hookClaimBdStore(dir, env, ""), bead)
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
