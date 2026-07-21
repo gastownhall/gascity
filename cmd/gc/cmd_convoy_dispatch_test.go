@@ -4054,14 +4054,13 @@ name = "flow-city"
 		t.Fatal(err)
 	}
 	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"flow-city\"\npath = %q\n", rigDir))
-	t.Setenv("GC_CITY", cityDir)
 
 	prevCityFlag := cityFlag
 	prevList := workflowServeList
 	prevControl := controlDispatcherServe
 	prevInterval := workflowServeIdlePollInterval
 	prevAttempts := workflowServeIdlePollAttempts
-	cityFlag = ""
+	cityFlag = cityDir
 	workflowServeIdlePollInterval = 0
 	workflowServeIdlePollAttempts = 0
 	t.Cleanup(func() {
