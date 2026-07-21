@@ -24,6 +24,7 @@ type gitProbe interface {
 	HasUnpushedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
+	CurrentBranch() (string, error)
 }
 
 // newGitProbe returns a gitProbe scoped to the given directory. Indirected

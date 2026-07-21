@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -53,6 +52,7 @@ func reapClosedBeadWorktrees(
 		if store == nil {
 			continue
 		}
+		rigRoot := rigRootForName(rigName, cfg.Rigs)
 		rigWorktreeDir := filepath.Join(wtRoot, rigName)
 		entries, err := os.ReadDir(rigWorktreeDir)
 		if err != nil {
@@ -93,14 +93,19 @@ func reapClosedBeadWorktrees(
 			}
 
 			// Safety checks: run from the worktree directory so git status
-			// and stash list apply to the worktree's branch.
-			wg := git.New(worktreePath)
+			// and stash list apply to the worktree's branch. A probe error
+			// is treated the same as an unsafe result (fail closed) — an
+			// unreadable probe gives no evidence the tree is safe to reap.
+			wg := newGitProbe(worktreePath)
 			hasUncommitted := wg.HasUncommittedWork()
-			hasUnpushed, _ := wg.HasUnpushedCommitsResult()
-			hasStashes, _ := wg.HasStashesResult()
+			hasUnpushed, unpushedErr := wg.HasUnpushedCommitsResult()
+			hasStashes, stashesErr := wg.HasStashesResult()
 
-			if hasUncommitted || hasUnpushed || hasStashes {
-				reason := fmt.Sprintf("uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
+			if hasUncommitted || hasUnpushed || hasStashes || unpushedErr != nil || stashesErr != nil {
+				reason := fmt.Sprintf(
+					"uncommitted=%v unpushed=%v (err=%v) stashes=%v (err=%v)",
+					hasUncommitted, hasUnpushed, unpushedErr, hasStashes, stashesErr,
+				)
 				fmt.Fprintf(stderr, //nolint:errcheck
 					"reapClosedBeadWorktrees: skipping %s (bead %s closed but unsafe: %s)\n",
 					worktreePath, beadID, reason,
@@ -124,10 +129,19 @@ func reapClosedBeadWorktrees(
 			// Capture branch before removal — the worktree dir will be gone after.
 			branch, _ := wg.CurrentBranch()
 
+			if rigRoot == "" {
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: skipping %s (bead %s closed but rig %q path unresolved)\n",
+					worktreePath, beadID, rigName,
+				)
+				continue
+			}
+
 			// Remove the worktree. git worktree remove must be run from the
-			// main repo root, not from within the worktree being removed.
-			mainRepo := git.New(cityPath)
-			if err := mainRepo.WorktreeRemove(worktreePath, false); err != nil {
+			// rig's own repo root, not from the city root — a rig is an
+			// external repository with its own .git, distinct from the
+			// city's (mirrors session_worktree_prune.go's rig-root pattern).
+			if err := newGitProbe(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
 			}
@@ -154,19 +168,25 @@ func reapClosedBeadWorktrees(
 	return reaped
 }
 
-// extractBeadIDFromWorktreeName scans consecutive dash-separated segment pairs
-// in name for one that LooksLikeConfiguredBeadID. Returns the first match, or
-// "" if none. Handles names like "builder-ga-34q3ss-pr2738" → "ga-34q3ss" and
-// bare "ga-06kfi6" → "ga-06kfi6".
+// extractBeadIDFromWorktreeName scans dash-separated segment windows in name,
+// growing from each start position, for one that LooksLikeConfiguredBeadID.
+// Returns the first match, or "" if none. A configured rig prefix may itself
+// be hyphenated (e.g. rig "agent-diagnostics"), so a fixed two-segment window
+// is not enough — the window must grow to cover multi-segment prefixes.
+// Handles names like "builder-ga-34q3ss-pr2738" → "ga-34q3ss",
+// "agent-diagnostics-h1" → "agent-diagnostics-h1" (hyphenated rig prefix),
+// and bare "ga-06kfi6" → "ga-06kfi6".
 func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 	if name == "" || cfg == nil {
 		return ""
 	}
 	parts := strings.Split(name, "-")
-	for i := 0; i+1 < len(parts); i++ {
-		candidate := parts[i] + "-" + parts[i+1]
-		if sling.LooksLikeConfiguredBeadID(cfg, candidate) {
-			return candidate
+	for i := 0; i < len(parts); i++ {
+		for j := i + 1; j < len(parts); j++ {
+			candidate := strings.Join(parts[i:j+1], "-")
+			if sling.LooksLikeConfiguredBeadID(cfg, candidate) {
+				return candidate
+			}
 		}
 	}
 	return ""

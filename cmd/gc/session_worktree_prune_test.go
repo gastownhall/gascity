@@ -17,16 +17,18 @@ import (
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted.
 type fakeGitProbe struct {
-	isRepo         bool
-	hasUncommitted bool
-	hasUnpushed    bool
-	unpushedErr    error
-	hasStashes     bool
-	stashesErr     error
-	worktreeRemove func(path string, force bool) error
-	removedPath    string
-	removedForce   bool
-	removeInvoked  bool
+	isRepo           bool
+	hasUncommitted   bool
+	hasUnpushed      bool
+	unpushedErr      error
+	hasStashes       bool
+	stashesErr       error
+	currentBranch    string
+	currentBranchErr error
+	worktreeRemove   func(path string, force bool) error
+	removedPath      string
+	removedForce     bool
+	removeInvoked    bool
 }
 
 func (f *fakeGitProbe) IsRepo() bool             { return f.isRepo }
@@ -35,6 +37,10 @@ func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
 func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
+func (f *fakeGitProbe) CurrentBranch() (string, error) {
+	return f.currentBranch, f.currentBranchErr
+}
+
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	f.removeInvoked = true
 	f.removedPath = path
