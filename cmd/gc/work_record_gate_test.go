@@ -86,7 +86,7 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 				reachable = neverReachable
 			}
 			bead := beads.Bead{ID: "wr-1", Type: "task", Metadata: tc.meta}
-			got := validateWorkRecordOnClose(bead, reachable)
+			got := validateWorkRecordOnClose(bead, "", reachable)
 			if tc.wantViol == "" {
 				if len(got) != 0 {
 					t.Fatalf("expected no violations, got %v", got)
@@ -210,7 +210,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), t.TempDir(), tc.enforce, &stderr)
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), t.TempDir(), "", tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
