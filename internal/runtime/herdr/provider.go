@@ -125,16 +125,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if strayPane != "" && strayPane != info.PaneID {
 		_ = p.c.closePane(ctx, strayPane)
 	}
-	// Deliver the agent's first turn. Two mutually-exclusive sources: a pool/sling
-	// slot carries its claim instruction in cfg.Nudge; a named always-awake Claude
-	// session carries its behavioral prime in cfg.PromptSuffix (PromptMode=arg).
-	// herdr launches via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg
-	// slot to ride PromptSuffix onto, so without this it would drop the prime, boot
-	// a bare `claude` REPL, and (because the resolver already set
+	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
+	// a named always-awake Claude session carries its behavioral prime in
+	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
+	// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
+	// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
+	// ride PromptSuffix onto, so without this it would drop the prime, boot a
+	// bare `claude` REPL, and (because the resolver already set
 	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
-	// prime) leave the agent wholly unprimed and idle. Route both through the one
-	// hardened post-idle paste+submit path; cfg.Nudge takes precedence so the
-	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
+	// prime) leave the agent wholly unprimed and idle. startupDeliveryText
+	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
+	// returned unchanged. Route it through the one hardened post-idle
+	// paste+submit path. See startupDeliveryText.
 	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening. The paste buffers and survives that window,
