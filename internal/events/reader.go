@@ -31,7 +31,7 @@ type Filter struct {
 	// append-only and seq-ordered, so "strictly before this seq" is a
 	// stable resume point regardless of concurrent appends.
 	BeforeSeq uint64
-	Limit int // cap results at this count (0 or negative = unlimited)
+	Limit     int // cap results at this count (0 or negative = unlimited)
 	// WindowBytes, when positive, limits how far ReadFilteredTail walks
 	// backward from the end of the log. Events more than WindowBytes bytes
 	// before EOF are not examined; the caller should treat "not found in

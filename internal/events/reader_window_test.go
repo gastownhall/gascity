@@ -33,7 +33,8 @@ func TestReadFilteredTailWindowBytes_BoundStopsWalk(t *testing.T) {
 		Type: "gc.noise",
 	}
 	noiseJSON, _ := json.Marshal(noise)
-	noiseLine := append(noiseJSON, '\n')
+	noiseJSON = append(noiseJSON, '\n')
+	noiseLine := noiseJSON
 
 	f, err := os.Create(path)
 	if err != nil {

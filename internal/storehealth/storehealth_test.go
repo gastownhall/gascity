@@ -12,8 +12,10 @@ import (
 )
 
 // Compile-time checks: spyTailProvider must implement both interfaces.
-var _ events.Provider = (*spyTailProvider)(nil)
-var _ events.TailProvider = (*spyTailProvider)(nil)
+var (
+	_ events.Provider     = (*spyTailProvider)(nil)
+	_ events.TailProvider = (*spyTailProvider)(nil)
+)
 
 func TestStorePath(t *testing.T) {
 	got := StorePath("/tmp/citysvc")
@@ -277,7 +279,7 @@ type spyTailProvider struct {
 	calls []tailCallRecord
 }
 
-func (s *spyTailProvider) Record(e events.Event)                       { s.inner.Record(e) }
+func (s *spyTailProvider) Record(e events.Event)                        { s.inner.Record(e) }
 func (s *spyTailProvider) List(f events.Filter) ([]events.Event, error) { return s.inner.List(f) }
 
 func (s *spyTailProvider) ListTail(f events.Filter, limit int) ([]events.Event, error) {
@@ -345,7 +347,8 @@ func TestLastMaintenanceBoundedScan_EventBeforeWindow(t *testing.T) {
 	// Fill with noise events until the file exceeds lastMaintenanceScanWindow,
 	// pushing the maintenance event before the window floor.
 	noiseBase, _ := json.Marshal(events.Event{Seq: 2, Ts: time.Date(2026, 4, 1, 12, 0, 1, 0, time.UTC), Type: "gc.session.started"})
-	noiseLine := append(noiseBase, '\n')
+	noiseBase = append(noiseBase, '\n')
+	noiseLine := noiseBase
 	written := int64(len(lineBytes) + 1)
 	for written <= lastMaintenanceScanWindow+int64(len(noiseLine))*10 {
 		f.Write(noiseLine) //nolint:errcheck
