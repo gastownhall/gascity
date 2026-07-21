@@ -1589,6 +1589,13 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if text == "" {
 		return true, nil
 	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too (the residual NudgeNow gap): capture the
+	// pre-nudge activity before the first write and stamp it only after the
+	// trailing Enter is delivered, so a later GetSessionActivity discounts gc's
+	// echo instead of counting this nudge as the agent responding (see
+	// discountPokeActivity). A failed write records nothing.
+	commitPoke := t.beginPoke(target)
 	if err := client.write([]byte(text)); err != nil {
 		return true, err
 	}
@@ -1598,6 +1605,7 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if err := client.write([]byte{'\r'}); err != nil {
 		return true, err
 	}
+	commitPoke()
 	return true, nil
 }
 
@@ -1831,11 +1839,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// entry would let the final Enter's echo land outside the discount window.
 	// pokePrior also carries a still-unanswered earlier poke's baseline forward
 	// so chained nudges inside pokeGrace don't record gc's own echo as prior.
-	prior := t.pokePrior(session)
+	commitPoke := t.beginPoke(session)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(session, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -1918,11 +1926,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// See NudgeSession for why prior is captured before the first keystroke
 	// (via pokePrior, which also carries a still-unanswered earlier poke's
 	// baseline forward) and the poke stamped only on confirmed delivery.
-	prior := t.pokePrior(pane)
+	commitPoke := t.beginPoke(pane)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(pane, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -2373,6 +2381,20 @@ func (t *Tmux) recordPokeAt(session string, prior, at time.Time) {
 	}
 	t.pokes[session] = pokeInfo{at: at, prior: prior}
 	t.pokeMu.Unlock()
+}
+
+// beginPoke snapshots the genuine pre-nudge activity for session (via pokePrior,
+// which also carries a still-unanswered earlier poke's baseline forward) and
+// returns a commit closure. Callers invoke commit only after the nudge's final
+// keystroke is confirmed delivered; it stamps the poke so a later
+// GetSessionActivity discounts gc's own keystroke echo (see discountPokeActivity)
+// instead of counting the nudge as the agent responding. A nudge that never
+// confirms delivery must not call commit, leaving last_active untouched. This is
+// the shared prior-before-write / stamp-after-delivery contract used by
+// NudgeSession, NudgePane, and the hidden-attached send path.
+func (t *Tmux) beginPoke(session string) (commit func()) {
+	prior := t.pokePrior(session)
+	return func() { t.recordPokeAt(session, prior, time.Now()) }
 }
 
 // pokePrior snapshots the genuine session activity to record as a new poke's
