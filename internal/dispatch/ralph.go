@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/targetscope"
 )
 
 // maxCheckInfraRetries bounds how many times a ralph check gate may be re-run
@@ -235,7 +236,10 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		storePath = cityPath
 	}
 
-	workDir := resolveInheritedMetadata(store, bead, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey)
+	workDir, scopeViolation := ralphWorkDir(store, bead, targetscope.Envelope{CityPath: cityPath, StorePath: storePath})
+	if scopeViolation != "" {
+		return convergence.GateResult{}, fmt.Errorf("%s: %s", bead.ID, scopeViolation)
+	}
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
@@ -1065,6 +1069,39 @@ func trimAttemptStepRefSuffix(stepRef, suffix string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSuffix(stepRef, suffix), true
+}
+
+// ralphWorkDir resolves the directory the exec check runs in.
+//
+// The declared gc.target_scope is the authority (§7): when a bead resolves a
+// valid scope, its worktree decides, and the claim-stamped gc.work_dir is not
+// consulted at all. That is the whole point of the object — gc.work_dir is
+// written from whatever cwd the claiming session happened to hold, so a check
+// that trusts it runs wherever the worker stood rather than where the work was
+// targeted.
+//
+// The tri-state is kept apart deliberately:
+//
+//   - valid, worktree known   → the declared worktree.
+//   - valid, worktree unknown → empty, so the caller falls to the store root.
+//     This is the §2c field-empty case and it must NOT reach for the flat key:
+//     a scope that says "unknown" is an answer, not an absence.
+//   - invalid                 → a violation. Falling back to the flat key here
+//     would hand the check the exact cwd value the scope was declared to
+//     override, which is how a corrupt object becomes an escalation.
+//   - absent                  → the legacy inherited flat read, unchanged. No
+//     existing bead has a scope, so this is every bead until a boundary
+//     declares one.
+func ralphWorkDir(store beads.Store, bead beads.Bead, envelope targetscope.Envelope) (workDir, violation string) {
+	switch res := targetscope.ResolveForReader(store, bead, envelope); res.State {
+	case targetscope.StateValid:
+		return res.Scope.Worktree, ""
+	case targetscope.StateInvalid:
+		return "", fmt.Sprintf("%s is unusable (%v); refusing to run the exec check against the claim-time %s instead",
+			beadmeta.TargetScopeMetadataKey, res.Reason, beadmeta.WorkDirMetadataKey)
+	default:
+		return resolveInheritedMetadata(store, bead, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey), ""
+	}
 }
 
 func resolveInheritedMetadata(store beads.Store, bead beads.Bead, keys ...string) string {
