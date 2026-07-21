@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,77 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 func TestCleanupFailedManagedDoltRecovery_NilCause(t *testing.T) {
 	if err := cleanupFailedManagedDoltRecovery("/nonexistent", 0, 0, nil); err != nil {
 		t.Errorf("cleanupFailedManagedDoltRecovery(nil cause) = %v, want nil", err)
+	}
+}
+
+func TestCleanupFailedManagedDoltRecovery_ClearsRuntimeAndPublishedState(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "cleanup-test"
+
+[beads]
+provider = "bd"
+backend = "dolt"
+`), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatalf("write beads config: %v", err)
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		t.Fatalf("managedDoltLifecycleOwned: %v", err)
+	}
+	if !owned {
+		t.Fatal("managedDoltLifecycleOwned = false, want true for managed bd city")
+	}
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	const (
+		pid  = 4242
+		port = 33123
+	)
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: "2026-07-21T00:00:00Z",
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("write provider runtime state: %v", err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte("4242\n"), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("write published runtime state: %v", err)
+	}
+
+	cause := errors.New("preflight cleanup failed")
+	err = cleanupFailedManagedDoltRecovery(cityPath, 0, port, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cleanupFailedManagedDoltRecovery error = %v, want sentinel cause", err)
+	}
+
+	got, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read provider runtime state: %v", err)
+	}
+	if got.Running || got.PID != 0 || got.Port != port {
+		t.Fatalf("provider runtime state = {Running:%v PID:%d Port:%d}, want {Running:false PID:0 Port:%d}", got.Running, got.PID, got.Port, port)
+	}
+	if _, err := os.Stat(layout.PIDFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pid file stat error = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published runtime state stat error = %v, want os.ErrNotExist", err)
 	}
 }
 
@@ -243,6 +315,7 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnly(t *testing.T) {
 
 func TestRecoverManagedDolt_ProceedsWhenProbeUnreachable(t *testing.T) {
 	cityPath := setupRecoveryTestCity(t)
+	preflightErr := errors.New("preflight cleanup failed")
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldPreflight := managedDoltPreflightCleanupFn
@@ -255,12 +328,12 @@ func TestRecoverManagedDolt_ProceedsWhenProbeUnreachable(t *testing.T) {
 		return fmt.Errorf("connection refused")
 	}
 	managedDoltPreflightCleanupFn = func(_ string) error {
-		return fmt.Errorf("stop: expected — no real dolt process")
+		return preflightErr
 	}
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
-	if err == nil {
-		t.Fatal("expected error when unreachable server recovery proceeds to stop/start")
+	if !errors.Is(err, preflightErr) {
+		t.Fatalf("recoverManagedDoltProcess error = %v, want preflight cleanup sentinel", err)
 	}
 	if report.Ready {
 		t.Error("expected Ready=false when probe fails")

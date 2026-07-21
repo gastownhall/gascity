@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -3132,81 +3131,6 @@ esac
 	}
 	if published.PID != listener.Process.Pid || published.Port != newPort {
 		t.Fatalf("published state = %+v, want pid=%d port=%d", published, listener.Process.Pid, newPort)
-	}
-}
-
-func TestDoltStateRecoverManagedCmdClearsPublishedStateWhenPreflightCleanupFails(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
-	cityPath := t.TempDir()
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
-		t.Fatalf("MkdirAll(runtime dir): %v", err)
-	}
-	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(data dir): %v", err)
-	}
-
-	port := reserveRandomTCPPort(t)
-	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
-	defer func() {
-		_ = original.Process.Kill()
-		_ = original.Wait()
-	}()
-	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pid): %v", err)
-	}
-	state := doltRuntimeState{
-		Running:   true,
-		PID:       original.Process.Pid,
-		Port:      port,
-		DataDir:   layout.DataDir,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
-		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
-	}
-	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
-		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
-	}
-
-	oldPreflight := managedDoltPreflightCleanupFn
-	managedDoltPreflightCleanupFn = func(string) error {
-		return errors.New("preflight cleanup failed")
-	}
-	defer func() { managedDoltPreflightCleanupFn = oldPreflight }()
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "preflight cleanup failed") {
-		t.Fatalf("stderr = %q, want preflight cleanup failure", stderr.String())
-	}
-	if managedStopPIDAlive(original.Process.Pid) {
-		t.Fatalf("original pid %d still alive after failed recovery", original.Process.Pid)
-	}
-	stateAfter, err := readDoltRuntimeStateFile(layout.StateFile)
-	if err != nil {
-		t.Fatalf("readDoltRuntimeStateFile(after failure): %v", err)
-	}
-	if stateAfter.Running {
-		t.Fatalf("stateAfter.Running = true after failed preflight cleanup: %+v", stateAfter)
-	}
-	if stateAfter.PID != 0 {
-		t.Fatalf("stateAfter.PID = %d, want 0 after failed preflight cleanup", stateAfter.PID)
-	}
-	if stateAfter.Port != port {
-		t.Fatalf("stateAfter.Port = %d, want %d after failed preflight cleanup", stateAfter.Port, port)
-	}
-	if _, err := os.Stat(layout.PIDFile); !os.IsNotExist(err) {
-		t.Fatalf("pid file still present after failed preflight cleanup: err=%v", err)
-	}
-	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
-		t.Fatalf("published managed state still present after failed preflight cleanup: err=%v", err)
 	}
 }
 
