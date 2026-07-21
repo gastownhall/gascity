@@ -96,6 +96,27 @@ type ListQuery struct {
 	// observe external mutations immediately.
 	Live bool
 	Sort SortOrder
+	// AllowBackingCreatedLimit lets a backing store satisfy a bounded
+	// SortCreatedDesc read with its own native row limit even though the backing
+	// breaks created_at ties by id ASC while Gas City's canonical order
+	// (sortBeadsForQuery) and cursor continuation (SeekBoundary.After) break them
+	// by id DESC. A native desc limit can therefore keep the smaller-id tie
+	// members at the boundary and drop the larger-id ties an exact or
+	// cursor-paginated caller needs, so it is OFF by default: exact/paginated
+	// reads fetch the full candidate set and let ApplyListQuery cut the exact
+	// (created_at DESC, id DESC) prefix. Only a caller that folds the bounded rows
+	// into a max over the created_at sort key ITSELF may set it true — every
+	// dropped boundary tie shares the surviving rows' created_at, so the max is
+	// unchanged (e.g. the order dispatcher's RecentRunsAll/LastRun, which reduce to
+	// max(created_at)). A caller that reduces over a DIFFERENT column must NOT set
+	// it: the order dispatcher's event cursor (Cursor/bdCursor) reduces to max(seq)
+	// via MaxSeqFromLabels, and because seq is forward-only the max-seq run is the
+	// newest largest-id row — exactly the tie member a bounded id-ASC read drops —
+	// so a bounded backing read there would regress the cursor and replay events. It
+	// has no effect on SortCreatedAsc (whose backing id ASC tie-break already
+	// matches the canonical order, so bounded asc reads are exact) or on stores that
+	// always resolve the limit Go-side.
+	AllowBackingCreatedLimit bool
 	// TierMode selects the storage tier(s) to read from. Zero value
 	// (TierIssues) preserves the legacy single-tier behavior.
 	TierMode TierMode

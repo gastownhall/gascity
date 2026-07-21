@@ -612,11 +612,9 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	}
 
 	var issuesTable string
-	if err := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
-		}
-		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
+	issuesScanErr := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable)
+	if err := validateExternalDoltIssuesTableScan(database, issuesScanErr); err != nil {
+		return err
 	}
 
 	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
@@ -640,6 +638,16 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 		)
 	}
 	return nil
+}
+
+func validateExternalDoltIssuesTableScan(database string, scanErr error) error {
+	if scanErr == nil {
+		return nil
+	}
+	if scanErr == sql.ErrNoRows { //nolint:errorlint // Preserve the pre-extraction exact-sentinel contract.
+		return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
+	}
+	return fmt.Errorf("beads store not usable on external endpoint: %w", scanErr)
 }
 
 func readCanonicalProjectID(metadataPath string) (string, error) {
@@ -706,8 +714,21 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		if !strings.EqualFold(cfg.Rigs[i].Name, rigName) {
 			continue
 		}
-		cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
-		cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		// An inherited rig must not carry the deprecated per-rig
+		// dolt_host/dolt_port in city.toml. A stamped target makes the beads
+		// reconciler treat the rig as an explicit override and churn its
+		// .beads/config.yaml back to `explicit` (dropping the inherited
+		// dolt.user) on every city start, and drifts into a hard error if the
+		// city endpoint later changes (validateCanonicalCompatDoltDrift). Clear
+		// it so the rig truly inherits — matching the managed-city path.
+		// Explicit and self targets keep their host/port.
+		if state.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			cfg.Rigs[i].DoltHost = ""
+			cfg.Rigs[i].DoltPort = ""
+		} else {
+			cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
+			cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		}
 		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)

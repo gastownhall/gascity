@@ -39,6 +39,7 @@ type fakeState struct {
 	cfg               *config.City
 	rawCfg            *config.City // optional: raw config for provenance detection
 	sp                *runtime.Fake
+	sessionProvider   runtime.Provider // optional override for SessionProvider
 	stores            map[string]beads.Store
 	cityBeadStore     beads.Store // city-level store for session beads
 	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
@@ -97,8 +98,13 @@ func newFakeState(t testing.TB) *fakeState {
 	}
 }
 
-func (f *fakeState) Config() *config.City                { return f.cfg }
-func (f *fakeState) SessionProvider() runtime.Provider   { return f.sp }
+func (f *fakeState) Config() *config.City { return f.cfg }
+func (f *fakeState) SessionProvider() runtime.Provider {
+	if f.sessionProvider != nil {
+		return f.sessionProvider
+	}
+	return f.sp
+}
 func (f *fakeState) BeadStore(rig string) beads.Store    { return f.stores[rig] }
 func (f *fakeState) BeadStores() map[string]beads.Store  { return f.stores }
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }

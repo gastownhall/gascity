@@ -800,6 +800,24 @@ content_hash = "sha256:000000000000000000000000000000000000000000000000000000000
 	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo after repair: %v", err)
 	}
+
+	// An unrelated file makes the full integrity walk fail while leaving the
+	// binary/commit marker valid. The reload hot path must trust that marker and
+	// avoid re-materializing the entire shared cache.
+	sentinel := filepath.Join(cacheDir, "reload-fast-path-sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sentinel): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+		t.Fatal("expected full validation to reject the unrelated sentinel")
+	}
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("marker fast path re-materialized the cache: %v", err)
+	}
 }
 
 func TestEnsureBundledPacksCurrentSkipsNonBundledPacks(t *testing.T) {

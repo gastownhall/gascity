@@ -16,7 +16,7 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
 		`{"role":"user","content":"read the file"}`,
 		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
-		`{"role":"tool","content":[{"type":"text","text":"file data"}],"tool_call_id":"call-1"}`,
+		`{"role":"tool","content":[{"type":"text","text":"file data"}],"tool_call_id":"call-1","status":"failed"}`,
 		`{"role":"assistant","content":"done"}`,
 	})
 
@@ -36,13 +36,13 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 		t.Fatalf("tool use block = %#v, want call-1 Read tool_use", toolUseBlocks[0])
 	}
 	var toolInput struct {
-		Path string `json:"path"`
+		FilePath string `json:"file_path"`
 	}
 	if err := json.Unmarshal(toolUseBlocks[0].Input, &toolInput); err != nil {
 		t.Fatalf("unmarshal tool input: %v", err)
 	}
-	if toolInput.Path != "README.md" {
-		t.Fatalf("tool input path = %q, want README.md", toolInput.Path)
+	if toolInput.FilePath != "README.md" {
+		t.Fatalf("tool input file_path = %q, want README.md", toolInput.FilePath)
 	}
 	toolResult := sess.Messages[2]
 	if toolResult.Type != "result" {
@@ -57,6 +57,57 @@ func TestReadKimiFilePreservesNativeToolRows(t *testing.T) {
 	}
 	if blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "call-1" {
 		t.Fatalf("tool result block = %#v, want call-1 tool_result", blocks[0])
+	}
+	if !blocks[0].IsError {
+		t.Fatalf("tool result IsError = false, want true from failed status: %#v", blocks[0])
+	}
+}
+
+func TestReadKimiFileNormalizesToolObjectsToNeutralKeys(t *testing.T) {
+	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
+		`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Edit","arguments":"{\"filePath\":\"README.md\",\"oldString\":\"old\",\"newString\":\"new\"}"}}]}`,
+		`{"role":"tool","content":{"output":"Edited README.md","filePath":"README.md","patch":"--- README.md\n+++ README.md\n@@\n-old\n+new","exitCode":0},"tool_call_id":"call-1"}`,
+	})
+
+	sess, err := ReadKimiFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadKimiFile: %v", err)
+	}
+	toolUseBlocks := sess.Messages[0].ContentBlocks()
+	if len(toolUseBlocks) != 1 {
+		t.Fatalf("tool use blocks = %d, want 1", len(toolUseBlocks))
+	}
+	var input struct {
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if err := json.Unmarshal(toolUseBlocks[0].Input, &input); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
+	}
+	if input.FilePath != "README.md" || input.OldString != "old" || input.NewString != "new" {
+		t.Fatalf("neutral input = %+v, want README.md old/new", input)
+	}
+	toolResultBlocks := sess.Messages[1].ContentBlocks()
+	if len(toolResultBlocks) != 1 {
+		t.Fatalf("tool result blocks = %d, want 1", len(toolResultBlocks))
+	}
+	var output struct {
+		Output   string `json:"output"`
+		FilePath string `json:"file_path"`
+		Patch    string `json:"patch"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal(toolResultBlocks[0].Content, &output); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if output.Output != "Edited README.md" || output.FilePath != "README.md" || !strings.Contains(output.Patch, "+new") || output.ExitCode != 0 {
+		t.Fatalf("neutral output = %+v, want patch result", output)
+	}
+	for _, forbidden := range []string{"filePath", "oldString", "newString", "exitCode"} {
+		if strings.Contains(string(toolUseBlocks[0].Input), forbidden) || strings.Contains(string(toolResultBlocks[0].Content), forbidden) {
+			t.Fatalf("Kimi normalized blocks leaked %s: input=%s content=%s", forbidden, toolUseBlocks[0].Input, toolResultBlocks[0].Content)
+		}
 	}
 }
 
@@ -99,7 +150,7 @@ func TestReadKimiFileNativeToolCallArgumentShapes(t *testing.T) {
 		{
 			name:      "raw object",
 			arguments: `{"path":"README.md"}`,
-			want:      map[string]any{"path": "README.md"},
+			want:      map[string]any{"file_path": "README.md"},
 		},
 		{
 			name:      "invalid json string",
@@ -309,20 +360,29 @@ func TestFindKimiSessionFileByIDRejectsTraversalSessionID(t *testing.T) {
 
 func TestReadProviderFileNewerDispatchesKimi(t *testing.T) {
 	path := writeKimiContext(t, filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl"), []string{
-		`{"role":"user","content":"hello"}`,
+		`{"role":"user","content":"before"}`,
+		`{"role":"assistant","content":"after"}`,
 	})
-	sess, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, "ignored")
+	full, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile: %v", err)
+	}
+	fullIDs := kimiEntryIDs(full.Messages)
+	if len(fullIDs) != 2 {
+		t.Fatalf("full Kimi message IDs = %v, want two entries", fullIDs)
+	}
+	sess, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, fullIDs[0])
 	if err != nil {
 		t.Fatalf("ReadProviderFileNewer: %v", err)
 	}
-	if sess.ID != "session-123" || len(sess.Messages) != 1 {
+	if sess.ID != "session-123" || len(sess.Messages) != 1 || sess.Messages[0].UUID != fullIDs[1] {
 		t.Fatalf("ReadProviderFileNewer session = id %q messages %d, want Kimi reader output", sess.ID, len(sess.Messages))
 	}
-	rawSess, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, "ignored")
+	rawSess, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, fullIDs[0])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawNewer: %v", err)
 	}
-	if rawSess.ID != "session-123" || len(rawSess.Messages) != 1 {
+	if rawSess.ID != "session-123" || len(rawSess.Messages) != 1 || rawSess.Messages[0].UUID != fullIDs[1] {
 		t.Fatalf("ReadProviderFileRawNewer session = id %q messages %d, want Kimi reader output", rawSess.ID, len(rawSess.Messages))
 	}
 }
@@ -334,29 +394,115 @@ func TestReadProviderFileKimiAppliesMessageIDCursors(t *testing.T) {
 		`{"role":"user","content":"third"}`,
 		`{"role":"assistant","content":"fourth"}`,
 	})
+	full, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile: %v", err)
+	}
+	fullIDs := kimiEntryIDs(full.Messages)
+	if len(fullIDs) != 4 {
+		t.Fatalf("full Kimi message IDs = %v, want four entries", fullIDs)
+	}
 
-	newer, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, "kimi-1")
+	newer, err := ReadProviderFileNewer("kimi/tmux-cli", path, 0, fullIDs[1])
 	if err != nil {
 		t.Fatalf("ReadProviderFileNewer: %v", err)
 	}
-	if got := kimiEntryIDs(newer.Messages); !reflect.DeepEqual(got, []string{"kimi-2", "kimi-3"}) {
-		t.Fatalf("newer Kimi message IDs = %v, want [kimi-2 kimi-3]", got)
+	if got := kimiEntryIDs(newer.Messages); !reflect.DeepEqual(got, fullIDs[2:]) {
+		t.Fatalf("newer Kimi message IDs = %v, want %v", got, fullIDs[2:])
 	}
 
-	older, err := ReadProviderFileOlder("kimi/tmux-cli", path, 0, "kimi-2")
+	older, err := ReadProviderFileOlder("kimi/tmux-cli", path, 0, fullIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileOlder: %v", err)
 	}
-	if got := kimiEntryIDs(older.Messages); !reflect.DeepEqual(got, []string{"kimi-0", "kimi-1"}) {
-		t.Fatalf("older Kimi message IDs = %v, want [kimi-0 kimi-1]", got)
+	if got := kimiEntryIDs(older.Messages); !reflect.DeepEqual(got, fullIDs[:2]) {
+		t.Fatalf("older Kimi message IDs = %v, want %v", got, fullIDs[:2])
 	}
 
-	rawNewer, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, "kimi-2")
+	rawNewer, err := ReadProviderFileRawNewer("kimi/tmux-cli", path, 0, fullIDs[2])
 	if err != nil {
 		t.Fatalf("ReadProviderFileRawNewer: %v", err)
 	}
-	if got := kimiEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, []string{"kimi-3"}) {
-		t.Fatalf("raw newer Kimi message IDs = %v, want [kimi-3]", got)
+	if got := kimiEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, fullIDs[3:]) {
+		t.Fatalf("raw newer Kimi message IDs = %v, want %v", got, fullIDs[3:])
+	}
+}
+
+func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsAcrossAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions", "hash", "session-123", "context.jsonl")
+	repeated := `{"role":"assistant","content":"same answer"}`
+	writeKimiContext(t, path, []string{
+		`{"role":"_checkpoint","id":0}`,
+		`{"role":"user","content":"first prompt"}`,
+		`{"role":"_checkpoint","id":1}`,
+		repeated,
+		`{"role":"user","content":"repeat it"}`,
+		`{"role":"_checkpoint","id":2}`,
+		repeated,
+	})
+
+	before, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile before append: %v", err)
+	}
+	beforeIDs := kimiEntryIDs(before.Messages)
+	if len(beforeIDs) != 4 {
+		t.Fatalf("before IDs = %v, want four entries", beforeIDs)
+	}
+	if beforeIDs[1] == beforeIDs[3] {
+		t.Fatalf("repeated native rows share ID %q", beforeIDs[1])
+	}
+	if want := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:1"); beforeIDs[1] != want {
+		t.Fatalf("first repeated row ID = %q, want checkpoint-derived %q", beforeIDs[1], want)
+	}
+	// The second identical row shares its content digest with the first, so the
+	// occurrence sequence must discriminate it beyond the checkpoint-derived
+	// base ID that only the first occurrence retains.
+	if base := stableSyntheticEntryID("kimi", []byte(repeated), "checkpoint:2"); beforeIDs[3] == base {
+		t.Fatalf("second repeated row ID = %q missing occurrence discriminator", beforeIDs[3])
+	}
+
+	writeKimiContext(t, path, []string{
+		`{"role":"_checkpoint","id":0}`,
+		`{"role":"user","content":"first prompt"}`,
+		`{"role":"_checkpoint","id":1}`,
+		repeated,
+		`{"role":"user","content":"repeat it"}`,
+		`{"role":"_checkpoint","id":2}`,
+		repeated,
+		`{"role":"_checkpoint","id":3}`,
+		`{"role":"user","content":"appended later"}`,
+	})
+	after, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile after append: %v", err)
+	}
+	afterIDs := kimiEntryIDs(after.Messages)
+	if len(afterIDs) != 5 {
+		t.Fatalf("after IDs = %v, want five entries", afterIDs)
+	}
+	if !reflect.DeepEqual(afterIDs[:4], beforeIDs) {
+		t.Fatalf("append changed existing IDs: before=%v after=%v", beforeIDs, afterIDs)
+	}
+}
+
+func TestReadProviderFileKimiDisambiguatesRepeatedNativeRowsWithinCheckpoint(t *testing.T) {
+	path := writeKimiContext(t, filepath.Join(t.TempDir(), "context.jsonl"), []string{
+		`{"role":"_checkpoint","id":1}`,
+		`{"role":"assistant","content":"same answer"}`,
+		`{"role":"assistant","content":"same answer"}`,
+	})
+
+	sess, err := ReadProviderFile("kimi/tmux-cli", path, 0)
+	if err != nil {
+		t.Fatalf("ReadProviderFile with byte-identical in-window rows: %v", err)
+	}
+	ids := kimiEntryIDs(sess.Messages)
+	if len(ids) != 2 {
+		t.Fatalf("entry IDs = %v, want two entries", ids)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("byte-identical in-window rows share entry ID %q", ids[0])
 	}
 }
 

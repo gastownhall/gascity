@@ -220,9 +220,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
-				"full conformance covers the raw exec provider, not the production seam-backed prefix composition",
+				"internal/runtime/exec/exec_test.go",
+				"TestExecConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/exec", "execConformanceScript"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),

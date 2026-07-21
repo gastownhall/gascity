@@ -262,6 +262,20 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...string) {
+	t.Helper()
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read compact marker: %v", err)
+	}
+	text := string(data)
+	for _, fragment := range want {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("compact marker missing evidence %q:\n%s", fragment, text)
+		}
+	}
+}
+
 func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
 	t.Helper()
 	if err := os.WriteFile(markerPath, []byte(
@@ -622,6 +636,19 @@ case "$query" in
     exit 0
     ;;
   *"SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"*)
+    if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
+      calls_file="$state_file.$db-head-calls"
+      calls=0
+      if [ -f "$calls_file" ]; then
+        calls="$(cat "$calls_file")"
+      fi
+      calls=$((calls + 1))
+      printf '%%s\n' "$calls" > "$calls_file"
+      if [ "$calls" -eq 4 ]; then
+        print_cell ""
+        exit 0
+      fi
+    fi
     if [ "$mode" = "writer_race_db_hash_empty_pre_probe" ] && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.compact-head-calls"
       calls=0
@@ -2849,6 +2876,16 @@ func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("same-row-count value-hash drift should write quarantine marker: %v", err)
 	}
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten table value hash changed without row-count increase",
+		"integrity_table_drift=table=beads,before_rows=10,after_rows=10,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=same_row_count_hash_drift",
+		"flatten_preflight_head=headcommit",
+		"flatten_pre_reset_head=headcommit",
+		"flatten_head=compactcommit",
+		"preflight_db_value_hash=hash-before",
+		"decision=preserve_marker_manual_review_required",
+		"clear_decision=clear_only_after_clean_worktree_reachable_server_healthy_bead_queries_and_diff_hash_evidence_proves_no_loss",
+	)
 }
 
 func TestCompactScriptFailsOnEmptyPreflightValueHash(t *testing.T) {
@@ -2916,6 +2953,30 @@ func TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC(t *testing
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("empty postflight hash should write quarantine marker: %v", err)
+	}
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten value hash probe returned empty value",
+		"flatten_preflight_head=headcommit",
+		"flatten_head=compactcommit",
+		"preflight_db_value_hash=hash-before",
+		"postflight_db_value_hash=",
+		"decision=preserve_marker_manual_review_required",
+	)
+}
+
+func TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second dolt db: %v", err)
+	}
+
+	out, err := fixture.run(t, "second_db_post_flatten_head_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite second database HEAD probe failure:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "zed")
+	if got := compactMarkerValue(t, marker, "postflight_db_value_hash"); got != "" {
+		t.Fatalf("second database marker inherited postflight hash %q from the first database", got)
 	}
 }
 
@@ -3255,6 +3316,10 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	if !strings.Contains(secondOut, quarantine) ||
 		!strings.Contains(secondOut, "reason=post-flatten row count decreased") {
 		t.Fatalf("second compact missing quarantine marker details:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "quarantine recovery: keep marker unless git status is clean") ||
+		!strings.Contains(secondOut, "gc dolt compact --gc-only --only-db beads") {
+		t.Fatalf("second compact missing safe recovery guidance:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {

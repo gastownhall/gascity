@@ -4425,6 +4425,45 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 }
 
+func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "one", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+		t.Fatalf("Create one: %v", err)
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create two: %v", err)
+	}
+	sessionID := "019d9845-abcd-7000-8000-000000000456"
+	if err := store.SetMetadata(info.ID, "session_key", sessionID); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	now := time.Now()
+	dayDir := filepath.Join(searchBase, now.Format("2006"), now.Format("01"), now.Format("02"))
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	keyedPath := filepath.Join(dayDir, "rollout-"+now.Format("2006-01-02T15-04-05")+"-"+sessionID+".jsonl")
+	meta := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(keyedPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile keyed: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != keyedPath {
+		t.Errorf("TranscriptPath = %q, want keyed Codex transcript %q", path, keyedPath)
+	}
+}
+
 func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

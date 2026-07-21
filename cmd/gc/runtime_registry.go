@@ -81,12 +81,12 @@ func buildRuntimeRegistry() *registry.Registry {
 	// session-server per city; one workspace per rig/town, one tab per agent.
 	// tmux stays the default; select "herdr" per-agent/city to pilot it. See
 	// internal/runtime/herdr-provider-design.md.
-	must(r.Register("herdr", func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	must(r.Register("herdr", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		session := cityName
 		if session == "" {
 			session = "default"
 		}
-		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath), nil
+		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)

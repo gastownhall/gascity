@@ -1659,3 +1659,188 @@ func TestRunDoltCleanup_DryRunReportsDeletedScopeTargets(t *testing.T) {
 		t.Errorf("ProtectedPIDs = %v, want [6203 6204] (live external + missing-config-but-live-cwd both protected)", r.Reaped.ProtectedPIDs)
 	}
 }
+
+func TestRunDoltCleanup_ForceRemovesDataDirAfterConfirmedKill(t *testing.T) {
+	// ga-ntbpyb.2 acceptance criterion 1: a confirmed-orphan dolt process
+	// (bare server, --data-dir on the test-config-path allowlist) has its
+	// data directory removed once its kill is confirmed.
+	proc := DoltProcInfo{
+		PID:            7301,
+		Argv:           []string{"dolt", "sql-server", "--data-dir", "/tmp/TestDataDir1/dolt-data"},
+		StartTimeTicks: 5,
+	}
+	var removed []string
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{proc}, nil
+		},
+		KillProcess: func(_ int, _ syscall.Signal) error {
+			return syscall.ESRCH // already gone by the time we signal
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if r.Reaped.Count != 1 {
+		t.Errorf("Reaped.Count = %d, want 1", r.Reaped.Count)
+	}
+	if len(removed) != 1 || removed[0] != "/tmp/TestDataDir1/dolt-data" {
+		t.Fatalf("RemoveDataDir calls = %v, want exactly one call for /tmp/TestDataDir1/dolt-data", removed)
+	}
+	if len(r.Reaped.Targets) != 1 || r.Reaped.Targets[0].DataDir != "/tmp/TestDataDir1/dolt-data" {
+		t.Fatalf("Reaped.Targets = %+v, want DataDir echoed in the report", r.Reaped.Targets)
+	}
+}
+
+func TestRunDoltCleanup_DryRunDoesNotRemoveDataDir(t *testing.T) {
+	proc := DoltProcInfo{
+		PID:  7302,
+		Argv: []string{"dolt", "sql-server", "--data-dir", "/tmp/TestDataDir2/dolt-data"},
+	}
+	var removed []string
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		HomeDir: "/home/u",
+		// Force not set → dry-run: the plan (including DataDir) is reported
+		// but nothing is signaled or removed.
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{proc}, nil
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return nil
+		},
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(removed) != 0 {
+		t.Fatalf("RemoveDataDir calls = %v, want none in dry-run", removed)
+	}
+	if len(r.Reaped.Targets) != 1 || r.Reaped.Targets[0].DataDir != "/tmp/TestDataDir2/dolt-data" {
+		t.Fatalf("Reaped.Targets = %+v, want DataDir still visible in the dry-run plan", r.Reaped.Targets)
+	}
+}
+
+func TestRunDoltCleanup_ForceSkipsDataDirRemovalWhenTargetBecomesProtected(t *testing.T) {
+	// Mirrors TestRunDoltCleanup_ForceSkipsSIGKILLWhenProcessBecomesProtected:
+	// if revalidation discovers the target is no longer eligible for reap
+	// before SIGKILL (here, it starts serving a protected rig port), the kill
+	// is never confirmed — so DataDir removal must not run either.
+	fs := fsys.NewFake()
+	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
+
+	discoverCalls := 0
+	var removed []string
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:    []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:      fs,
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			discoverCalls++
+			proc := DoltProcInfo{
+				PID:            4445,
+				Argv:           []string{"dolt", "sql-server", "--data-dir", "/tmp/TestDataDir3/dolt-data"},
+				StartTimeTicks: 10,
+			}
+			if discoverCalls >= 3 {
+				proc.Ports = []int{28231}
+			}
+			return []DoltProcInfo{proc}, nil
+		},
+		KillProcess: func(_ int, _ syscall.Signal) error { return nil },
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if r.Reaped.Count != 0 {
+		t.Errorf("Reaped.Count = %d, want 0 because SIGKILL was skipped", r.Reaped.Count)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("RemoveDataDir calls = %v, want none for a target that became protected before its kill was confirmed", removed)
+	}
+}
+
+func TestRunDoltCleanup_ForceDataDirRemovalErrorIsRecorded(t *testing.T) {
+	proc := DoltProcInfo{
+		PID:            7303,
+		Argv:           []string{"dolt", "sql-server", "--data-dir", "/tmp/TestDataDir4/dolt-data"},
+		StartTimeTicks: 5,
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		FS:      fsys.NewFake(),
+		JSON:    true,
+		Force:   true,
+		HomeDir: "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{proc}, nil
+		},
+		KillProcess: func(_ int, _ syscall.Signal) error {
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(string) error {
+			return fmt.Errorf("permission denied")
+		},
+		ReapGracePeriod: 1,
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+	if r.Reaped.Count != 1 {
+		t.Errorf("Reaped.Count = %d, want 1: a failed data-dir removal must not un-confirm an already-confirmed kill", r.Reaped.Count)
+	}
+	if r.Summary.ErrorsTotal != 1 {
+		t.Errorf("Summary.ErrorsTotal = %d, want 1", r.Summary.ErrorsTotal)
+	}
+	if len(r.Errors) != 1 || r.Errors[0].Stage != "reap" || !strings.Contains(r.Errors[0].Error, "permission denied") {
+		t.Fatalf("Errors = %+v, want one reap-stage data-dir removal error", r.Errors)
+	}
+	if len(r.Reaped.Errors) == 0 {
+		t.Errorf("Reaped.Errors empty; want the data-dir removal failure recorded")
+	}
+}

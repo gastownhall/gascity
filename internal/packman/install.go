@@ -108,11 +108,13 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 }
 
 // EnsureBundledPacksCurrent repairs any bundled pack synthetic caches that were
-// written by a different binary version. Each call to EnsureRepoInCache for a
-// bundled source validates the cache against the running binary's embedded
-// content and re-materializes it when the hashes differ. This prevents the
-// config loader's strict content-hash check from failing after a binary upgrade
-// where the running controller and the most-recently-installed binary differ.
+// written by a different binary version. A matching marker is enough on this
+// controller hot path: it binds the cache to the running binary's embedded
+// content hash and canonical commit without walking the materialized file set.
+// A missing or stale marker falls through to EnsureRepoInCache, which performs
+// full validation under the shared cache lock and re-materializes when needed.
+// This prevents binary-upgrade skew without serializing every config reload on
+// a full walk of the bundled repository.
 //
 // Callers that need to ensure all packs (including remote git clones) are
 // present should use InstallLocked instead.
@@ -134,6 +136,13 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 	for _, source := range sources {
 		pack := lock.Packs[source]
 		if pack.Commit == "" {
+			continue
+		}
+		cachePath, err := RepoCachePath(source, pack.Commit)
+		if err != nil {
+			return err
+		}
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, pack.Commit) == nil {
 			continue
 		}
 		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {

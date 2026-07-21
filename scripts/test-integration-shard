@@ -108,7 +108,6 @@ cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
-  TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof
   TestPhase2WorkerCoreRealTransportProof
 )
 

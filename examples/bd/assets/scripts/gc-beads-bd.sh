@@ -208,7 +208,7 @@ run_with_timeout() {
     (
         sleep "$timeout_seconds" 2>/dev/null || sleep 1
         kill "$cmd_pid" 2>/dev/null || true
-    ) &
+    ) </dev/null >/dev/null 2>&1 &
     local watchdog_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
@@ -2028,10 +2028,9 @@ log_tail_has_journal_corruption() {
 # database_journal_corrupt probes one database directory offline and reports
 # whether dolt refuses to load it with a journal-corruption error. Only safe
 # while the managed server is down — offline dolt commands contend with a
-# running server's file locks. Probe output is spooled to a temp file rather
-# than captured via command substitution: the run_with_timeout watchdog's
-# sleep child inherits a substitution pipe and would hold it open for the
-# full timeout, turning every healthy-database probe into a 30s stall.
+# running server's file locks. Probe output is spooled to a temp file so stdout
+# and stderr can be scanned together without retaining the diagnostic stream
+# in a shell variable.
 database_journal_corrupt() {
     local probe_db_dir="$1" probe_out probe_hit=1
     probe_out=$(mktemp) || {

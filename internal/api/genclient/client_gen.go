@@ -237,6 +237,240 @@ func (e RunStepStatus) Valid() bool {
 	}
 }
 
+// Defines values for SessionStreamStructuredMessageEventOperation.
+const (
+	Reset    SessionStreamStructuredMessageEventOperation = "reset"
+	Snapshot SessionStreamStructuredMessageEventOperation = "snapshot"
+	Upsert   SessionStreamStructuredMessageEventOperation = "upsert"
+)
+
+// Valid indicates whether the value is a known member of the SessionStreamStructuredMessageEventOperation enum.
+func (e SessionStreamStructuredMessageEventOperation) Valid() bool {
+	switch e {
+	case Reset:
+		return true
+	case Snapshot:
+		return true
+	case Upsert:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStreamStructuredMessageEventResetReason.
+const (
+	CursorInvalidated SessionStreamStructuredMessageEventResetReason = "cursor_invalidated"
+	HistoryRewritten  SessionStreamStructuredMessageEventResetReason = "history_rewritten"
+	ResumeInvalid     SessionStreamStructuredMessageEventResetReason = "resume_invalid"
+	StreamChanged     SessionStreamStructuredMessageEventResetReason = "stream_changed"
+)
+
+// Valid indicates whether the value is a known member of the SessionStreamStructuredMessageEventResetReason enum.
+func (e SessionStreamStructuredMessageEventResetReason) Valid() bool {
+	switch e {
+	case CursorInvalidated:
+		return true
+	case HistoryRewritten:
+		return true
+	case ResumeInvalid:
+		return true
+	case StreamChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredMessageAssistantStatus.
+const (
+	SessionStructuredMessageAssistantStatusFinal      SessionStructuredMessageAssistantStatus = "final"
+	SessionStructuredMessageAssistantStatusPartial    SessionStructuredMessageAssistantStatus = "partial"
+	SessionStructuredMessageAssistantStatusSuperseded SessionStructuredMessageAssistantStatus = "superseded"
+	SessionStructuredMessageAssistantStatusUnknown    SessionStructuredMessageAssistantStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredMessageAssistantStatus enum.
+func (e SessionStructuredMessageAssistantStatus) Valid() bool {
+	switch e {
+	case SessionStructuredMessageAssistantStatusFinal:
+		return true
+	case SessionStructuredMessageAssistantStatusPartial:
+		return true
+	case SessionStructuredMessageAssistantStatusSuperseded:
+		return true
+	case SessionStructuredMessageAssistantStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredMessageSystemStatus.
+const (
+	SessionStructuredMessageSystemStatusFinal      SessionStructuredMessageSystemStatus = "final"
+	SessionStructuredMessageSystemStatusPartial    SessionStructuredMessageSystemStatus = "partial"
+	SessionStructuredMessageSystemStatusSuperseded SessionStructuredMessageSystemStatus = "superseded"
+	SessionStructuredMessageSystemStatusUnknown    SessionStructuredMessageSystemStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredMessageSystemStatus enum.
+func (e SessionStructuredMessageSystemStatus) Valid() bool {
+	switch e {
+	case SessionStructuredMessageSystemStatusFinal:
+		return true
+	case SessionStructuredMessageSystemStatusPartial:
+		return true
+	case SessionStructuredMessageSystemStatusSuperseded:
+		return true
+	case SessionStructuredMessageSystemStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredMessageToolStatus.
+const (
+	SessionStructuredMessageToolStatusFinal      SessionStructuredMessageToolStatus = "final"
+	SessionStructuredMessageToolStatusPartial    SessionStructuredMessageToolStatus = "partial"
+	SessionStructuredMessageToolStatusSuperseded SessionStructuredMessageToolStatus = "superseded"
+	SessionStructuredMessageToolStatusUnknown    SessionStructuredMessageToolStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredMessageToolStatus enum.
+func (e SessionStructuredMessageToolStatus) Valid() bool {
+	switch e {
+	case SessionStructuredMessageToolStatusFinal:
+		return true
+	case SessionStructuredMessageToolStatusPartial:
+		return true
+	case SessionStructuredMessageToolStatusSuperseded:
+		return true
+	case SessionStructuredMessageToolStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredMessageUnknownStatus.
+const (
+	SessionStructuredMessageUnknownStatusFinal      SessionStructuredMessageUnknownStatus = "final"
+	SessionStructuredMessageUnknownStatusPartial    SessionStructuredMessageUnknownStatus = "partial"
+	SessionStructuredMessageUnknownStatusSuperseded SessionStructuredMessageUnknownStatus = "superseded"
+	SessionStructuredMessageUnknownStatusUnknown    SessionStructuredMessageUnknownStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredMessageUnknownStatus enum.
+func (e SessionStructuredMessageUnknownStatus) Valid() bool {
+	switch e {
+	case SessionStructuredMessageUnknownStatusFinal:
+		return true
+	case SessionStructuredMessageUnknownStatusPartial:
+		return true
+	case SessionStructuredMessageUnknownStatusSuperseded:
+		return true
+	case SessionStructuredMessageUnknownStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredMessageUserStatus.
+const (
+	SessionStructuredMessageUserStatusFinal      SessionStructuredMessageUserStatus = "final"
+	SessionStructuredMessageUserStatusPartial    SessionStructuredMessageUserStatus = "partial"
+	SessionStructuredMessageUserStatusSuperseded SessionStructuredMessageUserStatus = "superseded"
+	SessionStructuredMessageUserStatusUnknown    SessionStructuredMessageUserStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredMessageUserStatus enum.
+func (e SessionStructuredMessageUserStatus) Valid() bool {
+	switch e {
+	case SessionStructuredMessageUserStatusFinal:
+		return true
+	case SessionStructuredMessageUserStatusPartial:
+		return true
+	case SessionStructuredMessageUserStatusSuperseded:
+		return true
+	case SessionStructuredMessageUserStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionStructuredToolErrorCategory.
+const (
+	SessionStructuredToolErrorCategoryCommandFailure          SessionStructuredToolErrorCategory = "command_failure"
+	SessionStructuredToolErrorCategoryFileError               SessionStructuredToolErrorCategory = "file_error"
+	SessionStructuredToolErrorCategoryNetworkError            SessionStructuredToolErrorCategory = "network_error"
+	SessionStructuredToolErrorCategoryTimeout                 SessionStructuredToolErrorCategory = "timeout"
+	SessionStructuredToolErrorCategoryUnknown                 SessionStructuredToolErrorCategory = "unknown"
+	SessionStructuredToolErrorCategoryUserRejection           SessionStructuredToolErrorCategory = "user_rejection"
+	SessionStructuredToolErrorCategoryUserRejectionWithReason SessionStructuredToolErrorCategory = "user_rejection_with_reason"
+	SessionStructuredToolErrorCategoryValidationError         SessionStructuredToolErrorCategory = "validation_error"
+)
+
+// Valid indicates whether the value is a known member of the SessionStructuredToolErrorCategory enum.
+func (e SessionStructuredToolErrorCategory) Valid() bool {
+	switch e {
+	case SessionStructuredToolErrorCategoryCommandFailure:
+		return true
+	case SessionStructuredToolErrorCategoryFileError:
+		return true
+	case SessionStructuredToolErrorCategoryNetworkError:
+		return true
+	case SessionStructuredToolErrorCategoryTimeout:
+		return true
+	case SessionStructuredToolErrorCategoryUnknown:
+		return true
+	case SessionStructuredToolErrorCategoryUserRejection:
+		return true
+	case SessionStructuredToolErrorCategoryUserRejectionWithReason:
+		return true
+	case SessionStructuredToolErrorCategoryValidationError:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTranscriptConversationResponseFormat.
+const (
+	SessionTranscriptConversationResponseFormatConversation SessionTranscriptConversationResponseFormat = "conversation"
+	SessionTranscriptConversationResponseFormatText         SessionTranscriptConversationResponseFormat = "text"
+)
+
+// Valid indicates whether the value is a known member of the SessionTranscriptConversationResponseFormat enum.
+func (e SessionTranscriptConversationResponseFormat) Valid() bool {
+	switch e {
+	case SessionTranscriptConversationResponseFormatConversation:
+		return true
+	case SessionTranscriptConversationResponseFormatText:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTranscriptRawResponseFormat.
+const (
+	SessionTranscriptRawResponseFormatRaw SessionTranscriptRawResponseFormat = "raw"
+)
+
+// Valid indicates whether the value is a known member of the SessionTranscriptRawResponseFormat enum.
+func (e SessionTranscriptRawResponseFormat) Valid() bool {
+	switch e {
+	case SessionTranscriptRawResponseFormatRaw:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -609,6 +843,48 @@ func (e PostV0CityByCityNameRigByNameByActionParamsAction) Valid() bool {
 	case Resume:
 		return true
 	case Suspend:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StreamSessionParamsFormat.
+const (
+	StreamSessionParamsFormatConversation StreamSessionParamsFormat = "conversation"
+	StreamSessionParamsFormatRaw          StreamSessionParamsFormat = "raw"
+	StreamSessionParamsFormatStructured   StreamSessionParamsFormat = "structured"
+)
+
+// Valid indicates whether the value is a known member of the StreamSessionParamsFormat enum.
+func (e StreamSessionParamsFormat) Valid() bool {
+	switch e {
+	case StreamSessionParamsFormatConversation:
+		return true
+	case StreamSessionParamsFormatRaw:
+		return true
+	case StreamSessionParamsFormatStructured:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetV0CityByCityNameSessionByIdTranscriptParamsFormat.
+const (
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "conversation"
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw          GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "raw"
+	GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured   GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "structured"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameSessionByIdTranscriptParamsFormat enum.
+func (e GetV0CityByCityNameSessionByIdTranscriptParamsFormat) Valid() bool {
+	switch e {
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation:
+		return true
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw:
+		return true
+	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured:
 		return true
 	default:
 		return false
@@ -2483,6 +2759,7 @@ type PackResponse struct {
 
 // PaginationInfo defines model for PaginationInfo.
 type PaginationInfo struct {
+	HasNewerMessages       *bool   `json:"has_newer_messages,omitempty"`
 	HasOlderMessages       bool    `json:"has_older_messages"`
 	ReturnedMessageCount   int64   `json:"returned_message_count"`
 	TotalCompactions       int64   `json:"total_compactions"`
@@ -3295,6 +3572,12 @@ type SessionPatchBody struct {
 	Title *string `json:"title,omitempty"`
 }
 
+// SessionPendingClearedEvent defines model for SessionPendingClearedEvent.
+type SessionPendingClearedEvent struct {
+	// RequestId Request ID of the interaction that was cleared.
+	RequestId string `json:"request_id"`
+}
+
 // SessionPendingResponse defines model for SessionPendingResponse.
 type SessionPendingResponse struct {
 	Pending   *PendingInteraction `json:"pending,omitempty"`
@@ -3396,7 +3679,7 @@ type SessionStrandedPayload struct {
 	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
-// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
 }
@@ -3407,7 +3690,7 @@ type SessionStreamMessageEvent struct {
 	Id         string          `json:"id"`
 	Pagination *PaginationInfo `json:"pagination,omitempty"`
 
-	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.).
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
 	Provider string        `json:"provider"`
 	Template string        `json:"template"`
 	Turns    *[]OutputTurn `json:"turns"`
@@ -3422,9 +3705,819 @@ type SessionStreamRawMessageEvent struct {
 	Messages   *[]SessionRawMessageFrame `json:"messages"`
 	Pagination *PaginationInfo           `json:"pagination,omitempty"`
 
-	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
 	Provider string `json:"provider"`
 	Template string `json:"template"`
+}
+
+// SessionStreamStructuredMessageEvent Provider-neutral structured transcript update with explicit snapshot, upsert, or reset application semantics.
+type SessionStreamStructuredMessageEvent struct {
+	// Format Always structured for this event.
+	Format  string                   `json:"format"`
+	History SessionStructuredHistory `json:"history"`
+	Id      string                   `json:"id"`
+
+	// Operation How the client applies this structured frame: replace from a snapshot/reset or merge an upsert.
+	Operation  SessionStreamStructuredMessageEventOperation `json:"operation"`
+	Pagination *PaginationInfo                              `json:"pagination,omitempty"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
+	Provider string `json:"provider"`
+
+	// ResetReason Present if and only if operation is reset; absent for snapshot and upsert. Identifies why the reset replaced the client transcript.
+	ResetReason *SessionStreamStructuredMessageEventResetReason `json:"reset_reason,omitempty"`
+
+	// SchemaVersion Structured session transcript schema version.
+	SchemaVersion string `json:"schema_version"`
+
+	// StructuredMessages Provider-normalized structured messages.
+	StructuredMessages []SessionStructuredMessage `json:"structured_messages"`
+	Template           string                     `json:"template"`
+}
+
+// SessionStreamStructuredMessageEventOperation How the client applies this structured frame: replace from a snapshot/reset or merge an upsert.
+type SessionStreamStructuredMessageEventOperation string
+
+// SessionStreamStructuredMessageEventResetReason Present if and only if operation is reset; absent for snapshot and upsert. Identifies why the reset replaced the client transcript.
+type SessionStreamStructuredMessageEventResetReason string
+
+// SessionStructuredArgument defines model for SessionStructuredArgument.
+type SessionStructuredArgument struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// SessionStructuredBlock Provider-normalized transcript block discriminated by its closed block type vocabulary.
+type SessionStructuredBlock struct {
+	union json.RawMessage
+}
+
+// SessionStructuredBlockImage defines model for SessionStructuredBlockImage.
+type SessionStructuredBlockImage struct {
+	FilePath *string `json:"file_path,omitempty"`
+	ImageUrl *string `json:"image_url,omitempty"`
+	MimeType *string `json:"mime_type,omitempty"`
+	Text     *string `json:"text,omitempty"`
+	Type     string  `json:"type"`
+}
+
+// SessionStructuredBlockInteraction defines model for SessionStructuredBlockInteraction.
+type SessionStructuredBlockInteraction struct {
+	Interaction *SessionStructuredInteraction `json:"interaction,omitempty"`
+	Type        string                        `json:"type"`
+}
+
+// SessionStructuredBlockText defines model for SessionStructuredBlockText.
+type SessionStructuredBlockText struct {
+	Text *string `json:"text,omitempty"`
+	Type string  `json:"type"`
+}
+
+// SessionStructuredBlockThinking defines model for SessionStructuredBlockThinking.
+type SessionStructuredBlockThinking struct {
+	Signature *string `json:"signature,omitempty"`
+	Thinking  *string `json:"thinking,omitempty"`
+	Type      string  `json:"type"`
+}
+
+// SessionStructuredBlockToolResult defines model for SessionStructuredBlockToolResult.
+type SessionStructuredBlockToolResult struct {
+	Content  *string `json:"content,omitempty"`
+	FilePath *string `json:"file_path,omitempty"`
+	IsError  *bool   `json:"is_error,omitempty"`
+	Name     *string `json:"name,omitempty"`
+
+	// Structured Provider-neutral tool result discriminated by its closed kind vocabulary.
+	Structured *SessionStructuredToolResult `json:"structured,omitempty"`
+	ToolCallId *string                      `json:"tool_call_id,omitempty"`
+	Type       string                       `json:"type"`
+}
+
+// SessionStructuredBlockToolUse defines model for SessionStructuredBlockToolUse.
+type SessionStructuredBlockToolUse struct {
+	FilePath *string `json:"file_path,omitempty"`
+	Id       *string `json:"id,omitempty"`
+
+	// Input Provider-neutral tool input discriminated by its closed kind vocabulary.
+	Input *SessionStructuredToolInput `json:"input,omitempty"`
+	Name  *string                     `json:"name,omitempty"`
+	Type  string                      `json:"type"`
+}
+
+// SessionStructuredBlockUnknown defines model for SessionStructuredBlockUnknown.
+type SessionStructuredBlockUnknown struct {
+	Content  *string `json:"content,omitempty"`
+	FilePath *string `json:"file_path,omitempty"`
+	Id       *string `json:"id,omitempty"`
+	ImageUrl *string `json:"image_url,omitempty"`
+
+	// Input Provider-neutral tool input discriminated by its closed kind vocabulary.
+	Input       *SessionStructuredToolInput   `json:"input,omitempty"`
+	Interaction *SessionStructuredInteraction `json:"interaction,omitempty"`
+	IsError     *bool                         `json:"is_error,omitempty"`
+	MimeType    *string                       `json:"mime_type,omitempty"`
+	Name        *string                       `json:"name,omitempty"`
+	Signature   *string                       `json:"signature,omitempty"`
+
+	// Structured Provider-neutral tool result discriminated by its closed kind vocabulary.
+	Structured *SessionStructuredToolResult `json:"structured,omitempty"`
+	Text       *string                      `json:"text,omitempty"`
+	Thinking   *string                      `json:"thinking,omitempty"`
+	ToolCallId *string                      `json:"tool_call_id,omitempty"`
+	Type       string                       `json:"type"`
+}
+
+// SessionStructuredContinuity defines model for SessionStructuredContinuity.
+type SessionStructuredContinuity struct {
+	CompactionCount *int64  `json:"compaction_count,omitempty"`
+	HasBranches     *bool   `json:"has_branches,omitempty"`
+	Note            *string `json:"note,omitempty"`
+	Status          string  `json:"status"`
+}
+
+// SessionStructuredCursor defines model for SessionStructuredCursor.
+type SessionStructuredCursor struct {
+	AfterEntryId *string `json:"after_entry_id,omitempty"`
+
+	// ResumeToken Opaque cursor for an exact structured REST-to-SSE handoff or SSE reconnect.
+	ResumeToken string `json:"resume_token"`
+}
+
+// SessionStructuredDiagnostic defines model for SessionStructuredDiagnostic.
+type SessionStructuredDiagnostic struct {
+	Code    string  `json:"code"`
+	Count   *int64  `json:"count,omitempty"`
+	Message *string `json:"message,omitempty"`
+}
+
+// SessionStructuredGeneration defines model for SessionStructuredGeneration.
+type SessionStructuredGeneration struct {
+	Id         string  `json:"id"`
+	ObservedAt *string `json:"observed_at,omitempty"`
+}
+
+// SessionStructuredHistory defines model for SessionStructuredHistory.
+type SessionStructuredHistory struct {
+	Continuity            SessionStructuredContinuity    `json:"continuity"`
+	Cursor                SessionStructuredCursor        `json:"cursor"`
+	Diagnostics           *[]SessionStructuredDiagnostic `json:"diagnostics,omitempty"`
+	GcSessionId           *string                        `json:"gc_session_id,omitempty"`
+	Generation            SessionStructuredGeneration    `json:"generation"`
+	LogicalConversationId *string                        `json:"logical_conversation_id,omitempty"`
+	ProviderSessionId     *string                        `json:"provider_session_id,omitempty"`
+	TailState             SessionStructuredTailState     `json:"tail_state"`
+	TranscriptStreamId    string                         `json:"transcript_stream_id"`
+}
+
+// SessionStructuredIDESelection defines model for SessionStructuredIDESelection.
+type SessionStructuredIDESelection struct {
+	Text *string `json:"text,omitempty"`
+}
+
+// SessionStructuredInteraction defines model for SessionStructuredInteraction.
+type SessionStructuredInteraction struct {
+	Action    *string   `json:"action,omitempty"`
+	Kind      *string   `json:"kind,omitempty"`
+	Options   *[]string `json:"options,omitempty"`
+	Prompt    *string   `json:"prompt,omitempty"`
+	RequestId *string   `json:"request_id,omitempty"`
+	State     string    `json:"state"`
+}
+
+// SessionStructuredMessage Provider-normalized transcript message discriminated by its closed role vocabulary.
+type SessionStructuredMessage struct {
+	union json.RawMessage
+}
+
+// SessionStructuredMessageAssistant defines model for SessionStructuredMessageAssistant.
+type SessionStructuredMessageAssistant struct {
+	Blocks     []SessionStructuredBlock                `json:"blocks"`
+	Id         string                                  `json:"id"`
+	Model      *string                                 `json:"model,omitempty"`
+	Provider   *string                                 `json:"provider,omitempty"`
+	Role       string                                  `json:"role"`
+	Status     SessionStructuredMessageAssistantStatus `json:"status"`
+	StopReason *string                                 `json:"stop_reason,omitempty"`
+	Timestamp  *string                                 `json:"timestamp,omitempty"`
+	Usage      *SessionStructuredUsage                 `json:"usage,omitempty"`
+}
+
+// SessionStructuredMessageAssistantStatus defines model for SessionStructuredMessageAssistant.Status.
+type SessionStructuredMessageAssistantStatus string
+
+// SessionStructuredMessageSystem defines model for SessionStructuredMessageSystem.
+type SessionStructuredMessageSystem struct {
+	Blocks      []SessionStructuredBlock             `json:"blocks"`
+	Id          string                               `json:"id"`
+	Provider    *string                              `json:"provider,omitempty"`
+	Role        string                               `json:"role"`
+	Status      SessionStructuredMessageSystemStatus `json:"status"`
+	SystemEvent *SessionStructuredSystemEvent        `json:"system_event,omitempty"`
+	Timestamp   *string                              `json:"timestamp,omitempty"`
+}
+
+// SessionStructuredMessageSystemStatus defines model for SessionStructuredMessageSystem.Status.
+type SessionStructuredMessageSystemStatus string
+
+// SessionStructuredMessageTool defines model for SessionStructuredMessageTool.
+type SessionStructuredMessageTool struct {
+	Blocks    []SessionStructuredBlock           `json:"blocks"`
+	Id        string                             `json:"id"`
+	Provider  *string                            `json:"provider,omitempty"`
+	Role      string                             `json:"role"`
+	Status    SessionStructuredMessageToolStatus `json:"status"`
+	Timestamp *string                            `json:"timestamp,omitempty"`
+}
+
+// SessionStructuredMessageToolStatus defines model for SessionStructuredMessageTool.Status.
+type SessionStructuredMessageToolStatus string
+
+// SessionStructuredMessageUnknown defines model for SessionStructuredMessageUnknown.
+type SessionStructuredMessageUnknown struct {
+	Blocks      []SessionStructuredBlock              `json:"blocks"`
+	Id          string                                `json:"id"`
+	Model       *string                               `json:"model,omitempty"`
+	Provider    *string                               `json:"provider,omitempty"`
+	Role        string                                `json:"role"`
+	Status      SessionStructuredMessageUnknownStatus `json:"status"`
+	StopReason  *string                               `json:"stop_reason,omitempty"`
+	SystemEvent *SessionStructuredSystemEvent         `json:"system_event,omitempty"`
+	Timestamp   *string                               `json:"timestamp,omitempty"`
+	Usage       *SessionStructuredUsage               `json:"usage,omitempty"`
+	UserPrompt  *SessionStructuredUserPrompt          `json:"user_prompt,omitempty"`
+}
+
+// SessionStructuredMessageUnknownStatus defines model for SessionStructuredMessageUnknown.Status.
+type SessionStructuredMessageUnknownStatus string
+
+// SessionStructuredMessageUser defines model for SessionStructuredMessageUser.
+type SessionStructuredMessageUser struct {
+	Blocks     []SessionStructuredBlock           `json:"blocks"`
+	Id         string                             `json:"id"`
+	Provider   *string                            `json:"provider,omitempty"`
+	Role       string                             `json:"role"`
+	Status     SessionStructuredMessageUserStatus `json:"status"`
+	Timestamp  *string                            `json:"timestamp,omitempty"`
+	UserPrompt *SessionStructuredUserPrompt       `json:"user_prompt,omitempty"`
+}
+
+// SessionStructuredMessageUserStatus defines model for SessionStructuredMessageUser.Status.
+type SessionStructuredMessageUserStatus string
+
+// SessionStructuredPatchHunk defines model for SessionStructuredPatchHunk.
+type SessionStructuredPatchHunk struct {
+	FilePath *string   `json:"file_path,omitempty"`
+	Lines    *[]string `json:"lines,omitempty"`
+	NewLines *int64    `json:"new_lines,omitempty"`
+	NewStart *int64    `json:"new_start,omitempty"`
+	OldLines *int64    `json:"old_lines,omitempty"`
+	OldStart *int64    `json:"old_start,omitempty"`
+}
+
+// SessionStructuredPlanStep defines model for SessionStructuredPlanStep.
+type SessionStructuredPlanStep struct {
+	Status *string `json:"status,omitempty"`
+	Step   *string `json:"step,omitempty"`
+}
+
+// SessionStructuredQuestion defines model for SessionStructuredQuestion.
+type SessionStructuredQuestion struct {
+	Header      *string                            `json:"header,omitempty"`
+	MultiSelect *bool                              `json:"multi_select,omitempty"`
+	Options     *[]SessionStructuredQuestionOption `json:"options,omitempty"`
+	Question    *string                            `json:"question,omitempty"`
+}
+
+// SessionStructuredQuestionOption defines model for SessionStructuredQuestionOption.
+type SessionStructuredQuestionOption struct {
+	Description *string `json:"description,omitempty"`
+	Label       *string `json:"label,omitempty"`
+}
+
+// SessionStructuredSearchResultItem defines model for SessionStructuredSearchResultItem.
+type SessionStructuredSearchResultItem struct {
+	Snippet *string `json:"snippet,omitempty"`
+	Title   *string `json:"title,omitempty"`
+	Url     *string `json:"url,omitempty"`
+}
+
+// SessionStructuredSystemEvent defines model for SessionStructuredSystemEvent.
+type SessionStructuredSystemEvent struct {
+	Category *string `json:"category,omitempty"`
+	Code     *string `json:"code,omitempty"`
+	Kind     *string `json:"kind,omitempty"`
+	Message  *string `json:"message,omitempty"`
+}
+
+// SessionStructuredTailState defines model for SessionStructuredTailState.
+type SessionStructuredTailState struct {
+	Activity              string    `json:"activity"`
+	Degraded              *bool     `json:"degraded,omitempty"`
+	DegradedReason        *string   `json:"degraded_reason,omitempty"`
+	LastEntryId           *string   `json:"last_entry_id,omitempty"`
+	OpenToolCallIds       *[]string `json:"open_tool_call_ids,omitempty"`
+	PendingInteractionIds *[]string `json:"pending_interaction_ids,omitempty"`
+}
+
+// SessionStructuredTodoItem defines model for SessionStructuredTodoItem.
+type SessionStructuredTodoItem struct {
+	ActiveForm *string `json:"active_form,omitempty"`
+	Content    *string `json:"content,omitempty"`
+	Id         *string `json:"id,omitempty"`
+	Priority   *string `json:"priority,omitempty"`
+	Status     *string `json:"status,omitempty"`
+}
+
+// SessionStructuredToolError defines model for SessionStructuredToolError.
+type SessionStructuredToolError struct {
+	// Category Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown.
+	Category   SessionStructuredToolErrorCategory `json:"category"`
+	Message    *string                            `json:"message,omitempty"`
+	UserReason *string                            `json:"user_reason,omitempty"`
+}
+
+// SessionStructuredToolErrorCategory Provider-neutral category: user_rejection, user_rejection_with_reason, command_failure, file_error, validation_error, timeout, network_error, or unknown.
+type SessionStructuredToolErrorCategory string
+
+// SessionStructuredToolInput Provider-neutral tool input discriminated by its closed kind vocabulary.
+type SessionStructuredToolInput struct {
+	union json.RawMessage
+}
+
+// SessionStructuredToolInputArguments defines model for SessionStructuredToolInputArguments.
+type SessionStructuredToolInputArguments struct {
+	Arguments []SessionStructuredArgument `json:"arguments"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind string `json:"kind"`
+}
+
+// SessionStructuredToolInputCode defines model for SessionStructuredToolInputCode.
+type SessionStructuredToolInputCode struct {
+	Code string `json:"code"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind     string  `json:"kind"`
+	Language *string `json:"language,omitempty"`
+}
+
+// SessionStructuredToolInputCommand defines model for SessionStructuredToolInputCommand.
+type SessionStructuredToolInputCommand struct {
+	Arguments *[]SessionStructuredArgument `json:"arguments,omitempty"`
+	Command   string                       `json:"command"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind string `json:"kind"`
+}
+
+// SessionStructuredToolInputFetch defines model for SessionStructuredToolInputFetch.
+type SessionStructuredToolInputFetch struct {
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind   string  `json:"kind"`
+	Prompt *string `json:"prompt,omitempty"`
+	Url    *string `json:"url,omitempty"`
+}
+
+// SessionStructuredToolInputFile defines model for SessionStructuredToolInputFile.
+type SessionStructuredToolInputFile struct {
+	Command  *string `json:"command,omitempty"`
+	FilePath string  `json:"file_path"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind     string  `json:"kind"`
+	Language *string `json:"language,omitempty"`
+}
+
+// SessionStructuredToolInputGlob defines model for SessionStructuredToolInputGlob.
+type SessionStructuredToolInputGlob struct {
+	Arguments *[]SessionStructuredArgument `json:"arguments,omitempty"`
+	FilePath  *string                      `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind    string  `json:"kind"`
+	Pattern *string `json:"pattern,omitempty"`
+	Query   *string `json:"query,omitempty"`
+}
+
+// SessionStructuredToolInputPatch defines model for SessionStructuredToolInputPatch.
+type SessionStructuredToolInputPatch struct {
+	FilePath *string `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind     string  `json:"kind"`
+	Language *string `json:"language,omitempty"`
+	Patch    string  `json:"patch"`
+}
+
+// SessionStructuredToolInputPlan defines model for SessionStructuredToolInputPlan.
+type SessionStructuredToolInputPlan struct {
+	Explanation *string `json:"explanation,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind  string                       `json:"kind"`
+	Plan  *string                      `json:"plan,omitempty"`
+	Steps *[]SessionStructuredPlanStep `json:"steps,omitempty"`
+}
+
+// SessionStructuredToolInputQuestion defines model for SessionStructuredToolInputQuestion.
+type SessionStructuredToolInputQuestion struct {
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind     string    `json:"kind"`
+	Options  *[]string `json:"options,omitempty"`
+	Question *string   `json:"question,omitempty"`
+}
+
+// SessionStructuredToolInputSearch defines model for SessionStructuredToolInputSearch.
+type SessionStructuredToolInputSearch struct {
+	Arguments *[]SessionStructuredArgument `json:"arguments,omitempty"`
+	Command   *string                      `json:"command,omitempty"`
+	FilePath  *string                      `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind    string  `json:"kind"`
+	Pattern *string `json:"pattern,omitempty"`
+	Query   *string `json:"query,omitempty"`
+}
+
+// SessionStructuredToolInputStdin defines model for SessionStructuredToolInputStdin.
+type SessionStructuredToolInputStdin struct {
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind          string  `json:"kind"`
+	LinkedCommand *string `json:"linked_command,omitempty"`
+	TaskId        *string `json:"task_id,omitempty"`
+	Text          *string `json:"text,omitempty"`
+}
+
+// SessionStructuredToolInputTask defines model for SessionStructuredToolInputTask.
+type SessionStructuredToolInputTask struct {
+	Description *string `json:"description,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind       string  `json:"kind"`
+	Prompt     *string `json:"prompt,omitempty"`
+	TaskId     *string `json:"task_id,omitempty"`
+	TaskStatus *string `json:"task_status,omitempty"`
+	TaskType   *string `json:"task_type,omitempty"`
+}
+
+// SessionStructuredToolInputText defines model for SessionStructuredToolInputText.
+type SessionStructuredToolInputText struct {
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+// SessionStructuredToolInputTodo defines model for SessionStructuredToolInputTodo.
+type SessionStructuredToolInputTodo struct {
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind  string                       `json:"kind"`
+	Todos *[]SessionStructuredTodoItem `json:"todos,omitempty"`
+}
+
+// SessionStructuredToolInputUnknown defines model for SessionStructuredToolInputUnknown.
+type SessionStructuredToolInputUnknown struct {
+	Arguments   *[]SessionStructuredArgument `json:"arguments,omitempty"`
+	Code        *string                      `json:"code,omitempty"`
+	Command     *string                      `json:"command,omitempty"`
+	Description *string                      `json:"description,omitempty"`
+	Explanation *string                      `json:"explanation,omitempty"`
+	FilePath    *string                      `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind          string                       `json:"kind"`
+	Language      *string                      `json:"language,omitempty"`
+	LinkedCommand *string                      `json:"linked_command,omitempty"`
+	Options       *[]string                    `json:"options,omitempty"`
+	Patch         *string                      `json:"patch,omitempty"`
+	Pattern       *string                      `json:"pattern,omitempty"`
+	Plan          *string                      `json:"plan,omitempty"`
+	Prompt        *string                      `json:"prompt,omitempty"`
+	Query         *string                      `json:"query,omitempty"`
+	Question      *string                      `json:"question,omitempty"`
+	Steps         *[]SessionStructuredPlanStep `json:"steps,omitempty"`
+	TaskId        *string                      `json:"task_id,omitempty"`
+	TaskStatus    *string                      `json:"task_status,omitempty"`
+	TaskType      *string                      `json:"task_type,omitempty"`
+	Text          *string                      `json:"text,omitempty"`
+	Todos         *[]SessionStructuredTodoItem `json:"todos,omitempty"`
+	Url           *string                      `json:"url,omitempty"`
+}
+
+// SessionStructuredToolInputWrite defines model for SessionStructuredToolInputWrite.
+type SessionStructuredToolInputWrite struct {
+	FilePath *string `json:"file_path,omitempty"`
+
+	// Kind Provider-neutral input kind such as command, code, patch, glob, fetch, search, file, arguments, or text.
+	Kind     string  `json:"kind"`
+	Language *string `json:"language,omitempty"`
+	Text     *string `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResult Provider-neutral tool result discriminated by its closed kind vocabulary.
+type SessionStructuredToolResult struct {
+	union json.RawMessage
+}
+
+// SessionStructuredToolResultBash defines model for SessionStructuredToolResultBash.
+type SessionStructuredToolResultBash struct {
+	Command     *string                     `json:"command,omitempty"`
+	Content     *string                     `json:"content,omitempty"`
+	Error       *SessionStructuredToolError `json:"error,omitempty"`
+	ExitCode    *int64                      `json:"exit_code,omitempty"`
+	Interrupted *bool                       `json:"interrupted,omitempty"`
+	IsImage     *bool                       `json:"is_image,omitempty"`
+	Kind        string                      `json:"kind"`
+	NumLines    *int64                      `json:"num_lines,omitempty"`
+	Stderr      *string                     `json:"stderr,omitempty"`
+	StderrLines *int64                      `json:"stderr_lines,omitempty"`
+	Stdout      *string                     `json:"stdout,omitempty"`
+	StdoutLines *int64                      `json:"stdout_lines,omitempty"`
+	TaskId      *string                     `json:"task_id,omitempty"`
+	TaskStatus  *string                     `json:"task_status,omitempty"`
+	Text        *string                     `json:"text,omitempty"`
+	Timestamp   *string                     `json:"timestamp,omitempty"`
+	Truncated   *bool                       `json:"truncated,omitempty"`
+}
+
+// SessionStructuredToolResultEdit defines model for SessionStructuredToolResultEdit.
+type SessionStructuredToolResultEdit struct {
+	Content      *string                       `json:"content,omitempty"`
+	Error        *SessionStructuredToolError   `json:"error,omitempty"`
+	FilePath     *string                       `json:"file_path,omitempty"`
+	FilePaths    *[]string                     `json:"file_paths,omitempty"`
+	Kind         string                        `json:"kind"`
+	NewString    *string                       `json:"new_string,omitempty"`
+	OldString    *string                       `json:"old_string,omitempty"`
+	OriginalFile *string                       `json:"original_file,omitempty"`
+	Patch        *string                       `json:"patch,omitempty"`
+	PatchHunks   *[]SessionStructuredPatchHunk `json:"patch_hunks,omitempty"`
+	ReplaceAll   *bool                         `json:"replace_all,omitempty"`
+	UserModified *bool                         `json:"user_modified,omitempty"`
+}
+
+// SessionStructuredToolResultFetch defines model for SessionStructuredToolResultFetch.
+type SessionStructuredToolResultFetch struct {
+	Bytes      *int64                      `json:"bytes,omitempty"`
+	Content    *string                     `json:"content,omitempty"`
+	DurationMs *int64                      `json:"duration_ms,omitempty"`
+	Error      *SessionStructuredToolError `json:"error,omitempty"`
+	Kind       string                      `json:"kind"`
+	NumLines   *int64                      `json:"num_lines,omitempty"`
+	StatusCode *int64                      `json:"status_code,omitempty"`
+	StatusText *string                     `json:"status_text,omitempty"`
+	Text       *string                     `json:"text,omitempty"`
+	Url        *string                     `json:"url,omitempty"`
+}
+
+// SessionStructuredToolResultGlob defines model for SessionStructuredToolResultGlob.
+type SessionStructuredToolResultGlob struct {
+	Content    *string                     `json:"content,omitempty"`
+	DurationMs *int64                      `json:"duration_ms,omitempty"`
+	Error      *SessionStructuredToolError `json:"error,omitempty"`
+	Filenames  *[]string                   `json:"filenames,omitempty"`
+	Kind       string                      `json:"kind"`
+	NumFiles   *int64                      `json:"num_files,omitempty"`
+	NumLines   *int64                      `json:"num_lines,omitempty"`
+	Truncated  *bool                       `json:"truncated,omitempty"`
+}
+
+// SessionStructuredToolResultGrep defines model for SessionStructuredToolResultGrep.
+type SessionStructuredToolResultGrep struct {
+	AppliedLimit *int64                               `json:"applied_limit,omitempty"`
+	Content      *string                              `json:"content,omitempty"`
+	Counts       *[]SessionStructuredArgument         `json:"counts,omitempty"`
+	DurationMs   *int64                               `json:"duration_ms,omitempty"`
+	Error        *SessionStructuredToolError          `json:"error,omitempty"`
+	Filenames    *[]string                            `json:"filenames,omitempty"`
+	Kind         string                               `json:"kind"`
+	Mode         *string                              `json:"mode,omitempty"`
+	NumFiles     *int64                               `json:"num_files,omitempty"`
+	NumLines     *int64                               `json:"num_lines,omitempty"`
+	NumResults   *int64                               `json:"num_results,omitempty"`
+	Query        *string                              `json:"query,omitempty"`
+	ResultItems  *[]SessionStructuredSearchResultItem `json:"result_items,omitempty"`
+}
+
+// SessionStructuredToolResultPlan defines model for SessionStructuredToolResultPlan.
+type SessionStructuredToolResultPlan struct {
+	Content     *string                      `json:"content,omitempty"`
+	Error       *SessionStructuredToolError  `json:"error,omitempty"`
+	Explanation *string                      `json:"explanation,omitempty"`
+	Kind        string                       `json:"kind"`
+	Plan        *string                      `json:"plan,omitempty"`
+	Steps       *[]SessionStructuredPlanStep `json:"steps,omitempty"`
+	Text        *string                      `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResultPython defines model for SessionStructuredToolResultPython.
+type SessionStructuredToolResultPython struct {
+	Code        *string                     `json:"code,omitempty"`
+	Error       *SessionStructuredToolError `json:"error,omitempty"`
+	ExitCode    *int64                      `json:"exit_code,omitempty"`
+	Interrupted *bool                       `json:"interrupted,omitempty"`
+	IsImage     *bool                       `json:"is_image,omitempty"`
+	Kind        string                      `json:"kind"`
+	Stderr      *string                     `json:"stderr,omitempty"`
+	Stdout      *string                     `json:"stdout,omitempty"`
+	Text        *string                     `json:"text,omitempty"`
+	Truncated   *bool                       `json:"truncated,omitempty"`
+}
+
+// SessionStructuredToolResultQuestion defines model for SessionStructuredToolResultQuestion.
+type SessionStructuredToolResultQuestion struct {
+	Answer    *string                      `json:"answer,omitempty"`
+	Answers   *[]SessionStructuredArgument `json:"answers,omitempty"`
+	Content   *string                      `json:"content,omitempty"`
+	Error     *SessionStructuredToolError  `json:"error,omitempty"`
+	Kind      string                       `json:"kind"`
+	Options   *[]string                    `json:"options,omitempty"`
+	Question  *string                      `json:"question,omitempty"`
+	Questions *[]SessionStructuredQuestion `json:"questions,omitempty"`
+	Text      *string                      `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResultRead defines model for SessionStructuredToolResultRead.
+type SessionStructuredToolResultRead struct {
+	Content    *string                     `json:"content,omitempty"`
+	Error      *SessionStructuredToolError `json:"error,omitempty"`
+	FilePath   *string                     `json:"file_path,omitempty"`
+	Kind       string                      `json:"kind"`
+	Language   *string                     `json:"language,omitempty"`
+	NumLines   *int64                      `json:"num_lines,omitempty"`
+	StartLine  *int64                      `json:"start_line,omitempty"`
+	TotalLines *int64                      `json:"total_lines,omitempty"`
+}
+
+// SessionStructuredToolResultSearch defines model for SessionStructuredToolResultSearch.
+type SessionStructuredToolResultSearch struct {
+	AppliedLimit *int64                               `json:"applied_limit,omitempty"`
+	Content      *string                              `json:"content,omitempty"`
+	Counts       *[]SessionStructuredArgument         `json:"counts,omitempty"`
+	DurationMs   *int64                               `json:"duration_ms,omitempty"`
+	Error        *SessionStructuredToolError          `json:"error,omitempty"`
+	Filenames    *[]string                            `json:"filenames,omitempty"`
+	Kind         string                               `json:"kind"`
+	Mode         *string                              `json:"mode,omitempty"`
+	NumFiles     *int64                               `json:"num_files,omitempty"`
+	NumLines     *int64                               `json:"num_lines,omitempty"`
+	NumResults   *int64                               `json:"num_results,omitempty"`
+	Query        *string                              `json:"query,omitempty"`
+	ResultItems  *[]SessionStructuredSearchResultItem `json:"result_items,omitempty"`
+}
+
+// SessionStructuredToolResultStdin defines model for SessionStructuredToolResultStdin.
+type SessionStructuredToolResultStdin struct {
+	Content  *string                     `json:"content,omitempty"`
+	Error    *SessionStructuredToolError `json:"error,omitempty"`
+	Kind     string                      `json:"kind"`
+	NumLines *int64                      `json:"num_lines,omitempty"`
+	TaskId   *string                     `json:"task_id,omitempty"`
+	Text     *string                     `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResultTask defines model for SessionStructuredToolResultTask.
+type SessionStructuredToolResultTask struct {
+	Content           *string                     `json:"content,omitempty"`
+	Description       *string                     `json:"description,omitempty"`
+	Error             *SessionStructuredToolError `json:"error,omitempty"`
+	ExitCode          *int64                      `json:"exit_code,omitempty"`
+	Kind              string                      `json:"kind"`
+	Output            *string                     `json:"output,omitempty"`
+	Stderr            *string                     `json:"stderr,omitempty"`
+	Stdout            *string                     `json:"stdout,omitempty"`
+	TaskId            *string                     `json:"task_id,omitempty"`
+	TaskStatus        *string                     `json:"task_status,omitempty"`
+	TaskType          *string                     `json:"task_type,omitempty"`
+	Text              *string                     `json:"text,omitempty"`
+	TotalDurationMs   *int64                      `json:"total_duration_ms,omitempty"`
+	TotalTokens       *int64                      `json:"total_tokens,omitempty"`
+	TotalToolUseCount *int64                      `json:"total_tool_use_count,omitempty"`
+}
+
+// SessionStructuredToolResultText defines model for SessionStructuredToolResultText.
+type SessionStructuredToolResultText struct {
+	Content *string                     `json:"content,omitempty"`
+	Error   *SessionStructuredToolError `json:"error,omitempty"`
+	Kind    string                      `json:"kind"`
+	Text    *string                     `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResultTodo defines model for SessionStructuredToolResultTodo.
+type SessionStructuredToolResultTodo struct {
+	Content  *string                      `json:"content,omitempty"`
+	Error    *SessionStructuredToolError  `json:"error,omitempty"`
+	Kind     string                       `json:"kind"`
+	NewTodos *[]SessionStructuredTodoItem `json:"new_todos,omitempty"`
+	OldTodos *[]SessionStructuredTodoItem `json:"old_todos,omitempty"`
+	Text     *string                      `json:"text,omitempty"`
+}
+
+// SessionStructuredToolResultUnknown defines model for SessionStructuredToolResultUnknown.
+type SessionStructuredToolResultUnknown struct {
+	Answer            *string                              `json:"answer,omitempty"`
+	Answers           *[]SessionStructuredArgument         `json:"answers,omitempty"`
+	AppliedLimit      *int64                               `json:"applied_limit,omitempty"`
+	Bytes             *int64                               `json:"bytes,omitempty"`
+	Code              *string                              `json:"code,omitempty"`
+	Command           *string                              `json:"command,omitempty"`
+	Content           *string                              `json:"content,omitempty"`
+	Counts            *[]SessionStructuredArgument         `json:"counts,omitempty"`
+	Description       *string                              `json:"description,omitempty"`
+	DurationMs        *int64                               `json:"duration_ms,omitempty"`
+	Error             *SessionStructuredToolError          `json:"error,omitempty"`
+	ExitCode          *int64                               `json:"exit_code,omitempty"`
+	Explanation       *string                              `json:"explanation,omitempty"`
+	FilePath          *string                              `json:"file_path,omitempty"`
+	FilePaths         *[]string                            `json:"file_paths,omitempty"`
+	Filenames         *[]string                            `json:"filenames,omitempty"`
+	Interrupted       *bool                                `json:"interrupted,omitempty"`
+	IsImage           *bool                                `json:"is_image,omitempty"`
+	Kind              string                               `json:"kind"`
+	Language          *string                              `json:"language,omitempty"`
+	Mode              *string                              `json:"mode,omitempty"`
+	NewString         *string                              `json:"new_string,omitempty"`
+	NewTodos          *[]SessionStructuredTodoItem         `json:"new_todos,omitempty"`
+	NumFiles          *int64                               `json:"num_files,omitempty"`
+	NumLines          *int64                               `json:"num_lines,omitempty"`
+	NumResults        *int64                               `json:"num_results,omitempty"`
+	OldString         *string                              `json:"old_string,omitempty"`
+	OldTodos          *[]SessionStructuredTodoItem         `json:"old_todos,omitempty"`
+	Options           *[]string                            `json:"options,omitempty"`
+	OriginalFile      *string                              `json:"original_file,omitempty"`
+	Output            *string                              `json:"output,omitempty"`
+	Patch             *string                              `json:"patch,omitempty"`
+	PatchHunks        *[]SessionStructuredPatchHunk        `json:"patch_hunks,omitempty"`
+	Plan              *string                              `json:"plan,omitempty"`
+	Query             *string                              `json:"query,omitempty"`
+	Question          *string                              `json:"question,omitempty"`
+	Questions         *[]SessionStructuredQuestion         `json:"questions,omitempty"`
+	ReplaceAll        *bool                                `json:"replace_all,omitempty"`
+	ResultItems       *[]SessionStructuredSearchResultItem `json:"result_items,omitempty"`
+	StartLine         *int64                               `json:"start_line,omitempty"`
+	StatusCode        *int64                               `json:"status_code,omitempty"`
+	StatusText        *string                              `json:"status_text,omitempty"`
+	Stderr            *string                              `json:"stderr,omitempty"`
+	StderrLines       *int64                               `json:"stderr_lines,omitempty"`
+	Stdout            *string                              `json:"stdout,omitempty"`
+	StdoutLines       *int64                               `json:"stdout_lines,omitempty"`
+	Steps             *[]SessionStructuredPlanStep         `json:"steps,omitempty"`
+	TaskId            *string                              `json:"task_id,omitempty"`
+	TaskStatus        *string                              `json:"task_status,omitempty"`
+	TaskType          *string                              `json:"task_type,omitempty"`
+	Text              *string                              `json:"text,omitempty"`
+	Timestamp         *string                              `json:"timestamp,omitempty"`
+	TotalDurationMs   *int64                               `json:"total_duration_ms,omitempty"`
+	TotalLines        *int64                               `json:"total_lines,omitempty"`
+	TotalTokens       *int64                               `json:"total_tokens,omitempty"`
+	TotalToolUseCount *int64                               `json:"total_tool_use_count,omitempty"`
+	Truncated         *bool                                `json:"truncated,omitempty"`
+	Url               *string                              `json:"url,omitempty"`
+	UserModified      *bool                                `json:"user_modified,omitempty"`
+}
+
+// SessionStructuredToolResultWrite defines model for SessionStructuredToolResultWrite.
+type SessionStructuredToolResultWrite struct {
+	Content    *string                       `json:"content,omitempty"`
+	Error      *SessionStructuredToolError   `json:"error,omitempty"`
+	FilePath   *string                       `json:"file_path,omitempty"`
+	FilePaths  *[]string                     `json:"file_paths,omitempty"`
+	Kind       string                        `json:"kind"`
+	Language   *string                       `json:"language,omitempty"`
+	NumLines   *int64                        `json:"num_lines,omitempty"`
+	Patch      *string                       `json:"patch,omitempty"`
+	PatchHunks *[]SessionStructuredPatchHunk `json:"patch_hunks,omitempty"`
+	StartLine  *int64                        `json:"start_line,omitempty"`
+	Text       *string                       `json:"text,omitempty"`
+	TotalLines *int64                        `json:"total_lines,omitempty"`
+}
+
+// SessionStructuredUploadedFile defines model for SessionStructuredUploadedFile.
+type SessionStructuredUploadedFile struct {
+	FilePath     *string `json:"file_path,omitempty"`
+	MimeType     *string `json:"mime_type,omitempty"`
+	OriginalName *string `json:"original_name,omitempty"`
+	PreviewUrl   *string `json:"preview_url,omitempty"`
+	Size         *string `json:"size,omitempty"`
+}
+
+// SessionStructuredUsage defines model for SessionStructuredUsage.
+type SessionStructuredUsage struct {
+	CacheCreationTokens *int64 `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens     *int64 `json:"cache_read_tokens,omitempty"`
+	ContextPercent      *int64 `json:"context_percent,omitempty"`
+	ContextUsedTokens   *int64 `json:"context_used_tokens,omitempty"`
+	ContextWindowTokens *int64 `json:"context_window_tokens,omitempty"`
+	InputTokens         *int64 `json:"input_tokens,omitempty"`
+	OutputTokens        *int64 `json:"output_tokens,omitempty"`
+	ReasoningTokens     *int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// SessionStructuredUserPrompt defines model for SessionStructuredUserPrompt.
+type SessionStructuredUserPrompt struct {
+	OpenedFiles   *[]string                        `json:"opened_files,omitempty"`
+	Selections    *[]SessionStructuredIDESelection `json:"selections,omitempty"`
+	Text          *string                          `json:"text,omitempty"`
+	UploadedFiles *[]SessionStructuredUploadedFile `json:"uploaded_files,omitempty"`
 }
 
 // SessionSubmitInputBody defines model for SessionSubmitInputBody.
@@ -3451,22 +4544,67 @@ type SessionSubmitSucceededPayload struct {
 	SessionId string `json:"session_id"`
 }
 
-// SessionTranscriptGetResponse defines model for SessionTranscriptGetResponse.
-type SessionTranscriptGetResponse struct {
-	// Format conversation, text, or raw.
-	Format string `json:"format"`
-	Id     string `json:"id"`
+// SessionTranscriptConversationResponse defines model for SessionTranscriptConversationResponse.
+type SessionTranscriptConversationResponse struct {
+	// Format Conversation or text transcript format.
+	Format     SessionTranscriptConversationResponseFormat `json:"format"`
+	Id         string                                      `json:"id"`
+	Pagination *PaginationInfo                             `json:"pagination,omitempty"`
 
-	// Messages Populated for raw format; provider-native frames emitted verbatim as the provider wrote them.
-	Messages   *[]SessionRawMessageFrame `json:"messages,omitempty"`
-	Pagination *PaginationInfo           `json:"pagination,omitempty"`
-
-	// Provider Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing.
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
 	Provider string `json:"provider"`
 	Template string `json:"template"`
 
-	// Turns Populated for conversation/text formats.
+	// Turns Conversation/text transcript turns.
 	Turns *[]OutputTurn `json:"turns,omitempty"`
+}
+
+// SessionTranscriptConversationResponseFormat Conversation or text transcript format.
+type SessionTranscriptConversationResponseFormat string
+
+// SessionTranscriptGetResponse Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.
+type SessionTranscriptGetResponse struct {
+	union json.RawMessage
+}
+
+// SessionTranscriptRawResponse defines model for SessionTranscriptRawResponse.
+type SessionTranscriptRawResponse struct {
+	// Format Raw provider-native transcript format.
+	Format SessionTranscriptRawResponseFormat `json:"format"`
+	Id     string                             `json:"id"`
+
+	// Messages Provider-native transcript frames emitted only for raw format.
+	Messages   *[]SessionRawMessageFrame `json:"messages"`
+	Pagination *PaginationInfo           `json:"pagination,omitempty"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing.
+	Provider string `json:"provider"`
+	Template string `json:"template"`
+}
+
+// SessionTranscriptRawResponseFormat Raw provider-native transcript format.
+type SessionTranscriptRawResponseFormat string
+
+// SessionTranscriptStructuredResponse Provider-neutral structured transcript snapshot.
+type SessionTranscriptStructuredResponse struct {
+	// Format Structured provider-neutral transcript format.
+	Format  string                   `json:"format"`
+	History SessionStructuredHistory `json:"history"`
+	Id      string                   `json:"id"`
+
+	// Operation Always snapshot for a REST structured transcript.
+	Operation  string          `json:"operation"`
+	Pagination *PaginationInfo `json:"pagination,omitempty"`
+
+	// Provider Producing provider identifier (claude, codex, gemini, opencode, etc.).
+	Provider string `json:"provider"`
+
+	// SchemaVersion Structured session transcript schema version.
+	SchemaVersion string `json:"schema_version"`
+
+	// StructuredMessages Provider-normalized structured messages.
+	StructuredMessages []SessionStructuredMessage `json:"structured_messages"`
+	Template           string                     `json:"template"`
 }
 
 // SessionUnknownStatePayload defines model for SessionUnknownStatePayload.
@@ -7735,9 +8873,21 @@ type PostV0CityByCityNameSessionByIdStopParams struct {
 
 // StreamSessionParams defines parameters for StreamSession.
 type StreamSessionParams struct {
-	// Format Transcript format: conversation (default) or raw.
-	Format *string `form:"format,omitempty" json:"format,omitempty"`
+	// Format Transcript format: conversation (default), raw, or structured.
+	Format *StreamSessionParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeThinking Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise.
+	IncludeThinking *bool `form:"include_thinking,omitempty" json:"include_thinking,omitempty"`
+
+	// AfterCursor Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect.
+	AfterCursor *string `form:"after_cursor,omitempty" json:"after_cursor,omitempty"`
+
+	// LastEventID Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor.
+	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
+
+// StreamSessionParamsFormat defines parameters for StreamSession.
+type StreamSessionParamsFormat string
 
 // SubmitSessionParams defines parameters for SubmitSession.
 type SubmitSessionParams struct {
@@ -7756,15 +8906,21 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
 	Tail *string `form:"tail,omitempty" json:"tail,omitempty"`
 
-	// Format Transcript format: conversation (default) or raw.
-	Format *string `form:"format,omitempty" json:"format,omitempty"`
+	// Format Transcript format: conversation (default), raw, or structured.
+	Format *GetV0CityByCityNameSessionByIdTranscriptParamsFormat `form:"format,omitempty" json:"format,omitempty"`
 
-	// Before Pagination cursor: return entries before this UUID.
+	// IncludeThinking Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise.
+	IncludeThinking *bool `form:"include_thinking,omitempty" json:"include_thinking,omitempty"`
+
+	// Before Pagination cursor: return entries before this stable transcript entry ID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 
-	// After Pagination cursor: return entries after this UUID.
+	// After Pagination cursor: return entries after this stable transcript entry ID.
 	After *string `form:"after,omitempty" json:"after,omitempty"`
 }
+
+// GetV0CityByCityNameSessionByIdTranscriptParamsFormat defines parameters for GetV0CityByCityNameSessionByIdTranscript.
+type GetV0CityByCityNameSessionByIdTranscriptParamsFormat string
 
 // PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
 type PostV0CityByCityNameSessionByIdWakeParams struct {
@@ -9262,6 +10418,32 @@ func (t *SessionStreamCommonEvent) MergePendingInteraction(v PendingInteraction)
 	return err
 }
 
+// AsSessionPendingClearedEvent returns the union data inside the SessionStreamCommonEvent as a SessionPendingClearedEvent
+func (t SessionStreamCommonEvent) AsSessionPendingClearedEvent() (SessionPendingClearedEvent, error) {
+	var body SessionPendingClearedEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionPendingClearedEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionPendingClearedEvent
+func (t *SessionStreamCommonEvent) FromSessionPendingClearedEvent(v SessionPendingClearedEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionPendingClearedEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionPendingClearedEvent
+func (t *SessionStreamCommonEvent) MergeSessionPendingClearedEvent(v SessionPendingClearedEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsHeartbeatEvent returns the union data inside the SessionStreamCommonEvent as a HeartbeatEvent
 func (t SessionStreamCommonEvent) AsHeartbeatEvent() (HeartbeatEvent, error) {
 	var body HeartbeatEvent
@@ -9294,6 +10476,1557 @@ func (t SessionStreamCommonEvent) MarshalJSON() ([]byte, error) {
 }
 
 func (t *SessionStreamCommonEvent) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionStructuredBlockText returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockText
+func (t SessionStructuredBlock) AsSessionStructuredBlockText() (SessionStructuredBlockText, error) {
+	var body SessionStructuredBlockText
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockText overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockText
+func (t *SessionStructuredBlock) FromSessionStructuredBlockText(v SessionStructuredBlockText) error {
+	v.Type = "text"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockText performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockText
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockText(v SessionStructuredBlockText) error {
+	v.Type = "text"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockThinking returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockThinking
+func (t SessionStructuredBlock) AsSessionStructuredBlockThinking() (SessionStructuredBlockThinking, error) {
+	var body SessionStructuredBlockThinking
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockThinking overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockThinking
+func (t *SessionStructuredBlock) FromSessionStructuredBlockThinking(v SessionStructuredBlockThinking) error {
+	v.Type = "thinking"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockThinking performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockThinking
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockThinking(v SessionStructuredBlockThinking) error {
+	v.Type = "thinking"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockToolUse returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockToolUse
+func (t SessionStructuredBlock) AsSessionStructuredBlockToolUse() (SessionStructuredBlockToolUse, error) {
+	var body SessionStructuredBlockToolUse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockToolUse overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockToolUse
+func (t *SessionStructuredBlock) FromSessionStructuredBlockToolUse(v SessionStructuredBlockToolUse) error {
+	v.Type = "tool_use"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockToolUse performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockToolUse
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockToolUse(v SessionStructuredBlockToolUse) error {
+	v.Type = "tool_use"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockToolResult returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockToolResult
+func (t SessionStructuredBlock) AsSessionStructuredBlockToolResult() (SessionStructuredBlockToolResult, error) {
+	var body SessionStructuredBlockToolResult
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockToolResult overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockToolResult
+func (t *SessionStructuredBlock) FromSessionStructuredBlockToolResult(v SessionStructuredBlockToolResult) error {
+	v.Type = "tool_result"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockToolResult performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockToolResult
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockToolResult(v SessionStructuredBlockToolResult) error {
+	v.Type = "tool_result"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockInteraction returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockInteraction
+func (t SessionStructuredBlock) AsSessionStructuredBlockInteraction() (SessionStructuredBlockInteraction, error) {
+	var body SessionStructuredBlockInteraction
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockInteraction overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockInteraction
+func (t *SessionStructuredBlock) FromSessionStructuredBlockInteraction(v SessionStructuredBlockInteraction) error {
+	v.Type = "interaction"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockInteraction performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockInteraction
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockInteraction(v SessionStructuredBlockInteraction) error {
+	v.Type = "interaction"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockImage returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockImage
+func (t SessionStructuredBlock) AsSessionStructuredBlockImage() (SessionStructuredBlockImage, error) {
+	var body SessionStructuredBlockImage
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockImage overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockImage
+func (t *SessionStructuredBlock) FromSessionStructuredBlockImage(v SessionStructuredBlockImage) error {
+	v.Type = "image"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockImage performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockImage
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockImage(v SessionStructuredBlockImage) error {
+	v.Type = "image"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredBlockUnknown returns the union data inside the SessionStructuredBlock as a SessionStructuredBlockUnknown
+func (t SessionStructuredBlock) AsSessionStructuredBlockUnknown() (SessionStructuredBlockUnknown, error) {
+	var body SessionStructuredBlockUnknown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredBlockUnknown overwrites any union data inside the SessionStructuredBlock as the provided SessionStructuredBlockUnknown
+func (t *SessionStructuredBlock) FromSessionStructuredBlockUnknown(v SessionStructuredBlockUnknown) error {
+	v.Type = "unknown"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredBlockUnknown performs a merge with any union data inside the SessionStructuredBlock, using the provided SessionStructuredBlockUnknown
+func (t *SessionStructuredBlock) MergeSessionStructuredBlockUnknown(v SessionStructuredBlockUnknown) error {
+	v.Type = "unknown"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionStructuredBlock) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionStructuredBlock) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "image":
+		return t.AsSessionStructuredBlockImage()
+	case "interaction":
+		return t.AsSessionStructuredBlockInteraction()
+	case "text":
+		return t.AsSessionStructuredBlockText()
+	case "thinking":
+		return t.AsSessionStructuredBlockThinking()
+	case "tool_result":
+		return t.AsSessionStructuredBlockToolResult()
+	case "tool_use":
+		return t.AsSessionStructuredBlockToolUse()
+	case "unknown":
+		return t.AsSessionStructuredBlockUnknown()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionStructuredBlock) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionStructuredBlock) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionStructuredMessageUnknown returns the union data inside the SessionStructuredMessage as a SessionStructuredMessageUnknown
+func (t SessionStructuredMessage) AsSessionStructuredMessageUnknown() (SessionStructuredMessageUnknown, error) {
+	var body SessionStructuredMessageUnknown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredMessageUnknown overwrites any union data inside the SessionStructuredMessage as the provided SessionStructuredMessageUnknown
+func (t *SessionStructuredMessage) FromSessionStructuredMessageUnknown(v SessionStructuredMessageUnknown) error {
+	v.Role = "unknown"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredMessageUnknown performs a merge with any union data inside the SessionStructuredMessage, using the provided SessionStructuredMessageUnknown
+func (t *SessionStructuredMessage) MergeSessionStructuredMessageUnknown(v SessionStructuredMessageUnknown) error {
+	v.Role = "unknown"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredMessageUser returns the union data inside the SessionStructuredMessage as a SessionStructuredMessageUser
+func (t SessionStructuredMessage) AsSessionStructuredMessageUser() (SessionStructuredMessageUser, error) {
+	var body SessionStructuredMessageUser
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredMessageUser overwrites any union data inside the SessionStructuredMessage as the provided SessionStructuredMessageUser
+func (t *SessionStructuredMessage) FromSessionStructuredMessageUser(v SessionStructuredMessageUser) error {
+	v.Role = "user"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredMessageUser performs a merge with any union data inside the SessionStructuredMessage, using the provided SessionStructuredMessageUser
+func (t *SessionStructuredMessage) MergeSessionStructuredMessageUser(v SessionStructuredMessageUser) error {
+	v.Role = "user"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredMessageAssistant returns the union data inside the SessionStructuredMessage as a SessionStructuredMessageAssistant
+func (t SessionStructuredMessage) AsSessionStructuredMessageAssistant() (SessionStructuredMessageAssistant, error) {
+	var body SessionStructuredMessageAssistant
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredMessageAssistant overwrites any union data inside the SessionStructuredMessage as the provided SessionStructuredMessageAssistant
+func (t *SessionStructuredMessage) FromSessionStructuredMessageAssistant(v SessionStructuredMessageAssistant) error {
+	v.Role = "assistant"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredMessageAssistant performs a merge with any union data inside the SessionStructuredMessage, using the provided SessionStructuredMessageAssistant
+func (t *SessionStructuredMessage) MergeSessionStructuredMessageAssistant(v SessionStructuredMessageAssistant) error {
+	v.Role = "assistant"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredMessageSystem returns the union data inside the SessionStructuredMessage as a SessionStructuredMessageSystem
+func (t SessionStructuredMessage) AsSessionStructuredMessageSystem() (SessionStructuredMessageSystem, error) {
+	var body SessionStructuredMessageSystem
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredMessageSystem overwrites any union data inside the SessionStructuredMessage as the provided SessionStructuredMessageSystem
+func (t *SessionStructuredMessage) FromSessionStructuredMessageSystem(v SessionStructuredMessageSystem) error {
+	v.Role = "system"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredMessageSystem performs a merge with any union data inside the SessionStructuredMessage, using the provided SessionStructuredMessageSystem
+func (t *SessionStructuredMessage) MergeSessionStructuredMessageSystem(v SessionStructuredMessageSystem) error {
+	v.Role = "system"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredMessageTool returns the union data inside the SessionStructuredMessage as a SessionStructuredMessageTool
+func (t SessionStructuredMessage) AsSessionStructuredMessageTool() (SessionStructuredMessageTool, error) {
+	var body SessionStructuredMessageTool
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredMessageTool overwrites any union data inside the SessionStructuredMessage as the provided SessionStructuredMessageTool
+func (t *SessionStructuredMessage) FromSessionStructuredMessageTool(v SessionStructuredMessageTool) error {
+	v.Role = "tool"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredMessageTool performs a merge with any union data inside the SessionStructuredMessage, using the provided SessionStructuredMessageTool
+func (t *SessionStructuredMessage) MergeSessionStructuredMessageTool(v SessionStructuredMessageTool) error {
+	v.Role = "tool"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionStructuredMessage) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"role"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionStructuredMessage) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "assistant":
+		return t.AsSessionStructuredMessageAssistant()
+	case "system":
+		return t.AsSessionStructuredMessageSystem()
+	case "tool":
+		return t.AsSessionStructuredMessageTool()
+	case "unknown":
+		return t.AsSessionStructuredMessageUnknown()
+	case "user":
+		return t.AsSessionStructuredMessageUser()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionStructuredMessage) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionStructuredMessage) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionStructuredToolInputUnknown returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputUnknown
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputUnknown() (SessionStructuredToolInputUnknown, error) {
+	var body SessionStructuredToolInputUnknown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputUnknown overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputUnknown
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputUnknown(v SessionStructuredToolInputUnknown) error {
+	v.Kind = "unknown"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputUnknown performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputUnknown
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputUnknown(v SessionStructuredToolInputUnknown) error {
+	v.Kind = "unknown"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputCommand returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputCommand
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputCommand() (SessionStructuredToolInputCommand, error) {
+	var body SessionStructuredToolInputCommand
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputCommand overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputCommand
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputCommand(v SessionStructuredToolInputCommand) error {
+	v.Kind = "command"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputCommand performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputCommand
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputCommand(v SessionStructuredToolInputCommand) error {
+	v.Kind = "command"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputStdin returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputStdin
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputStdin() (SessionStructuredToolInputStdin, error) {
+	var body SessionStructuredToolInputStdin
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputStdin overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputStdin
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputStdin(v SessionStructuredToolInputStdin) error {
+	v.Kind = "stdin"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputStdin performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputStdin
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputStdin(v SessionStructuredToolInputStdin) error {
+	v.Kind = "stdin"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputCode returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputCode
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputCode() (SessionStructuredToolInputCode, error) {
+	var body SessionStructuredToolInputCode
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputCode overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputCode
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputCode(v SessionStructuredToolInputCode) error {
+	v.Kind = "code"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputCode performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputCode
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputCode(v SessionStructuredToolInputCode) error {
+	v.Kind = "code"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputPatch returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputPatch
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputPatch() (SessionStructuredToolInputPatch, error) {
+	var body SessionStructuredToolInputPatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputPatch overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputPatch
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputPatch(v SessionStructuredToolInputPatch) error {
+	v.Kind = "patch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputPatch performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputPatch
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputPatch(v SessionStructuredToolInputPatch) error {
+	v.Kind = "patch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputWrite returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputWrite
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputWrite() (SessionStructuredToolInputWrite, error) {
+	var body SessionStructuredToolInputWrite
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputWrite overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputWrite
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputWrite(v SessionStructuredToolInputWrite) error {
+	v.Kind = "write"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputWrite performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputWrite
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputWrite(v SessionStructuredToolInputWrite) error {
+	v.Kind = "write"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputGlob returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputGlob
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputGlob() (SessionStructuredToolInputGlob, error) {
+	var body SessionStructuredToolInputGlob
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputGlob overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputGlob
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputGlob(v SessionStructuredToolInputGlob) error {
+	v.Kind = "glob"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputGlob performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputGlob
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputGlob(v SessionStructuredToolInputGlob) error {
+	v.Kind = "glob"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputFetch returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputFetch
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputFetch() (SessionStructuredToolInputFetch, error) {
+	var body SessionStructuredToolInputFetch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputFetch overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputFetch
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputFetch(v SessionStructuredToolInputFetch) error {
+	v.Kind = "fetch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputFetch performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputFetch
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputFetch(v SessionStructuredToolInputFetch) error {
+	v.Kind = "fetch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputSearch returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputSearch
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputSearch() (SessionStructuredToolInputSearch, error) {
+	var body SessionStructuredToolInputSearch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputSearch overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputSearch
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputSearch(v SessionStructuredToolInputSearch) error {
+	v.Kind = "search"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputSearch performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputSearch
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputSearch(v SessionStructuredToolInputSearch) error {
+	v.Kind = "search"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputFile returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputFile
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputFile() (SessionStructuredToolInputFile, error) {
+	var body SessionStructuredToolInputFile
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputFile overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputFile
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputFile(v SessionStructuredToolInputFile) error {
+	v.Kind = "file"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputFile performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputFile
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputFile(v SessionStructuredToolInputFile) error {
+	v.Kind = "file"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputTodo returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputTodo
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputTodo() (SessionStructuredToolInputTodo, error) {
+	var body SessionStructuredToolInputTodo
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputTodo overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputTodo
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputTodo(v SessionStructuredToolInputTodo) error {
+	v.Kind = "todo"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputTodo performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputTodo
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputTodo(v SessionStructuredToolInputTodo) error {
+	v.Kind = "todo"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputPlan returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputPlan
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputPlan() (SessionStructuredToolInputPlan, error) {
+	var body SessionStructuredToolInputPlan
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputPlan overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputPlan
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputPlan(v SessionStructuredToolInputPlan) error {
+	v.Kind = "plan"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputPlan performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputPlan
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputPlan(v SessionStructuredToolInputPlan) error {
+	v.Kind = "plan"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputQuestion returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputQuestion
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputQuestion() (SessionStructuredToolInputQuestion, error) {
+	var body SessionStructuredToolInputQuestion
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputQuestion overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputQuestion
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputQuestion(v SessionStructuredToolInputQuestion) error {
+	v.Kind = "question"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputQuestion performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputQuestion
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputQuestion(v SessionStructuredToolInputQuestion) error {
+	v.Kind = "question"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputTask returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputTask
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputTask() (SessionStructuredToolInputTask, error) {
+	var body SessionStructuredToolInputTask
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputTask overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputTask
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputTask(v SessionStructuredToolInputTask) error {
+	v.Kind = "task"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputTask performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputTask
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputTask(v SessionStructuredToolInputTask) error {
+	v.Kind = "task"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputText returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputText
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputText() (SessionStructuredToolInputText, error) {
+	var body SessionStructuredToolInputText
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputText overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputText
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputText(v SessionStructuredToolInputText) error {
+	v.Kind = "text"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputText performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputText
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputText(v SessionStructuredToolInputText) error {
+	v.Kind = "text"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolInputArguments returns the union data inside the SessionStructuredToolInput as a SessionStructuredToolInputArguments
+func (t SessionStructuredToolInput) AsSessionStructuredToolInputArguments() (SessionStructuredToolInputArguments, error) {
+	var body SessionStructuredToolInputArguments
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolInputArguments overwrites any union data inside the SessionStructuredToolInput as the provided SessionStructuredToolInputArguments
+func (t *SessionStructuredToolInput) FromSessionStructuredToolInputArguments(v SessionStructuredToolInputArguments) error {
+	v.Kind = "arguments"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolInputArguments performs a merge with any union data inside the SessionStructuredToolInput, using the provided SessionStructuredToolInputArguments
+func (t *SessionStructuredToolInput) MergeSessionStructuredToolInputArguments(v SessionStructuredToolInputArguments) error {
+	v.Kind = "arguments"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionStructuredToolInput) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"kind"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionStructuredToolInput) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "arguments":
+		return t.AsSessionStructuredToolInputArguments()
+	case "code":
+		return t.AsSessionStructuredToolInputCode()
+	case "command":
+		return t.AsSessionStructuredToolInputCommand()
+	case "fetch":
+		return t.AsSessionStructuredToolInputFetch()
+	case "file":
+		return t.AsSessionStructuredToolInputFile()
+	case "glob":
+		return t.AsSessionStructuredToolInputGlob()
+	case "patch":
+		return t.AsSessionStructuredToolInputPatch()
+	case "plan":
+		return t.AsSessionStructuredToolInputPlan()
+	case "question":
+		return t.AsSessionStructuredToolInputQuestion()
+	case "search":
+		return t.AsSessionStructuredToolInputSearch()
+	case "stdin":
+		return t.AsSessionStructuredToolInputStdin()
+	case "task":
+		return t.AsSessionStructuredToolInputTask()
+	case "text":
+		return t.AsSessionStructuredToolInputText()
+	case "todo":
+		return t.AsSessionStructuredToolInputTodo()
+	case "unknown":
+		return t.AsSessionStructuredToolInputUnknown()
+	case "write":
+		return t.AsSessionStructuredToolInputWrite()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionStructuredToolInput) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionStructuredToolInput) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionStructuredToolResultUnknown returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultUnknown
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultUnknown() (SessionStructuredToolResultUnknown, error) {
+	var body SessionStructuredToolResultUnknown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultUnknown overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultUnknown
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultUnknown(v SessionStructuredToolResultUnknown) error {
+	v.Kind = "unknown"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultUnknown performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultUnknown
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultUnknown(v SessionStructuredToolResultUnknown) error {
+	v.Kind = "unknown"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultBash returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultBash
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultBash() (SessionStructuredToolResultBash, error) {
+	var body SessionStructuredToolResultBash
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultBash overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultBash
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultBash(v SessionStructuredToolResultBash) error {
+	v.Kind = "bash"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultBash performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultBash
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultBash(v SessionStructuredToolResultBash) error {
+	v.Kind = "bash"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultPython returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultPython
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultPython() (SessionStructuredToolResultPython, error) {
+	var body SessionStructuredToolResultPython
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultPython overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultPython
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultPython(v SessionStructuredToolResultPython) error {
+	v.Kind = "python"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultPython performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultPython
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultPython(v SessionStructuredToolResultPython) error {
+	v.Kind = "python"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultRead returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultRead
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultRead() (SessionStructuredToolResultRead, error) {
+	var body SessionStructuredToolResultRead
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultRead overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultRead
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultRead(v SessionStructuredToolResultRead) error {
+	v.Kind = "read"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultRead performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultRead
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultRead(v SessionStructuredToolResultRead) error {
+	v.Kind = "read"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultGlob returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultGlob
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultGlob() (SessionStructuredToolResultGlob, error) {
+	var body SessionStructuredToolResultGlob
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultGlob overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultGlob
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultGlob(v SessionStructuredToolResultGlob) error {
+	v.Kind = "glob"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultGlob performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultGlob
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultGlob(v SessionStructuredToolResultGlob) error {
+	v.Kind = "glob"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultGrep returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultGrep
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultGrep() (SessionStructuredToolResultGrep, error) {
+	var body SessionStructuredToolResultGrep
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultGrep overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultGrep
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultGrep(v SessionStructuredToolResultGrep) error {
+	v.Kind = "grep"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultGrep performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultGrep
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultGrep(v SessionStructuredToolResultGrep) error {
+	v.Kind = "grep"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultSearch returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultSearch
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultSearch() (SessionStructuredToolResultSearch, error) {
+	var body SessionStructuredToolResultSearch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultSearch overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultSearch
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultSearch(v SessionStructuredToolResultSearch) error {
+	v.Kind = "search"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultSearch performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultSearch
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultSearch(v SessionStructuredToolResultSearch) error {
+	v.Kind = "search"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultFetch returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultFetch
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultFetch() (SessionStructuredToolResultFetch, error) {
+	var body SessionStructuredToolResultFetch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultFetch overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultFetch
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultFetch(v SessionStructuredToolResultFetch) error {
+	v.Kind = "fetch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultFetch performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultFetch
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultFetch(v SessionStructuredToolResultFetch) error {
+	v.Kind = "fetch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultTodo returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultTodo
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultTodo() (SessionStructuredToolResultTodo, error) {
+	var body SessionStructuredToolResultTodo
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultTodo overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultTodo
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultTodo(v SessionStructuredToolResultTodo) error {
+	v.Kind = "todo"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultTodo performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultTodo
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultTodo(v SessionStructuredToolResultTodo) error {
+	v.Kind = "todo"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultPlan returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultPlan
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultPlan() (SessionStructuredToolResultPlan, error) {
+	var body SessionStructuredToolResultPlan
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultPlan overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultPlan
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultPlan(v SessionStructuredToolResultPlan) error {
+	v.Kind = "plan"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultPlan performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultPlan
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultPlan(v SessionStructuredToolResultPlan) error {
+	v.Kind = "plan"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultQuestion returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultQuestion
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultQuestion() (SessionStructuredToolResultQuestion, error) {
+	var body SessionStructuredToolResultQuestion
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultQuestion overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultQuestion
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultQuestion(v SessionStructuredToolResultQuestion) error {
+	v.Kind = "question"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultQuestion performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultQuestion
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultQuestion(v SessionStructuredToolResultQuestion) error {
+	v.Kind = "question"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultStdin returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultStdin
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultStdin() (SessionStructuredToolResultStdin, error) {
+	var body SessionStructuredToolResultStdin
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultStdin overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultStdin
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultStdin(v SessionStructuredToolResultStdin) error {
+	v.Kind = "stdin"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultStdin performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultStdin
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultStdin(v SessionStructuredToolResultStdin) error {
+	v.Kind = "stdin"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultTask returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultTask
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultTask() (SessionStructuredToolResultTask, error) {
+	var body SessionStructuredToolResultTask
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultTask overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultTask
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultTask(v SessionStructuredToolResultTask) error {
+	v.Kind = "task"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultTask performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultTask
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultTask(v SessionStructuredToolResultTask) error {
+	v.Kind = "task"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultWrite returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultWrite
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultWrite() (SessionStructuredToolResultWrite, error) {
+	var body SessionStructuredToolResultWrite
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultWrite overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultWrite
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultWrite(v SessionStructuredToolResultWrite) error {
+	v.Kind = "write"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultWrite performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultWrite
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultWrite(v SessionStructuredToolResultWrite) error {
+	v.Kind = "write"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultEdit returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultEdit
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultEdit() (SessionStructuredToolResultEdit, error) {
+	var body SessionStructuredToolResultEdit
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultEdit overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultEdit
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultEdit(v SessionStructuredToolResultEdit) error {
+	v.Kind = "edit"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultEdit performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultEdit
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultEdit(v SessionStructuredToolResultEdit) error {
+	v.Kind = "edit"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStructuredToolResultText returns the union data inside the SessionStructuredToolResult as a SessionStructuredToolResultText
+func (t SessionStructuredToolResult) AsSessionStructuredToolResultText() (SessionStructuredToolResultText, error) {
+	var body SessionStructuredToolResultText
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStructuredToolResultText overwrites any union data inside the SessionStructuredToolResult as the provided SessionStructuredToolResultText
+func (t *SessionStructuredToolResult) FromSessionStructuredToolResultText(v SessionStructuredToolResultText) error {
+	v.Kind = "text"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStructuredToolResultText performs a merge with any union data inside the SessionStructuredToolResult, using the provided SessionStructuredToolResultText
+func (t *SessionStructuredToolResult) MergeSessionStructuredToolResultText(v SessionStructuredToolResultText) error {
+	v.Kind = "text"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionStructuredToolResult) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"kind"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionStructuredToolResult) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "bash":
+		return t.AsSessionStructuredToolResultBash()
+	case "edit":
+		return t.AsSessionStructuredToolResultEdit()
+	case "fetch":
+		return t.AsSessionStructuredToolResultFetch()
+	case "glob":
+		return t.AsSessionStructuredToolResultGlob()
+	case "grep":
+		return t.AsSessionStructuredToolResultGrep()
+	case "plan":
+		return t.AsSessionStructuredToolResultPlan()
+	case "python":
+		return t.AsSessionStructuredToolResultPython()
+	case "question":
+		return t.AsSessionStructuredToolResultQuestion()
+	case "read":
+		return t.AsSessionStructuredToolResultRead()
+	case "search":
+		return t.AsSessionStructuredToolResultSearch()
+	case "stdin":
+		return t.AsSessionStructuredToolResultStdin()
+	case "task":
+		return t.AsSessionStructuredToolResultTask()
+	case "text":
+		return t.AsSessionStructuredToolResultText()
+	case "todo":
+		return t.AsSessionStructuredToolResultTodo()
+	case "unknown":
+		return t.AsSessionStructuredToolResultUnknown()
+	case "write":
+		return t.AsSessionStructuredToolResultWrite()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionStructuredToolResult) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionStructuredToolResult) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsSessionTranscriptConversationResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptConversationResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptConversationResponse() (SessionTranscriptConversationResponse, error) {
+	var body SessionTranscriptConversationResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptConversationResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptConversationResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptConversationResponse(v SessionTranscriptConversationResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptConversationResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptConversationResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptConversationResponse(v SessionTranscriptConversationResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionTranscriptRawResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptRawResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptRawResponse() (SessionTranscriptRawResponse, error) {
+	var body SessionTranscriptRawResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptRawResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptRawResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptRawResponse(v SessionTranscriptRawResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptRawResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptRawResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptRawResponse(v SessionTranscriptRawResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionTranscriptStructuredResponse returns the union data inside the SessionTranscriptGetResponse as a SessionTranscriptStructuredResponse
+func (t SessionTranscriptGetResponse) AsSessionTranscriptStructuredResponse() (SessionTranscriptStructuredResponse, error) {
+	var body SessionTranscriptStructuredResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionTranscriptStructuredResponse overwrites any union data inside the SessionTranscriptGetResponse as the provided SessionTranscriptStructuredResponse
+func (t *SessionTranscriptGetResponse) FromSessionTranscriptStructuredResponse(v SessionTranscriptStructuredResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionTranscriptStructuredResponse performs a merge with any union data inside the SessionTranscriptGetResponse, using the provided SessionTranscriptStructuredResponse
+func (t *SessionTranscriptGetResponse) MergeSessionTranscriptStructuredResponse(v SessionTranscriptStructuredResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t SessionTranscriptGetResponse) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"format"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t SessionTranscriptGetResponse) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "conversation":
+		return t.AsSessionTranscriptConversationResponse()
+	case "raw":
+		return t.AsSessionTranscriptRawResponse()
+	case "structured":
+		return t.AsSessionTranscriptStructuredResponse()
+	case "text":
+		return t.AsSessionTranscriptConversationResponse()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t SessionTranscriptGetResponse) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -26218,12 +28951,59 @@ func NewStreamSessionRequest(server string, cityName string, id string, params *
 
 		}
 
+		if params.IncludeThinking != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_thinking", *params.IncludeThinking, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AfterCursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_cursor", *params.AfterCursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		if params.LastEventID != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Last-Event-ID", *params.LastEventID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Last-Event-ID", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -26405,6 +29185,22 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 		if params.Format != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeThinking != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_thinking", *params.IncludeThinking, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

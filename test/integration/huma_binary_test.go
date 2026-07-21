@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/testutil"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -258,11 +259,7 @@ func writeSupervisorConfig(t *testing.T, gcHome string, port int) {
 // ~104 chars.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gcit-")
-	if err != nil {
-		t.Fatalf("short tmp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := testutil.ShortTempDir(t, "gcit-")
 	registerIntegrationDoltSQLServerCleanup(t, dir)
 	return dir
 }

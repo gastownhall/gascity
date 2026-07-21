@@ -1278,3 +1278,95 @@ func TestControllerStatusGuidance(t *testing.T) {
 		})
 	}
 }
+
+type blockingStatusRunningProvider struct {
+	runtime.Provider
+	entered chan<- struct{}
+	release <-chan struct{}
+	running bool
+}
+
+func (p blockingStatusRunningProvider) IsRunning(string) bool {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	return p.running
+}
+
+func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	base := blockingStatusRunningProvider{Provider: runtime.NewFake(), entered: entered, release: release, running: true}
+	sp := newBoundedStatusProvider(base)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatusWithStoreAndSnapshot(sp, newFakeDrainOps(), cfg, "", nil, newSessionBeadSnapshot(nil), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want worker rendered as unknown partial", out)
+	}
+	if strings.Contains(out, "worker                  stopped") || strings.Contains(out, "worker\tstopped") {
+		t.Fatalf("stdout = %q, must not render timeout fallback as authoritative stopped", out)
+	}
+}
+
+func TestRenderCityStatusFromAPIPartialRendersUnknownNotStopped(t *testing.T) {
+	view := api.StatusView{
+		CityName:      "city",
+		CityPath:      "/home/user/city",
+		Partial:       true,
+		PartialErrors: []string{"runtime status probe incomplete; non-running agent rows are unknown"},
+		Agents: []api.StatusAgentView{
+			{Name: "worker", QualifiedName: "worker", Scope: "city", Running: false},
+		},
+		Summary: api.StatusSummaryView{TotalAgents: 1, RunningAgents: 0},
+	}
+	cr := api.CachedRead[api.StatusView]{Body: view}
+
+	var stdout bytes.Buffer
+	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), false, &stdout); code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want worker rendered as unknown partial on the API render path", out)
+	}
+	if strings.Contains(out, "worker                  stopped") || strings.Contains(out, "worker\tstopped") {
+		t.Fatalf("stdout = %q, must not render partial status as authoritative stopped", out)
+	}
+
+	// The JSON projection off the same view must also carry the partial flags.
+	var jsonOut bytes.Buffer
+	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), true, &jsonOut); code != 0 {
+		t.Fatalf("json code = %d, want 0", code)
+	}
+	var status StatusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, jsonOut.String())
+	}
+	if !status.Partial {
+		t.Fatalf("status.Partial = false, want true carried through the API JSON projection")
+	}
+	if len(status.PartialErrors) == 0 {
+		t.Fatalf("status.PartialErrors = empty, want runtime partial diagnostic")
+	}
+}
