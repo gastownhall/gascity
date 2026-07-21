@@ -274,6 +274,7 @@ type beadsScriptOptions struct {
 	PodPhase    string
 	ListOutput  string
 	ReadyOutput string
+	Stdin       string
 }
 
 type beadsScriptResult struct {
@@ -355,6 +356,9 @@ exit 1
 	for key, value := range opts.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+	if opts.Stdin != "" {
+		cmd.Stdin = strings.NewReader(opts.Stdin)
+	}
 	out, err := cmd.CombinedOutput()
 
 	callLogBytes, readCallErr := os.ReadFile(callLogPath)
@@ -401,4 +405,64 @@ func beadsScriptPath(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "contrib", "beads-scripts", "gc-beads-k8s"))
+}
+
+// beadsScriptUpdateEnv is the projected scope env an update runs under.
+var beadsScriptUpdateEnv = map[string]string{
+	"GC_CITY_PATH": "/city", "GC_STORE_ROOT": "/city/rigs/testrig", "GC_BEADS_PREFIX": "tr",
+}
+
+// TestBeadsScriptUpdateForwardsEveryDocumentedField pins the generated `bd
+// update` argv for every field the update request may carry (see
+// docs/reference/exec-beads-provider.md). A dropped field makes the write
+// silently succeed while the change is lost: dropping `type`, for instance,
+// leaves a graph.v2 step at type=gate forever — ready-excluded, so never
+// dispatched — even though activation reported success.
+func TestBeadsScriptUpdateForwardsEveryDocumentedField(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "update",
+		Args: []string{"tr-abc"},
+		Stdin: `{"title":"renamed","status":"in_progress","type":"task","priority":1,` +
+			`"description":"note","assignee":"worker-1","parent_id":"tr-parent",` +
+			`"labels":["added"],"remove_labels":["dropped"]}`,
+		Env: beadsScriptUpdateEnv,
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s update error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for _, want := range []string{
+		"--title renamed",
+		"--status in_progress",
+		"--type task",
+		"--priority 1",
+		"--description note",
+		"--assignee worker-1",
+		"--parent tr-parent",
+		"--add-label added",
+		"--remove-label dropped",
+	} {
+		assertCallContains(t, result.callLog, want)
+	}
+}
+
+// TestBeadsScriptUpdateOmitsAbsentFields pins that fields absent from the wire
+// are not spuriously passed to bd as empty flags, so updating one field cannot
+// clobber the others.
+func TestBeadsScriptUpdateOmitsAbsentFields(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:    "update",
+		Args:  []string{"tr-abc"},
+		Stdin: `{"description":"just a note"}`,
+		Env:   beadsScriptUpdateEnv,
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s update error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, "--description just a note")
+	for _, absent := range []string{
+		"--title", "--status", "--type", "--priority",
+		"--assignee", "--parent", "--add-label", "--remove-label",
+	} {
+		assertCallNotContains(t, result.callLog, absent)
+	}
 }

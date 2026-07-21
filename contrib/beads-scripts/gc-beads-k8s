@@ -359,17 +359,33 @@ case "$op" in
     input=$(cat)
     cmd_args=(update --json "$id")
 
-    description=$(echo "$input" | jq -r '.description // empty')
-    [ -n "$description" ] && cmd_args+=(--description "$description")
+    # Forward every scalar field the update request may carry (see
+    # docs/reference/exec-beads-provider.md). Dropping any of them makes the
+    # write silently succeed while the change is lost -- dropping .type, for
+    # example, leaves a graph.v2 step at type=gate forever (ready-excluded, so
+    # never dispatched) even though activation reported success.
+    for field in title status type description assignee; do
+      value=$(echo "$input" | jq -r --arg f "$field" '.[$f] // empty')
+      [ -n "$value" ] && cmd_args+=("--$field" "$value")
+    done
+
+    priority=$(echo "$input" | jq -r '.priority // empty')
+    [ -n "$priority" ] && cmd_args+=(--priority "$priority")
 
     # Append labels via --add-label (one per flag).
     while IFS= read -r label; do
       [ -n "$label" ] && cmd_args+=(--add-label "$label")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
-    # Handle parent_id change.
+    # Remove labels via --remove-label (one per flag).
+    while IFS= read -r label; do
+      [ -n "$label" ] && cmd_args+=(--remove-label "$label")
+    done < <(echo "$input" | jq -r '.remove_labels // [] | .[]')
+
+    # Handle parent_id change. bd models the parent natively, so pass --parent
+    # rather than encoding it as a label the way label-only backends must.
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
-    [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
+    [ -n "$parent_id" ] && cmd_args+=(--parent "$parent_id")
 
     # Handle metadata via --metadata (avoids CSV quoting issues with --add-label).
     # bd --metadata uses merge semantics: new keys are added, existing keys are

@@ -497,6 +497,83 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// UpdateRoundTripsEveryDocumentedField pins the whole update wire, not just
+	// the description. Each field is written on its own so a backend that drops
+	// exactly one of them fails on that field rather than hiding behind the
+	// others. Update{Type} in particular had no coverage anywhere in the suite,
+	// which is how a store could silently ignore it.
+	t.Run("UpdateRoundTripsEveryDocumentedField", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{Title: "parent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := s.Create(beads.Bead{Title: "original", Type: "task", Labels: []string{"keep", "drop"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		title, status, typ, desc, assignee := "renamed", "in_progress", "gate", "new description", "worker-1"
+		// Not 2: backends normalize the default priority back to "unset".
+		priority := 1
+		for name, opts := range map[string]beads.UpdateOpts{
+			"title":       {Title: &title},
+			"status":      {Status: &status},
+			"type":        {Type: &typ},
+			"priority":    {Priority: &priority},
+			"description": {Description: &desc},
+			"assignee":    {Assignee: &assignee},
+			"parent_id":   {ParentID: &parent.ID},
+			"labels":      {Labels: []string{"added"}},
+			"metadata":    {Metadata: map[string]string{"note": "x"}},
+		} {
+			if err := s.Update(b.ID, opts); err != nil {
+				t.Fatalf("Update(%s): %v", name, err)
+			}
+		}
+
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ field, got, want string }{
+			{"Title", got.Title, title},
+			{"Status", got.Status, status},
+			{"Type", got.Type, typ},
+			{"Description", got.Description, desc},
+			{"Assignee", got.Assignee, assignee},
+			{"ParentID", got.ParentID, parent.ID},
+		} {
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+			}
+		}
+		if got.Priority == nil || *got.Priority != priority {
+			t.Errorf("Priority = %v, want %d", got.Priority, priority)
+		}
+		if got.Metadata["note"] != "x" {
+			t.Errorf("Metadata[note] = %q, want %q", got.Metadata["note"], "x")
+		}
+		if !hasLabel(got.Labels, "added") {
+			t.Errorf("Labels = %v, want to contain %q (labels append)", got.Labels, "added")
+		}
+
+		// remove_labels is the one field that needs a second read to observe.
+		if err := s.Update(b.ID, beads.UpdateOpts{RemoveLabels: []string{"drop"}}); err != nil {
+			t.Fatalf("Update(remove_labels): %v", err)
+		}
+		got, err = s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasLabel(got.Labels, "drop") {
+			t.Errorf("Labels = %v, want %q removed", got.Labels, "drop")
+		}
+		if !hasLabel(got.Labels, "keep") {
+			t.Errorf("Labels = %v, want %q preserved", got.Labels, "keep")
+		}
+	})
+
 	t.Run("UpdateNotFound", func(t *testing.T) {
 		s := newStore()
 		desc := "whatever"
@@ -1253,4 +1330,14 @@ func hasExactly(sorted []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// hasLabel reports whether labels contains want.
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }
