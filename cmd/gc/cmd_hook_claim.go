@@ -1287,11 +1287,27 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 	return false
 }
 
+// hookClaimRoutedTo reads gc.routed_to and normalizes a leaked JSON-null literal
+// ("null", any case) to an ABSENT route. A raw metadata write (e.g. a manual
+// `bd update --set-metadata gc.routed_to=null`) or a serialization round-trip can
+// store the string "null" instead of clearing the key; left as a literal route
+// target it matches no session and strands the bead unclaimable forever (a
+// contributor to the zero-claim/starvation class). No legitimate route target is
+// ever named "null", so treating it as "" restores the intended "unrouted"
+// meaning and lets the bead re-enter the draw.
+func hookClaimRoutedTo(candidate beads.Bead) string {
+	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
+	if strings.EqualFold(routedTo, "null") {
+		return ""
+	}
+	return routedTo
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
 	}
-	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
+	routedTo := hookClaimRoutedTo(candidate)
 	runTarget := strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
 	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	for _, target := range routeTargets {
@@ -1310,7 +1326,7 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 }
 
 func hookClaimRoute(candidate beads.Bead) string {
-	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
+	if routedTo := hookClaimRoutedTo(candidate); routedTo != "" {
 		return routedTo
 	}
 	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
