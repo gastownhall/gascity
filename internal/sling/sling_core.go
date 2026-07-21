@@ -343,8 +343,21 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
+	// Resolve the target scope BEFORE compiling: the reconciled branch has to
+	// be in formulaVars before template substitution, or the formula
+	// substitutes one branch while the scope records another. A rejection here
+	// costs a launch and nothing else, because nothing is materialized yet.
+	launchScope, err := ResolveLaunchScope(opts.BeadOrFormula, "", opts.Vars, formulaVars, inv.Formula, invocationConvoyID(inv, isGraph), a, deps)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars)
 	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
+	// Declare every member, then stamp the root — both before the instantiate
+	// call below materializes anything.
+	if err := launchScope.PrepareLaunchScope(recipe); err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
 	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
