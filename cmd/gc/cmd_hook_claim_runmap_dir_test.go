@@ -37,7 +37,7 @@ func proxyReaderPath(dir, affinity string) string {
 // the exact cross-process break attempt-2's blocker flagged when the writer
 // diverged onto a hashed filename.
 func TestWriteRunMapMatchesProxyReaderContract(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	const affinity = "gascity/gc.implementation-worker-1"
 	if err := writeRunMap("run-42", "bead-42", affinity); err != nil {
@@ -64,7 +64,7 @@ func TestWriteRunMapMatchesProxyReaderContract(t *testing.T) {
 // os.Rename fails for it deterministically and uid-independently (not even root
 // renames a file over a directory).
 func TestWriteRunMapErrorsWhenAllPublishesFail(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	if err := os.Mkdir(filepath.Join(dir, runMapFileName("sess")), 0o755); err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestWriteRunMapErrorsWhenDirUnwritable(t *testing.T) {
 // best-effort (nil); it is not promoted to an error. One key's target is blocked
 // by a directory (rename fails); the other publishes normally.
 func TestWriteRunMapBestEffortOnPartialFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	if err := os.Mkdir(filepath.Join(dir, runMapFileName("blocked")), 0o755); err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestWriteRunMapSelfProvisionsOwnerOnlyDir(t *testing.T) {
 // file is published, instead of silently trusting a dir any local user can
 // clobber.
 func TestWriteRunMapRefusesGroupOtherWritableDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	unsafe := filepath.Join(dir, "unsafe")
 	if err := os.Mkdir(unsafe, 0o755); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestWriteRunMapRefusesGroupOtherWritableDir(t *testing.T) {
 // still honored: a sticky dir owned by this user (the shape a root/self
 // provisioner installs) is trusted and published into.
 func TestWriteRunMapAllowsStickyOwnedDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	handoff := filepath.Join(dir, "handoff")
 	if err := os.Mkdir(handoff, 0o755); err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestWriteRunMapAllowsStickyOwnedDir(t *testing.T) {
 // (or reap in) a shared group/other-writable dir, where an in-process reap is
 // both a no-op and a claim-latency amplifier (CWE-400).
 func TestPruneRunMapSkipsUnsafeDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	shared := filepath.Join(dir, "shared")
 	if err := os.Mkdir(shared, 0o755); err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestPruneRunMapSkipsUnsafeDir(t *testing.T) {
 // size: with more stale files than the budget, one prune leaves at least the
 // overflow behind.
 func TestPruneRunMapBoundedByBudget(t *testing.T) {
-	dir := t.TempDir() // 0o700 → prunable
+	dir := privateRunMapTestDir(t)
 	total := runMapPruneScanBudget + 10
 	old := time.Now().Add(-100 * time.Hour)
 	for i := 0; i < total; i++ {
@@ -271,7 +271,7 @@ func TestDefaultRunMapDirMatchesProxy(t *testing.T) {
 // trust an attacker-editable run_id. The writer must surface an error and neither
 // follow the link (rewriting the attacker's file through it) nor report success.
 func TestWriteRunMapRefusesSymlinkTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	const key = "victim-session"
 	forged := filepath.Join(dir, "attacker-forged.json")
@@ -302,7 +302,7 @@ func TestWriteRunMapRefusesSymlinkTarget(t *testing.T) {
 // publishes cleanly, previously returned a silent nil (published>0) and hid the
 // forgery. The squat must now surface an error even though the clean key lands.
 func TestWriteRunMapSquatForcesErrorDespiteOtherPublish(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	const squatted = "worker-1"    // the proxy-read session name, pre-squatted
 	const clean = "worker-1-actor" // another key that publishes normally
@@ -325,7 +325,7 @@ func TestWriteRunMapSquatForcesErrorDespiteOtherPublish(t *testing.T) {
 // normal refresh: a pre-existing regular file this user owns (a prior claim's
 // publish) is overwritten with the new run id, not refused as a squat.
 func TestWriteRunMapRefreshesOwnRegularFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	const key = "sess"
 	if err := os.WriteFile(filepath.Join(dir, runMapFileName(key)), []byte(`{"run_id":"old"}`), 0o644); err != nil {

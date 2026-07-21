@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+func privateRunMapTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("make run-map test dir owner-only: %v", err)
+	}
+	return dir
+}
+
 func TestSanitizeRunMapKey(t *testing.T) {
 	cases := map[string]string{
 		"gc__review-synthesizer-mc-1kkqd": "gc__review-synthesizer-mc-1kkqd",
@@ -24,7 +33,7 @@ func TestSanitizeRunMapKey(t *testing.T) {
 }
 
 func TestWriteRunMapWritesPerKeyAtomically(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 
 	// duplicate key ("sess/name" twice), an empty key, and a distinct key
@@ -68,7 +77,7 @@ func TestWriteRunMapWritesPerKeyAtomically(t *testing.T) {
 }
 
 func TestWriteRunMapEmptyRunIDNoOp(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	if err := writeRunMap("", "bead-456", "sess"); err != nil {
 		t.Fatalf("writeRunMap: %v", err)
@@ -80,7 +89,7 @@ func TestWriteRunMapEmptyRunIDNoOp(t *testing.T) {
 }
 
 func TestWriteRunMapHonorsDirOverride(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	sub := filepath.Join(dir, "runmap")
 	t.Setenv("GC_RUNMAP_DIR", sub)
 	if err := writeRunMap("run-9", "bead-9", "only"); err != nil {
@@ -108,7 +117,7 @@ func TestRunMapTTL(t *testing.T) {
 }
 
 func TestPruneRunMapReapsStaleKeepsFresh(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	fresh := filepath.Join(dir, "fresh.json")
 	stale := filepath.Join(dir, "stale.json")
 	notJSON := filepath.Join(dir, "keep.txt") // non-.json is never touched
@@ -140,7 +149,7 @@ func TestPruneRunMapReapsStaleKeepsFresh(t *testing.T) {
 }
 
 func TestWriteRunMapPrunesStaleOnWrite(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	t.Setenv("GC_RUNMAP_DIR", dir)
 	t.Setenv("GC_RUNMAP_TTL", "1h")
 	stale := filepath.Join(dir, "dead-session.json")
@@ -168,7 +177,7 @@ func TestWriteRunMapPrunesStaleOnWrite(t *testing.T) {
 // a dead-write orphan and is reaped; a fresh .tmp (a possible in-flight write) is
 // left untouched.
 func TestPruneRunMapReapsStaleTmpOrphans(t *testing.T) {
-	dir := t.TempDir() // 0o700 → prunable
+	dir := privateRunMapTestDir(t)
 	staleTmp := filepath.Join(dir, "sess.json.1234.tmp")
 	freshTmp := filepath.Join(dir, "live.json.5678.tmp")
 	for _, f := range []string{staleTmp, freshTmp} {
@@ -199,7 +208,7 @@ func TestPruneRunMapReapsStaleTmpOrphans(t *testing.T) {
 // publishes. Before the fix, prune matched any stale ".json"/".tmp" by mtime alone
 // and silently deleted both foreign files.
 func TestWriteRunMapKeepsForeignFilesInExplicitDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 
 	foreignJSON := filepath.Join(dir, "config.json") // unrelated app config
 	foreignTmp := filepath.Join(dir, "cache.tmp")    // unrelated temp file
@@ -287,7 +296,7 @@ func TestRunMapTempOrphanName(t *testing.T) {
 //   - the published entry carries only run_id/bead_id/ts — no nonce, signature,
 //     token, or any other integrity/authentication field a consumer could verify.
 func TestRunMapEntryIsUnauthenticatedBestEffortTelemetry(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateRunMapTestDir(t)
 	const key = "sess"
 
 	// A same-uid regular file at the predictable name simulates a co-uid cell's
