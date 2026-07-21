@@ -2198,4 +2198,21 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 	if !hasSkip {
 		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
 	}
+
+	// Pod-local init only scaffolds a session filesystem; it must not register
+	// or start a city, and must not run provider login/readiness probes (a
+	// gateway-backed provider cannot satisfy a first-party-login probe, and the
+	// controller owns readiness). Assert both flags are present.
+	for _, flag := range []string{"--no-start", "--skip-provider-readiness"} {
+		found := false
+		for _, arg := range gcInitCmd {
+			if arg == flag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
+	}
 }
