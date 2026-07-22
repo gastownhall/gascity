@@ -60,7 +60,7 @@ func TestFirstRootCommandMatchesPersistentScopeGrammar(t *testing.T) {
 	}
 }
 
-func TestRootCommandOptionsSkipPackDiscoveryForPrivateHelpersAndMetrics(t *testing.T) {
+func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -72,14 +72,21 @@ func TestRootCommandOptionsSkipPackDiscoveryForPrivateHelpersAndMetrics(t *testi
 		{name: "scoped metrics", args: []string{"--city", "/tmp/city", "--rig=tower", "metrics", "status"}, skip: true},
 		{name: "remote context metrics", args: []string{"--context=prod", "metrics", "status"}, skip: true},
 		{name: "remote URL metrics", args: []string{"--city-url", "https://city.example", "--city-name=remote", "metrics", "status"}, skip: true},
+		{name: "bd", args: []string{"bd", "show", "example-123"}, skip: true},
+		{name: "scoped bd", args: []string{"--city", "/tmp/city", "--rig=tower", "bd", "list"}, skip: true},
+		{name: "remote context bd", args: []string{"--context=prod", "bd", "ready"}, skip: true},
+		{name: "remote URL bd", args: []string{"--city-url", "https://city.example", "--city-name=remote", "bd", "list"}, skip: true},
 		{name: "credential helper", args: []string{"git-credential", "get"}, skip: true},
 		{name: "dolt state helper", args: []string{"dolt-state", "allocate-port", "--city", "/tmp/city"}, skip: true},
 		{name: "scoped dolt config helper", args: []string{"--city", "/tmp/city", "dolt-config", "normalize-scope"}, skip: true},
 		{name: "beads store bridge helper", args: []string{"bd-store-bridge", "--dir", "/tmp/rig", "list"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
+		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
 		{name: "after terminator", args: []string{"--", "metrics"}},
+		{name: "bd after terminator", args: []string{"--", "bd"}},
 		{name: "unknown flag", args: []string{"--unknown", "metrics"}},
+		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
 	}
 
 	for _, test := range tests {
@@ -198,6 +205,12 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 			name:        "injected metrics suppresses ordinary ambient discovery",
 			ambientArgs: []string{"version"},
 			injected:    []string{"metrics", "status"},
+			wantPack:    false,
+		},
+		{
+			name:        "injected bd suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"bd", "list"},
 			wantPack:    false,
 		},
 		{
