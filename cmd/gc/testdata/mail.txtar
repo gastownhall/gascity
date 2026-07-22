@@ -1,10 +1,10 @@
 # Mail — durable bidirectional delivery across CLI process boundaries
 #
-# This journey owns only the composition edge: city initialization wires mail
-# to the bead store, separate gc processes observe the same messages, and both
-# human and configured-agent identities can address each other. Focused command
-# tests own output and error semantics; Tier A acceptance owns the full mail
-# lifecycle (read, peek, reply, thread, mark, count, archive, and delete).
+# This is the single cross-process, file-backed composition proof: city
+# initialization wires mail to the bead store, separate gc processes observe
+# the same messages, and human and configured-agent identities can address each
+# other. Focused command tests own UI and validation semantics; mail.Provider
+# conformance owns message state transitions.
 
 env GC_BEADS=file
 env GC_DOLT=skip
