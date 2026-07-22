@@ -29,7 +29,7 @@ func TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter(t *testing.T) {
 }
 
 // TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade pins the seam
-// behaviour the condWritesStamp comment in native_dolt_store.go guarantees:
+// behavior the condWritesStamp comment in native_dolt_store.go guarantees:
 // require yields a typed refusal and auto yields a loud degrade — never a
 // silent legacy write under require. Adding the narrow CAS must not move
 // either verdict.

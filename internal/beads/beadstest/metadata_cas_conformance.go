@@ -12,7 +12,7 @@ import (
 // TEST FIXTURE can evaluate. Note the distinction from
 // ConditionalWriterOptions, whose legs turn on what a STORE can express: the
 // contention leg here is a claim about the backend's isolation, so a fixture
-// that models a backend without modelling its isolation cannot judge it.
+// that models a backend without modeling its isolation cannot judge it.
 type MetadataCASOptions struct {
 	// FixtureLacksIsolationReason, when non-empty, declares that this
 	// factory's store cannot evaluate the contention leg because the fixture

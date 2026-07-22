@@ -206,9 +206,9 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 	// do value-CAS but cannot soundly fence on a revision (NativeDoltStore)
 	// declares MetadataCASWriter only, and every ConditionalWriter satisfies
 	// MetadataCASWriter anyway, so this widens the backings that forward
-	// without changing behaviour for fully capable ones. The trio above keeps
+	// without changing behavior for fully capable ones. The trio above keeps
 	// resolving through ConditionalWriterFor — a narrow backing must not
-	// unlock a revision fence it cannot honour.
+	// unlock a revision fence it cannot honor.
 	writer, ok := MetadataCASWriterFor(c.conditionalBacking())
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
