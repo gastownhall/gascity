@@ -1,6 +1,7 @@
 package targetscope
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -29,8 +30,12 @@ type BeadGetter interface {
 // absent would re-enable the cwd writers. Absent is returned only when the walk
 // completes having seen no value at all.
 //
-// A store error mid-walk is likewise INVALID, never absent: "I could not read
-// the scope" must never be permission to stamp cwd.
+// A TRANSPORT error mid-walk is likewise INVALID, never absent: "I could not
+// read the scope" must never be permission to stamp cwd. A dangling ancestor
+// reference is the ONE exception: a not-found ancestor is a definite answer
+// ("that bead is gone"), not a read failure, so the walk skips it and may still
+// return absent — an existing unscoped bead whose lineage pointer is stale must
+// keep its legacy behavior rather than flip to invalid. See inheritedNext.
 func ResolveInherited(store BeadGetter, bead beads.Bead) Resolution {
 	if raw := bead.Metadata[beadmeta.TargetScopeMetadataKey]; raw != "" {
 		return Parse(raw)
@@ -61,10 +66,20 @@ func ResolveInherited(store BeadGetter, bead beads.Bead) Resolution {
 // inheritedNext advances one hop along the parent chain then the root chain,
 // returning nil when the walk is exhausted.
 //
-// A Get failure is reported rather than swallowed. dispatch's flat-key walk
-// treats an unreadable ancestor as "no value here, carry on", which is right
-// for a best-effort string but wrong for a guard: a transient store error would
-// silently become "unscoped" and unlock the cwd stamp.
+// A TRANSPORT failure is reported rather than swallowed: a transient store error
+// must not silently become "unscoped" and unlock the cwd stamp — that is the
+// distinction from dispatch's best-effort flat-key walk, which carries on past
+// any read error.
+//
+// A not-found ancestor is treated differently, and deliberately: it is a
+// DEFINITE answer, not a read failure. A stale ParentID or gc.root_bead_id — a
+// stage whose ephemeral wisp root was cleaned up is the common case — means
+// "there is no scope up this link", so the walk skips that candidate and, if the
+// whole chain is exhausted, returns absent. Folding not-found into the transport
+// bucket would flip an existing unscoped bead with a dangling lineage pointer
+// from absent to invalid, standing the cwd writers down and warning the close
+// gate — a behavior change for a bead that carries no scope. Only a genuine
+// transport error stays fail-closed.
 func inheritedNext(store BeadGetter, current beads.Bead, visited map[string]struct{}) (*beads.Bead, error) {
 	for _, candidate := range []string{current.ParentID, current.Metadata[beadmeta.RootBeadIDMetadataKey]} {
 		if candidate == "" || candidate == current.ID {
@@ -76,6 +91,9 @@ func inheritedNext(store BeadGetter, current beads.Bead, visited map[string]stru
 		visited[candidate] = struct{}{}
 		next, err := store.Get(candidate)
 		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			return nil, err
 		}
 		return &next, nil
