@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -27,7 +28,12 @@ type Provider struct {
 	c            *client
 	metaDir      string        // sidecar KV root (herdr has no per-session metadata store)
 	setupTimeout time.Duration // per-command timeout for pre_start ([session] setup_timeout)
-	mu           sync.Mutex    // serializes workspace/tab find-or-create across concurrent Starts
+	// setupMaxTimeout enables the activity-aware pre_start budget
+	// ([session] setup_max_timeout): when > 0, runSetupCommand replaces the
+	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
+	// plus this absolute ceiling.
+	setupMaxTimeout time.Duration
+	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
 }
 
 // defaultSetupTimeout mirrors the tmux provider's [session] setup_timeout
@@ -47,14 +53,14 @@ var (
 // city-less construction). setupTimeout bounds each pre_start command
 // ([session] setup_timeout); non-positive values fall back to
 // defaultSetupTimeout.
-func New(herdrSession, metaDir, cityRoot string, setupTimeout time.Duration) *Provider {
+func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout time.Duration) *Provider {
 	if metaDir == "" {
 		metaDir = filepath.Join(os.TempDir(), "gc-herdr-meta", sanitize(herdrSession))
 	}
 	if setupTimeout <= 0 {
 		setupTimeout = defaultSetupTimeout
 	}
-	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir, setupTimeout: setupTimeout}
+	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir, setupTimeout: setupTimeout, setupMaxTimeout: setupMaxTimeout}
 }
 
 // ── ServerLifecycleProvider: own the shared herdr session-server ─────────────
@@ -218,6 +224,9 @@ const (
 	// exits, so a pre_start that daemonizes a child holding inherited stdio
 	// cannot hang the start (mirrors tmux's setupCommandWaitDelay).
 	preStartWaitDelay = 2 * time.Second
+	// preStartCancelGrace is the rollback-trap budget when the activity-aware
+	// setup budget is enabled (mirrors tmux's setupCancelGrace).
+	preStartCancelGrace = 10 * time.Second
 )
 
 // runPreStart runs cfg.PreStart shell commands on the host before the agent is
@@ -254,9 +263,23 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// Deadline shape (mirrors tmux's runSetupCommand): with setupMaxTimeout
+	// unset the historical fixed wall-clock deadline applies; with it set the
+	// budget is activity-aware — timeout bounds output silence,
+	// setupMaxTimeout bounds total runtime.
+	idle, grace := time.Duration(0), preStartWaitDelay
+	if p.setupMaxTimeout > 0 {
+		idle, grace = timeout, preStartCancelGrace
+	}
+	mon := execgrace.NewMonitor(ctx, idle, p.setupMaxTimeout)
+	defer mon.Stop()
+	runCtx := mon.Context()
+	if !mon.Enabled() {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
 	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
 	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
 	// agent itself. A pool session's worktree is often created concurrently with
@@ -276,14 +299,24 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 		c.Env = append(c.Env, k+"="+v)
 	}
 	var out bytes.Buffer
-	c.Stdout, c.Stderr = &out, &out
-	c.WaitDelay = preStartWaitDelay
+	w := mon.Writer(&out)
+	c.Stdout, c.Stderr = w, w
+	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// the command's process group first so shell rollback traps run before
+	// the forced kill; the grace doubles as the pipe-closing WaitDelay
+	// (mirrors tmux's runSetupCommand).
+	execgrace.Apply(c, grace)
 	if err := c.Run(); err != nil {
 		// ErrWaitDelay means the command itself exited successfully and only the
 		// force-closed pipes ended the wait: a setup command that daemonizes a
 		// child holding inherited stdio succeeded (mirrors tmux).
 		if errors.Is(err, exec.ErrWaitDelay) {
 			return nil
+		}
+		// context.Cause surfaces which budget fired (execgrace.ErrIdle,
+		// execgrace.ErrCeiling, or the fixed deadline's DeadlineExceeded).
+		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		if tail := strings.TrimSpace(out.String()); tail != "" {
 			if len(tail) > preStartOutputLimit {

@@ -51,7 +51,12 @@ var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {
-	SetupTimeout       time.Duration
+	SetupTimeout time.Duration
+	// SetupMaxTimeout, when > 0, switches setup/pre_start commands from the
+	// fixed SetupTimeout wall-clock deadline to an activity-aware budget:
+	// SetupTimeout bounds output silence (idle), SetupMaxTimeout bounds total
+	// runtime (runaway ceiling). Zero (the default) keeps the fixed deadline.
+	SetupMaxTimeout    time.Duration
 	NudgeReadyTimeout  time.Duration
 	NudgeRetryInterval time.Duration
 	NudgeLockTimeout   time.Duration

@@ -1549,6 +1549,16 @@ type SessionConfig struct {
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
+	// SetupMaxTimeout enables an activity-aware budget for session setup and
+	// pre_start commands. When set (e.g. "10m"), a setup command is no longer
+	// killed after setup_timeout of wall clock; instead setup_timeout bounds
+	// how long it may run without producing output (idle budget) and
+	// setup_max_timeout bounds its total runtime regardless of output (the
+	// runaway ceiling). A slow but healthy command — a large worktree checkout
+	// streaming progress — survives, while a hung one still dies after
+	// setup_timeout of silence. Duration string. Empty (the default) keeps
+	// the fixed setup_timeout deadline.
+	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
@@ -1629,6 +1639,13 @@ func durationFloorOr(raw string, def, floor time.Duration) time.Duration {
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
 	return durationOr(s.SetupTimeout, 10*time.Second)
+}
+
+// SetupMaxTimeoutDuration returns the activity-aware setup ceiling as a
+// time.Duration. Zero — the feature disabled, keeping the fixed
+// setup_timeout deadline — if empty or unparseable.
+func (s *SessionConfig) SetupMaxTimeoutDuration() time.Duration {
+	return durationOr(s.SetupMaxTimeout, 0)
 }
 
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.
