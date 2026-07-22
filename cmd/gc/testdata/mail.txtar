@@ -13,9 +13,13 @@ env GC_SESSION=fake
 exec gc init $WORK/bright-lights
 cd $WORK/bright-lights
 
+! exec gc mail check mayor
+
 # Human sends a durable message to the configured agent.
 exec gc mail send mayor 'hey, are you still there?'
 stdout 'Sent message gc-1 to mayor'
+
+exec gc mail check mayor
 
 exec gc mail inbox mayor
 stdout 'human'

@@ -98,7 +98,6 @@ review_formulas_recovery_tests=(
 rest_smoke_tests=(
   TestE2E_WorkspaceDefaults
   TestE2E_Hook_WithWork
-  TestE2E_MailCheck
   TestE2E_MultiAgent_PoolAndFixed
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
