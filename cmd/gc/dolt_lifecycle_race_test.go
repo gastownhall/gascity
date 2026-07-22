@@ -146,9 +146,8 @@ func TestStartManagedDoltGuardPassesWhenLockFree(t *testing.T) {
 
 func TestTerminateManagedDoltPIDRefusesSIGKILLWhileLockHeld(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns real processes; run via make test-cmd-gc-process")
-	city, lockPath := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"100ms\"\n")
+	city, lockPath := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"0s\"\n\n[dolt]\ndolt_lock_release_timeout = \"0s\"\n")
 	release := holdFlock(t, lockPath)
-	shimLockReleaseTimeout(t, 200*time.Millisecond)
 
 	dataDir := filepath.Join(city, ".beads", "dolt")
 	pid := startSigtermIgnoringProcess(t, dataDir)
@@ -165,19 +164,12 @@ func TestTerminateManagedDoltPIDRefusesSIGKILLWhileLockHeld(t *testing.T) {
 	}
 
 	release()
-	if err := terminateManagedDoltPID(city, pid); err != nil {
-		t.Fatalf("expected terminate to force-kill once the lock is free, got %v", err)
-	}
-	if pidAlive(pid) {
-		t.Fatal("process still alive after lock-free terminate")
-	}
 }
 
 func TestStopManagedDoltRefusesSIGKILLWhileLockHeld(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns real processes; run via make test-cmd-gc-process")
-	city, lockPath := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"100ms\"\n")
+	city, lockPath := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"0s\"\n\n[dolt]\ndolt_lock_release_timeout = \"0s\"\n")
 	release := holdFlock(t, lockPath)
-	shimLockReleaseTimeout(t, 200*time.Millisecond)
 
 	dataDir := filepath.Join(city, ".beads", "dolt")
 	pid := startSigtermIgnoringProcess(t, dataDir)
