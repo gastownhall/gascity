@@ -495,6 +495,9 @@ make test-fast-parallel
 # Full process-backed cmd/gc suite, sharded.
 make test-cmd-gc-process-parallel
 
+# Focused product-metrics testhook profile.
+make test-productmetrics-testhook
+
 # CI integration buckets, sharded.
 make test-integration-shards-parallel
 
@@ -536,6 +539,17 @@ GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
 Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
+
+The `productmetrics_testhook` profile is a required, path-gated CI lane with
+six named owners, including the real CLI re-exec process contract. Its tagged
+process owner is intentionally absent from ordinary untagged `cmd/gc` shard
+enumeration. The serial `make test-cmd-gc-process` target runs the ordinary
+suite and then this profile; `make test-cmd-gc-process-parallel` and
+`make test-local-full-parallel` add one independent
+`productmetrics-testhook` job beside the ordinary shards.
+The existing macOS `mac-cmd-gc-process` matrix runs the same profile once on
+shard 6 so the Darwin production composition remains covered without another
+Mac runner.
 
 #### PR static-check scope
 
