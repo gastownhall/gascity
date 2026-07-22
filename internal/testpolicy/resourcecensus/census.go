@@ -42,6 +42,9 @@ const (
 	ResourceSlowProcessGate Resource = "slow_process_gate"
 	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
 	ResourceHTTPTestServer Resource = "http_test_server"
+	// ResourceListenerHelper counts calls to the explicit catalog of helpers
+	// whose implementation owns a network listener.
+	ResourceListenerHelper Resource = "listener_helper"
 	// ResourceNetListen counts direct stream listeners opened by package-level
 	// net constructors.
 	ResourceNetListen Resource = "net_listen"
@@ -64,6 +67,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceCWD:             {},
 	ResourceSlowProcessGate: {},
 	ResourceHTTPTestServer:  {},
+	ResourceListenerHelper:  {},
 	ResourceNetListen:       {},
 	ResourceNetListenConfig: {},
 	ResourceNetListenPacket: {},
@@ -140,6 +144,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "tracked test source totals remain visible as audit evidence",
 			ResourceOwner:   "ga-80po0c.2 owns this point-in-time source census",
 			MigrationTarget: "P0.4a",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeAll,
+			Resource:        ResourceListenerHelper,
+			BaselineCalls:   58,
+			BaselineFiles:   23,
+			ReportedCalls:   58,
+			ReportedFiles:   23,
+			OwnerBead:       "ga-80po0c.2.2.3",
+			Invariant:       "all-source listener-helper call/file totals cannot drift without an explicit checked policy update",
+			ResourceOwner:   "ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption",
+			MigrationTarget: "P0.4c-listener-helper",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -220,6 +237,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its loopback server and removes duplicate server-backed coverage",
 			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceListenerHelper,
+			BaselineCalls:   38,
+			BaselineFiles:   13,
+			ReportedCalls:   38,
+			ReportedFiles:   13,
+			OwnerBead:       "ga-80po0c.2.2.3",
+			Invariant:       "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership",
+			MigrationTarget: "P0.4c-listener-helper",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -489,6 +519,19 @@ var bootstrapPolicy = Ledger{
 		},
 		{
 			Scope:           ScopeUntagged,
+			Resource:        ResourceListenerHelper,
+			BaselineCalls:   38,
+			BaselineFiles:   13,
+			ReportedCalls:   38,
+			ReportedFiles:   13,
+			OwnerBead:       "ga-80po0c.2.2.3",
+			Invariant:       "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership",
+			MigrationTarget: "P0.4c-listener-helper",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
 			BaselineCalls:   92,
 			BaselineFiles:   34,
@@ -669,12 +712,61 @@ type bindingInfo struct {
 	uses                       map[*ast.Ident]types.Object
 	expressionTypes            map[ast.Expr]types.TypeAndValue
 	packageDeclarations        map[string]struct{}
+	packageFunctions           map[string]struct{}
 	unresolvedImportQualifiers map[string]struct{}
 }
 
 type packageKey struct {
 	directory   string
 	packageName string
+}
+
+type listenerHelperPackageIdentity struct {
+	importPath string
+	key        packageKey
+	names      []string
+}
+
+var listenerHelperPackageIdentities = []listenerHelperPackageIdentity{
+	{
+		key: packageKey{directory: "cmd/gc", packageName: "main"},
+		names: []string{
+			"managedDoltPortAvailableForHost",
+			"registryBrowserLogin",
+			"runController",
+			"runSupervisor",
+			"startControllerSocket",
+			"startNudgeWakeListener",
+		},
+	},
+	{
+		importPath: "github.com/gastownhall/gascity/internal/runtime/runtimecapability",
+		key:        packageKey{directory: "internal/runtime/runtimecapability", packageName: "runtimecapability"},
+		names:      []string{"Run"},
+	},
+	{
+		importPath: "github.com/gastownhall/gascity/test/acceptance/helpers",
+		key:        packageKey{directory: "test/acceptance/helpers", packageName: "acceptancehelpers"},
+		names:      []string{"WriteSupervisorConfig"},
+	},
+	{
+		key:   packageKey{directory: "test/dashport", packageName: "dashport_test"},
+		names: []string{"newHarness"},
+	},
+}
+
+var targetedDotImportPaths = map[string]struct{}{
+	"github.com/gastownhall/gascity/internal/runtime/runtimecapability": {},
+	"github.com/gastownhall/gascity/internal/runtime/tmux":              {},
+	"github.com/gastownhall/gascity/test/acceptance/helpers":            {},
+	"github.com/gastownhall/gascity/test/tmuxtest":                      {},
+	"net":               {},
+	"net/http/httptest": {},
+	"os":                {},
+	"os/exec":           {},
+	"syscall":           {},
+	"testing":           {},
+	"time":              {},
 }
 
 type resourceCall struct {
@@ -695,7 +787,14 @@ func (importer *emptyPackageImporter) Import(importPath string) (*types.Package,
 	if imported, ok := importer.packages[importPath]; ok {
 		return imported, nil
 	}
-	imported := types.NewPackage(importPath, path.Base(importPath))
+	packageName := path.Base(importPath)
+	for _, identity := range listenerHelperPackageIdentities {
+		if importPath == identity.importPath {
+			packageName = identity.key.packageName
+			break
+		}
+	}
+	imported := types.NewPackage(importPath, packageName)
 	if importPath == "net" {
 		// Seed only the receiver type the census needs so go/types can carry
 		// ListenConfig identity through pointers and aliases without loading
@@ -742,6 +841,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 	var hermeticSources []parsedFile
 	var runnables []RunnableOwner
 	packageDeclarations := make(map[packageKey]map[string]struct{})
+	packageFunctions := make(map[packageKey]map[string]struct{})
 	for _, name := range names {
 		data, err := fs.ReadFile(sourceFS, name)
 		if err != nil {
@@ -759,6 +859,15 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 			packageDeclarations[key] = declarations
 		}
 		recordPackageDeclarations(file, declarations)
+		listenerHelperNames := listenerHelperPackageNames(key)
+		if len(listenerHelperNames) > 0 {
+			functions := packageFunctions[key]
+			if functions == nil {
+				functions = make(map[string]struct{})
+				packageFunctions[key] = functions
+			}
+			recordPackageFunctionDeclarations(file, functions, listenerHelperNames)
+		}
 		source := parsedFile{
 			name:        normalized,
 			directory:   key.directory,
@@ -781,7 +890,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 			return Census{}, fmt.Errorf("scanning imports in %s: %w", name, err)
 		}
 		runnables = append(runnables, runnableOwners(file, key.directory, key.packageName)...)
-		candidates := resourceCandidateCalls(file)
+		candidates := resourceCandidateCalls(file, key)
 		source.tagged = tagged || hasImplicitPlatformConstraint(name)
 		source.calls = candidates
 		if retainHermeticSource {
@@ -798,6 +907,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		source := &sources[index]
 		bindings := resolveBindings(fileSet, source.file, importer, fmt.Sprintf("resourcecensus.local/file%d", index))
 		bindings.packageDeclarations = packageDeclarations[source.groupKey()]
+		bindings.packageFunctions = packageFunctions[source.groupKey()]
 		bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(source.file)
 		source.bindings = bindings
 	}
@@ -834,6 +944,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 			fileSet:             fileSet,
 			files:               hermeticSources,
 			packageDeclarations: packageDeclarations,
+			packageFunctions:    packageFunctions,
 		},
 	}
 	for _, source := range sources {
@@ -856,7 +967,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		}
 
 		for _, candidate := range source.calls {
-			resources, err := matchedResourcesForCall(candidate.call, source.bindings, testingObjects, slowHelpers[source.groupKey()])
+			resources, err := matchedResourcesForCall(candidate.call, source.groupKey(), source.bindings, testingObjects, slowHelpers[source.groupKey()])
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
@@ -1009,7 +1120,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" || importPath == "github.com/gastownhall/gascity/internal/runtime/tmux" || importPath == "github.com/gastownhall/gascity/test/tmuxtest" {
+			if _, targeted := targetedDotImportPaths[importPath]; targeted {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -1017,21 +1128,23 @@ func validateImports(file *ast.File) error {
 	return nil
 }
 
-func resourceCandidateCalls(file *ast.File) []resourceCall {
+func resourceCandidateCalls(file *ast.File, key packageKey) []resourceCall {
 	aliases := testingImportAliases(file)
+	listenerHelperSelectors := listenerHelperSelectorCandidates(file)
+	samePackageHelperNames := listenerHelperPackageNames(key)
 	var calls []resourceCall
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
 		if ok {
-			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases))
+			calls = appendResourceCandidateCalls(calls, function.Body, function.Name.Name, isRunnableOwner(function, aliases), listenerHelperSelectors, samePackageHelperNames)
 			continue
 		}
-		calls = appendResourceCandidateCalls(calls, declaration, "", false)
+		calls = appendResourceCandidateCalls(calls, declaration, "", false, listenerHelperSelectors, samePackageHelperNames)
 	}
 	return calls
 }
 
-func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool) []resourceCall {
+func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner string, runnable bool, listenerHelperSelectors map[string]struct{}, listenerHelperPackageNames []string) []resourceCall {
 	ast.Inspect(node, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -1043,14 +1156,56 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenIP", "ListenMulticastUDP", "ListenPacket", "ListenTCP", "ListenUDP", "ListenUnix", "ListenUnixgram":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
+			if _, candidate := listenerHelperSelectors[function.Sel.Name]; candidate {
+				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
+			}
 		case *ast.Ident:
-			if function.Name == "skipSlowCmdGCTest" {
+			if function.Name == "skipSlowCmdGCTest" || containsString(listenerHelperPackageNames, function.Name) {
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		}
 		return true
 	})
 	return calls
+}
+
+func listenerHelperSelectorCandidates(file *ast.File) map[string]struct{} {
+	candidates := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		if spec.Name != nil && spec.Name.Name == "_" {
+			continue
+		}
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		for _, identity := range listenerHelperPackageIdentities {
+			if importPath == identity.importPath {
+				for _, name := range identity.names {
+					candidates[name] = struct{}{}
+				}
+			}
+		}
+	}
+	return candidates
+}
+
+func listenerHelperPackageNames(key packageKey) []string {
+	for _, identity := range listenerHelperPackageIdentities {
+		if key == identity.key {
+			return identity.names
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func runnableOwners(file *ast.File, packageDir, packageName string) []RunnableOwner {
@@ -1225,6 +1380,15 @@ func recordPackageDeclarations(file *ast.File, declarations map[string]struct{})
 					}
 				}
 			}
+		}
+	}
+}
+
+func recordPackageFunctionDeclarations(file *ast.File, functions map[string]struct{}, catalogNames []string) {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Recv == nil && containsString(catalogNames, function.Name.Name) {
+			functions[function.Name.Name] = struct{}{}
 		}
 	}
 }
@@ -1466,6 +1630,33 @@ func functionParameterCount(fields *ast.FieldList) int {
 		}
 	}
 	return count
+}
+
+func isListenerHelperPackageCall(call *ast.CallExpr, key packageKey, bindings bindingInfo) bool {
+	identifier, ok := unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	for _, identity := range listenerHelperPackageIdentities {
+		if key != identity.key {
+			continue
+		}
+		for _, helperName := range identity.names {
+			if identifier.Name != helperName {
+				continue
+			}
+			if _, declared := bindings.packageFunctions[helperName]; !declared {
+				return false
+			}
+			object := bindings.uses[identifier]
+			if object == nil {
+				return true
+			}
+			function, ok := object.(*types.Func)
+			return ok && function.Pkg() != nil && function.Pkg().Name() == key.packageName && function.Parent() == function.Pkg().Scope()
+		}
+	}
+	return false
 }
 
 func isSlowHelperCall(call *ast.CallExpr, bindings bindingInfo, ownership types.Object) bool {

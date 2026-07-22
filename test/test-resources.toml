@@ -33,6 +33,19 @@ resource_owner = "ga-80po0c.2 owns this point-in-time source census"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
+[[audit_baseline]]
+scope = "all"
+resource = "listener_helper"
+baseline_calls = 58
+baseline_files = 23
+reported_calls = 58
+reported_files = 23
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
+resource_owner = "ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-01"
+
 # Debt rows ratchet source call sites only. They are not test-size entries and
 # do not exempt or reclassify any test.
 [[debt]]
@@ -111,6 +124,19 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
+migration_target = "P0.4c-listener-helper"
 expires = "2026-10-01"
 
 [[debt]]
@@ -380,6 +406,19 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership"
+migration_target = "P0.4c-listener-helper"
 expires = "2026-10-01"
 
 [[small_debt]]
