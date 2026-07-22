@@ -857,6 +857,107 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	}
 }
 
+// TestDeliverSessionNudgeWithWorkerManagedDrainedTargetIsUndeliverable pins the
+// sc-875uie send-time guard end to end: a managed nudge to a DRAINED session is
+// reported undeliverable synchronously and NOT enqueued, so the sender gets a real
+// failure signal instead of the false "queued" success that used to evaporate
+// (gc nudge status 0/0/0, zero trace). Contrast the closing-session case above,
+// which WakeSession rejects and the enqueue→rollback path dead-letters (dead==1);
+// a drained session is not a wake conflict, so absent the guard the wake would
+// silently "succeed" and strand the nudge.
+func TestDeliverSessionNudgeWithWorkerManagedDrainedTargetIsUndeliverable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	// A drained pool worker: state=drained projects to BaseStateDrained, which is
+	// NOT a wake conflict — WakeSession would accept a wake and report success. That
+	// is the exact silent-strand the send-time guard intercepts.
+	if err := store.SetMetadata(info.ID, "state", "drained"); err != nil {
+		t.Fatalf("SetMetadata(state): %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	prevPoke := nudgePokeController
+	prevObserve := nudgeObserveTarget
+	pokes := 0
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
+	nudgePokeController = func(string) error {
+		pokes++
+		return nil
+	}
+	nudgeObserveTarget = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		return worker.LiveObservation{Running: false}, nil
+	}
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler = prevManaged
+		nudgePokeController = prevPoke
+		nudgeObserveTarget = prevObserve
+	})
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "worker",
+		agent:       config.Agent{Name: "worker", Provider: "claude"},
+	}
+
+	// Text mode: undeliverable → exit 1, message on stderr, and NOTHING enqueued.
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "undeliverable") || !strings.Contains(stderr.String(), "drained") {
+		t.Fatalf("stderr = %q, want undeliverable/drained", stderr.String())
+	}
+	if pokes != 0 {
+		t.Fatalf("pokes = %d, want 0 (guard fires before the enqueue/poke)", pokes)
+	}
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0 (nothing enqueued — no evaporation and no dead-letter)", len(pending), len(inFlight), len(dead))
+	}
+	// The read-only probe must not have stamped a wake request on the session.
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != "" {
+		t.Fatalf("wake_request = %q, want empty (probe is read-only)", got)
+	}
+
+	// JSON mode: a structured failure signal — ok=false, queued=false,
+	// outcome="undeliverable", with the state carried in reason.
+	var jstdout, jstderr bytes.Buffer
+	jcode := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, true, &jstdout, &jstderr)
+	if jcode != 1 {
+		t.Fatalf("deliverSessionNudgeWithWorker(json) = %d, want 1", jcode)
+	}
+	for _, want := range []string{`"ok":false`, `"queued":false`, `"outcome":"undeliverable"`, `"reason":"drained"`} {
+		if !strings.Contains(jstdout.String(), want) {
+			t.Fatalf("json stdout = %q, want substring %q", jstdout.String(), want)
+		}
+	}
+}
+
 func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

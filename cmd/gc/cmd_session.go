@@ -2596,6 +2596,7 @@ type sessionNudgeJSON struct {
 	Delivery      string `json:"delivery"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	Reason        string `json:"reason,omitempty"`
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".

@@ -772,6 +772,21 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		return 1
 	}
 	if queueManagedWake {
+		// Send-time loud-fail guard (sc-875uie): shouldQueueManagedNudgeWake chose to
+		// queue purely on !obs.Running, which cannot tell a resumable (asleep) session
+		// from one that has DRAINED. A drained session is not a wake conflict, so
+		// WakeSession accepts the wake and returns success — but the reconciler spawns
+		// a fresh worker instead of resuming it, so nothing ever consumes the queued
+		// nudge; it lingers until its retired fence stops matching and gc nudge status
+		// reads 0/0/0, having handed the sender a false "queued" success. Detect that
+		// silent-strand case here and fail undeliverable BEFORE enqueuing. (Terminal
+		// and gone targets are NOT diverted here — WakeSession already rejects them and
+		// the enqueue→rollback path dead-letters them loudly.) A probe error
+		// (transient/store) is non-fatal: fall through to the existing enqueue+wake
+		// path rather than block a legitimate nudge.
+		if reason, wouldStrand, probeErr := nudgeManagedWakeStrands(target, store); probeErr == nil && wouldStrand {
+			return writeUndeliverableSessionNudgeResult(target, mode, reason, jsonOutput, stdout, stderr)
+		}
 		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
 	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
@@ -892,6 +907,20 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+}
+
+// nudgeManagedWakeStrands reports whether queuing a managed nudge-wake for the
+// target would silently strand it (a drained/stopped session WakeSession accepts
+// but never resumes), via the session front door's read-only ManagedWakeWouldStrand
+// probe. When the front door is unbacked or the target carries no session id it
+// cannot classify, so it reports wouldStrand=false to preserve the pre-existing
+// enqueue behavior.
+func nudgeManagedWakeStrands(target nudgeTarget, store beads.Store) (string, bool, error) {
+	front := cliSessionFrontDoor(store, target.cfg, target.cityPath)
+	if !front.Backed() || target.sessionID == "" {
+		return "", false, nil
+	}
+	return front.ManagedWakeWouldStrand(target.sessionID, time.Now().UTC())
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
@@ -1083,6 +1112,34 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 	}
 	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 	return 0
+}
+
+// writeUndeliverableSessionNudgeResult reports a nudge that was NOT queued
+// because the target session would silently strand a managed wake (drained/
+// stopped — see nudgeManagedWakeStrands). It is the loud-fail counterpart to
+// writeQueuedSessionNudgeResult: the command exits non-zero and, in JSON mode,
+// emits queued=false / outcome="undeliverable" with the reason, so a caller
+// (human or script) gets a real failure signal instead of a false "queued"
+// success that later evaporates (sc-875uie).
+func writeUndeliverableSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, reason string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		if code := writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
+			SchemaVersion: "1",
+			OK:            false,
+			Target:        target.agentKey(),
+			SessionID:     target.sessionID,
+			SessionName:   target.sessionName,
+			Delivery:      string(mode),
+			Queued:        false,
+			Outcome:       "undeliverable",
+			Reason:        reason,
+		}); code != 0 {
+			return code
+		}
+		return 1
+	}
+	fmt.Fprintf(stderr, "gc session nudge: undeliverable — target session %s is %s and will not be resumed; nudge not queued\n", target.agentKey(), reason) //nolint:errcheck
+	return 1
 }
 
 func sendMailNotify(target nudgeTarget, sender string) error {
