@@ -18,9 +18,14 @@ func TestCheckInstalledNoRemoteImportsMissingLockOK(t *testing.T) {
 	city := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+`)
 
 	report, err := CheckInstalled(city, map[string]config.Import{
-		"local": {Source: "./packs/local"},
+		"local": {Source: localPack},
 	})
 	if err != nil {
 		t.Fatalf("CheckInstalled: %v", err)
@@ -31,6 +36,36 @@ func TestCheckInstalledNoRemoteImportsMissingLockOK(t *testing.T) {
 	if report.CheckedSources != 0 {
 		t.Fatalf("CheckedSources = %d, want 0", report.CheckedSources)
 	}
+}
+
+// TestCheckInstalledReportsMissingTransitiveLockEntryFromLocalPathSource is
+// the regression for #4525's sibling report (#4523): a local path-source
+// pack's own remote imports must still be walked and checked against the
+// lockfile, even though the local pack itself is never locked. Before the
+// fix, walkImport returned immediately for any non-remote source, so a
+// missing transitive remote import silently read as "Import state OK".
+func TestCheckInstalledReportsMissingTransitiveLockEntryFromLocalPathSource(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+
+[imports.roles]
+source = "https://example.com/roles.git"
+version = "^1.0"
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: localPack},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lock-entry")
 }
 
 func TestCheckInstalledReportsMissingLockfile(t *testing.T) {
@@ -666,6 +701,19 @@ func assertSingleIssue(t *testing.T, report *CheckReport, code string) {
 	if report.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1", report.ErrorCount())
 	}
+}
+
+// writeLocalPack writes packToml to a fresh temp dir's pack.toml and
+// returns the dir's absolute path — standing in for the already-resolved
+// absolute path `gc import add` writes into city.toml for a local
+// path-source import (resolveImportAddPath in cmd/gc/cmd_import.go).
+func writeLocalPack(t *testing.T, packToml string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+	return dir
 }
 
 func writeTestLockfile(t *testing.T, city string, packs map[string]LockedPack) {

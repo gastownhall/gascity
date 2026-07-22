@@ -126,6 +126,7 @@ type importCheckState struct {
 
 func (s *importCheckState) walkImport(name string, imp config.Import) {
 	if !isRemoteSource(imp.Source) {
+		s.walkLocalImport(name, imp)
 		return
 	}
 
@@ -208,6 +209,33 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 		return
 	}
 	s.seen[imp.Source] = true
+	for _, nestedName := range sortedImportNames(nested) {
+		s.walkImport(name+"/"+nestedName, nested[nestedName])
+	}
+}
+
+// walkLocalImport handles a local path-source import. Unlike a remote
+// import, it is never locked or cached, so it can't produce a
+// missing-lock-entry issue for itself — but its own declared imports still
+// need walking so a missing transitive remote import is caught here rather
+// than surfacing later as a load-time "not installed" error.
+func (s *importCheckState) walkLocalImport(name string, imp config.Import) {
+	if !imp.ImportIsTransitive() || s.seen[imp.Source] {
+		return
+	}
+	s.seen[imp.Source] = true
+	nested, err := readPackImports(imp.Source)
+	if err != nil {
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "invalid-local-pack",
+			ImportName: name,
+			Source:     imp.Source,
+			Path:       filepath.Join(imp.Source, "pack.toml"),
+			Message:    err.Error(),
+		})
+		return
+	}
 	for _, nestedName := range sortedImportNames(nested) {
 		s.walkImport(name+"/"+nestedName, nested[nestedName])
 	}

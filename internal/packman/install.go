@@ -192,7 +192,11 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 	if err != nil {
 		return nil, err
 	}
-	if len(reachable) == 0 {
+	// A direct import list with no remote entries (len(reachable) == 0) can
+	// still transitively reach remote sources through a local path-source
+	// pack's own imports — discoverReachableClosure walks those regardless
+	// of directness, so only an empty import list can skip the loop.
+	if len(imports) == 0 {
 		return &Lockfile{Schema: LockfileSchema, Packs: make(map[string]LockedPack)}, nil
 	}
 
@@ -335,7 +339,19 @@ func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (
 
 func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
 	if !isRemoteSource(imp.Source) {
-		return nil
+		// A local path-source pack is never locked or fetched from cache,
+		// but its own declared imports still need to reach the closure —
+		// read its pack.toml straight off disk instead of from a resolved
+		// git commit cache.
+		if !imp.ImportIsTransitive() || seen[imp.Source] {
+			return nil
+		}
+		seen[imp.Source] = true
+		nested, err := readPackImports(imp.Source)
+		if err != nil {
+			return fmt.Errorf("local pack %q: %w", imp.Source, err)
+		}
+		return s.walkNestedImports(nested, constraints, reachable, seen, dirty)
 	}
 
 	mergedConstraint, err := mergeConstraints(constraints[imp.Source], imp.Version)
@@ -368,6 +384,10 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	if err != nil {
 		return err
 	}
+	return s.walkNestedImports(nested, constraints, reachable, seen, dirty)
+}
+
+func (s *syncState) walkNestedImports(nested map[string]config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
 	names := make([]string, 0, len(nested))
 	for name := range nested {
 		names = append(names, name)

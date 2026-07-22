@@ -56,6 +56,58 @@ schema = 1
 	}
 }
 
+// TestSyncLockWalksLocalPathSourceTransitiveImports is the regression for
+// #4523: a local path-source pack's own remote imports were never walked
+// into the reachable closure (walkImport returned immediately for any
+// non-remote source), so `gc import install` silently wrote no lock entry
+// for them, and loading the config later failed with "not installed" —
+// even though install had just reported success. The same pack imported
+// from a remote source recurses fine; only the local-path branch skipped
+// discovery entirely.
+func TestSyncLockWalksLocalPathSourceTransitiveImports(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^2.0"
+`)
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: localPack},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("len(Packs) = %d, want 1: %#v", len(got.Packs), got.Packs)
+	}
+	if _, ok := got.Packs["https://example.com/b.git"]; !ok {
+		t.Fatalf("missing transitive lock entry for local pack's remote import b: %#v", got.Packs)
+	}
+}
+
 // TestSyncLockWithPolicyBlocksTransitiveInternalImport is the regression for the
 // transitive-import SSRF finding: a public top-level pack that passes the caller's
 // source fence can declare a nested internal/link-local/file import in its
