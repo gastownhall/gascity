@@ -1159,6 +1159,8 @@ func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *tes
 			fs := newSessionFakeState(t)
 			searchBase := t.TempDir()
 			srv := New(fs)
+			structuredPeekPoll := make(chan time.Time)
+			srv.structuredPeekPoll = structuredPeekPoll
 			humaHandler := newTestCityHandlerWith(t, fs, srv)
 			srv.sessionLogSearchPaths = []string{searchBase}
 
@@ -1205,6 +1207,11 @@ func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *tes
 			writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 				`{"uuid":"m1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":"authoritative history"},"timestamp":"2025-01-01T00:00:00Z"}`,
 			)
+			select {
+			case structuredPeekPoll <- time.Now():
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("structured peek stream did not consume the injected poll tick")
+			}
 
 			body := waitForRecorderSubstring(t, rec, `"reset_reason":"stream_changed"`, 10*time.Second)
 			cancel()
