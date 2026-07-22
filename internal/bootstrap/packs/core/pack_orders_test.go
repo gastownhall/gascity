@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -196,5 +197,105 @@ func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	}
 	if !strings.Contains(body, "will retry next sweep") {
 		t.Error("notify-on-human-gate-creation.sh must surface an undeliverable send to stderr (loud-fail #4543)")
+	}
+}
+
+// assertCooldownExecOrder checks a cooldown-triggered exec order: it must
+// validate, run on a cooldown trigger with a parseable interval, dispatch via
+// exec (not a formula/pool), and point at a script embedded in the pack.
+func assertCooldownExecOrder(t *testing.T, orderFile, scriptBase string) {
+	t.Helper()
+	o := readOrder(t, orderFile)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", orderFile, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("%s: trigger = %q, want %q", orderFile, o.Trigger, "cooldown")
+	}
+	if _, err := time.ParseDuration(o.Interval); err != nil {
+		t.Errorf("%s: interval %q is not a valid duration: %v", orderFile, o.Interval, err)
+	}
+	if !o.IsExec() {
+		t.Errorf("%s: want exec dispatch, got formula %q", orderFile, o.Formula)
+	}
+	if o.Pool != "" {
+		t.Errorf("%s: exec orders must not set a pool, got %q", orderFile, o.Pool)
+	}
+	wantSuffix := "assets/scripts/" + scriptBase
+	if !strings.HasSuffix(o.Exec, wantSuffix) {
+		t.Errorf("%s: exec = %q, want suffix %q", orderFile, o.Exec, wantSuffix)
+	}
+	if _, err := fs.ReadFile(PackFS, "assets/scripts/"+scriptBase); err != nil {
+		t.Errorf("%s: referenced script not embedded: %v", orderFile, err)
+	}
+}
+
+// TestRenudgeStaleHumanGatesOrder pins the staleness-sweep order's contract: it
+// is a cooldown-triggered exec order running the renudge-stale-human-gates
+// script. It is the repeating companion to notify-on-human-gate-creation (which
+// fires once, on bead.created); this one re-fires on a cooldown for gates left
+// open.
+func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
+	assertCooldownExecOrder(t, "renudge-stale-human-gates.toml", "renudge-stale-human-gates.sh")
+}
+
+// TestRenudgeStaleHumanGatesScriptContract guards the load-bearing behaviors of
+// the staleness re-nudge script. Like the creation-notify script its failures
+// are best-effort and swallowed at runtime, so the contract is pinned here:
+//
+//   - Enumeration is over OPEN gates (`gc bd gate list`, open-only by default)
+//     with `--limit 0` so a rig past the default 50-gate page is not silently
+//     truncated — a truncated page would drop stale gates from the sweep.
+//   - It re-nudges ONLY open human gates: await_type == "human" AND
+//     status == "open". The live town carries dozens of legacy await_type=null
+//     workflow gates that must never be mailed about.
+//   - Both the staleness threshold and the repeat interval are configurable
+//     (GC_STALE_GATE_THRESHOLD / GC_STALE_GATE_RENUDGE_INTERVAL) — the order's
+//     purpose is "open past a configurable threshold, repeating on the
+//     interval".
+//   - Addressee resolution consults gc.deferred_assignee (formula/molecule
+//     gates strip the assignee there), matching the creation notify so a gate
+//     is re-nudged at the same address it was first notified.
+//   - The list projection omits assignee/metadata, so the script must re-fetch
+//     via `gc bd show` to resolve the addressee.
+//   - Notification rides `gc mail send --notify`, the one primitive that mails
+//     AND nudges a real session while natively skipping the tmux-nudge for the
+//     sessionless "human" recipient (cmd_mail.go `to != "human"`).
+//   - The prefix->rig enumeration excludes the HQ pseudo-rig (`.hq != true`),
+//     matching the sibling scripts' cross-rig convention.
+//   - Loud-fail: an undeliverable send must surface and NOT be recorded, so the
+//     next sweep retries it (gastownhall/gascity#4543).
+func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/renudge-stale-human-gates.sh")
+	if err != nil {
+		t.Fatalf("reading renudge-stale-human-gates.sh: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		"gc bd gate list",                    // enumerate OPEN gates (not events)
+		"--limit 0",                          // no silent 50-gate truncation
+		`.await_type == "human"`,             // human gates only
+		`.status == "open"`,                  // skip already-resolved gates
+		"GC_STALE_GATE_THRESHOLD",            // configurable staleness threshold
+		"GC_STALE_GATE_RENUDGE_INTERVAL",     // configurable repeat interval
+		"gc bd show",                         // re-fetch (list omits assignee)
+		"gc.deferred_assignee",               // formula/molecule addressee
+		"--notify",                           // mail + nudge, human-safe primitive
+		".hq != true",                        // exclude HQ from prefix->rig lookup
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renudge-stale-human-gates.sh missing load-bearing element %q", want)
+		}
+	}
+
+	// Loud-fail: the send must be conditional (retry on failure), and the
+	// failure path must surface to stderr rather than silently record the gate
+	// as re-nudged. The dedup record must live on the SUCCESS branch only.
+	if !strings.Contains(body, "if gc mail send") {
+		t.Error("renudge-stale-human-gates.sh must branch on the mail-send result (loud-fail retry), not fire-and-forget")
+	}
+	if !strings.Contains(body, "will retry next sweep") {
+		t.Error("renudge-stale-human-gates.sh must surface an undeliverable send to stderr (loud-fail #4543)")
 	}
 }
