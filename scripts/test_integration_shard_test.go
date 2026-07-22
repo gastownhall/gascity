@@ -47,6 +47,128 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	}
 }
 
+func TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux(t *testing.T) {
+	repo := repoRoot(t)
+	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repo, runtimeTmuxManifestRelativePath))
+	fixture := newIntegrationShardFixtureForPlatform(t, "linux", "amd64")
+
+	out, err := fixture.runShard(t, "packages-runtime-tmux-2-of-6")
+	if err != nil {
+		t.Fatalf("runtime-tmux integration shard failed: %v\n%s", err, out)
+	}
+
+	captured, err := os.ReadFile(fixture.capturePath)
+	if err != nil {
+		t.Fatalf("read captured go invocation: %v", err)
+	}
+	encodedInvocations := strings.TrimSuffix(string(captured), "\x00\x00")
+	invocations := strings.Split(encodedInvocations, "\x00\x00")
+	if len(invocations) != 1 {
+		t.Fatalf("go test invoked %d times, want only the final runtime-tmux shard command:\n%s", len(invocations), captured)
+	}
+
+	var selected []string
+	for index, testName := range manifest {
+		if index%6 == 1 {
+			selected = append(selected, testName)
+		}
+	}
+	got := strings.Split(invocations[0], "\x00")
+	want := []string{
+		"test",
+		"-tags", "integration",
+		"-timeout", "17s",
+		"./internal/runtime/tmux",
+		"-run", "^(" + strings.Join(selected, "|") + ")$",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("runtime-tmux go test argv = %q, want exact checked-manifest shard command %q", got, want)
+	}
+}
+
+func TestRuntimeTmuxIntegrationShardPreservesDynamicDiscoveryOnDarwin(t *testing.T) {
+	assertRuntimeTmuxIntegrationShardUsesDynamicDiscovery(t, "Darwin", newIntegrationShardFixtureForPlatform(t, "darwin", "amd64"))
+}
+
+func TestRuntimeTmuxIntegrationShardPreservesDynamicDiscoveryOnLinuxArm64(t *testing.T) {
+	assertRuntimeTmuxIntegrationShardUsesDynamicDiscovery(t, "Linux/arm64", newIntegrationShardFixtureForPlatform(t, "linux", "arm64"))
+}
+
+func TestRuntimeTmuxIntegrationShardSelectsUsingSanitizedTarget(t *testing.T) {
+	fixture := newIntegrationShardFixtureForPlatform(t, "darwin", "arm64")
+	assertRuntimeTmuxIntegrationShardUsesDynamicDiscovery(
+		t,
+		"Darwin/arm64 with ambient linux/amd64 override",
+		fixture,
+		"GOOS=linux",
+		"GOARCH=amd64",
+	)
+}
+
+func assertRuntimeTmuxIntegrationShardUsesDynamicDiscovery(t *testing.T, platform string, fixture integrationShardFixture, extraEnv ...string) {
+	t.Helper()
+	assertRuntimeTmuxIntegrationShardUsesDynamicDiscoveryOnShard(
+		t,
+		platform,
+		fixture,
+		"2",
+		"TestDarwinBeta",
+		extraEnv...,
+	)
+}
+
+func assertRuntimeTmuxIntegrationShardUsesDynamicDiscoveryOnShard(t *testing.T, platform string, fixture integrationShardFixture, shardIndex, selectedTest string, extraEnv ...string) {
+	t.Helper()
+
+	out, err := fixture.runShardWithEnv(t, "packages-runtime-tmux-"+shardIndex+"-of-6", extraEnv...)
+	if err != nil {
+		t.Fatalf("%s runtime-tmux integration shard failed: %v\n%s", platform, err, out)
+	}
+
+	captured, err := os.ReadFile(fixture.capturePath)
+	if err != nil {
+		t.Fatalf("read captured %s go invocations: %v", platform, err)
+	}
+	encodedInvocations := strings.TrimSuffix(string(captured), "\x00\x00")
+	encoded := strings.Split(encodedInvocations, "\x00\x00")
+	var invocations [][]string
+	for _, invocation := range encoded {
+		invocations = append(invocations, strings.Split(invocation, "\x00"))
+	}
+	want := [][]string{
+		{
+			"test",
+			"-tags", "integration",
+			"-timeout", "17s",
+			"./internal/runtime/tmux",
+			"-list", "^Test",
+		},
+		{
+			"test",
+			"-tags", "integration",
+			"-timeout", "17s",
+			"./internal/runtime/tmux",
+			"-run", "^(" + selectedTest + ")$",
+		},
+	}
+	if !slices.EqualFunc(invocations, want, slices.Equal) {
+		t.Fatalf("%s runtime-tmux go test invocations = %q, want discovery plus final shard %q", platform, invocations, want)
+	}
+}
+
+func TestRuntimeTmuxIntegrationShardClearsAmbientManifestOnDynamicFallback(t *testing.T) {
+	fixture := newIntegrationShardFixtureForPlatform(t, "darwin", "amd64")
+	manifest := writeGoTestManifest(t, t.TempDir(), "TestForcedByAmbientManifest")
+	assertRuntimeTmuxIntegrationShardUsesDynamicDiscoveryOnShard(
+		t,
+		"Darwin/amd64 with ambient one-entry manifest",
+		fixture,
+		"1",
+		"TestDarwinAlpha",
+		"GO_TEST_MANIFEST="+manifest,
+	)
+}
+
 func TestCmdGCIntegrationManifestMatchesTaggedDeclarations(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseCmdGCIntegrationManifest(t, filepath.Join(repo, "scripts", "test-integration-shard"))
@@ -325,6 +447,10 @@ type integrationShardFixture struct {
 }
 
 func newIntegrationShardFixture(t *testing.T) integrationShardFixture {
+	return newIntegrationShardFixtureForPlatform(t, "linux", "amd64")
+}
+
+func newIntegrationShardFixtureForPlatform(t *testing.T, goos, goarch string) integrationShardFixture {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -338,6 +464,8 @@ func newIntegrationShardFixture(t *testing.T) integrationShardFixture {
 set -euo pipefail
 
 capture_path=`+shellQuote(capturePath)+`
+modeled_goos=`+shellQuote(goos)+`
+modeled_goarch=`+shellQuote(goarch)+`
 
 case "$1" in
   env)
@@ -347,18 +475,23 @@ case "$1" in
       GOMODCACHE) echo /tmp/fake-gomodcache ;;
       GOTMPDIR) echo "" ;;
       GOROOT) echo /tmp/fake-goroot ;;
+      GOOS) echo "${GOOS:-$modeled_goos}" ;;
+      GOARCH) echo "${GOARCH:-$modeled_goarch}" ;;
       *) echo "unexpected go env key: $2" >&2; exit 1 ;;
     esac
     ;;
   test)
+    is_list=0
     for arg in "$@"; do
       if [[ "$arg" == "-list" ]]; then
-        echo "go test -list must not run" >&2
-        exit 97
+        is_list=1
       fi
     done
     printf '%s\0' "$@" >> "$capture_path"
     printf '\0' >> "$capture_path"
+    if [[ "$is_list" == "1" ]]; then
+      printf '%s\n' TestDarwinAlpha TestDarwinBeta TestDarwinGamma 'ok  github.com/gastownhall/gascity/internal/runtime/tmux  0.001s'
+    fi
     ;;
   *)
     echo "unexpected go command: $*" >&2
@@ -375,19 +508,27 @@ esac
 }
 
 func (f integrationShardFixture) run(t *testing.T) ([]byte, error) {
+	return f.runShard(t, "packages-cmd-gc-integration")
+}
+
+func (f integrationShardFixture) runShard(t *testing.T, shard string) ([]byte, error) {
+	return f.runShardWithEnv(t, shard)
+}
+
+func (f integrationShardFixture) runShardWithEnv(t *testing.T, shard string, extraEnv ...string) ([]byte, error) {
 	t.Helper()
 	repo := repoRoot(t)
 	cmd := exec.Command(
 		filepath.Join(repo, "scripts", "test-integration-shard"),
-		"packages-cmd-gc-integration",
+		shard,
 	)
 	cmd.Dir = repo
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"PATH=" + f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + f.homeDir,
 		"GC_TEST_NO_SLICE=1",
 		"SYS_USR_CGO_FALLBACK=0",
 		"GO_TEST_TIMEOUT=17s",
-	}
+	}, extraEnv...)
 	return cmd.CombinedOutput()
 }
