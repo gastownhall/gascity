@@ -658,3 +658,49 @@ func (s *Store) ManagedWakeWouldStrand(id string, now time.Time) (state string, 
 	}
 	return "", false, nil
 }
+
+// ManagedWakeUnreachable reports, via a read-only lifecycle projection (it never
+// mutates the session), whether a nudge ALREADY QUEUED for session id can no longer
+// be consumed because the target session has reached a terminal or stranding
+// lifecycle state. It is the maintenance-time superset of ManagedWakeWouldStrand:
+// the send-time strand probe deliberately covers only the drained/stopped states
+// WakeSession would silently accept, leaving the terminal states to WakeSession's
+// own enqueue-time rejection. The drain-time dead-letter sweep, by contrast, runs
+// AFTER the raced session has often progressed all the way to closed (the
+// reconciler closes a drained pool worker), so it must treat BOTH the terminal
+// wake-conflict states (closed / closing / archived-without-continuity) AND the
+// stranding states (drained / stopped) as unreachable. Archived-WITH-continuity and
+// every live/resumable state (asleep, suspended, active, start-pending) return
+// unreachable=false — those genuinely still consume a queued nudge, so sweeping
+// them would drop a live delivery.
+//
+// A missing session bead (ErrNotFound) returns unreachable=false: at sweep time a
+// freshly-queued nudge can momentarily race ahead of a slow session read, so
+// treating a transient not-found as terminal would drop a legitimate nudge; a
+// genuinely retention-swept bead is caught by the fence-mismatch dead-letter path
+// on the next delivery attempt instead. Any other store error is returned bare so
+// the caller keeps the item rather than misclassify a live target as unreachable.
+func (s *Store) ManagedWakeUnreachable(id string, now time.Time) (state string, unreachable bool, err error) {
+	b, err := s.store.Get(id)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !IsSessionBeadOrRepairable(b) {
+		return "", false, nil
+	}
+	RepairEmptyType(s.store.Store, &b)
+	lcInput := LifecycleInputFromMetadata(b.Status, b.Metadata)
+	lcInput.Now = now
+	view := ProjectLifecycle(lcInput)
+	if st, conflict := lifecycleWakeConflictState(view); conflict {
+		return st, true, nil
+	}
+	switch view.BaseState {
+	case BaseStateDrained, BaseStateStopped:
+		return string(view.BaseState), true, nil
+	}
+	return "", false, nil
+}
