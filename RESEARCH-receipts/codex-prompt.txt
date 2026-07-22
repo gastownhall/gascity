@@ -1,0 +1,20 @@
+You are an INDEPENDENT researcher verifying a claim. Do not trust my framing; find your own evidence and cite it.
+
+Codebase: /home/csauer/gascity-work/sc-lcwsqf-notify-gate  (Go; a CLI `gc` that embeds `bd` bead-tracker subcommands; docs under docs/reference/specs/).
+
+QUESTION: Determine whether EITHER of these two capabilities ALREADY EXISTS in shipped code/config/docs, usable WITHOUT writing new code:
+
+(1) notify-on-human-gate-creation: when a `type=human` gate bead is created (ad-hoc via `bd gate create --type=human`, or formula-synthesized), the system emits a mail message AND/OR a nudge to the gate's human addressee/assignee — so the human is actively told that a gate awaits their action.
+
+(2) staleness re-nudge: an OPEN human gate that has been open past a configurable threshold automatically RE-FIRES a mail+nudge to the addressee, repeating on an interval — so an ignored human gate keeps reminding.
+
+Investigate thoroughly and specifically:
+- Gate creation code paths (bd gate create; formula/molecule gate-step synthesis) — any notification side effect on creation?
+- The `bd gate check` watcher and its `--escalate` flag — what does --escalate actually DO for a `human`-type gate? Does it mail/nudge the addressee? Trace the code.
+- The bundled `gate-sweep` maintenance order (a scheduled order that runs `bd gate check ... --escalate` on a cooldown) — does it cover `human` gates, and does escalation reach the human via mail/nudge?
+- Any periodic/background sweep loop, config knob (interval/threshold), or formula-schema field governing gate notification or re-nudge.
+- docs/reference/specs/formula-spec-v2.md gate sections.
+
+For EACH capability output: VERDICT = EXISTS / PARTIAL / ABSENT, with file:line citations and a 1-3 sentence justification. Explicitly answer: does `bd gate check --escalate` or `gate-sweep` already notify (mail or nudge) the addressee of an aging OPEN human gate? If a capability is ABSENT, name the closest existing machinery and whether it is configurable rather than needing new code.
+
+Be rigorous, cite real file:line evidence, and do not speculate beyond what the code/docs show. Output a concise structured report.
