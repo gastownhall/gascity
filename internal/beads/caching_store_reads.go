@@ -439,6 +439,15 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
+			if current, ok := c.beads[id]; ok && current.Revision > 0 &&
+				fresh.Revision <= current.Revision && beadChanged(current, fresh, false) {
+				// A dirty row commonly follows a successful write whose immediate
+				// refresh lagged. Do not bless the same-or-older revision as clean;
+				// make one uncached read-through attempt and leave the dirty fence for
+				// reconciliation if visibility still has not advanced.
+				c.mu.Unlock()
+				return c.backing.Get(id)
+			}
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 				depsMode:   depsFromFields,
 				seqMode:    seqClearBeadSeqOnly,
@@ -458,6 +467,13 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	c.mu.RUnlock()
 	return c.backing.Get(id)
+}
+
+// GetCanonical forwards duplicate-aware reads to the backing store. Canonical
+// reads intentionally bypass cached state because the backing may expose a
+// newer wisp row alongside a stale issue row with the same logical ID.
+func (c *CachingStore) GetCanonical(id string) (Bead, error) {
+	return GetCanonical(c.backing, id)
 }
 
 // Ready returns open beads whose blocking deps are all closed.

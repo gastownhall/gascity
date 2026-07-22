@@ -563,15 +563,32 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, err
 	return closeorder.Order(store, ids)
 }
 
+// SpecSidecarCloseResult reports a generated-sidecar close and the observer
+// receipts reserved after each candidate's close notification. Callers that own
+// an event provider through shutdown can wait on Deliveries before releasing it.
+type SpecSidecarCloseResult struct {
+	Closed     int
+	Deliveries []beads.CloseObserverDelivery
+}
+
 // CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
 // workflow root. It is safe to call after the root has already been closed.
 func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, error) {
+	result, err := CloseSpecSidecarsForRootSequenced(store, rootID, reason)
+	return result.Closed, err
+}
+
+// CloseSpecSidecarsForRootSequenced is CloseSpecSidecarsForRoot with observer
+// receipts. Each receipt is reserved after CloseAll returns while using the
+// same per-bead mutation order as the close, so it also covers a bead.closed
+// callback queued behind an already-running observer for that sidecar.
+func CloseSpecSidecarsForRootSequenced(store beads.Store, rootID, reason string) (SpecSidecarCloseResult, error) {
 	if store == nil {
-		return 0, fmt.Errorf("bead store unavailable")
+		return SpecSidecarCloseResult{}, fmt.Errorf("bead store unavailable")
 	}
 	rootID = strings.TrimSpace(rootID)
 	if rootID == "" {
-		return 0, nil
+		return SpecSidecarCloseResult{}, nil
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -586,7 +603,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("listing workflow spec sidecars for %s: %w", rootID, err)
+		return SpecSidecarCloseResult{}, fmt.Errorf("listing workflow spec sidecars for %s: %w", rootID, err)
 	}
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
@@ -596,49 +613,73 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 		ids = append(ids, bead.ID)
 	}
 	if len(ids) == 0 {
-		return 0, nil
+		return SpecSidecarCloseResult{}, nil
 	}
 	slices.Sort(ids)
 	ordered, err := closeorder.Order(store, ids)
 	if err != nil {
-		return 0, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
+		return SpecSidecarCloseResult{}, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
 	}
-	return store.CloseAll(ordered, map[string]string{
+	closed, closeErr := store.CloseAll(ordered, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
 		"close_reason":              reason,
 	})
+	result := SpecSidecarCloseResult{Closed: closed}
+	if barrier, ok := beads.ObserverBarrierFor(store); ok {
+		result.Deliveries = make([]beads.CloseObserverDelivery, 0, len(ordered))
+		for _, id := range ordered {
+			if delivery := barrier.BeadObserverBarrier(id); delivery != nil {
+				result.Deliveries = append(result.Deliveries, delivery)
+			}
+		}
+	}
+	return result, closeErr
 }
 
 // CloseSpecSidecarsForClosedRoots closes generated spec sidecars whose owning
 // workflow root is already closed. It repairs residues left by older workflow
 // finalizers and source-bead close hooks.
 func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, error) {
+	result, err := CloseSpecSidecarsForClosedRootsSequenced(store, reason)
+	return result.Closed, err
+}
+
+// CloseSpecSidecarsForClosedRootsSequenced is
+// CloseSpecSidecarsForClosedRoots with observer receipts for every repaired
+// sidecar. Callers that own an event provider through shutdown can wait for the
+// returned deliveries before releasing it.
+func CloseSpecSidecarsForClosedRootsSequenced(store beads.Store, reason string) (SpecSidecarCloseResult, error) {
 	if store == nil {
-		return 0, fmt.Errorf("bead store unavailable")
+		return SpecSidecarCloseResult{}, fmt.Errorf("bead store unavailable")
 	}
 	specs, err := generatedSpecSidecarCandidates(store)
 	if err != nil {
-		return 0, err
+		return SpecSidecarCloseResult{}, err
 	}
 	rootIDs := make(map[string]struct{})
+	var repairErr error
+	live := beads.HandlesFor(store).Live
 	for _, spec := range specs {
 		rootID := strings.TrimSpace(spec.Metadata[beadmeta.RootBeadIDMetadataKey])
 		if rootID == "" {
 			continue
 		}
-		root, err := store.Get(rootID)
+		root, err := live.Get(rootID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return 0, fmt.Errorf("loading workflow root %s for spec %s: %w", rootID, spec.ID, err)
+			repairErr = errors.Join(repairErr,
+				fmt.Errorf("loading workflow root %s for spec %s: %w", rootID, spec.ID, err))
+			continue
 		}
-		if root.Status == "closed" && IsWorkflowRoot(root) {
+		if root.Status == "closed" && IsWorkflowRoot(root) &&
+			strings.TrimSpace(root.Metadata[beadmeta.MoleculeLifecyclePendingMetadataKey]) == "" {
 			rootIDs[rootID] = struct{}{}
 		}
 	}
 	if len(rootIDs) == 0 {
-		return 0, nil
+		return SpecSidecarCloseResult{}, repairErr
 	}
 	orderedRoots := make([]string, 0, len(rootIDs))
 	for rootID := range rootIDs {
@@ -646,15 +687,14 @@ func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, err
 	}
 	slices.Sort(orderedRoots)
 
-	closed := 0
+	result := SpecSidecarCloseResult{}
 	for _, rootID := range orderedRoots {
-		n, err := CloseSpecSidecarsForRoot(store, rootID, reason)
-		if err != nil {
-			return closed, err
-		}
-		closed += n
+		rootResult, rootErr := CloseSpecSidecarsForRootSequenced(store, rootID, reason)
+		result.Closed += rootResult.Closed
+		result.Deliveries = append(result.Deliveries, rootResult.Deliveries...)
+		repairErr = errors.Join(repairErr, rootErr)
 	}
-	return closed, nil
+	return result, repairErr
 }
 
 func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {

@@ -1176,9 +1176,8 @@ func registeredCityLabel(city supervisor.CityEntry) string {
 	return name
 }
 
-// openCityRecorder returns a Recorder that appends to .gc/events.jsonl in the
-// current city. Returns events.Discard on any error — commands always get a
-// valid recorder.
+// openCityRecorder returns the configured events recorder for the current city.
+// Returns events.Discard on any error so commands always receive a valid sink.
 func openCityRecorder(stderr io.Writer) events.Recorder {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -1192,8 +1191,7 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		eventsCfg = cfg.Events
 	}
-	rec, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	rec, err := newCityEventsProvider(cityPath, eventsCfg, stderr)
 	if err != nil {
 		return events.Discard
 	}

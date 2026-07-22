@@ -29,11 +29,17 @@ type cachingGraphApplyStore struct {
 }
 
 func (s cachingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	unlock := s.cache.lockUnknownMutationScope()
 	result, err := s.applier.ApplyGraphPlan(ctx, plan)
 	if err != nil {
+		unlock()
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	drains := s.cache.refreshGraphAppliedBeads(result)
+	unlock()
+	for _, drain := range drains {
+		drain()
+	}
 	return result, nil
 }
 
@@ -50,17 +56,23 @@ type cachingStorageGraphApplyStore struct {
 }
 
 func (s cachingStorageGraphApplyStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
+	unlock := s.cache.lockUnknownMutationScope()
 	result, err := s.storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
 	if err != nil {
+		unlock()
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	drains := s.cache.refreshGraphAppliedBeads(result)
+	unlock()
+	for _, drain := range drains {
+		drain()
+	}
 	return result, nil
 }
 
-func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
+func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) []func() {
 	if result == nil || len(result.IDs) == 0 {
-		return
+		return nil
 	}
 	ids := uniqueGraphAppliedIDs(result)
 	refreshed := make([]txTouchedBead, 0, len(ids))
@@ -96,17 +108,19 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
 				clearDirty: true,
 			})
 			notifications = append(notifications, cacheNotification{
-				eventType: "bead.created",
-				bead:      fresh,
+				eventType:      "bead.created",
+				bead:           fresh,
+				resolvePending: true,
 			})
 			continue
 		}
 		c.markDirtyLocked(item.id)
+		c.retainPendingPublication(item.id, "bead.created")
 	}
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	c.notifyChanges(notifications)
+	return c.enqueueOrderedChanges(notifications)
 }
 
 func uniqueGraphAppliedIDs(result *GraphApplyResult) []string {

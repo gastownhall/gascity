@@ -1896,10 +1896,14 @@ type bdInvocation struct {
 func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 	t.Helper()
 	orig := beadsExecCommandRunnerWithEnv
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
+	origEnv := beadsExecCommandEnvRunnerWithEnv
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = orig
+		beadsExecCommandEnvRunnerWithEnv = origEnv
+	})
 
 	calls := &[]bdInvocation{}
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+	captureRunner := func(env map[string]string) beads.CommandRunner {
 		snap := maps.Clone(env)
 		return func(dir, name string, args ...string) ([]byte, error) {
 			*calls = append(*calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
@@ -1926,6 +1930,14 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 				t.Errorf("unexpected bd subcommand args=%v — fake must be extended if sling now invokes this", args)
 				return nil, fmt.Errorf("unexpected bd subcommand args=%v", args)
 			}
+		}
+	}
+	beadsExecCommandRunnerWithEnv = captureRunner
+	beadsExecCommandEnvRunnerWithEnv = func(base map[string]string) beads.CommandEnvRunner {
+		return func(dir, name string, explicit map[string]string, args ...string) ([]byte, error) {
+			env := maps.Clone(base)
+			maps.Copy(env, explicit)
+			return captureRunner(env)(dir, name, args...)
 		}
 	}
 	return calls

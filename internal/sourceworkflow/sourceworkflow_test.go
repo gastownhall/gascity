@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -706,6 +708,105 @@ func TestCloseSpecSidecarsForRootClosesOnlyOpenSpecs(t *testing.T) {
 	}
 	if workAfter.Status != "open" {
 		t.Fatalf("non-spec workflow bead status = %q, want open", workAfter.Status)
+	}
+}
+
+func TestCloseSpecSidecarsForClosedRootsSequencedReturnsRepairDeliveries(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{
+		Title: "closed workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	spec, err := base.Create(beads.Bead{
+		Title: "generated spec residue",
+		Type:  "spec",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindSpec,
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create spec: %v", err)
+	}
+	store := beads.NewCachingStoreForTest(base, nil)
+	if err := store.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := base.Close(root.ID); err != nil {
+		t.Fatalf("external Close root: %v", err)
+	}
+
+	result, err := CloseSpecSidecarsForClosedRootsSequenced(store, WorkflowSpecSidecarClosedReason)
+	if err != nil {
+		t.Fatalf("CloseSpecSidecarsForClosedRootsSequenced: %v", err)
+	}
+	if result.Closed != 1 || len(result.Deliveries) != 1 {
+		t.Fatalf("repair result = %+v, want one close and one delivery", result)
+	}
+	delivered := make(chan struct{})
+	result.Deliveries[0].AfterDelivery(func() { close(delivered) })
+	select {
+	case <-delivered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("repair delivery did not complete")
+	}
+	after, err := base.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get spec: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", after.Status)
+	}
+}
+
+func TestCloseSpecSidecarsForClosedRootsRetainsPendingLifecycleOrdering(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "pending closed workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:                     beadmeta.KindWorkflow,
+			beadmeta.MoleculeLifecyclePendingMetadataKey: "v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("Close root: %v", err)
+	}
+	spec, err := store.Create(beads.Bead{
+		Title: "generated spec awaiting root lifecycle",
+		Type:  "spec",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindSpec,
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create spec: %v", err)
+	}
+
+	result, err := CloseSpecSidecarsForClosedRootsSequenced(store, WorkflowSpecSidecarClosedReason)
+	if err != nil {
+		t.Fatalf("CloseSpecSidecarsForClosedRootsSequenced: %v", err)
+	}
+	if result.Closed != 0 || len(result.Deliveries) != 0 {
+		t.Fatalf("repair result = %+v, want pending root skipped", result)
+	}
+	after, err := store.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get spec: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("spec status = %q, want open until root lifecycle publishes", after.Status)
 	}
 }
 

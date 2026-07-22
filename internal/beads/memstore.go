@@ -29,7 +29,12 @@ type MemStore struct {
 	DisableConditionalWrites bool
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ CloseTransitioner             = (*MemStore)(nil)
+	_ CloseAllTransitioner          = (*MemStore)(nil)
+	_ UpdateTransitioner            = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -225,6 +230,26 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// UpdateWithTransition applies a full Update while holding the store lock and
+// returns the exact snapshots on either side of that mutation.
+func (m *MemStore) UpdateWithTransition(id string, opts UpdateOpts) (UpdateTransition, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	i := m.indexOfLocked(id)
+	if i < 0 {
+		return UpdateTransition{}, fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+	}
+	before := m.snapshotBeadWithDepsLocked(m.beads[i])
+	m.applyUpdateLocked(i, opts)
+	after := m.snapshotBeadWithDepsLocked(m.beads[i])
+	return UpdateTransition{
+		Before:               before,
+		After:                after,
+		TransitionedToClosed: before.Status != "closed" && after.Status == "closed",
+	}, nil
+}
+
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
 func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
@@ -266,6 +291,41 @@ func (m *MemStore) Close(id string) error {
 	return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 }
 
+// CloseWithReasonIfOpen atomically closes a live bead and records its close
+// reason with a single revision bump. If the bead is already closed, it
+// returns the existing durable snapshot without changing it.
+func (m *MemStore) CloseWithReasonIfOpen(id, reason string) (CloseTransition, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	i := m.indexOfLocked(id)
+	if i < 0 {
+		return CloseTransition{}, fmt.Errorf("closing bead %q with reason: %w", id, ErrNotFound)
+	}
+
+	before := m.snapshotBeadWithDepsLocked(m.beads[i])
+	if m.beads[i].Status == "closed" {
+		return CloseTransition{Before: before, After: before}, nil
+	}
+
+	reason = closeReasonForTransition(before, reason)
+	if reason != "" {
+		if m.beads[i].Metadata == nil {
+			m.beads[i].Metadata = make(map[string]string)
+		}
+		m.beads[i].Metadata["close_reason"] = reason
+	}
+	m.beads[i].Status = "closed"
+	m.beads[i].UpdatedAt = time.Now().UTC()
+	m.beads[i].Revision++
+
+	return CloseTransition{
+		Before:       before,
+		After:        m.snapshotBeadWithDepsLocked(m.beads[i]),
+		Transitioned: true,
+	}, nil
+}
+
 // Reopen sets a bead's status to "open". Returns a wrapped ErrNotFound if the
 // ID does not exist.
 func (m *MemStore) Reopen(id string) error {
@@ -296,13 +356,35 @@ func (m *MemStore) Reopen(id string) error {
 func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.closeAllLocked(ids, metadata, false).Count, nil
+}
+
+// CloseAllWithTransitions closes the requested live beads under the same
+// store lock that owns the authoritative before/after classification.
+func (m *MemStore) CloseAllWithTransitions(ids []string, metadata map[string]string) (CloseAllTransitionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closeAllLocked(ids, metadata, true), nil
+}
+
+func (m *MemStore) closeAllLocked(ids []string, metadata map[string]string, captureTransitions bool) CloseAllTransitionResult {
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true
 	}
-	closed := 0
+	result := CloseAllTransitionResult{}
+	if captureTransitions {
+		result.Transitions = make(map[string]CloseTransition, len(idSet))
+	}
 	for i := range m.beads {
-		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
+		if !idSet[m.beads[i].ID] {
+			continue
+		}
+		before := m.snapshotBeadWithDepsLocked(m.beads[i])
+		if m.beads[i].Status == "closed" {
+			if captureTransitions {
+				result.Transitions[m.beads[i].ID] = CloseTransition{Before: before, After: cloneBead(before)}
+			}
 			continue
 		}
 		m.beads[i].Status = "closed"
@@ -314,15 +396,27 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		for k, v := range metadata {
 			m.beads[i].Metadata[k] = v
 		}
-		closed++
+		result.Count++
+		if captureTransitions {
+			result.Transitions[m.beads[i].ID] = CloseTransition{
+				Before:       before,
+				After:        m.snapshotBeadWithDepsLocked(m.beads[i]),
+				Transitioned: true,
+			}
+		}
 	}
-	return closed, nil
+	return result
 }
 
 // List returns beads matching the query.
 func (m *MemStore) List(query ListQuery) ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.listLocked(query)
+}
+
+// listLocked returns matching beads while the caller holds m.mu.
+func (m *MemStore) listLocked(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -441,17 +535,58 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 }
 
 // Get retrieves a bead by ID. Returns a wrapped ErrNotFound if the ID does
-// not exist.
+// not exist. The returned bead carries its stored dependency fields verbatim
+// (structured Dependencies or the Needs shorthand), matching every other read
+// path (List, Ready, Children); the DepAdd-side edge graph is exposed through
+// DepList, and the merged view is derived only at transition-snapshot time.
 func (m *MemStore) Get(id string) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.getLocked(id)
+}
 
+// getLocked returns one bead while the caller holds m.mu.
+func (m *MemStore) getLocked(id string) (Bead, error) {
 	for _, b := range m.beads {
 		if b.ID == id {
 			return cloneBead(b), nil
 		}
 	}
 	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+}
+
+// snapshotBeadWithDepsLocked returns a complete row replacement while the
+// caller holds m.mu. Transition/event snapshots must reflect the authoritative
+// dependency graph: m.deps (seeded from Needs at Create and mutated by
+// DepAdd/DepRemove) plus any structured Dependencies set directly on the bead at
+// Create (which Create does not mirror into m.deps). It deliberately does NOT
+// re-derive edges from the Needs shorthand — Needs was already converted to
+// m.deps at Create, so deriving it again would resurrect an edge a later
+// DepRemove deleted from the graph.
+func (m *MemStore) snapshotBeadWithDepsLocked(b Bead) Bead {
+	snapshot := cloneBead(b)
+	deps := snapshot.Dependencies
+	seen := make(map[Dep]struct{}, len(deps)+len(m.deps))
+	var merged []Dep
+	for _, dep := range deps {
+		if _, duplicate := seen[dep]; duplicate {
+			continue
+		}
+		seen[dep] = struct{}{}
+		merged = append(merged, dep)
+	}
+	for _, dep := range m.deps {
+		if dep.IssueID != snapshot.ID {
+			continue
+		}
+		if _, duplicate := seen[dep]; duplicate {
+			continue
+		}
+		seen[dep] = struct{}{}
+		merged = append(merged, dep)
+	}
+	snapshot.Dependencies = merged
+	return snapshot
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID,
@@ -567,7 +702,11 @@ func (m *MemStore) Ping() error {
 	return nil
 }
 
-// DepAdd records a dependency: issueID depends on dependsOnID.
+// DepAdd records a dependency: issueID depends on dependsOnID. The edge is
+// stored only in the dependency graph (m.deps); the stored bead's Needs and
+// Dependencies fields are left intact so read paths stay consistent and the
+// legacy Needs shorthand survives. Transition snapshots merge both
+// representations via snapshotBeadWithDepsLocked.
 func (m *MemStore) DepAdd(issueID, dependsOnID, depType string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -588,14 +727,16 @@ func (m *MemStore) DepAdd(issueID, dependsOnID, depType string) error {
 	return nil
 }
 
-// DepRemove removes a dependency between two beads.
+// DepRemove removes a dependency between two beads. Like DepAdd, it mutates
+// only the dependency graph and leaves the stored bead's Needs/Dependencies
+// fields untouched.
 func (m *MemStore) DepRemove(issueID, dependsOnID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, d := range m.deps {
 		if d.IssueID == issueID && d.DependsOnID == dependsOnID {
 			m.deps = append(m.deps[:i], m.deps[i+1:]...)
-			return nil
+			break
 		}
 	}
 	return nil // removing nonexistent dep is a no-op

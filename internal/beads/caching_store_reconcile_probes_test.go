@@ -291,7 +291,7 @@ func TestReconcileMergeNoInputAliasing(t *testing.T) {
 
 		c, _ := newMergeHarnessStore(st)
 		c.mu.Lock()
-		res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+		res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, 0, in.now)
 		snapshot := captureEndState(c)
 		c.mu.Unlock()
 

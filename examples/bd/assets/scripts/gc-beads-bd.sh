@@ -32,6 +32,14 @@
 
 set -e
 
+# A lifecycle owner delegates its lease only to the synchronous bd mutation
+# performed by bd-store-bridge. Quarantine the credential before runtime-layout,
+# port-allocation, and other setup helpers spawn; those commands must never be
+# mistaken for descendants authorized to join the mutation lease.
+lifecycle_mutation_scope="${GC_LIFECYCLE_MUTATION_SCOPE:-}"
+lifecycle_mutation_token="${GC_LIFECYCLE_MUTATION_TOKEN:-}"
+unset GC_LIFECYCLE_MUTATION_SCOPE GC_LIFECYCLE_MUTATION_TOKEN
+
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).
@@ -2896,7 +2904,16 @@ op_store_bridge() {
         die "gc binary not found for exec store operations"
     fi
 
-    GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
+    GC_LIFECYCLE_MUTATION_SCOPE="$lifecycle_mutation_scope" \
+        GC_LIFECYCLE_MUTATION_TOKEN="$lifecycle_mutation_token" \
+        GC_DOLT_PASSWORD="$DOLT_PASSWORD" \
+        BEADS_DOLT_PASSWORD="$DOLT_PASSWORD" \
+        "$gc_bin" bd-store-bridge \
+        --dir "$scope_dir" \
+        --host "$host" \
+        --port "$DOLT_PORT" \
+        --user "$DOLT_USER" \
+        "$@"
     return $?
 }
 op_health() {

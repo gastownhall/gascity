@@ -31,6 +31,14 @@ var rotatingBasenameRE = regexp.MustCompile(
 // writes a warning to stderr and returns an error. This prevents a
 // hash-colliding rotation from silently destroying a prior archive.
 func gzipAndArchive(source, dest string, stderr io.Writer) error {
+	return gzipAndArchiveWithParentSync(source, dest, stderr, syncEventLogParent)
+}
+
+func gzipAndArchiveWithParentSync(
+	source, dest string,
+	stderr io.Writer,
+	syncParent func(string) error,
+) error {
 	if _, err := os.Stat(dest); err == nil {
 		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 			"events: rotation: target archive %q already exists; leaving %q in place for operator inspection\n",
@@ -78,12 +86,43 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("renaming %q -> %q: %w", tmp, dest, err)
 	}
+	// Make the archive name durable before removing the only other link to the
+	// acknowledged segment. Without this ordering, a power loss can discard both
+	// the rename and the later source deletion even though the gzip contents were
+	// synced successfully.
+	if err := syncParent(dest); err != nil {
+		return fmt.Errorf("syncing archive directory after rename: %w", err)
+	}
 	if err := os.Remove(source); err != nil {
 		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 			"events: rotation: archive succeeded but failed to remove source %q: %v\n",
 			source, err)
+		return nil
+	}
+	if err := syncParent(dest); err != nil {
+		return fmt.Errorf("syncing archive directory after source removal: %w", err)
 	}
 	return nil
+}
+
+// gzipAndArchiveIfNeeded completes a live rotation unless a constructor that
+// won the rotation-maintenance lock already reaped the same source. A missing
+// source is successful only when the canonical destination exists; when both
+// exist gzipAndArchive retains its collision guard and leaves the source for
+// operator inspection.
+func gzipAndArchiveIfNeeded(source, dest string, stderr io.Writer) error {
+	if _, err := os.Stat(source); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat source: %w", err)
+		}
+		if _, destErr := os.Stat(dest); destErr == nil {
+			return nil
+		} else if !os.IsNotExist(destErr) {
+			return fmt.Errorf("stat destination: %w", destErr)
+		}
+		return fmt.Errorf("rotation source %q and archive %q are both missing", filepath.Base(source), filepath.Base(dest))
+	}
+	return gzipAndArchive(source, dest, stderr)
 }
 
 // reapOrphanedRotatingFiles cleans up rotation-era artifacts on
@@ -280,6 +319,7 @@ func readSeqWindow(path string) (uint64, uint64, error) {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(scanCommittedJSONLLines)
 	var first uint64
 	for scanner.Scan() {
 		var header struct {
@@ -334,6 +374,7 @@ func readGzipSeqWindow(path string) (uint64, uint64, error) {
 
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(scanCommittedJSONLLines)
 	var first, last uint64
 	for scanner.Scan() {
 		var header struct {

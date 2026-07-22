@@ -2,6 +2,8 @@ package beads_test
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -508,6 +510,70 @@ func TestMemStoreGetReturnsClonedDependencies(t *testing.T) {
 	}
 	if again.Dependencies[0].DependsOnID != "dep-1" {
 		t.Fatalf("DependsOnID after Get mutation = %q, want dep-1", again.Dependencies[0].DependsOnID)
+	}
+}
+
+func TestMemStoreDepAddDepRemovePreserveNeeds(t *testing.T) {
+	s := beads.NewMemStore()
+	created, err := s.Create(beads.Bead{Title: "needs-carrier", Needs: []string{"gc-2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DepAdd(created.ID, "gc-3", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got.Needs, "gc-2") {
+		t.Fatalf("Needs after DepAdd = %v, want to still contain gc-2", got.Needs)
+	}
+
+	if err := s.DepRemove(created.ID, "gc-3"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got.Needs, "gc-2") {
+		t.Fatalf("Needs after DepRemove = %v, want to still contain gc-2", got.Needs)
+	}
+}
+
+func TestMemStoreGetAndListAgreeOnDependencyFields(t *testing.T) {
+	s := beads.NewMemStore()
+	created, err := s.Create(beads.Bead{Title: "needs-carrier", Needs: []string{"gc-2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := s.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row beads.Bead
+	found := false
+	for _, b := range listed {
+		if b.ID == created.ID {
+			row = b
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("created bead missing from List")
+	}
+	if !reflect.DeepEqual(got.Dependencies, row.Dependencies) {
+		t.Fatalf("Dependencies shape differs between read paths: Get=%+v List=%+v", got.Dependencies, row.Dependencies)
+	}
+	if !reflect.DeepEqual(got.Needs, row.Needs) {
+		t.Fatalf("Needs shape differs between read paths: Get=%v List=%v", got.Needs, row.Needs)
 	}
 }
 

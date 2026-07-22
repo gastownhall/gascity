@@ -1889,6 +1889,7 @@ func TestCachingStoreUpdateClearsCachedDependenciesFromFreshBead(t *testing.T) {
 	fresh.Title = "Cleared"
 	fresh.Needs = nil
 	fresh.Dependencies = nil
+	fresh.Revision++
 	backing.fresh[blocked.ID] = fresh
 	title := "Cleared"
 	if err := cache.Update(blocked.ID, beads.UpdateOpts{Title: &title}); err != nil {

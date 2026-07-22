@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,12 +43,65 @@ type CachingStore struct {
 	mutationSeq     uint64
 	primePartialErr error
 
+	// closeObserverSuppressions ref-counts in-flight per-call close observer
+	// ownership by bead ID. Reconciliation consults it while holding mu so a
+	// close it observes mid-flight cannot race the initiating operation's own
+	// callback (or its explicit callback suppression).
+	closeObserverSuppressions map[string]int
+
+	// mutationScopeMu is shared by every cache over the same durable scope. It
+	// lets unknown multi-ID commits (transactions and graph
+	// apply) serialize with known-ID mutations. Known-ID mutations take the read
+	// side plus their sorted per-ID locks, preserving concurrency across
+	// different IDs. Generated-ID creates also hold the read side across their
+	// backing commit, then lock the returned ID before cache finalization.
+	// Unknown multi-ID mutations take the write side across backing commit,
+	// cache finalization, and notification reservation.
+	mutationScopeMu *sync.RWMutex
+	// mutationGeneration is shared by every cache over the same durable scope.
+	// Its per-bead generations fence replacement-handle reconciliation
+	// snapshots that local beadSeq values cannot see.
+	mutationGeneration *cacheMutationGeneration
+
+	// unknownMutationWaiters is protected by closeStateMu. It exposes the
+	// otherwise-unobservable RWMutex wait state to deterministic internal race
+	// tests; production behavior does not consult it.
+	unknownMutationWaiters int
+
+	// closeStateLocks and closeStateMu are shared by every cache over the same
+	// durable scope and serialize every known-ID mutation for the same bead.
+	// Backing I/O remains concurrent across different IDs, and callbacks run
+	// after these locks are released so observers may safely re-enter the store.
+	closeStateMu    *sync.Mutex
+	closeStateLocks map[string]*cacheCloseStateLock
+
+	// orderedNotificationQueues and orderedNotificationMu are shared by every
+	// cache over the same durable scope. They preserve the per-ID mutation order
+	// established by closeStateLocks without invoking callbacks while those
+	// locks are held.
+	// A callback may re-enter the store; reentrant notifications join the active
+	// queue and are drained after the current callback returns.
+	orderedNotificationMu     *sync.Mutex
+	orderedNotificationQueues map[string]*cacheOrderedNotificationQueue
+	// pendingPublications retains definite successful writes whose complete
+	// observer payload could not be read after commit. It is shared across cache
+	// handles for the same durable scope so a replacement handle can finish the
+	// publication after a provider reload.
+	pendingPublications *cachePendingPublications
+
 	reconciling  atomic.Bool
 	syncFailures int
-	stats        CacheStats
-	onChange     func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
-	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
+	// pendingRecoveryFailures counts consecutive reconcile passes whose targeted
+	// pending-intent recovery hit a non-NotFound read error, and
+	// lastPendingRecoveryAt stamps the most recent recovery attempt. Together they
+	// drive a bounded backoff so a persistently unreadable intent cannot pin
+	// full-scan reconciliation at the poll floor. Guarded by c.mu.
+	pendingRecoveryFailures int
+	lastPendingRecoveryAt   time.Time
+	stats                   CacheStats
+	onChange                cacheChangeObserver
+	problemf                func(string)
+	problemLog              map[string]cacheProblemLogState
 
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
 	// emitted by runReconciliation. Without this, a busy cache at SMALL
@@ -77,12 +131,15 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
-	applyEventBeforeCommitForTest func()
+	applyEventBeforeCommitForTest                           func()
+	reconcileAfterMergeBeforeNotificationReservationForTest func()
 }
 
 var (
-	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
-	_ AtomicTxStore                 = (*CachingStore)(nil)
+	_ ConditionalAssignmentReleaser    = (*CachingStore)(nil)
+	_ AtomicTxStore                    = (*CachingStore)(nil)
+	_ CanonicalGetter                  = (*CachingStore)(nil)
+	_ SequencedCloseObserverSuppressor = (*CachingStore)(nil)
 )
 
 type cacheState int
@@ -97,6 +154,16 @@ const (
 type cacheProblemLogState struct {
 	lastAt     time.Time
 	suppressed int64
+}
+
+type cacheCloseStateLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type cacheOrderedNotificationQueue struct {
+	draining bool
+	pending  []cacheObserverNotification
 }
 
 type fullPrimeCycle struct {
@@ -117,6 +184,12 @@ type CacheStats struct {
 	ReconcileRecoveries     int64
 	ReconcileCloseDeferrals int64
 	SyncFailures            int
+	// PendingRecoveryFailures is the current consecutive count of reconcile
+	// passes whose targeted pending-intent recovery hit a non-NotFound read
+	// error. A non-zero value means at least one committed mutation's observer
+	// publication is stalled behind an unreadable backing row and full-scan
+	// reconciliation is backing off rather than spinning at the poll floor.
+	PendingRecoveryFailures int
 	ProblemCount            int64
 	LastProblemAt           time.Time
 	LastProblem             string
@@ -149,6 +222,12 @@ const (
 	cacheReconcileIntervalLarge     = 120 * time.Second
 	cacheProblemLogWindow           = time.Minute
 	cacheReconcileFailureBackoff    = time.Minute
+	// cachePendingRecoveryBackoffShiftCap bounds the exponential term used to
+	// back off the pending-intent reconcile deadline after consecutive failed
+	// targeted recoveries. The delay grows as adaptiveInterval * 2^min(failures,
+	// cap) and is clamped at cacheReconcileFailureBackoff, so one persistently
+	// unreadable intent cannot pin full-scan reconciliation at the poll floor.
+	cachePendingRecoveryBackoffShiftCap = 6
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
 	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
 	// the reconciler's footprint in the operator-visible log stays bounded
@@ -232,6 +311,28 @@ func computeAutoStagger(agentID string) time.Duration {
 // stamps them onto the recorded event so the redacted export can forward them
 // as typed primitives without ever decoding the payload.
 func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) *CachingStore {
+	return newValidatedCachingStore(backing, adaptCacheChangeObserver(onChange))
+}
+
+// NewCachingStoreWithEventTimestamp is the recorder-facing constructor. It
+// includes the durable mutation's occurrence time so delayed recovery does not
+// inflate run-step duration by stamping an event at reconciliation time.
+func NewCachingStoreWithEventTimestamp(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage, occurredAt time.Time)) *CachingStore {
+	return newValidatedCachingStore(backing, onChange)
+}
+
+type cacheChangeObserver func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage, occurredAt time.Time)
+
+func adaptCacheChangeObserver(fn func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) cacheChangeObserver {
+	if fn == nil {
+		return nil
+	}
+	return func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage, _ time.Time) {
+		fn(eventType, beadID, runID, sessionID, stepID, payload)
+	}
+}
+
+func newValidatedCachingStore(backing Store, onChange cacheChangeObserver) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -273,11 +374,11 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 // adaptLegacyOnChange bridges the legacy 3-param onChange used by the test
 // constructors to the production 5-param form, dropping the run/session ids the
 // tests do not exercise. Nil-safe.
-func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) cacheChangeObserver {
 	if fn == nil {
 		return nil
 	}
-	return func(eventType, beadID string, _, _, _ string, payload json.RawMessage) {
+	return func(eventType, beadID string, _, _, _ string, payload json.RawMessage, _ time.Time) {
 		fn(eventType, beadID, payload)
 	}
 }
@@ -289,18 +390,27 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 	c.primeRetryDelay = fn
 }
 
-func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) *CachingStore {
+func newCachingStore(backing Store, idPrefix string, onChange cacheChangeObserver) *CachingStore {
+	coordination := cacheMutationCoordinationFor(backing)
 	return &CachingStore{
-		backing:     backing,
-		idPrefix:    normalizeIDPrefix(idPrefix),
-		beads:       make(map[string]Bead),
-		deps:        make(map[string][]Dep),
-		dirty:       make(map[string]struct{}),
-		beadSeq:     make(map[string]uint64),
-		localBeadAt: make(map[string]time.Time),
-		deletedSeq:  make(map[string]uint64),
-		problemLog:  make(map[string]cacheProblemLogState),
-		onChange:    onChange,
+		backing:                   backing,
+		idPrefix:                  normalizeIDPrefix(idPrefix),
+		beads:                     make(map[string]Bead),
+		deps:                      make(map[string][]Dep),
+		dirty:                     make(map[string]struct{}),
+		beadSeq:                   make(map[string]uint64),
+		localBeadAt:               make(map[string]time.Time),
+		deletedSeq:                make(map[string]uint64),
+		closeObserverSuppressions: make(map[string]int),
+		mutationScopeMu:           &coordination.mutationScopeMu,
+		mutationGeneration:        &coordination.mutationGeneration,
+		closeStateMu:              &coordination.closeStateMu,
+		closeStateLocks:           coordination.closeStateLocks,
+		orderedNotificationMu:     &coordination.orderedNotificationMu,
+		orderedNotificationQueues: coordination.orderedNotificationQueues,
+		pendingPublications:       &coordination.pendingPublications,
+		problemLog:                make(map[string]cacheProblemLogState),
+		onChange:                  onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
 		},
@@ -344,6 +454,13 @@ func (c *CachingStore) WaitForParentProjection(ctx context.Context, id, oldParen
 }
 
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
+	sharedGeneration := uint64(0)
+	if c.mutationGeneration != nil {
+		sharedGeneration = c.mutationGeneration.advance(ids...)
+	}
+	if c.pendingPublications != nil {
+		c.pendingPublications.resequence(ids, sharedGeneration)
+	}
 	c.mutationSeq++
 	seq := c.mutationSeq
 	for _, id := range ids {
@@ -353,6 +470,17 @@ func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 		c.beadSeq[id] = seq
 	}
 	return seq
+}
+
+func (c *CachingStore) sharedMutationGeneration() uint64 {
+	if c.mutationGeneration == nil {
+		return 0
+	}
+	return c.mutationGeneration.current()
+}
+
+func (c *CachingStore) sharedMutationChangedSince(id string, generation uint64) bool {
+	return c.mutationGeneration != nil && c.mutationGeneration.changedSince(id, generation)
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
@@ -365,6 +493,135 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 		c.localBeadAt[id] = now
 	}
 	return seq
+}
+
+func (c *CachingStore) lockCloseState(ids ...string) func() {
+	unlock, _ := c.lockCloseStateContended(ids...)
+	return unlock
+}
+
+// lockExclusiveCloseState fences a scope-wide eligibility/read/close window
+// while preserving the same per-ID ordering used by ordinary cache writes.
+// References are published before waiting on the scope lock so a replacement
+// cache handle cannot overtake this mutation in the shared notification order.
+func (c *CachingStore) lockExclusiveCloseState(ids ...string) func() {
+	ordered, locks, _ := c.reserveCloseStateLocks(ids...)
+	c.mutationScopeMu.Lock()
+	unlockIDs := c.lockReservedCloseState(ordered, locks)
+	return func() {
+		unlockIDs()
+		c.mutationScopeMu.Unlock()
+	}
+}
+
+// lockCloseStateContended also reports whether the mutation was ordered after
+// an already-reserved same-ID mutation. ApplyEvent uses that fact to
+// distinguish a newer event that arrived during an in-flight local mutation
+// from an ordinary stale event delivered after a local mutation completed.
+func (c *CachingStore) lockCloseStateContended(ids ...string) (func(), bool) {
+	ordered, locks, contended := c.reserveCloseStateLocks(ids...)
+	if len(ordered) == 0 {
+		return func() {}, false
+	}
+
+	c.mutationScopeMu.RLock()
+	unlockIDs := c.lockReservedCloseState(ordered, locks)
+	return func() {
+		unlockIDs()
+		c.mutationScopeMu.RUnlock()
+	}, contended
+}
+
+// reserveCloseStateLocks publishes this mutation's per-ID lock references
+// before it waits on mutationScopeMu. That ordering makes an ID-scoped writer
+// waiting behind an unknown-scope transaction observable to deterministic race
+// tests without changing the actual lock order: scope lock, per-ID locks, then
+// the cache mutex.
+func (c *CachingStore) reserveCloseStateLocks(ids ...string) ([]string, []*cacheCloseStateLock, bool) {
+	unique := make(map[string]struct{}, len(ids))
+	ordered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, exists := unique[id]; exists {
+			continue
+		}
+		unique[id] = struct{}{}
+		ordered = append(ordered, id)
+	}
+	if len(ordered) == 0 {
+		return nil, nil, false
+	}
+	sort.Strings(ordered)
+
+	c.closeStateMu.Lock()
+	if c.closeStateLocks == nil {
+		c.closeStateLocks = make(map[string]*cacheCloseStateLock)
+	}
+	locks := make([]*cacheCloseStateLock, len(ordered))
+	contended := false
+	for i, id := range ordered {
+		entry := c.closeStateLocks[id]
+		if entry == nil {
+			entry = &cacheCloseStateLock{}
+			c.closeStateLocks[id] = entry
+		} else {
+			contended = true
+		}
+		entry.refs++
+		locks[i] = entry
+	}
+	c.closeStateMu.Unlock()
+	return ordered, locks, contended
+}
+
+// lockReservedCloseState acquires and later releases a previously reserved,
+// sorted per-ID lock set. The caller must already hold mutationScopeMu for
+// reading or writing.
+func (c *CachingStore) lockReservedCloseState(ordered []string, locks []*cacheCloseStateLock) func() {
+	for _, entry := range locks {
+		entry.mu.Lock()
+	}
+	return func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].mu.Unlock()
+		}
+		c.closeStateMu.Lock()
+		for i, id := range ordered {
+			entry := locks[i]
+			entry.refs--
+			if entry.refs == 0 && c.closeStateLocks[id] == entry {
+				delete(c.closeStateLocks, id)
+			}
+		}
+		c.closeStateMu.Unlock()
+	}
+}
+
+// lockUnknownMutationScope serializes a mutation whose concrete bead IDs are
+// not available until its backing operation commits. Callers must hold the
+// returned lock across cache finalization and ordered-notification reservation,
+// then release it before invoking any observer callback.
+func (c *CachingStore) lockUnknownMutationScope() func() {
+	c.closeStateMu.Lock()
+	c.unknownMutationWaiters++
+	c.closeStateMu.Unlock()
+
+	c.mutationScopeMu.Lock()
+
+	c.closeStateMu.Lock()
+	c.unknownMutationWaiters--
+	c.closeStateMu.Unlock()
+	return c.mutationScopeMu.Unlock
+}
+
+// closeObserverSuppressedLocked reports whether reconciliation must omit a
+// synthesized bead.closed notification for id. Created and updated events are
+// unrelated observations and remain visible while the close is in flight.
+// Caller must hold c.mu.
+func (c *CachingStore) closeObserverSuppressedLocked(id string) bool {
+	return c.closeObserverSuppressions[id] > 0
 }
 
 // absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
@@ -1211,6 +1468,7 @@ func (c *CachingStore) updateStatsLocked() {
 	}
 	c.stats.TotalDeps = totalDeps
 	c.stats.SyncFailures = c.syncFailures
+	c.stats.PendingRecoveryFailures = c.pendingRecoveryFailures
 	c.updateCadenceStatsLocked()
 }
 

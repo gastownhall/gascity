@@ -104,7 +104,7 @@ func TestReconcileMergeDifferential_TwoPass(t *testing.T) {
 					live := cloneSnapshotInputs(in1) // pass1's preserve mutates freshByID
 					c, _ := newMergeHarnessStore(st0)
 					c.mu.Lock()
-					c.mergeSnapshotLocked(live.freshByID, live.confirmedClosed, live.depMap, live.useFreshDeps, live.startSeq, live.now)
+					c.mergeSnapshotLocked(live.freshByID, live.confirmedClosed, live.depMap, live.useFreshDeps, live.startSeq, 0, live.now)
 					seqBefore := c.mutationSeq
 					opNow := in1.now
 					id := targetIDs[0]

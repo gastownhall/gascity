@@ -847,11 +847,17 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
 
 	recorder := events.Discard
-	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
-		recorder = fr
-		eventProv = fr
+	var eventProv events.Provider // nil when configured provider construction fails
+	if provider, err := newCityEventsProvider(cityPath, cfg.Events, stderr); err == nil {
+		stableProvider := newReloadableEventsProvider(provider)
+		stableProvider.setActiveProviderName(effectiveEventsProviderConfig(cfg.Events).provider)
+		recorder = stableProvider
+		eventProv = stableProvider
+		defer func() {
+			if closeErr := stableProvider.Close(); closeErr != nil {
+				fmt.Fprintf(stderr, "gc start: close events provider: %v\n", closeErr) //nolint:errcheck // best-effort stderr
+			}
+		}()
 	}
 
 	// Pre-check container images once (fail fast before N serial starts).

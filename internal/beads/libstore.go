@@ -18,11 +18,13 @@ type BeadsLibStore struct { //nolint:revive // name intentional: disambiguates f
 // server started by "bd init --server" in that directory.
 func NewBeadsLibStore(dir, idPrefix string) (*BeadsLibStore, error) {
 	beadsDir := filepath.Join(dir, ".beads")
-	runner := ExecCommandRunnerWithEnv(map[string]string{
+	env := map[string]string{
 		"BEADS_DIR":             beadsDir,
 		"BEADS_DOLT_AUTO_START": "1",
-	})
-	bd := NewBdStoreWithPrefix(dir, runner, idPrefix)
+	}
+	runner := ExecCommandRunnerWithEnv(env)
+	bd := NewBdStoreWithPrefix(dir, runner, idPrefix,
+		WithBdStoreCommandEnvRunner(ExecCommandEnvRunnerWithEnv(env)))
 	return &BeadsLibStore{BdStore: bd, dir: dir}, nil
 }
 

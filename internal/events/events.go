@@ -12,6 +12,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -152,8 +153,10 @@ const (
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
-	// MoleculeResolved fires once at the molecule-autoclose Go close site
-	// when a molecule root transitions to closed. It carries the
+	// MoleculeResolved is emitted at the molecule-autoclose Go close site when
+	// a molecule root transitions to closed. Durable lifecycle recovery is
+	// intentionally at-least-once: a failed acknowledgement can repeat the
+	// identical transition, so consumers must fold it idempotently. It carries the
 	// state-transition record (issue, from/to status, close reason) joined
 	// to the resolving session, resolved from the root's stamped metadata
 	// (gc.session_name / gc.session_id / gc.work_dir). It is additive: the
@@ -317,6 +320,17 @@ type Recorder interface {
 	Record(e Event)
 }
 
+// DurableRecorder is an optional Recorder capability for state transitions
+// whose recovery intent must not be cleared until event publication is
+// acknowledged. Implementations append the supplied batch in order and return
+// nil only after the append is durably acknowledged. A non-nil error may follow
+// a partial append, so callers must retain their recovery intent and retry with
+// at-least-once semantics.
+type DurableRecorder interface {
+	Recorder
+	RecordDurably(events ...Event) error
+}
+
 // Provider is the full interface for event backends. It embeds Recorder
 // for writing and adds reading, querying, and watching. Implementations
 // include FileRecorder (built-in JSONL file) and exec (user-supplied
@@ -364,6 +378,18 @@ type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
 }
 
+// ErrRotationUnsupported reports that the current event backend cannot rotate
+// its log. Callers should treat this as a capability mismatch, not as a failed
+// rotation attempt.
+var ErrRotationUnsupported = errors.New("event provider does not support rotation")
+
+// RotatingProvider is an optional extension for providers that support an
+// operator-requested event-log rotation. FileRecorder implements it directly;
+// stable delegating providers use it to preserve the capability across reloads.
+type RotatingProvider interface {
+	ForceRotate() (RotationResult, error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {
@@ -378,7 +404,8 @@ type Watcher interface {
 	Close() error
 }
 
-// Discard silently drops all events.
+// Discard silently drops best-effort events. It deliberately does not
+// implement DurableRecorder: a discarded event is not durable publication.
 var Discard Recorder = discardRecorder{}
 
 type discardRecorder struct{}

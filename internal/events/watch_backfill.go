@@ -189,7 +189,7 @@ func (sr *segmentReader) readInto(filter Filter, maxSeq *uint64, out *[]Event, b
 	added := 0
 	for added < batch {
 		line, err := sr.br.ReadBytes('\n')
-		if len(line) > 0 {
+		if len(line) > 0 && line[len(line)-1] == '\n' {
 			var e Event
 			if json.Unmarshal(trimLine(line), &e) == nil && matchesFilter(e, filter) && e.Seq > *maxSeq {
 				*maxSeq = e.Seq

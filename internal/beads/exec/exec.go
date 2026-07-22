@@ -33,6 +33,15 @@ func (s *Store) SetEnv(env map[string]string) {
 	s.env = env
 }
 
+// CacheMutationScope returns the configured durable store scope so decorating
+// caches opened during a controller reload share mutation/event ordering.
+func (s *Store) CacheMutationScope() string {
+	if s == nil {
+		return ""
+	}
+	return s.env["GC_STORE_ROOT"]
+}
+
 // NewStore returns a Store that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
@@ -43,14 +52,23 @@ func NewStore(script string) *Store {
 	}
 }
 
-func execProcessEnv(overrides map[string]string) []string {
-	out := make([]string, 0, len(os.Environ())+len(overrides))
+func execProcessEnv(base, explicit map[string]string) []string {
+	out := make([]string, 0, len(os.Environ())+len(base)+len(explicit))
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok || stripExecEnvKey(key) {
 			continue
 		}
 		out = append(out, entry)
+	}
+	overrides := make(map[string]string, len(base)+len(explicit))
+	for key, value := range base {
+		if !isLifecycleMutationEnvKey(key) {
+			overrides[key] = value
+		}
+	}
+	for key, value := range explicit {
+		overrides[key] = value
 	}
 	keys := make([]string, 0, len(overrides))
 	for key := range overrides {
@@ -65,19 +83,29 @@ func execProcessEnv(overrides map[string]string) []string {
 
 func stripExecEnvKey(key string) bool {
 	switch key {
-	case "GC_BEADS_PREFIX", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PROVIDER", "GC_RIG", "GC_RIG_ROOT", "GC_STORE_ROOT", "GC_STORE_SCOPE":
+	case "GC_BEADS_PREFIX", "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR", "GC_LIFECYCLE_MUTATION_SCOPE", "GC_LIFECYCLE_MUTATION_TOKEN", "GC_PROVIDER", "GC_RIG", "GC_RIG_ROOT", "GC_STORE_ROOT", "GC_STORE_SCOPE":
 		return true
 	}
 	return strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "GC_DOLT_")
 }
 
+func isLifecycleMutationEnvKey(key string) bool {
+	return key == "GC_LIFECYCLE_MUTATION_SCOPE" || key == "GC_LIFECYCLE_MUTATION_TOKEN"
+}
+
 // run executes the script with the given args, optionally piping stdinData
 // to its stdin. Returns the trimmed stdout on success.
 //
-// Exit code 2 is treated as success for unknown operation names. When ready is
-// called with contract flags, exit code 2 means the invocation was rejected and
-// must surface as an error instead of silently returning empty data.
+// Exit code 2 is treated as success for unknown operation names, matching the
+// documented exec-provider forward-compatibility contract. The one exception is
+// a `ready` call carrying contract flags (such as --include-ephemeral): there,
+// exit 2 fails closed so runnable ephemeral beads are never quietly hidden from
+// the orchestrator.
 func (s *Store) run(stdinData []byte, args ...string) (string, error) {
+	return s.runWithCommandEnv(stdinData, nil, args...)
+}
+
+func (s *Store) runWithCommandEnv(stdinData []byte, commandEnv map[string]string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 
@@ -86,7 +114,7 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	// expires, even if grandchild processes still hold them open.
 	cmd.WaitDelay = 2 * time.Second
 
-	cmd.Env = execProcessEnv(s.env)
+	cmd.Env = execProcessEnv(s.env, commandEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -101,7 +129,7 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 2 {
-				if readyExit2IsRejectedInvocation(args) {
+				if exit2IsRejectedInvocation(args) {
 					errMsg := strings.TrimSpace(stderr.String())
 					if errMsg == "" {
 						errMsg = err.Error()
@@ -121,8 +149,19 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	return strings.TrimRight(stdout.String(), "\n"), nil
 }
 
-func readyExit2IsRejectedInvocation(args []string) bool {
-	return len(args) > 1 && args[0] == "ready"
+// exit2IsRejectedInvocation reports whether an exit-2 response must fail closed
+// rather than degrade to the documented "unknown operation → no-op success".
+// Only `ready` invoked with contract flags qualifies: silently hiding runnable
+// ephemeral beads from the orchestrator is worse than a hard error. `dep-list`
+// is deliberately excluded — the exec-provider contract lets a script omit it
+// and expects an empty dependency list, which the composed callers (convoy
+// membership, drain, event hydration, and the lifecycle close path) treat as
+// the complete answer.
+func exit2IsRejectedInvocation(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return args[0] == "ready" && len(args) > 1
 }
 
 // isNotFoundError reports whether an error from the script indicates a
@@ -171,28 +210,39 @@ func (w *beadWire) toBead() beads.Bead {
 		status = "open"
 	}
 	return beads.Bead{
-		ID:          w.ID,
-		Title:       w.Title,
-		Status:      status,
-		Type:        w.Type,
-		Priority:    priority,
-		CreatedAt:   w.CreatedAt,
-		UpdatedAt:   w.UpdatedAt,
-		Assignee:    w.Assignee,
-		From:        w.From,
-		ParentID:    w.ParentID,
-		Ref:         w.Ref,
-		Needs:       w.Needs,
-		Description: w.Description,
-		Labels:      w.Labels,
-		Metadata:    coerceMetadata(w.Metadata),
-		Ephemeral:   w.Ephemeral,
-		NoHistory:   w.NoHistory,
-		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		ID:           w.ID,
+		Title:        w.Title,
+		Status:       status,
+		Type:         w.Type,
+		Priority:     priority,
+		CreatedAt:    w.CreatedAt,
+		UpdatedAt:    w.UpdatedAt,
+		Revision:     w.Revision,
+		Assignee:     w.Assignee,
+		From:         w.From,
+		ParentID:     w.ParentID,
+		Ref:          w.Ref,
+		Needs:        w.Needs,
+		Description:  w.Description,
+		Labels:       w.Labels,
+		Metadata:     coerceMetadata(w.Metadata),
+		Dependencies: append([]beads.Dep(nil), w.Dependencies...),
+		Ephemeral:    w.Ephemeral,
+		NoHistory:    w.NoHistory,
+		DeferUntil:   cloneTimePtr(w.DeferUntil),
+		IsBlocked:    cloneBoolPtr(w.IsBlocked),
 	}
 }
 
 func cloneTimePtr(v *time.Time) *time.Time {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
+func cloneBoolPtr(v *bool) *bool {
 	if v == nil {
 		return nil
 	}
@@ -283,7 +333,11 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 // would break them. A new exec: wrapper that closes agent-owned beads must
 // inject --force itself.
 func (s *Store) Close(id string) error {
-	_, err := s.run(nil, "close", id)
+	return s.closeWithCommandEnv(id, nil)
+}
+
+func (s *Store) closeWithCommandEnv(id string, commandEnv map[string]string) error {
+	_, err := s.runWithCommandEnv(nil, commandEnv, "close", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("closing bead %q: %w", id, beads.ErrNotFound)
@@ -450,7 +504,11 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
-	_, err := s.run([]byte(value), "set-metadata", id, key)
+	return s.setMetadataWithCommandEnv(id, key, value, nil)
+}
+
+func (s *Store) setMetadataWithCommandEnv(id, key, value string, commandEnv map[string]string) error {
+	_, err := s.runWithCommandEnv([]byte(value), commandEnv, "set-metadata", id, key)
 	if err != nil {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
@@ -460,12 +518,114 @@ func (s *Store) SetMetadata(id, key, value string) error {
 // SetMetadataBatch sets multiple key-value metadata pairs on a bead.
 // Delegates to sequential SetMetadata calls.
 func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
+	return s.setMetadataBatchWithCommandEnv(id, kvs, nil)
+}
+
+func (s *Store) setMetadataBatchWithCommandEnv(id string, kvs map[string]string, commandEnv map[string]string) error {
 	for k, v := range kvs {
-		if err := s.SetMetadata(id, k, v); err != nil {
+		if err := s.setMetadataWithCommandEnv(id, k, v, commandEnv); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// WithLifecycleMetadataTransaction holds the durable GC_STORE_ROOT lifecycle
+// lease while the callback performs live reads and bridge mutations. Mutation
+// mutation children receive a transaction-local lease delegation; reads and
+// ordinary exec children never inherit lifecycle ownership from the process.
+func (s *Store) WithLifecycleMetadataTransaction(id string, fn func(beads.LifecycleMetadataTransaction) error) error {
+	if s == nil {
+		return errors.New("lifecycle metadata transaction: nil exec Store")
+	}
+	if fn == nil {
+		return errors.New("lifecycle metadata transaction: nil callback")
+	}
+	scope := strings.TrimSpace(s.CacheMutationScope())
+	if scope == "" {
+		return errors.New("lifecycle metadata transaction: exec Store has no GC_STORE_ROOT")
+	}
+	return beads.WithLifecycleMutationLease(scope, func(commandEnv map[string]string) error {
+		return fn(execLifecycleMetadataTransaction{
+			id:         id,
+			store:      s,
+			commandEnv: commandEnv,
+		})
+	})
+}
+
+type execLifecycleMetadataTransaction struct {
+	id         string
+	store      *Store
+	commandEnv map[string]string
+}
+
+func (tx execLifecycleMetadataTransaction) Get() (beads.Bead, error) {
+	return tx.GetByID(tx.id)
+}
+
+func (tx execLifecycleMetadataTransaction) GetByID(id string) (beads.Bead, error) {
+	bead, err := tx.store.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	// A script that does not implement dep-list exits 2, which DepList degrades
+	// to an empty dependency list per the exec-provider contract. That empty set
+	// is the complete answer for a backend with no dependency concept, so the
+	// lifecycle payload stays complete rather than failing the close.
+	dependencies, err := tx.store.DepList(id, "down")
+	if err != nil {
+		return beads.Bead{}, fmt.Errorf("loading lifecycle dependencies for %q: %w", id, err)
+	}
+	bead.Dependencies = dependencies
+	return bead, nil
+}
+
+func (tx execLifecycleMetadataTransaction) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	// The exec `list` wire forwards only --status/--assignee/--type/--limit to the
+	// script; Live, TierMode, IncludeClosed, and Metadata are applied client-side
+	// by ApplyListQuery, which can filter a returned superset but cannot recover
+	// rows the script never emitted. Scripts (including the bundled bd bridge)
+	// default `list` to open, issues-tier beads, so a lifecycle read carrying
+	// IncludeClosed/TierBoth/Metadata would silently omit closed beads and
+	// ephemeral wisps. Fail loud so lifecycle-read consumers take their
+	// conservative fallback instead of proving from an incomplete subtree.
+	return nil, fmt.Errorf("exec lifecycle read: %w", beads.ErrLifecycleReadUnsupported)
+}
+
+func (tx execLifecycleMetadataTransaction) SetMetadata(key, value string) error {
+	return tx.store.setMetadataWithCommandEnv(tx.id, key, value, tx.commandEnv)
+}
+
+func (tx execLifecycleMetadataTransaction) SetMetadataBatch(values map[string]string) error {
+	return tx.store.setMetadataBatchWithCommandEnv(tx.id, values, tx.commandEnv)
+}
+
+func (tx execLifecycleMetadataTransaction) CloseWithReasonWithoutObserver(reason string) (beads.LifecycleCloseResult, error) {
+	before, err := tx.Get()
+	if err != nil {
+		return beads.LifecycleCloseResult{}, err
+	}
+	result := beads.LifecycleCloseResult{Before: before}
+	if before.Status == "closed" {
+		result.After = before
+		return result, nil
+	}
+
+	trimmedReason := strings.TrimSpace(reason)
+	if trimmedReason != "" && strings.TrimSpace(before.Metadata["close_reason"]) != trimmedReason {
+		if err := tx.SetMetadata("close_reason", trimmedReason); err != nil {
+			return result, err
+		}
+	}
+	closeErr := tx.store.closeWithCommandEnv(tx.id, tx.commandEnv)
+	result.CloseSucceeded = closeErr == nil
+	after, readErr := tx.Get()
+	if readErr == nil {
+		result.After = after
+		result.Transitioned = before.Status != "closed" && after.Status == "closed"
+	}
+	return result, closeErr
 }
 
 // Tx executes fn sequentially against the exec store.
@@ -526,4 +686,9 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 }
 
 // Compile-time interface check.
-var _ beads.Store = (*Store)(nil)
+var (
+	_ beads.Store                             = (*Store)(nil)
+	_ beads.LifecycleMetadataTransactionStore = (*Store)(nil)
+	_ beads.LifecycleCloseTransaction         = execLifecycleMetadataTransaction{}
+	_ beads.LifecycleReadTransaction          = execLifecycleMetadataTransaction{}
+)

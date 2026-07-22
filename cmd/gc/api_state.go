@@ -38,6 +38,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/ssrf"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -82,8 +83,21 @@ type controllerState struct {
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	// beadEventStartSeq is both the next watcher's cursor and the last sequence
+	// fully applied by the prior watcher. Reload resumes from this applied
+	// cursor—not from the backend head—so cancellation cannot skip a fetched or
+	// queued bead.close event. A destination backend must preserve equivalent
+	// history through the source head before it can be hot-swapped.
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	beadEventLifecycleMu   sync.Mutex
+	beadEventWatchCancel   context.CancelFunc
+	beadEventRecoverCancel context.CancelFunc
+	beadEventRecoverNotify chan struct{}
+	beadEventLoopWorkers   sync.WaitGroup
+	beadEventAutoWorkers   sync.WaitGroup
+	beadEventWorkerState   beadEventWorkerState
+	moleculeLifecycleOpMu  sync.Mutex
 
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
@@ -122,6 +136,26 @@ type controllerState struct {
 var controllerStateInitRigDirIfReady = initDirIfReady
 
 var beadEventWatcherRetryDelay = time.Second
+
+const (
+	moleculeLifecycleRecoveryInterval   = 5 * time.Minute
+	moleculeLifecycleRecoveryRetryFloor = 250 * time.Millisecond
+	moleculeLifecycleRecoveryRetryMax   = 5 * time.Second
+)
+
+type beadEventWorkerState uint8
+
+const (
+	beadEventWorkersRunning beadEventWorkerState = iota
+	beadEventWorkersPausingLoops
+	beadEventWorkersPausingAutoclose
+	beadEventWorkersPaused
+	beadEventWorkersStoppingLoops
+	beadEventWorkersStoppingAutoclose
+	beadEventWorkersStopped
+)
+
+var controllerRecoverMoleculeLifecycleIntents = recoverMoleculeLifecycleIntentsWithResolver
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
@@ -239,10 +273,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage, occurredAt time.Time) {
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:      eventType,
+				Ts:        occurredAt,
 				Actor:     "cache-reconcile",
 				Subject:   beadID,
 				RunID:     runID,
@@ -252,7 +287,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(baseStore, onChange)
+	cs := beads.NewCachingStoreWithEventTimestamp(baseStore, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -445,7 +480,17 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Recovery is independent of the watcher cursor. Start it before resolving
+	// an untrusted cursor so a transient LatestSeq failure can disable cache
+	// replay without also disabling durable lifecycle publication.
+	cs.startMoleculeLifecycleRecovery(ctx)
+	cs.beadEventLifecycleMu.Lock()
 	seq := cs.beadEventStartSeq
+	startSeqOK := cs.beadEventStartSeqOK
+	cs.beadEventLifecycleMu.Unlock()
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
 	// nothing more (nothing older is retained), which is the replay contract
@@ -454,24 +499,39 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	// history" (across archives), so re-resolve the head here and fail closed
 	// (skip the watcher; the scale patrol still converges) rather than flood
 	// the bead caches with the whole log.
-	if !cs.beadEventStartSeqOK {
+	if !startSeqOK {
 		latest, err := ep.LatestSeq()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "api: bead event watcher: start cursor unresolved (%v); skipping watcher\n", err)
 			return
 		}
 		seq = latest
+		cs.beadEventLifecycleMu.Lock()
+		cs.beadEventStartSeq = latest
+		cs.beadEventStartSeqOK = true
+		cs.beadEventLifecycleMu.Unlock()
 	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState != beadEventWorkersRunning || cs.beadEventWatchCancel != nil {
+		cs.beadEventLifecycleMu.Unlock()
+		cancel()
+		return
+	}
+	cs.beadEventWatchCancel = cancel
+	cs.beadEventLoopWorkers.Add(1)
+	cs.beadEventLifecycleMu.Unlock()
 	go func() {
+		defer cs.beadEventLoopWorkers.Done()
 		for {
-			watcher, err := ep.Watch(ctx, seq)
+			watcher, err := ep.Watch(watchCtx, seq)
 			if err != nil {
-				if ctx.Err() != nil {
+				if watchCtx.Err() != nil {
 					return
 				}
 				fmt.Fprintf(os.Stderr, "api: bead event watcher: watch from seq %d: %v\n", seq, err)
 				select {
-				case <-ctx.Done():
+				case <-watchCtx.Done():
 					return
 				case <-time.After(beadEventWatcherRetryDelay):
 					continue
@@ -483,17 +543,388 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 					_ = watcher.Close()
 					break
 				}
-				seq = evt.Seq
 				switch evt.Type {
 				case events.BeadCreated, events.BeadUpdated, events.BeadClosed, events.BeadDeleted:
 					cs.applyBeadEventToStores(evt)
 				}
+				// Advance only after the event's cache/autoclose handoff has
+				// completed. A reload cancellation can then replay any event that
+				// was fetched but not fully applied.
+				seq = evt.Seq
+				cs.beadEventLifecycleMu.Lock()
+				cs.beadEventStartSeq = seq
+				cs.beadEventStartSeqOK = true
+				cs.beadEventLifecycleMu.Unlock()
 			}
-			if ctx.Err() != nil {
+			if watchCtx.Err() != nil {
 				return
 			}
 		}
 	}()
+}
+
+// startMoleculeLifecycleRecovery owns durable molecule lifecycle recovery for
+// the controller's current city and rig stores. The initial pass runs in the
+// worker goroutine; later passes are coalesced by a single buffered notification
+// or triggered by the low-frequency safety-net ticker.
+func (cs *controllerState) startMoleculeLifecycleRecovery(ctx context.Context) {
+	if cs.EventProvider() == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	notify := make(chan struct{}, 1)
+
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState != beadEventWorkersRunning || cs.beadEventRecoverCancel != nil {
+		cs.beadEventLifecycleMu.Unlock()
+		cancel()
+		return
+	}
+	cs.beadEventRecoverCancel = cancel
+	cs.beadEventRecoverNotify = notify
+	cs.beadEventLoopWorkers.Add(1)
+	cs.beadEventLifecycleMu.Unlock()
+
+	go func() {
+		defer cs.beadEventLoopWorkers.Done()
+		ticker := time.NewTicker(moleculeLifecycleRecoveryInterval)
+		defer ticker.Stop()
+		runMoleculeLifecycleRecoveryLoop(recoveryCtx, notify, ticker.C, cs.recoverMoleculeLifecycleStores, time.After)
+	}()
+}
+
+// runMoleculeLifecycleRecoveryLoop is split from timer construction so tests
+// can drive every wakeup without wall-clock sleeps. A true recovery result
+// schedules one bounded exponential-backoff retry; malformed or ineligible
+// intents return false and therefore cannot create a hot loop.
+func runMoleculeLifecycleRecoveryLoop(
+	ctx context.Context,
+	notify chan struct{},
+	ticks <-chan time.Time,
+	recoverFn func() bool,
+	retryAfter func(time.Duration) <-chan time.Time,
+) {
+	if recoverFn == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	retryDelay := moleculeLifecycleRecoveryRetryFloor
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		needsRetry := recoverFn()
+		var retry <-chan time.Time
+		if needsRetry && retryAfter != nil {
+			retry = retryAfter(retryDelay)
+			retryDelay = nextMoleculeLifecycleRecoveryRetryDelay(retryDelay)
+		} else if !needsRetry {
+			retryDelay = moleculeLifecycleRecoveryRetryFloor
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-notify:
+			retryDelay = moleculeLifecycleRecoveryRetryFloor
+		case <-ticks:
+			retryDelay = moleculeLifecycleRecoveryRetryFloor
+		case <-retry:
+		}
+	}
+}
+
+func nextMoleculeLifecycleRecoveryRetryDelay(current time.Duration) time.Duration {
+	if current < moleculeLifecycleRecoveryRetryFloor {
+		return moleculeLifecycleRecoveryRetryFloor
+	}
+	if current >= moleculeLifecycleRecoveryRetryMax/2 {
+		return moleculeLifecycleRecoveryRetryMax
+	}
+	return current * 2
+}
+
+type controllerMoleculeLifecycleRecoveryStore struct {
+	store beads.Store
+	refs  []string
+}
+
+// recoverMoleculeLifecycleStores snapshots the current controller handles and
+// their logical city:/rig: ownership for each pass. Exact aliased handles are
+// scanned once, while every logical ref remains available to source recovery.
+func (cs *controllerState) recoverMoleculeLifecycleStores() bool {
+	cs.moleculeLifecycleOpMu.Lock()
+	defer cs.moleculeLifecycleOpMu.Unlock()
+
+	cs.mu.RLock()
+	rec := cs.eventProv
+	stores := make([]controllerMoleculeLifecycleRecoveryStore, 0, len(cs.beadStores)+1)
+	storesByRef := make(map[string]beads.Store, len(cs.beadStores)+1)
+	ambiguousRefs := make(map[string]struct{})
+	registerRef := func(ref string, store beads.Store) {
+		ref = sourceworkflow.NormalizeSourceStoreRef(ref)
+		if ref == "" || store == nil {
+			return
+		}
+		if _, ambiguous := ambiguousRefs[ref]; ambiguous {
+			return
+		}
+		if existing, exists := storesByRef[ref]; exists {
+			if sameMoleculeLifecycleStore(existing, store) {
+				return
+			}
+			delete(storesByRef, ref)
+			ambiguousRefs[ref] = struct{}{}
+			return
+		}
+		storesByRef[ref] = store
+	}
+	appendStore := func(store beads.Store, ref string) {
+		if store == nil {
+			return
+		}
+		ref = sourceworkflow.NormalizeSourceStoreRef(ref)
+		registerRef(ref, store)
+		for i := range stores {
+			if !sameMoleculeLifecycleStore(stores[i].store, store) {
+				continue
+			}
+			if ref != "" {
+				for _, existingRef := range stores[i].refs {
+					if existingRef == ref {
+						return
+					}
+				}
+				stores[i].refs = append(stores[i].refs, ref)
+			}
+			return
+		}
+		entry := controllerMoleculeLifecycleRecoveryStore{store: store}
+		if ref != "" {
+			entry.refs = []string{ref}
+		}
+		stores = append(stores, entry)
+	}
+	cityPath := cs.cityPath
+	cfg := cs.cfg
+	cityRef := ""
+	if cfg != nil {
+		cityRef = workflowStoreRefForDir(cityPath, cityPath, loadedCityName(cfg, cityPath), cfg)
+	}
+	appendStore(cs.cityBeadStore, cityRef)
+	configuredRigs := make(map[string]struct{})
+	if cfg != nil {
+		for _, configuredRig := range cfg.Rigs {
+			configuredRigs[configuredRig.Name] = struct{}{}
+			rigPath := strings.TrimSpace(configuredRig.Path)
+			rigRef := ""
+			if rigPath != "" {
+				if !filepath.IsAbs(rigPath) {
+					rigPath = filepath.Join(cityPath, rigPath)
+				}
+				rigRef = workflowStoreRefForDir(rigPath, cityPath, loadedCityName(cfg, cityPath), cfg)
+			}
+			appendStore(cs.beadStores[configuredRig.Name], rigRef)
+		}
+	}
+	for rigName, store := range cs.beadStores {
+		if _, configured := configuredRigs[rigName]; configured {
+			continue
+		}
+		appendStore(store, "")
+	}
+	cs.mu.RUnlock()
+
+	if rec == nil {
+		return false
+	}
+	resolve := moleculeLifecycleStoreResolver(func(storeRef string) (beads.Store, bool) {
+		storeRef = sourceworkflow.NormalizeSourceStoreRef(storeRef)
+		if storeRef == "" {
+			return nil, false
+		}
+		if _, ambiguous := ambiguousRefs[storeRef]; ambiguous {
+			return nil, false
+		}
+		store, ok := storesByRef[storeRef]
+		return store, ok && store != nil
+	})
+	retryNeeded := false
+	for _, entry := range stores {
+		rootStoreRef := ""
+		if len(entry.refs) == 1 {
+			rootStoreRef = entry.refs[0]
+		}
+		if controllerRecoverMoleculeLifecycleIntents(entry.store, rootStoreRef, resolve, rec) {
+			retryNeeded = true
+		}
+	}
+	return retryNeeded
+}
+
+// notifyMoleculeLifecycleRecovery coalesces immediate recovery requests. It is
+// safe before startup, during shutdown, and on a zero-value controllerState.
+func (cs *controllerState) notifyMoleculeLifecycleRecovery() {
+	if cs == nil {
+		return
+	}
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState != beadEventWorkersRunning {
+		cs.beadEventLifecycleMu.Unlock()
+		return
+	}
+	notify := cs.beadEventRecoverNotify
+	cs.beadEventLifecycleMu.Unlock()
+	if notify == nil {
+		return
+	}
+	select {
+	case notify <- struct{}{}:
+	default:
+	}
+}
+
+func (cs *controllerState) beginBeadEventWorker() bool {
+	cs.beadEventLifecycleMu.Lock()
+	defer cs.beadEventLifecycleMu.Unlock()
+	switch cs.beadEventWorkerState {
+	case beadEventWorkersRunning, beadEventWorkersPausingLoops, beadEventWorkersStoppingLoops:
+		cs.beadEventAutoWorkers.Add(1)
+		return true
+	default:
+		return false
+	}
+}
+
+func (cs *controllerState) endBeadEventWorker() {
+	cs.beadEventAutoWorkers.Done()
+}
+
+func (cs *controllerState) beadEventReplayCursor() (uint64, bool) {
+	cs.beadEventLifecycleMu.Lock()
+	defer cs.beadEventLifecycleMu.Unlock()
+	return cs.beadEventStartSeq, cs.beadEventStartSeqOK
+}
+
+// pauseBeadEventWorkers fences new watcher, recovery, and autoclose work,
+// cancels the two long-lived workers, and drains every already-owned lifecycle
+// operation. Unlike final shutdown, a successful pause may be resumed after a
+// config reload has atomically replaced the event backend.
+func (cs *controllerState) pauseBeadEventWorkers() bool {
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState != beadEventWorkersRunning {
+		cs.beadEventLifecycleMu.Unlock()
+		return false
+	}
+	cs.beadEventWorkerState = beadEventWorkersPausingLoops
+	watchCancel := cs.beadEventWatchCancel
+	recoveryCancel := cs.beadEventRecoverCancel
+	cs.beadEventWatchCancel = nil
+	cs.beadEventRecoverCancel = nil
+	cs.beadEventRecoverNotify = nil
+	cs.beadEventLifecycleMu.Unlock()
+
+	if watchCancel != nil {
+		watchCancel()
+	}
+	if recoveryCancel != nil {
+		recoveryCancel()
+	}
+	cs.beadEventLoopWorkers.Wait()
+
+	cs.beadEventLifecycleMu.Lock()
+	switch cs.beadEventWorkerState {
+	case beadEventWorkersPausingLoops:
+		cs.beadEventWorkerState = beadEventWorkersPausingAutoclose
+	case beadEventWorkersStoppingLoops:
+		cs.beadEventWorkerState = beadEventWorkersStoppingAutoclose
+	default:
+		cs.beadEventLifecycleMu.Unlock()
+		return false
+	}
+	cs.beadEventLifecycleMu.Unlock()
+
+	cs.beadEventAutoWorkers.Wait()
+	cs.beadEventLifecycleMu.Lock()
+	defer cs.beadEventLifecycleMu.Unlock()
+	switch cs.beadEventWorkerState {
+	case beadEventWorkersPausingAutoclose:
+		cs.beadEventWorkerState = beadEventWorkersPaused
+		return true
+	case beadEventWorkersStoppingAutoclose:
+		cs.beadEventWorkerState = beadEventWorkersStopped
+		return false
+	default:
+		return false
+	}
+}
+
+// resumeBeadEventWorkers restarts lifecycle recovery and the cache watcher
+// after a reload pause. afterSeq is the prior watcher's last fully-applied
+// cursor. The replacement backend must preserve the source history through its
+// cutover head; replay from the applied cursor then covers both a canceled
+// in-flight event and events emitted while config state is rebuilt. A final
+// stop racing the reload permanently wins and rejects the restart.
+func (cs *controllerState) resumeBeadEventWorkers(afterSeq uint64, afterSeqOK bool) bool {
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState != beadEventWorkersPaused {
+		cs.beadEventLifecycleMu.Unlock()
+		return false
+	}
+	cs.beadEventStartSeq = afterSeq
+	cs.beadEventStartSeqOK = afterSeqOK
+	cs.beadEventWorkerState = beadEventWorkersRunning
+	ctx := cs.cacheCtx
+	cs.beadEventLifecycleMu.Unlock()
+
+	cs.startBeadEventWatcher(ctx)
+	return true
+}
+
+// stopBeadEventWorkers prevents new autoclose dispatches, stops the event
+// watcher and lifecycle recovery loop, and waits for already-owned dispatches
+// and their deferred lifecycle records. The city's event provider remains open
+// until this returns.
+func (cs *controllerState) stopBeadEventWorkers() {
+	cs.beadEventLifecycleMu.Lock()
+	switch cs.beadEventWorkerState {
+	case beadEventWorkersStopped:
+		cs.beadEventLifecycleMu.Unlock()
+		return
+	case beadEventWorkersRunning, beadEventWorkersPausingLoops:
+		cs.beadEventWorkerState = beadEventWorkersStoppingLoops
+	case beadEventWorkersPaused, beadEventWorkersPausingAutoclose:
+		cs.beadEventWorkerState = beadEventWorkersStoppingAutoclose
+	}
+	watchCancel := cs.beadEventWatchCancel
+	recoveryCancel := cs.beadEventRecoverCancel
+	cs.beadEventWatchCancel = nil
+	cs.beadEventRecoverCancel = nil
+	cs.beadEventRecoverNotify = nil
+	cs.beadEventLifecycleMu.Unlock()
+	if watchCancel != nil {
+		watchCancel()
+	}
+	if recoveryCancel != nil {
+		recoveryCancel()
+	}
+	cs.beadEventLoopWorkers.Wait()
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState == beadEventWorkersStoppingLoops {
+		cs.beadEventWorkerState = beadEventWorkersStoppingAutoclose
+	}
+	cs.beadEventLifecycleMu.Unlock()
+
+	cs.beadEventAutoWorkers.Wait()
+	cs.beadEventLifecycleMu.Lock()
+	if cs.beadEventWorkerState == beadEventWorkersStoppingAutoclose {
+		cs.beadEventWorkerState = beadEventWorkersStopped
+	}
+	cs.beadEventLifecycleMu.Unlock()
 }
 
 // startMaintenanceLoop launches the periodic Dolt store maintenance
@@ -558,11 +989,12 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
+	autocloseBeadID := beadEventAutocloseID(evt)
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
 	var storeRef string
-	if evt.Type == events.BeadClosed {
-		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+	if autocloseBeadID != "" {
+		storeRef = cs.autocloseStoreRefLocked(autocloseBeadID)
 	}
 	cs.mu.RUnlock()
 
@@ -574,9 +1006,35 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
-	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+	if autocloseBeadID != "" && len(stores) > 0 {
+		cs.runBeadCloseAutoclose(autocloseBeadID, stores[0], storeRef)
 	}
+}
+
+// beadEventAutocloseID returns the bead whose terminal snapshot should drive
+// convoy/wisp/molecule autoclose. Backings without atomic update-transition
+// support conservatively publish Update(status=closed) as bead.updated because
+// they cannot prove transition ownership. The authoritative closed snapshot is
+// still a terminal observation and must drive the same idempotent autoclose
+// path; otherwise those stores strand parents even though projections show the
+// child closed.
+func beadEventAutocloseID(evt events.Event) string {
+	if evt.Type == events.BeadClosed {
+		return beadEventID(evt)
+	}
+	if evt.Type != events.BeadUpdated {
+		return ""
+	}
+	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
+	if !ok || bead.Status != "closed" {
+		return ""
+	}
+	id := strings.TrimSpace(bead.ID)
+	subject := strings.TrimSpace(evt.Subject)
+	if subject != "" && subject != id {
+		return ""
+	}
+	return id
 }
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns
@@ -602,6 +1060,47 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 	return ""
 }
 
+// moleculeAutocloseGraphStore snapshots the graph-class store together with
+// its logical city ref. Cross-store source workflows require both the source
+// and root refs during the final eligibility check so same-ID beads in another
+// store cannot satisfy the close accidentally.
+func (cs *controllerState) moleculeAutocloseGraphStore() (beads.GraphStore, string) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	store := beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	if cs.cfg == nil {
+		return store, ""
+	}
+	ref := workflowStoreRefForDir(cs.cityPath, cs.cityPath, loadedCityName(cs.cfg, cs.cityPath), cs.cfg)
+	return store, ref
+}
+
+// WaitContext behaves like moleculeAutocloseCompletion.Wait but abandons the
+// remaining lifecycle-delivery waits if ctx is canceled, reporting
+// completed=false. It exists for shutdown: a suppressed-close receipt can queue
+// behind an unresolved pending-publication gate that only the cache reconciler
+// resolves, so once the reconciler stops an unbounded Wait would pin the caller
+// forever. Every retry check is gated by a lifecycleDone drained here, so none
+// of them blocks after the drain returns.
+func (c moleculeAutocloseCompletion) WaitContext(ctx context.Context) (retry bool, completed bool) {
+	if ctx == nil {
+		return c.Wait(), true
+	}
+	for _, done := range c.lifecycleDone {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false, false
+		}
+	}
+	retry = c.retryNeeded
+	for _, check := range c.retryChecks {
+		retry = check() || retry
+	}
+	return retry, true
+}
+
 // runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248).
@@ -615,11 +1114,50 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// graph-root walks resolve through graphBeadStore() rather than assuming
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
-	graphStore := cs.GraphBeadStore()
+	graphStore, graphStoreRef := cs.moleculeAutocloseGraphStore()
+	rootStore := graphStore.Store
+	rootStoreRef := graphStoreRef
+	if rootStore == nil || sameMoleculeLifecycleStore(store, rootStore) {
+		rootStore = store
+		rootStoreRef = storeRef
+	}
+	if !cs.beginBeadEventWorker() {
+		return
+	}
 	beadCloseAutocloseDispatch(func() {
+		defer cs.endBeadEventWorker()
 		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doWispAutocloseWith(store, beadID, os.Stderr, rootStore)
+		retryNeeded := func() bool {
+			cs.moleculeLifecycleOpMu.Lock()
+			defer cs.moleculeLifecycleOpMu.Unlock()
+			completion := doMoleculeAutocloseWithStoreRefs(
+				store,
+				storeRef,
+				rootStore,
+				rootStoreRef,
+				rec,
+				beadID,
+				os.Stderr,
+			)
+			// Bound the wait on the worker (cache) context. A suppressed-close
+			// receipt can queue behind an unresolved pending-publication gate that
+			// only the cache reconciler resolves; once cacheCtx is canceled at
+			// shutdown the reconciler is gone and the gate never resolves, so an
+			// unbounded wait here would hold moleculeLifecycleOpMu forever and pin
+			// stopBeadEventWorkers' beadEventAutoWorkers.Wait(). cacheCtx is stable
+			// across reload pause/resume and canceled only at final shutdown, so
+			// the bound never fires during normal operation.
+			retry, completed := completion.WaitContext(cs.cacheCtx)
+			if !completed {
+				fmt.Fprintf(os.Stderr, "gc: bead-close autoclose for %s abandoned at shutdown before its lifecycle delivery completed\n", beadID) //nolint:errcheck // best-effort stderr
+				return false
+			}
+			return retry
+		}()
+		if retryNeeded {
+			cs.notifyMoleculeLifecycleRecovery()
+		}
 	})
 }
 

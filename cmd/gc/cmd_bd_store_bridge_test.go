@@ -7,7 +7,51 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestBridgeBeadPreservesDependencies(t *testing.T) {
+	want := []beads.Dep{{IssueID: "root", DependsOnID: "step", Type: "blocks"}}
+	got := bridgeBead(beads.Bead{ID: "root", Dependencies: want})
+	if len(got.Dependencies) != 1 || got.Dependencies[0] != want[0] {
+		t.Fatalf("bridge dependencies = %+v, want %+v", got.Dependencies, want)
+	}
+}
+
+func TestBridgeBeadPreservesInternalRevisionAndOmitsZero(t *testing.T) {
+	tests := []struct {
+		name         string
+		revision     int64
+		wantRevision string
+	}{
+		{name: "present", revision: 17, wantRevision: "17"},
+		{name: "zero omitted"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := json.Marshal(bridgeBead(beads.Bead{ID: "root", Revision: tt.revision}))
+			if err != nil {
+				t.Fatalf("marshal bridge bead: %v", err)
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatalf("unmarshal bridge bead: %v", err)
+			}
+			got, present := payload["revision"]
+			if tt.wantRevision == "" {
+				if present {
+					t.Fatalf("zero revision encoded as %s, want omitted; payload=%s", got, encoded)
+				}
+				return
+			}
+			if !present || string(got) != tt.wantRevision {
+				t.Fatalf("revision = %s (present %t), want %s; payload=%s", got, present, tt.wantRevision, encoded)
+			}
+		})
+	}
+}
 
 func withTestStdin(t *testing.T, input string, fn func()) {
 	t.Helper()

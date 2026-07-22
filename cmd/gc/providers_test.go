@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -808,6 +809,62 @@ provider = "fake"
 
 	if _, err := ep.List(events.Filter{}); err != nil {
 		t.Fatalf("openCityEventsProvider() did not use included fake provider: %v", err)
+	}
+}
+
+func TestOpenCityRecorderAtUsesConfiguredExecProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_EVENTS", "")
+	scriptPath := filepath.Join(cityDir, "events-provider")
+	logPath := scriptPath + ".log"
+	script := `#!/bin/sh
+case "$1" in
+  ensure-running) exit 2 ;;
+  record)
+    cat >> "$0.log"
+    printf '\n' >> "$0.log"
+    exit 0
+    ;;
+  latest-seq) printf '0\n'; exit 0 ;;
+  list) printf '[]\n'; exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write exec events provider: %v", err)
+	}
+	cityTOML := fmt.Sprintf(`[workspace]
+name = "exec-events-city"
+
+[events]
+provider = %q
+`, "exec:"+scriptPath)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	recorder := openCityRecorderAt(cityDir, io.Discard)
+	durable, ok := recorder.(events.DurableRecorder)
+	if !ok {
+		t.Fatalf("configured recorder type = %T, want events.DurableRecorder", recorder)
+	}
+	if err := durable.RecordDurably(events.Event{
+		Type:    events.MoleculeResolved,
+		Actor:   "controller",
+		Subject: "mol-1",
+	}); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read exec events log: %v", err)
+	}
+	if !strings.Contains(string(data), `"type":"molecule.resolved"`) {
+		t.Fatalf("exec events log = %q, want molecule.resolved", data)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".gc", "events.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("file event backend was used despite exec configuration: %v", err)
 	}
 }
 

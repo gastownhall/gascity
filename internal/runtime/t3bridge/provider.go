@@ -1706,7 +1706,8 @@ func resolveConfigProviderModel(cfg *execStartConfig) (string, string, bool) {
 }
 
 func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingStore {
-	bd := beads.NewBdStore(workDir, beads.ExecCommandRunnerWithEnv(env))
+	bd := beads.NewBdStore(workDir, beads.ExecCommandRunnerWithEnv(env),
+		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnv(env)))
 	return beads.NewCachingStore(bd, nil)
 }
 

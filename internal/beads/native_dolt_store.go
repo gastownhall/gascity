@@ -255,6 +255,11 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 type NativeDoltStore struct {
 	mu      sync.RWMutex
 	storage beadslib.Storage
+	// scopeRoot identifies the bead-store scope for cooperative close-transition
+	// serialization across independently opened Gas City handles. Test stores
+	// constructed directly from a storage value leave it empty and fall back to
+	// a process-local key derived from the store instance.
+	scopeRoot string
 	// generation increments on every successful reconnect. A read that fails
 	// with a transient connection error records the generation it observed and
 	// asks reconnect to swap the dead handle only if no other reader already did.
@@ -283,6 +288,11 @@ type NativeDoltStore struct {
 	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
+
+	// closeIdentityRead is the scoped fallback used when the native storage
+	// implementation does not expose a database/sql handle (embedded Dolt).
+	// Server-mode stores use their current handle directly.
+	closeIdentityRead nativeCloseIdentityReadFunc
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode.
 	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
@@ -314,6 +324,9 @@ func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ CloseTransitioner             = (*NativeDoltStore)(nil)
+	_ CloseAllTransitioner          = (*NativeDoltStore)(nil)
+	_ UpdateTransitioner            = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
@@ -350,6 +363,8 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.scopeRoot = scopeRoot
+	store.closeIdentityRead = nativeCloseIdentityReaderForScope(scopeRoot, env)
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -742,6 +757,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	if err := validateNativeGraphApplyPlan(plan); err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return nil, fmt.Errorf("locking native graph apply lifecycle scope: %w", err)
+	}
+	defer unlockScope()
 
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -903,6 +923,11 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return Bead{}, fmt.Errorf("locking native create lifecycle scope: %w", err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return Bead{}, err
@@ -959,6 +984,15 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	var unlockScope func()
+	if opts.Status != nil || opts.ParentID != nil || opts.Type != nil || len(opts.Metadata) > 0 || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		var err error
+		unlockScope, err = lockCloseTransitionScope(s.closeTransitionScopeKey())
+		if err != nil {
+			return fmt.Errorf("locking native status update for bead %q: %w", id, err)
+		}
+		defer unlockScope()
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -973,6 +1007,99 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return nativeStoreError(id, err)
 	}
 	return nil
+}
+
+// UpdateWithTransition applies a full Update and reads both snapshots inside
+// one native transaction while holding the lifecycle scope. If commit returns
+// an ancillary error after the callback completed, a scoped post-read reports
+// whether the transaction nevertheless became durable.
+func (s *NativeDoltStore) UpdateWithTransition(id string, opts UpdateOpts) (UpdateTransition, error) {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return UpdateTransition{}, fmt.Errorf("locking native update transition for bead %q: %w", id, err)
+	}
+	defer unlockScope()
+
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return UpdateTransition{}, err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+
+	var transition UpdateTransition
+	callbackCompleted := false
+	runErr := storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s with transition", id), func(tx beadslib.Transaction) error {
+		before, err := nativeUpdateSnapshot(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		transition.Before = before
+		if err := s.applyUpdateInTx(ctx, tx, id, opts); err != nil {
+			return err
+		}
+		after, err := nativeUpdateSnapshot(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		transition.After = after
+		transition.TransitionedToClosed = before.Status != "closed" && after.Status == "closed"
+		callbackCompleted = true
+		return nil
+	})
+	if runErr == nil {
+		return transition, nil
+	}
+	wrappedRunErr := nativeStoreError(id, runErr)
+	if !callbackCompleted {
+		return UpdateTransition{Before: transition.Before}, wrappedRunErr
+	}
+
+	snapshotReader, ok := storage.(nativeUpdateSnapshotReader)
+	if !ok {
+		verifyErr := fmt.Errorf("verifying native update transition for bead %q: %w", id, ErrUpdateTransitionUnsupported)
+		return UpdateTransition{Before: transition.Before}, errors.Join(wrappedRunErr, verifyErr)
+	}
+	after, verifyErr := nativeUpdateSnapshot(ctx, snapshotReader, id)
+	if verifyErr != nil {
+		return UpdateTransition{Before: transition.Before}, errors.Join(wrappedRunErr, verifyErr)
+	}
+	transition.After = after
+	// An indeterminate transaction result cannot prove which writer owns a
+	// post-read close. The transaction may have rolled back before a raw bd
+	// writer closed the row. Retain the authoritative state for convergence but
+	// never emit a lifecycle transition on this operation's behalf.
+	transition.TransitionedToClosed = false
+	return transition, wrappedRunErr
+}
+
+type nativeUpdateSnapshotReader interface {
+	GetIssue(context.Context, string) (*beadslib.Issue, error)
+	GetLabels(context.Context, string) ([]string, error)
+	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
+}
+
+func nativeUpdateSnapshot(ctx context.Context, reader nativeUpdateSnapshotReader, id string) (Bead, error) {
+	issue, err := reader.GetIssue(ctx, id)
+	if err != nil {
+		return Bead{}, nativeStoreError(id, err)
+	}
+	if issue == nil {
+		return Bead{}, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	labels, err := reader.GetLabels(ctx, id)
+	if err != nil {
+		return Bead{}, nativeStoreError(id, err)
+	}
+	dependencies, err := reader.GetDependencyRecords(ctx, id)
+	if err != nil {
+		return Bead{}, nativeStoreError(id, err)
+	}
+	snapshot := *issue
+	snapshot.Labels = append([]string(nil), labels...)
+	snapshot.Dependencies = cloneNativeDependencies(dependencies)
+	return beadFromNativeIssue(&snapshot)
 }
 
 // applyUpdateInTx applies an Update against an open beadslib transaction. It is
@@ -1091,6 +1218,11 @@ func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Trans
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee inside one native Dolt transaction.
 func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return false, fmt.Errorf("locking native release-if-current for bead %q: %w", id, err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err
@@ -1128,6 +1260,18 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 // Close sets a bead's status to closed through the upstream beads storage layer.
 func (s *NativeDoltStore) Close(id string) error {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native close for bead %q: %w", id, err)
+	}
+	defer unlockScope()
+	return s.closeWithoutScopeLock(id)
+}
+
+// closeWithoutScopeLock performs the native mutation while its caller holds
+// the cooperative close-transition scope. CloseAll uses it to avoid taking the
+// non-reentrant scope lock recursively.
+func (s *NativeDoltStore) closeWithoutScopeLock(id string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1154,6 +1298,11 @@ func (s *NativeDoltStore) Close(id string) error {
 
 // Reopen sets a closed bead's status back to open.
 func (s *NativeDoltStore) Reopen(id string) error {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native reopen for bead %q: %w", id, err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1176,26 +1325,82 @@ func (s *NativeDoltStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
-	closed := 0
+	result, err := s.closeAll(ids, metadata, false)
+	return result.Count, err
+}
+
+// CloseAllWithTransitions preserves NativeDoltStore's sequential partial-error
+// semantics while returning authoritative snapshots for every processed ID.
+func (s *NativeDoltStore) CloseAllWithTransitions(ids []string, metadata map[string]string) (CloseAllTransitionResult, error) {
+	return s.closeAll(ids, metadata, true)
+}
+
+func (s *NativeDoltStore) closeAll(ids []string, metadata map[string]string, captureTransitions bool) (CloseAllTransitionResult, error) {
+	if len(ids) == 0 {
+		return CloseAllTransitionResult{}, nil
+	}
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return CloseAllTransitionResult{}, fmt.Errorf("locking native close batch: %w", err)
+	}
+	defer unlockScope()
+
+	result := CloseAllTransitionResult{}
+	if captureTransitions {
+		result.Transitions = make(map[string]CloseTransition, len(ids))
+	}
+	record := func(id string, transition CloseTransition) {
+		if !captureTransitions {
+			return
+		}
+		recorded, seen := result.Transitions[id]
+		if !seen {
+			result.Transitions[id] = transition
+			return
+		}
+		if recorded.Before.ID == "" {
+			recorded.Before = transition.Before
+		}
+		if transition.After.ID != "" {
+			recorded.After = transition.After
+		}
+		recorded.Transitioned = recorded.Transitioned || transition.Transitioned
+		result.Transitions[id] = recorded
+	}
+	readAfterError := func(id string, before Bead, operationErr error) (CloseAllTransitionResult, error) {
+		transition := CloseTransition{Before: before}
+		after, readErr := s.Get(id)
+		if readErr == nil {
+			transition.After = after
+		}
+		record(id, transition)
+		return result, errors.Join(operationErr, readErr)
+	}
+
 	for _, id := range ids {
 		current, err := s.Get(id)
 		if err != nil {
-			return closed, err
+			return result, err
 		}
 		if current.Status == "closed" {
+			record(id, CloseTransition{Before: current, After: current})
 			continue
 		}
 		if len(metadata) > 0 {
-			if err := s.SetMetadataBatch(id, metadata); err != nil {
-				return closed, err
+			if err := s.setMetadataBatchWithoutScopeLock(id, metadata); err != nil {
+				return readAfterError(id, current, err)
 			}
 		}
-		if err := s.Close(id); err != nil {
-			return closed, err
+		transition, closeErr := s.closeWithReasonIfOpenWithoutScopeLock(id, metadata["close_reason"])
+		record(id, transition)
+		if transition.Transitioned {
+			result.Count++
 		}
-		closed++
+		if closeErr != nil {
+			return result, closeErr
+		}
 	}
-	return closed, nil
+	return result, nil
 }
 
 // List returns beads matching the query.
@@ -1389,6 +1594,15 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native metadata update for bead %q: %w", id, err)
+	}
+	defer unlockScope()
+	return s.setMetadataBatchWithoutScopeLock(id, kvs)
+}
+
+func (s *NativeDoltStore) setMetadataBatchWithoutScopeLock(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1428,6 +1642,16 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
+	// A Tx callback may call Tx.Close, so join the same scope serialization as
+	// standalone closes before acquiring storage. Scope -> storage is the shared
+	// lock order used by Close and CloseWithReasonIfOpen. Callbacks must use the
+	// provided Tx write surface rather than re-entering standalone store methods,
+	// which was already unsafe while a native storage transaction was open.
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native transaction close scope: %w", err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1477,6 +1701,11 @@ func (t *nativeDoltTx) Close(id string) error {
 
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native delete for bead %q: %w", id, err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1502,6 +1731,15 @@ func (s *NativeDoltStore) Ping() error {
 
 // DepAdd records a dependency between two beads.
 func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
+	var unlockScope func()
+	if depType == "parent-child" {
+		var err error
+		unlockScope, err = lockCloseTransitionScope(s.closeTransitionScopeKey())
+		if err != nil {
+			return fmt.Errorf("locking native parent dependency update for bead %q: %w", issueID, err)
+		}
+		defer unlockScope()
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1518,6 +1756,11 @@ func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency between two beads.
 func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
+	unlockScope, err := lockCloseTransitionScope(s.closeTransitionScopeKey())
+	if err != nil {
+		return fmt.Errorf("locking native dependency removal for bead %q: %w", issueID, err)
+	}
+	defer unlockScope()
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1747,6 +1990,9 @@ func nativeCloseReasonFromIssue(issue *beadslib.Issue) string {
 	if issue == nil {
 		return ""
 	}
+	if reason := strings.TrimSpace(issue.CloseReason); reason != "" {
+		return reason
+	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
 		return ""
@@ -1894,10 +2140,12 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Assignee:    b.Assignee,
 		Sender:      b.From,
 		CreatedAt:   b.CreatedAt,
+		UpdatedAt:   b.UpdatedAt,
 		Labels:      append([]string(nil), b.Labels...),
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: strings.TrimSpace(b.Metadata["close_reason"]),
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -1954,6 +2202,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Type:        string(issue.IssueType),
 		Priority:    nativePriorityFromIssue(issue),
 		CreatedAt:   issue.CreatedAt,
+		UpdatedAt:   issue.UpdatedAt,
 		Assignee:    issue.Assignee,
 		From:        issue.Sender,
 		Description: issue.Description,
@@ -1962,6 +2211,12 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+	}
+	if issue.CloseReason != "" {
+		if b.Metadata == nil {
+			b.Metadata = make(StringMap)
+		}
+		b.Metadata["close_reason"] = issue.CloseReason
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

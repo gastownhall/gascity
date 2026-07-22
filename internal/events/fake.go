@@ -33,13 +33,43 @@ func NewFailFake() *Fake {
 // Record appends the event to the Events slice. Auto-fills Seq and Ts.
 func (f *Fake) Record(e Event) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.recordLocked(e)
+	f.notifyWatchersLocked()
+	f.mu.Unlock()
+}
+
+// RecordDurably appends the complete batch under one lock. Broken fakes reject
+// the batch without appending any events so tests can exercise publication
+// retry paths.
+func (f *Fake) RecordDurably(events ...Event) error {
+	f.mu.Lock()
+	if f.broken {
+		f.mu.Unlock()
+		return fmt.Errorf("events provider unavailable")
+	}
+	for _, event := range events {
+		f.recordLocked(event)
+	}
+	if len(events) > 0 {
+		f.notifyWatchersLocked()
+	}
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *Fake) recordLocked(e Event) {
 	f.seq++
 	e.Seq = f.seq
 	if e.Ts.IsZero() {
 		e.Ts = time.Now()
 	}
 	f.Events = append(f.Events, e)
+}
+
+// notifyWatchersLocked broadcasts one state change to every watcher observing
+// the current generation. The caller must hold f.mu so a watcher cannot miss
+// the close-and-replace boundary.
+func (f *Fake) notifyWatchersLocked() {
 	if f.notify != nil {
 		close(f.notify)
 	}

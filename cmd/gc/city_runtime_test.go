@@ -780,6 +780,84 @@ func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 	}
 }
 
+type shutdownLifetimeRecorder struct {
+	mu                sync.Mutex
+	closed            bool
+	recorded          []events.Event
+	recordsAfterClose int
+}
+
+func (r *shutdownLifetimeRecorder) Record(event events.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		r.recordsAfterClose++
+		return
+	}
+	r.recorded = append(r.recorded, event)
+}
+
+func (r *shutdownLifetimeRecorder) Close() {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+}
+
+func TestCityRuntimeShutdownDrainsBeadEventWorkersBeforeRecorderClose(t *testing.T) {
+	cs := &controllerState{}
+	if !cs.beginBeadEventWorker() {
+		t.Fatal("beginBeadEventWorker rejected work before shutdown")
+	}
+
+	recorder := &shutdownLifetimeRecorder{}
+	workerEntered := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	go func() {
+		defer cs.endBeadEventWorker()
+		close(workerEntered)
+		<-releaseWorker
+		recorder.Record(events.Event{Type: events.MoleculeResolved, Subject: "mol-1"})
+	}()
+	<-workerEntered
+
+	cr := &CityRuntime{
+		cfg:    &config.City{},
+		sp:     runtime.NewFake(),
+		rec:    events.Discard,
+		cs:     cs,
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+	ownerDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		recorder.Close()
+		close(ownerDone)
+	}()
+
+	select {
+	case <-ownerDone:
+		t.Fatal("shutdown returned and recorder closed while bead-event work was pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseWorker)
+	select {
+	case <-ownerDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("shutdown did not finish after bead-event work completed")
+	}
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.recordsAfterClose != 0 {
+		t.Fatalf("records after recorder close = %d, want 0", recorder.recordsAfterClose)
+	}
+	if len(recorder.recorded) != 1 || recorder.recorded[0].Type != events.MoleculeResolved {
+		t.Fatalf("recorded events = %+v, want one molecule.resolved before close", recorder.recorded)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	buildCalls := 0
 	cr := &CityRuntime{

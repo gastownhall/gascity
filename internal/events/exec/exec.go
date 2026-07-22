@@ -26,10 +26,11 @@ import (
 
 // Provider implements [events.Provider] by delegating to a user-supplied script.
 type Provider struct {
-	script  string
-	timeout time.Duration
-	ready   sync.Once // ensure-running called once
-	stderr  io.Writer
+	script   string
+	timeout  time.Duration
+	ready    sync.Once // ensure-running called once
+	recordMu sync.Mutex
+	stderr   io.Writer
 }
 
 type listScriptFilter struct {
@@ -53,14 +54,40 @@ func NewProvider(script string, stderr io.Writer) *Provider {
 // Best-effort — errors are printed to stderr, never returned.
 func (p *Provider) Record(e events.Event) {
 	p.ensureRunning()
-	data, err := json.Marshal(e)
-	if err != nil {
-		p.logErr("record: marshal: %v", err)
-		return
-	}
-	if _, err := p.run(data, "record"); err != nil {
+	p.recordMu.Lock()
+	defer p.recordMu.Unlock()
+	if err := p.record(e, false); err != nil {
 		p.logErr("record: %v", err)
 	}
+}
+
+// RecordDurably invokes the existing record operation once per event, in input
+// order, and returns only after every subprocess has acknowledged success. A
+// script failure may follow a partial batch, so callers retain their recovery
+// intent and retry with at-least-once semantics.
+func (p *Provider) RecordDurably(batch ...events.Event) error {
+	p.ensureRunning()
+	p.recordMu.Lock()
+	defer p.recordMu.Unlock()
+	for _, event := range batch {
+		if err := p.record(event, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Provider) record(event events.Event, requireAcknowledgement bool) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if requireAcknowledgement {
+		_, err = p.runAcknowledged(data, "record")
+	} else {
+		_, err = p.run(data, "record")
+	}
+	return err
 }
 
 // List delegates to: script list with JSON filter on stdin, then applies the
@@ -144,6 +171,17 @@ func (p *Provider) ensureRunning() {
 // run executes the script with the given args, optionally piping stdinData
 // to its stdin. Returns the trimmed stdout on success.
 func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
+	return p.runOperation(stdinData, true, args...)
+}
+
+// runAcknowledged differs from the compatibility run path by treating exit 2
+// (unknown operation) as a failure. Durable publication cannot acknowledge an
+// event that the script explicitly declined to record.
+func (p *Provider) runAcknowledged(stdinData []byte, args ...string) (string, error) {
+	return p.runOperation(stdinData, false, args...)
+}
+
+func (p *Provider) runOperation(stdinData []byte, allowUnknownOperation bool, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
@@ -162,7 +200,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			if exitErr.ExitCode() == 2 {
+			if exitErr.ExitCode() == 2 && allowUnknownOperation {
 				return "", nil
 			}
 		}

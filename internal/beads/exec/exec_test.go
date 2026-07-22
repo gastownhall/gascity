@@ -1,6 +1,7 @@
 package exec //nolint:revive // internal package, always imported with alias
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -29,6 +30,231 @@ func storeTargetEnv(root string) map[string]string {
 		"GC_STORE_ROOT":   root,
 		"GC_STORE_SCOPE":  "rig",
 		"GC_BEADS_PREFIX": "gc",
+	}
+}
+
+func TestStoreCacheMutationScopeUsesStoreRoot(t *testing.T) {
+	store := NewStore("unused")
+	store.SetEnv(storeTargetEnv("/durable/rig/root"))
+	if got, want := store.CacheMutationScope(), "/durable/rig/root"; got != want {
+		t.Fatalf("CacheMutationScope() = %q, want %q", got, want)
+	}
+}
+
+func TestLifecycleMetadataTransactionSharesStoreRootLeaseWithBdStore(t *testing.T) {
+	storeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	execStore := NewStore("unused")
+	execStore.SetEnv(storeTargetEnv(storeRoot))
+	bdStore := beads.NewBdStore(storeRoot, func(string, string, ...string) ([]byte, error) {
+		return nil, nil
+	})
+
+	execEntered := make(chan struct{})
+	releaseExec := make(chan struct{})
+	execDone := make(chan error, 1)
+	go func() {
+		execDone <- beads.WithLifecycleMetadataTransaction(execStore, "exec-root", func(beads.LifecycleMetadataTransaction) error {
+			close(execEntered)
+			<-releaseExec
+			return nil
+		})
+	}()
+
+	select {
+	case <-execEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("exec lifecycle transaction did not enter")
+	}
+
+	bdEntered := make(chan struct{})
+	bdDone := make(chan error, 1)
+	go func() {
+		bdDone <- beads.WithLifecycleMetadataTransaction(bdStore, "bd-root", func(beads.LifecycleMetadataTransaction) error {
+			close(bdEntered)
+			return nil
+		})
+	}()
+
+	enteredBeforeRelease := false
+	select {
+	case <-bdEntered:
+		enteredBeforeRelease = true
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(releaseExec)
+
+	if err := <-execDone; err != nil {
+		t.Fatalf("exec lifecycle transaction: %v", err)
+	}
+	select {
+	case <-bdEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BdStore lifecycle transaction did not enter after exec release")
+	}
+	if err := <-bdDone; err != nil {
+		t.Fatalf("BdStore lifecycle transaction: %v", err)
+	}
+	if enteredBeforeRelease {
+		t.Fatal("same-scope BdStore lifecycle transaction entered while exec transaction held the store-root lease")
+	}
+}
+
+func TestLifecycleMetadataTransactionDelegatesLeaseOnlyToItsChild(t *testing.T) {
+	storeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outFile := filepath.Join(t.TempDir(), "lifecycle-env.txt")
+	readOutFile := filepath.Join(t.TempDir(), "lifecycle-read-env.txt")
+	depReadOutFile := filepath.Join(t.TempDir(), "lifecycle-dep-read-env.txt")
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+  get)
+    printf 'scope=%s\ntoken=%s\n' "${GC_LIFECYCLE_MUTATION_SCOPE:-}" "${GC_LIFECYCLE_MUTATION_TOKEN:-}" > "`+readOutFile+`"
+    printf '{"id":"%s","title":"root","status":"open","type":"molecule","created_at":"2026-02-27T10:00:00Z"}\n' "$2"
+    ;;
+  set-metadata)
+    printf 'scope=%s\ntoken=%s\n' "${GC_LIFECYCLE_MUTATION_SCOPE:-}" "${GC_LIFECYCLE_MUTATION_TOKEN:-}" > "`+outFile+`"
+    cat >/dev/null
+    ;;
+  dep-list)
+    printf 'scope=%s\ntoken=%s\n' "${GC_LIFECYCLE_MUTATION_SCOPE:-}" "${GC_LIFECYCLE_MUTATION_TOKEN:-}" > "`+depReadOutFile+`"
+    printf '[]\n'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+
+	t.Setenv("GC_LIFECYCLE_MUTATION_SCOPE", "hostile-ambient-scope")
+	t.Setenv("GC_LIFECYCLE_MUTATION_TOKEN", "hostile-ambient-token")
+	store := NewStore(script)
+	storeEnv := storeTargetEnv(storeRoot)
+	storeEnv["GC_LIFECYCLE_MUTATION_SCOPE"] = "hostile-configured-scope"
+	storeEnv["GC_LIFECYCLE_MUTATION_TOKEN"] = "hostile-configured-token"
+	store.SetEnv(storeEnv)
+
+	if err := store.SetMetadata("root", "ordinary", "write"); err != nil {
+		t.Fatalf("ordinary SetMetadata: %v", err)
+	}
+	ordinaryEnv, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(ordinaryEnv); got != "scope=\ntoken=\n" {
+		t.Fatalf("ordinary child inherited lifecycle delegation: %q", got)
+	}
+
+	if err := beads.WithLifecycleMetadataTransaction(store, "root", func(tx beads.LifecycleMetadataTransaction) error {
+		if _, err := tx.Get(); err != nil {
+			return err
+		}
+		readEnv, err := os.ReadFile(readOutFile)
+		if err != nil {
+			return err
+		}
+		if got := string(readEnv); got != "scope=\ntoken=\n" {
+			t.Fatalf("lifecycle read child inherited mutation delegation: %q", got)
+		}
+		depReadEnv, err := os.ReadFile(depReadOutFile)
+		if err != nil {
+			return err
+		}
+		if got := string(depReadEnv); got != "scope=\ntoken=\n" {
+			t.Fatalf("lifecycle dependency read child inherited mutation delegation: %q", got)
+		}
+		return tx.SetMetadata("lifecycle", "write")
+	}); err != nil {
+		t.Fatalf("WithLifecycleMetadataTransaction: %v", err)
+	}
+	delegatedEnv, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(delegatedEnv)
+	if !strings.Contains(got, "scope=sha256:") {
+		t.Fatalf("lifecycle child scope = %q, want durable hashed scope", got)
+	}
+	if strings.Contains(got, "hostile-ambient") || strings.Contains(got, "token=\n") {
+		t.Fatalf("lifecycle child delegation = %q, want fresh non-empty owner delegation", got)
+	}
+}
+
+func TestLifecycleMetadataTransactionCloseReturnsDurableWinningReason(t *testing.T) {
+	storeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statusFile := filepath.Join(t.TempDir(), "status")
+	reasonFile := filepath.Join(t.TempDir(), "reason")
+	if err := os.WriteFile(statusFile, []byte("open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+  get)
+    status="$(tr -d '\n' < "`+statusFile+`")"
+    reason=""
+    if test -f "`+reasonFile+`"; then
+      reason="$(tr -d '\n' < "`+reasonFile+`")"
+    fi
+    printf '{"id":"%s","title":"root","status":"%s","type":"molecule","created_at":"2026-02-27T10:00:00Z","metadata":{"close_reason":"%s"}}\n' "$2" "$status" "$reason"
+    ;;
+  set-metadata)
+    if test "$3" = close_reason; then
+      cat > "`+reasonFile+`"
+    else
+      cat >/dev/null
+    fi
+    ;;
+  close)
+    printf 'closed\n' > "`+statusFile+`"
+    ;;
+  dep-list)
+    printf '[{"issue_id":"root","depends_on_id":"step","type":"blocks"}]\n'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	store.SetEnv(storeTargetEnv(storeRoot))
+
+	const winningReason = "exec bridge lifecycle close"
+	if err := beads.WithLifecycleMetadataTransaction(store, "root", func(tx beads.LifecycleMetadataTransaction) error {
+		result, err := beads.CloseWithinLifecycleMetadataTransaction(tx, winningReason)
+		if err != nil {
+			return err
+		}
+		if result.Before.Status != "open" || !result.AuthoritativeClosed("root") || !result.Transitioned || !result.CloseSucceeded {
+			t.Fatalf("close result = %+v, want acknowledged authoritative transition", result)
+		}
+		wantDep := (beads.Dep{IssueID: "root", DependsOnID: "step", Type: "blocks"})
+		if len(result.Before.Dependencies) != 1 || result.Before.Dependencies[0] != wantDep ||
+			len(result.After.Dependencies) != 1 || result.After.Dependencies[0] != wantDep {
+			t.Fatalf("close dependencies = before:%+v after:%+v, want %+v", result.Before.Dependencies, result.After.Dependencies, wantDep)
+		}
+		if got := result.After.Metadata["close_reason"]; got != winningReason {
+			t.Fatalf("after close_reason = %q, want %q", got, winningReason)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("first lifecycle close: %v", err)
+	}
+
+	if err := beads.WithLifecycleMetadataTransaction(store, "root", func(tx beads.LifecycleMetadataTransaction) error {
+		result, err := beads.CloseWithinLifecycleMetadataTransaction(tx, "later reason must lose")
+		if err != nil {
+			return err
+		}
+		if result.Transitioned || result.After.Metadata["close_reason"] != winningReason {
+			t.Fatalf("repeat close result = %+v, want original durable winner", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("repeat lifecycle close: %v", err)
 	}
 }
 
@@ -641,6 +867,130 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestGetPreservesWireDependencies(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    printf '{"id":"EX-1","title":"found","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","dependencies":[{"issue_id":"EX-1","depends_on_id":"EX-0","type":"blocks"}]}\n'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+
+	got, err := store.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := beads.Dep{IssueID: "EX-1", DependsOnID: "EX-0", Type: "blocks"}
+	if len(got.Dependencies) != 1 || got.Dependencies[0] != want {
+		t.Fatalf("Dependencies = %+v, want [%+v]", got.Dependencies, want)
+	}
+}
+
+func TestDepListUnknownOperationReturnsEmpty(t *testing.T) {
+	// Exit 2 is the documented "unknown operation → no-op success" signal. A
+	// provider script that legitimately omits dep-list (exactly what the contract
+	// tells authors to do) must yield an empty dependency list, not a hard error,
+	// so DepList stays forward-compatible for every third-party backend that
+	// convoy membership, drain, and event hydration depend on.
+	store := NewStore(writeScript(t, t.TempDir(), `exit 2`))
+	deps, err := store.DepList("EX-1", "down")
+	if err != nil {
+		t.Fatalf("DepList on an unimplemented dep-list returned error: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("DepList = %+v, want empty dependency list", deps)
+	}
+}
+
+func TestLifecycleCloseSucceedsWithUnimplementedDepList(t *testing.T) {
+	// A minimal script per the exec-provider contract implements get/close and
+	// exits 2 for every other operation, including dep-list. A lifecycle close
+	// routed through the transaction must still succeed: an unimplemented dep-list
+	// means "no dependency concept", so an empty dependency set is the complete
+	// answer rather than a spurious failure.
+	storeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statusFile := filepath.Join(t.TempDir(), "status")
+	if err := os.WriteFile(statusFile, []byte("open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+  get)
+    status="$(tr -d '\n' < "`+statusFile+`")"
+    printf '{"id":"%s","title":"root","status":"%s","type":"molecule","created_at":"2026-02-27T10:00:00Z"}\n' "$2" "$status"
+    ;;
+  close)
+    printf 'closed\n' > "`+statusFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	store.SetEnv(storeTargetEnv(storeRoot))
+
+	if err := beads.WithLifecycleMetadataTransaction(store, "root", func(tx beads.LifecycleMetadataTransaction) error {
+		result, err := beads.CloseWithinLifecycleMetadataTransaction(tx, "exec lifecycle close with no dep-list")
+		if err != nil {
+			return err
+		}
+		if !result.AuthoritativeClosed("root") || !result.Transitioned || !result.CloseSucceeded {
+			t.Fatalf("close result = %+v, want acknowledged authoritative transition", result)
+		}
+		if len(result.Before.Dependencies) != 0 || len(result.After.Dependencies) != 0 {
+			t.Fatalf("dependencies = before:%+v after:%+v, want empty on an unimplemented dep-list", result.Before.Dependencies, result.After.Dependencies)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLifecycleMetadataTransaction: %v", err)
+	}
+}
+
+func TestExecLifecycleReadTransactionListIsUnsupported(t *testing.T) {
+	// The exec `list` wire forwards only --status/--assignee/--type/--limit to the
+	// script, so a LifecycleReadTransaction List carrying IncludeClosed, a
+	// non-default TierMode, or a Metadata filter would silently under-return the
+	// closed beads and ephemeral wisps the script hides by default. Fail loud with
+	// ErrLifecycleReadUnsupported so lifecycle-read consumers (molecule autoclose
+	// recovery) take their conservative fallback instead of proving eligibility
+	// from an incomplete subtree.
+	storeRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(storeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+  get) printf '{"id":"%s","title":"root","status":"open","type":"molecule","created_at":"2026-02-27T10:00:00Z"}\n' "$2" ;;
+  *) exit 2 ;;
+esac
+`)
+	store := NewStore(script)
+	store.SetEnv(storeTargetEnv(storeRoot))
+
+	if err := beads.WithLifecycleMetadataTransaction(store, "root", func(tx beads.LifecycleMetadataTransaction) error {
+		reader, ok := tx.(beads.LifecycleReadTransaction)
+		if !ok {
+			t.Fatal("exec lifecycle transaction does not expose LifecycleReadTransaction")
+		}
+		_, err := reader.List(beads.ListQuery{
+			Metadata:      map[string]string{"gc.root_bead_id": "root"},
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if !errors.Is(err, beads.ErrLifecycleReadUnsupported) {
+			t.Fatalf("lifecycle read List error = %v, want ErrLifecycleReadUnsupported", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLifecycleMetadataTransaction: %v", err)
+	}
+}
+
 func TestGet_notFound(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `
@@ -1116,6 +1466,45 @@ esac
 	}
 	if got.Metadata["name"] != "ok" {
 		t.Errorf("Metadata[name] = %q, want %q", got.Metadata["name"], "ok")
+	}
+}
+
+func TestParseBeadPreservesPrivateWireRevision(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want int64
+	}{
+		{
+			name: "script revision",
+			json: `{"id":"EX-1","title":"revisioned","status":"open","type":"task","revision":23}`,
+			want: 23,
+		},
+		{
+			name: "legacy script without revision",
+			json: `{"id":"EX-legacy","title":"legacy","status":"open","type":"task"}`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBead(tt.json)
+			if err != nil {
+				t.Fatalf("parseBead: %v", err)
+			}
+			if got.Revision != tt.want {
+				t.Fatalf("Revision = %d, want %d", got.Revision, tt.want)
+			}
+
+			publicJSON, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("json.Marshal(Bead): %v", err)
+			}
+			if strings.Contains(string(publicJSON), `"revision"`) {
+				t.Fatalf("public Bead JSON exposed private revision: %s", publicJSON)
+			}
+		})
 	}
 }
 

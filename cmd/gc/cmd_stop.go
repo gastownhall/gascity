@@ -313,9 +313,8 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		}
 	}
 	recorder := events.Discard
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
-		recorder = fr
+	if provider, err := newCityEventsProvider(cityPath, cfg.Events, stderr); err == nil {
+		recorder = provider
 	}
 
 	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()

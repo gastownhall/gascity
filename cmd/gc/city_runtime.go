@@ -88,9 +88,12 @@ type CityRuntime struct {
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
 
-	rec events.Recorder
-	cs  *controllerState // nil when controller-managed bead stores are unavailable
-	svc *workspacesvc.Manager
+	rec                           events.Recorder
+	eventProvider                 *reloadableEventsProvider
+	installedEventsConfig         effectiveEventsConfig
+	installedEventsConfigResolved bool
+	cs                            *controllerState // nil when controller-managed bead stores are unavailable
+	svc                           *workspacesvc.Manager
 
 	poolSessions      map[string]time.Duration
 	poolDeathHandlers map[string]poolDeathInfo
@@ -193,6 +196,7 @@ type CityRuntimeParams struct {
 
 var (
 	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycle
+	cityRuntimeNewEventsProvider         = newCityEventsProvider
 	cityRuntimeReloadLifecycleRetryDelay = time.Second
 	// reloadActiveTTL bounds how long a single accepted reload may occupy
 	// the activeReload slot. If a reconciler tick wedges in something that
@@ -279,37 +283,46 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
+	eventProvider, _ := p.Rec.(*reloadableEventsProvider)
+	installedEventsConfig := effectiveEventsProviderConfig(p.Cfg.Events)
+	if eventProvider != nil {
+		eventProvider.setActiveProviderName(installedEventsConfig.provider)
+	}
+
 	cr := &CityRuntime{
-		cityPath:                p.CityPath,
-		cityName:                p.CityName,
-		configName:              configName,
-		tomlPath:                p.TomlPath,
-		watchTargets:            p.WatchTargets,
-		configRev:               p.ConfigRev,
-		configDirty:             configDirty,
-		cfg:                     p.Cfg,
-		sp:                      p.SP,
-		publication:             p.Publication,
-		buildFn:                 p.BuildFn,
-		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
-		dops:                    p.Dops,
-		ct:                      ct,
-		it:                      it,
-		mat:                     mat,
-		wg:                      wg,
-		od:                      od,
-		orderSet:                orderSnapshot.Orders,
-		orderSetSignature:       orderSnapshot.Signature,
-		orderRescanEnabled:      true,
-		orderRescanLast:         time.Now(),
-		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
-		rec:                     p.Rec,
-		poolSessions:            p.PoolSessions,
-		poolDeathHandlers:       p.PoolDeathHandlers,
-		forceStopShutdown:       p.ForceStopShutdown,
-		suspendedNames:          suspendedNames,
-		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
-		convergenceReqCh:        p.ConvergenceReqCh,
+		cityPath:                      p.CityPath,
+		cityName:                      p.CityName,
+		configName:                    configName,
+		tomlPath:                      p.TomlPath,
+		watchTargets:                  p.WatchTargets,
+		configRev:                     p.ConfigRev,
+		configDirty:                   configDirty,
+		cfg:                           p.Cfg,
+		sp:                            p.SP,
+		publication:                   p.Publication,
+		buildFn:                       p.BuildFn,
+		buildFnWithSessionBeads:       p.BuildFnWithSessionBeads,
+		dops:                          p.Dops,
+		ct:                            ct,
+		it:                            it,
+		mat:                           mat,
+		wg:                            wg,
+		od:                            od,
+		orderSet:                      orderSnapshot.Orders,
+		orderSetSignature:             orderSnapshot.Signature,
+		orderRescanEnabled:            true,
+		orderRescanLast:               time.Now(),
+		trace:                         newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
+		rec:                           p.Rec,
+		eventProvider:                 eventProvider,
+		installedEventsConfig:         installedEventsConfig,
+		installedEventsConfigResolved: eventProvider != nil,
+		poolSessions:                  p.PoolSessions,
+		poolDeathHandlers:             p.PoolDeathHandlers,
+		forceStopShutdown:             p.ForceStopShutdown,
+		suspendedNames:                suspendedNames,
+		asyncStartLimiter:             newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
+		convergenceReqCh:              p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
 			if p.ReloadReqCh != nil {
 				return p.ReloadReqCh
@@ -1761,7 +1774,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
-	if cr.configRev != "" && result.Revision == cr.configRev {
+	if cr.eventProvider == nil {
+		cr.eventProvider, _ = cr.rec.(*reloadableEventsProvider)
+	}
+	if cr.eventProvider != nil && !cr.installedEventsConfigResolved {
+		cr.installedEventsConfig = effectiveEventsProviderConfig(cr.cfg.Events)
+		cr.installedEventsConfigResolved = true
+		cr.eventProvider.setActiveProviderName(cr.installedEventsConfig.provider)
+	}
+	desiredEventsConfig := effectiveEventsProviderConfig(result.Cfg.Events)
+	eventsConfigPending := cr.eventProvider != nil &&
+		(!cr.installedEventsConfigResolved || desiredEventsConfig != cr.installedEventsConfig)
+	if cr.configRev != "" && result.Revision == cr.configRev && !eventsConfigPending {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
 			err := fmt.Errorf("order reload: %w", orderErr)
@@ -1830,6 +1854,33 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextDops := cr.dops
 	providerChanged := false
 
+	var eventCandidate events.Provider
+	var eventCandidateHead uint64
+	if eventsConfigPending {
+		candidate, candidateErr := cityRuntimeNewEventsProvider(cr.cityPath, nextCfg.Events, cr.stderr)
+		if candidateErr != nil {
+			appendWarning(fmt.Sprintf("new events provider %q: %v (keeping old provider)", desiredEventsConfig.provider, candidateErr))
+		} else if head, headErr := candidate.LatestSeq(); headErr != nil {
+			appendWarning(fmt.Sprintf("probe new events provider %q: %v (keeping old provider)", desiredEventsConfig.provider, headErr))
+			if closeErr := candidate.Close(); closeErr != nil {
+				appendWarning(fmt.Sprintf("close unused events provider %q: %v", desiredEventsConfig.provider, closeErr))
+			}
+		} else {
+			eventCandidate = candidate
+			eventCandidateHead = head
+		}
+	}
+	closeEventCandidate := func() {
+		if eventCandidate == nil {
+			return
+		}
+		if closeErr := eventCandidate.Close(); closeErr != nil {
+			appendWarning(fmt.Sprintf("close unused events provider %q: %v", desiredEventsConfig.provider, closeErr))
+		}
+		eventCandidate = nil
+	}
+	defer closeEventCandidate()
+
 	// Detect session provider change. A pack-declared runtime binds its
 	// command into the provider at construction time, so a changed (or
 	// added/removed) declaration behind an unchanged selection name also
@@ -1875,6 +1926,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	if lifecycleErr != nil {
 		err := fmt.Errorf("config reload: %w", lifecycleErr)
+		closeEventCandidate()
 		fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
@@ -1908,13 +1960,17 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
 
+	var running []string
+	var providerSwapSummary string
 	if providerChanged {
-		running, lErr := cr.sp.ListRunning("")
+		var lErr error
+		running, lErr = cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
 			if runtime.IsPartialListError(lErr) {
 				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
 			}
+			closeEventCandidate()
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 			if trace != nil {
@@ -1926,10 +1982,89 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		providerSwapSummary := fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
+		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
+	}
+
+	var detachedEventProvider events.Provider
+	workersPaused := false
+	var replaySeq uint64
+	var replaySeqOK bool
+	resumeEventWorkers := func() {
+		if !workersPaused || cr.cs == nil {
+			return
+		}
+		if !cr.cs.resumeBeadEventWorkers(replaySeq, replaySeqOK) {
+			appendWarning("event workers were not resumed because controller shutdown won the reload race")
+		}
+		workersPaused = false
+	}
+	closeDetachedEventProvider := func() {
+		if detachedEventProvider == nil {
+			return
+		}
+		if closeErr := detachedEventProvider.Close(); closeErr != nil {
+			appendWarning(fmt.Sprintf("close previous events provider: %v", closeErr))
+		}
+		detachedEventProvider = nil
+	}
+	defer func() {
+		resumeEventWorkers()
+		closeDetachedEventProvider()
+	}()
+
+	if eventCandidate != nil {
+		if cr.cs != nil {
+			if !cr.cs.pauseBeadEventWorkers() {
+				err := errors.New("config reload: event workers could not pause because controller shutdown is in progress")
+				closeEventCandidate()
+				telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+				if trace != nil {
+					trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+				}
+				return reloadControlReply{
+					Outcome:  reloadOutcomeFailed,
+					Error:    err.Error(),
+					Warnings: warnings,
+				}
+			}
+			workersPaused = true
+			replaySeq, replaySeqOK = cr.cs.beadEventReplayCursor()
+		}
+
+		oldProvider, swapErr := cr.eventProvider.swapNamed(
+			eventCandidate,
+			desiredEventsConfig.provider,
+			validateReloadableEventsSequence,
+		)
+		if swapErr != nil {
+			// The swap was rejected and the old provider is retained. Keep the
+			// pre-pause cursor so resumeEventWorkers replays from exactly where the
+			// paused watcher left off on that same backend. Adopting the rejected
+			// candidate's head here would resume against the OLD provider with a
+			// cursor past its own records, silently skipping every event recorded
+			// between the pre-pause cursor and the candidate head.
+			appendWarning(fmt.Sprintf("swap events provider to %q: %v (keeping old provider)", desiredEventsConfig.provider, swapErr))
+			closeEventCandidate()
+		} else {
+			detachedEventProvider = oldProvider
+			eventCandidate = nil
+			cr.installedEventsConfig = desiredEventsConfig
+			cr.installedEventsConfigResolved = true
+			if !replaySeqOK {
+				// A construction-time head-probe failure means no watcher ever
+				// trusted a cursor. Only now that the replacement is installed is
+				// its pre-pause probed head the correct baseline, so records
+				// written against it during the paused rebuild are still replayed.
+				replaySeq = eventCandidateHead
+				replaySeqOK = true
+			}
+		}
+	}
+
+	if providerChanged {
 		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
 				providerSwapSummary, len(running))
@@ -2041,6 +2176,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
+	resumeEventWorkers()
+	closeDetachedEventProvider()
 	cr.configRev = result.Revision
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
@@ -3433,6 +3570,9 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		if cr.cs != nil {
+			defer cr.cs.stopBeadEventWorkers()
+		}
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

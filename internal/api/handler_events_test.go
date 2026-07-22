@@ -194,6 +194,41 @@ func TestEventRotateUnsupportedProviderReturnsMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestEventRotateWrappedUnsupportedProviderReportsInstalledBackend(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Events.Provider = "file" // desired config may be ahead of a rejected swap
+	state.eventProv = &namedUnsupportedRotatingProvider{
+		Provider: events.NewFake(),
+		name:     "exec:installed-script",
+	}
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusMethodNotAllowed, httpRec.Body.String())
+	}
+	want := "current provider is 'exec:installed-script'"
+	if !strings.Contains(httpRec.Body.String(), want) {
+		t.Fatalf("body = %q, want installed backend %q", httpRec.Body.String(), want)
+	}
+}
+
+type namedUnsupportedRotatingProvider struct {
+	events.Provider
+	name string
+}
+
+func (p *namedUnsupportedRotatingProvider) ActiveEventProviderName() string {
+	return p.name
+}
+
+func (p *namedUnsupportedRotatingProvider) ForceRotate() (events.RotationResult, error) {
+	return events.RotationResult{}, events.ErrRotationUnsupported
+}
+
 func TestEventRotateWaitReturnsCompleteCompressionStatus(t *testing.T) {
 	state := newFakeState(t)
 	var stderr strings.Builder

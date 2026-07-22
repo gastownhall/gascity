@@ -70,17 +70,31 @@ func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "rigs", "demo")
 
 	originalRunner := hookClaimCommandRunnerWithEnvContext
-	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	originalEnvRunner := hookClaimCommandEnvRunnerWithEnvContext
+	t.Cleanup(func() {
+		hookClaimCommandRunnerWithEnvContext = originalRunner
+		hookClaimCommandEnvRunnerWithEnvContext = originalEnvRunner
+	})
 	var capturedDir string
 	var capturedEnv map[string]string
 	var capturedName string
 	var capturedArgs []string
+	record := func(dir, name string, args []string) {
+		capturedDir = dir
+		capturedName = name
+		capturedArgs = append([]string(nil), args...)
+	}
 	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
 		capturedEnv = env
 		return func(dir, name string, args ...string) ([]byte, error) {
-			capturedDir = dir
-			capturedName = name
-			capturedArgs = append([]string(nil), args...)
+			record(dir, name, args)
+			return nil, nil
+		}
+	}
+	hookClaimCommandEnvRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandEnvRunner {
+		capturedEnv = env
+		return func(dir, name string, _ map[string]string, args ...string) ([]byte, error) {
+			record(dir, name, args)
 			return nil, nil
 		}
 	}
@@ -117,24 +131,36 @@ func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
 
 func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
 	originalRunner := hookClaimCommandRunnerWithEnvContext
-	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	originalEnvRunner := hookClaimCommandEnvRunnerWithEnvContext
+	t.Cleanup(func() {
+		hookClaimCommandRunnerWithEnvContext = originalRunner
+		hookClaimCommandEnvRunnerWithEnvContext = originalEnvRunner
+	})
 
 	var calls [][]string
+	respond := func(name string, args []string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+			return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
+		case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+			return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker","gc.root_bead_id":"root-1","gc.continuation_group":"review"}}]`), nil
+		default:
+			t.Fatalf("unexpected bd args: %#v", args)
+			return nil, nil
+		}
+	}
 	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
 		return func(_ string, name string, args ...string) ([]byte, error) {
-			if name != "bd" {
-				t.Fatalf("command name = %q, want bd", name)
-			}
-			calls = append(calls, append([]string(nil), args...))
-			switch {
-			case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
-				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker"}}]`), nil
-			case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
-				return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"rig/worker","gc.root_bead_id":"root-1","gc.continuation_group":"review"}}]`), nil
-			default:
-				t.Fatalf("unexpected bd args: %#v", args)
-				return nil, nil
-			}
+			return respond(name, args)
+		}
+	}
+	hookClaimCommandEnvRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandEnvRunner {
+		return func(_ string, name string, _ map[string]string, args ...string) ([]byte, error) {
+			return respond(name, args)
 		}
 	}
 

@@ -1000,7 +1000,7 @@ func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopenAndLiveRefresh(t *te
 	}
 }
 
-func TestCachingStoreClosedEventRechecksLocalReopenBeforeCommit(t *testing.T) {
+func TestCachingStoreClosedEventSerializesLocalReopenBeforeCommit(t *testing.T) {
 	backing := NewMemStore()
 	bead, err := backing.Create(Bead{Title: "reopen me"})
 	if err != nil {
@@ -1031,11 +1031,12 @@ func TestCachingStoreClosedEventRechecksLocalReopenBeforeCommit(t *testing.T) {
 	}()
 
 	<-beforeCommit
-	if err := cache.Reopen(bead.ID); err != nil {
-		t.Fatalf("Reopen: %v", err)
-	}
+	reopenDone := make(chan error, 1)
+	go func() { reopenDone <- cache.Reopen(bead.ID) }()
+	waitForCacheMutationWaiter(t, cache, bead.ID)
 	close(releaseCommit)
 	<-done
+	awaitMutationError(t, "Reopen", reopenDone)
 
 	got, err := cache.Get(bead.ID)
 	if err != nil {
@@ -1384,7 +1385,10 @@ func TestCachingStoreUpdateInvalidatesStaleCacheWhenRefreshFails(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	cache := NewCachingStoreForTest(backing, nil)
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -1402,6 +1406,9 @@ func TestCachingStoreUpdateInvalidatesStaleCacheWhenRefreshFails(t *testing.T) {
 	if got.Title != "after" {
 		t.Fatalf("Title = %q, want after", got.Title)
 	}
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want none without an authoritative post-update snapshot", events)
+	}
 
 	stats := cache.Stats()
 	if stats.ProblemCount != 1 {
@@ -1415,7 +1422,7 @@ func TestCachingStoreUpdateInvalidatesStaleCacheWhenRefreshFails(t *testing.T) {
 	}
 }
 
-func TestCachingStoreUpdateRemovesCacheWhenRefreshReturnsNotFound(t *testing.T) {
+func TestCachingStoreUpdateRemovesCacheWithoutSynthesizingCloseWhenRefreshReturnsNotFound(t *testing.T) {
 	t.Parallel()
 
 	backing := &deleteAfterUpdateStore{Store: NewMemStore()}
@@ -1447,8 +1454,8 @@ func TestCachingStoreUpdateRemovesCacheWhenRefreshReturnsNotFound(t *testing.T) 
 	if len(items) != 0 {
 		t.Fatalf("List after update/refresh NotFound = %#v, want no resurrected bead", items)
 	}
-	if len(events) != 1 || events[0] != "bead.closed:"+bead.ID {
-		t.Fatalf("events = %v, want [bead.closed:%s]", events, bead.ID)
+	if len(events) != 0 {
+		t.Fatalf("events = %v, want none without an authoritative post-update snapshot", events)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount != 0 {
@@ -1695,7 +1702,7 @@ func TestCachingStoreNoOpUpdatedEventPreservesCachedMetadataMap(t *testing.T) {
 	}
 }
 
-func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
+func TestCachingStoreApplyEventSerializesLocalMutationBeforeCommit(t *testing.T) {
 	backing := NewMemStore()
 	bead, err := backing.Create(Bead{
 		Title:    "mail",
@@ -1741,14 +1748,17 @@ func TestCachingStoreApplyEventRechecksLocalMutationBeforeCommit(t *testing.T) {
 	}()
 
 	<-beforeCommit
-	if err := cache.Update(bead.ID, UpdateOpts{
-		RemoveLabels: []string{"read"},
-		Metadata:     map[string]string{"mail.read": "false"},
-	}); err != nil {
-		t.Fatalf("Mark unread update: %v", err)
-	}
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- cache.Update(bead.ID, UpdateOpts{
+			RemoveLabels: []string{"read"},
+			Metadata:     map[string]string{"mail.read": "false"},
+		})
+	}()
+	waitForCacheMutationWaiter(t, cache, bead.ID)
 	close(releaseCommit)
 	<-done
+	awaitMutationError(t, "Mark unread update", updateDone)
 
 	got, err := cache.Get(bead.ID)
 	if err != nil {
@@ -1837,12 +1847,12 @@ func TestCachingStoreApplyEventRechecksRecentLocalAfterGetRefresh(t *testing.T) 
 	}
 }
 
-func TestCachingStoreApplyEventDropsRoutedEventOnConcurrentDepWrite(t *testing.T) {
+func TestCachingStoreApplyEventSerializesRoutedEventBeforeConcurrentDepWrite(t *testing.T) {
 	// Regression for gastownhall/gascity#2210 follow-up: the verified-backing
 	// path applies a conflicting metadata event for a bead flagged locally
-	// mutated only by a prior event. DepAdd/DepRemove mutate c.deps and bump the
-	// mutation seq WITHOUT touching c.beads[id], so a concurrent dep write that
-	// lands in the RUnlock->Lock window is invisible to the beadChanged guard
+	// mutated only by a prior event. A same-ID DepAdd must queue behind the event
+	// through cache finalization so neither mutation can overwrite the other's
+	// dependency state.
 	// (which compares only the cached Bead) and gets clobbered by
 	// updateEventDepsLocked. Snapshotting the mutation seq closes that hole: the
 	// event must drop and let reconciliation reconverge, leaving the concurrent
@@ -1916,14 +1926,15 @@ func TestCachingStoreApplyEventDropsRoutedEventOnConcurrentDepWrite(t *testing.T
 				close(done)
 			}()
 
-			// A concurrent dep write lands after the routed event verified
-			// against the backing store but before it commits.
+			// A concurrent dep write arrives after the routed event verified
+			// against the backing store but queues until the event commits.
 			<-beforeCommit
-			if err := cache.DepAdd(created.ID, tc.newDependsOn, "blocks"); err != nil {
-				t.Fatalf("concurrent DepAdd: %v", err)
-			}
+			depDone := make(chan error, 1)
+			go func() { depDone <- cache.DepAdd(created.ID, tc.newDependsOn, "blocks") }()
+			waitForCacheMutationWaiter(t, cache, created.ID)
 			close(releaseCommit)
 			<-done
+			awaitMutationError(t, "concurrent DepAdd", depDone)
 
 			cache.mu.RLock()
 			deps := cloneDeps(cache.deps[created.ID])
@@ -1937,7 +1948,7 @@ func TestCachingStoreApplyEventDropsRoutedEventOnConcurrentDepWrite(t *testing.T
 				}
 			}
 			if !found {
-				t.Fatalf("concurrent dep %q clobbered by routed event; cached deps=%+v (event must drop and let reconciliation reconverge — #2210)",
+				t.Fatalf("concurrent dep %q clobbered after routed event; cached deps=%+v (same-ID mutations must serialize — #2210)",
 					tc.newDependsOn, deps)
 			}
 		})
@@ -2954,7 +2965,7 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStore(NewBdStore("/city", runner), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3002,7 +3013,7 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3381,7 +3392,7 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3434,7 +3445,7 @@ func TestCachingStoreBdReconcileAppliesFreshListWhenReadyProjectionErrors(t *tes
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3502,7 +3513,7 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepsChange(t *t
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3585,7 +3596,7 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepTargetStatus
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	blockerStatus = "open"
 	projectionBlocked = true
 	if err := cache.Prime(context.Background()); err != nil {
@@ -3686,7 +3697,7 @@ func TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105(t
 	}
 
 	var events []string
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), func(eventType, beadID string, _ json.RawMessage) {
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), func(eventType, beadID string, _ json.RawMessage) {
 		events = append(events, eventType+":"+beadID)
 	})
 	if err := cache.Prime(context.Background()); err != nil {
@@ -3755,7 +3766,7 @@ func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *te
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3828,7 +3839,7 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore(t.TempDir(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3897,7 +3908,7 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3937,7 +3948,7 @@ func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *tes
 
 	runner := newCachingStoreBdDepRunner(t)
 	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3962,7 +3973,7 @@ func TestCachingStoreBdIncompleteDepsUseBackingForDownDepList(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -4032,7 +4043,7 @@ func TestCachingStoreBdIncompleteDepsDepAddDoesNotDropExistingBackingDeps(t *tes
 
 	runner := newCachingStoreBdDepRunner(t)
 	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -4058,7 +4069,7 @@ func TestCachingStoreBdIncompleteDepsDepRemoveDoesNotDropExternalBackingDeps(t *
 		{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"},
 		{IssueID: "bd-1", DependsOnID: "bd-3", Type: "blocks"},
 	}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore(t.TempDir(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}

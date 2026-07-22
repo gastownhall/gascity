@@ -1820,6 +1820,7 @@ type nativeDoltTransactionTestStorage interface {
 	CloseIssue(context.Context, string, string, string, string) error
 	AddLabel(context.Context, string, string, string) error
 	RemoveLabel(context.Context, string, string, string) error
+	GetLabels(context.Context, string) ([]string, error)
 	AddDependency(context.Context, *beadslib.Dependency, string) error
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error)
@@ -1856,6 +1857,10 @@ func (tx nativeDoltTransactionForTest) AddLabel(ctx context.Context, issueID, la
 
 func (tx nativeDoltTransactionForTest) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	return tx.storage.RemoveLabel(ctx, issueID, label, actor)
+}
+
+func (tx nativeDoltTransactionForTest) GetLabels(ctx context.Context, issueID string) ([]string, error) {
+	return tx.storage.GetLabels(ctx, issueID)
 }
 
 func (tx nativeDoltTransactionForTest) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
@@ -2109,6 +2114,18 @@ func (s *nativeDoltMemStorage) GetIssue(_ context.Context, id string) (*beadslib
 	return nativeIssueFromBead(bead)
 }
 
+func (s *nativeDoltMemStorage) GetIssuesByIDs(ctx context.Context, ids []string) ([]*beadslib.Issue, error) {
+	issues := make([]*beadslib.Issue, 0, len(ids))
+	for _, id := range ids {
+		issue, err := s.GetIssue(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, nil
+}
+
 func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
 	opts, err := nativeDoltMemUpdateOpts(updates)
 	if err != nil {
@@ -2207,6 +2224,14 @@ func (s *nativeDoltMemStorage) RemoveLabel(_ context.Context, issueID, label, _ 
 	return s.store.Update(issueID, UpdateOpts{RemoveLabels: []string{label}})
 }
 
+func (s *nativeDoltMemStorage) GetLabels(_ context.Context, issueID string) ([]string, error) {
+	bead, err := s.store.Get(issueID)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), bead.Labels...), nil
+}
+
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {
 	return s.store.DepAdd(dep.IssueID, dep.DependsOnID, string(dep.Type))
 }
@@ -2282,6 +2307,12 @@ func (s *nativeDoltMemStorage) Close() error {
 type nativeDoltCloseCapturingStorage struct {
 	*nativeDoltMemStorage
 	closeReasons []string
+}
+
+func (s *nativeDoltCloseCapturingStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
+		return fn(nativeDoltTransactionForTest{storage: s})
+	})
 }
 
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

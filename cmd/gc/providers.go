@@ -1083,6 +1083,23 @@ func newFileEventsRecorder(eventsPath string, eventsCfg config.EventsConfig, std
 	return events.NewFileRecorder(eventsPath, stderr, eventsFileRecorderOptions(eventsCfg, stderr)...)
 }
 
+// newCityEventsProvider constructs the configured backend for a known city.
+// Runtime and CLI emitters share this path so durable lifecycle publication
+// cannot acknowledge a different backend than `gc events` reads. GC_EVENTS
+// retains its documented precedence over the composed city configuration.
+func newCityEventsProvider(cityPath string, eventsCfg config.EventsConfig, stderr io.Writer) (events.Provider, error) {
+	provider := strings.TrimSpace(eventsCfg.Provider)
+	if override := strings.TrimSpace(os.Getenv("GC_EVENTS")); override != "" {
+		provider = override
+	}
+	return newEventsProviderForNameWithConfig(
+		provider,
+		filepath.Join(cityPath, ".gc", "events.jsonl"),
+		stderr,
+		eventsCfg,
+	)
+}
+
 // openCityEventsProvider resolves the city and returns an events.Provider.
 // Returns (nil, exitCode) on failure.
 func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, int) {

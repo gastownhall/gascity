@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,6 +43,61 @@ func drainWatcher(t *testing.T, w Watcher, n int) []Event {
 func recordN(rec *FileRecorder, prefix string, n int) {
 	for i := 0; i < n; i++ {
 		rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: fmt.Sprintf("%s-%d", prefix, i)})
+	}
+}
+
+func TestWatchResumesFromCommittedBoundaryAfterTornTailRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		afterSeq uint64
+	}{
+		{name: "resume-backfill", afterSeq: 0},
+		{name: "tail-after-latest", afterSeq: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "events.jsonl")
+			rec, err := NewFileRecorder(path, io.Discard)
+			if err != nil {
+				t.Fatalf("NewFileRecorder: %v", err)
+			}
+			defer rec.Close() //nolint:errcheck // test cleanup
+			if err := rec.RecordDurably(Event{Type: BeadCreated, Subject: "seed"}); err != nil {
+				t.Fatalf("seed RecordDurably: %v", err)
+			}
+			torn, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatalf("open torn writer: %v", err)
+			}
+			if _, err := torn.WriteString(`{"seq":2,"type":"bead.closed"}`); err != nil {
+				_ = torn.Close()
+				t.Fatalf("append torn record: %v", err)
+			}
+			if err := torn.Close(); err != nil {
+				t.Fatalf("close torn writer: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			watcher, err := rec.Watch(ctx, tc.afterSeq)
+			if err != nil {
+				t.Fatalf("Watch: %v", err)
+			}
+			defer watcher.Close() //nolint:errcheck // test cleanup
+			if tc.afterSeq == 0 {
+				seed := drainWatcher(t, watcher, 1)
+				if seed[0].Seq != 1 || seed[0].Subject != "seed" {
+					t.Fatalf("backfill seed = %+v, want seq 1 seed", seed[0])
+				}
+			}
+
+			if err := rec.RecordDurably(Event{Type: BeadClosed, Subject: "replacement-after-repair"}); err != nil {
+				t.Fatalf("replacement RecordDurably: %v", err)
+			}
+			got := drainWatcher(t, watcher, 1)
+			if got[0].Seq != 2 || got[0].Type != BeadClosed || got[0].Subject != "replacement-after-repair" {
+				t.Fatalf("replacement event = %+v, want repaired seq 2 bead.closed", got[0])
+			}
+		})
 	}
 }
 

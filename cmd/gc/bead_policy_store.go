@@ -36,9 +36,22 @@ type beadPolicyGraphStore struct {
 }
 
 var (
-	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
-	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.CanonicalGetter                       = (*beadPolicyStore)(nil)
+	_ beads.ConditionalAssignmentReleaser         = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter      = (*beadPolicyStore)(nil)
+	_ beads.CloseTransitionerHandleProvider       = (*beadPolicyStore)(nil)
+	_ beads.CloseAllTransitionerHandleProvider    = (*beadPolicyStore)(nil)
+	_ beads.UpdateTransitionerHandleProvider      = (*beadPolicyStore)(nil)
+	_ beads.CloseObserverSuppressorHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.ObserverBarrierHandleProvider         = (*beadPolicyStore)(nil)
+	_ beads.LifecycleMetadataTransactionStore     = (*beadPolicyStore)(nil)
 )
+
+// GetCanonical forwards canonical-row reads hidden by the embedded Store
+// interface. beadPolicyGraphStore inherits this method.
+func (s *beadPolicyStore) GetCanonical(id string) (beads.Bead, error) {
+	return beads.GetCanonical(s.Store, id)
+}
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
 // conditional-writes resolution target. The policy layer shapes creation and
@@ -49,6 +62,42 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// CloseTransitionerHandle forwards the atomic close capability hidden by the
+// policy Store embedding. The graph policy wrapper inherits this method.
+func (s *beadPolicyStore) CloseTransitionerHandle() (beads.CloseTransitioner, bool) {
+	return beads.CloseTransitionerFor(s.Store)
+}
+
+// CloseAllTransitionerHandle forwards backing-owned batch classification
+// hidden by the policy Store embedding. The graph wrapper inherits it.
+func (s *beadPolicyStore) CloseAllTransitionerHandle() (beads.CloseAllTransitioner, bool) {
+	return beads.CloseAllTransitionerFor(s.Store)
+}
+
+// UpdateTransitionerHandle forwards atomic full-update classification hidden
+// by the policy Store embedding. The graph policy wrapper inherits this method.
+func (s *beadPolicyStore) UpdateTransitionerHandle() (beads.UpdateTransitioner, bool) {
+	return beads.UpdateTransitionerFor(s.Store)
+}
+
+// CloseObserverSuppressorHandle forwards per-call observer suppression hidden
+// by the policy Store embedding. The graph policy wrapper inherits this method.
+func (s *beadPolicyStore) CloseObserverSuppressorHandle() (beads.CloseObserverSuppressor, bool) {
+	return beads.CloseObserverSuppressorFor(s.Store)
+}
+
+// ObserverBarrierHandle forwards non-mutating observer sequencing hidden by
+// the policy Store embedding. The graph policy wrapper inherits this method.
+func (s *beadPolicyStore) ObserverBarrierHandle() (beads.ObserverBarrier, bool) {
+	return beads.ObserverBarrierFor(s.Store)
+}
+
+// WithLifecycleMetadataTransaction forwards lifecycle serialization hidden by
+// the policy Store embedding. The graph policy wrapper inherits this method.
+func (s *beadPolicyStore) WithLifecycleMetadataTransaction(id string, fn func(beads.LifecycleMetadataTransaction) error) error {
+	return beads.WithLifecycleMetadataTransaction(s.Store, id, fn)
+}
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,8 +18,10 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ Provider = (*FileRecorder)(nil)
-	_ Provider = (*Fake)(nil)
+	_ Provider        = (*FileRecorder)(nil)
+	_ Provider        = (*Fake)(nil)
+	_ DurableRecorder = (*FileRecorder)(nil)
+	_ DurableRecorder = (*Fake)(nil)
 )
 
 func TestFileRecorderWritesEvent(t *testing.T) {
@@ -66,6 +70,518 @@ func TestFileRecorderWritesEvent(t *testing.T) {
 	}
 	if e.Ts.IsZero() {
 		t.Error("Ts should be auto-filled, got zero")
+	}
+}
+
+func TestFileRecorderRecordDurablyPreservesBatchOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	if err := rec.RecordDurably(
+		Event{Type: BeadClosed, Actor: "controller", Subject: "gc-1"},
+		Event{Type: MoleculeResolved, Actor: "controller", Subject: "gc-1"},
+	); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	got, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("events = %d, want 2", len(got))
+	}
+	if got[0].Type != BeadClosed || got[1].Type != MoleculeResolved {
+		t.Fatalf("event order = [%s %s], want [%s %s]", got[0].Type, got[1].Type, BeadClosed, MoleculeResolved)
+	}
+	if got[0].Seq+1 != got[1].Seq {
+		t.Fatalf("event seqs = [%d %d], want consecutive", got[0].Seq, got[1].Seq)
+	}
+}
+
+func TestFileRecorderRecordDurablyRepairsTornTailBeforeRetry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	rec, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	if err := rec.RecordDurably(Event{Type: BeadCreated, Actor: "controller", Subject: "gc-1"}); err != nil {
+		t.Fatalf("seed RecordDurably: %v", err)
+	}
+	torn, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open torn writer: %v", err)
+	}
+	if _, err := torn.WriteString(`{"seq":2,"type":"bead.closed","subject":"gc-1"`); err != nil {
+		_ = torn.Close()
+		t.Fatalf("append torn record: %v", err)
+	}
+	if err := torn.Close(); err != nil {
+		t.Fatalf("close torn writer: %v", err)
+	}
+
+	if err := rec.RecordDurably(
+		Event{Type: BeadClosed, Actor: "controller", Subject: "gc-1"},
+		Event{Type: MoleculeResolved, Actor: "controller", Subject: "gc-1"},
+	); err != nil {
+		t.Fatalf("retry RecordDurably: %v", err)
+	}
+	got, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("events = %+v, want seed plus complete retried lifecycle batch", got)
+	}
+	if got[0].Type != BeadCreated || got[1].Type != BeadClosed || got[2].Type != MoleculeResolved {
+		t.Fatalf("event order = [%s %s %s], want [%s %s %s]", got[0].Type, got[1].Type, got[2].Type, BeadCreated, BeadClosed, MoleculeResolved)
+	}
+	if got[0].Seq+1 != got[1].Seq || got[1].Seq+1 != got[2].Seq {
+		t.Fatalf("event seqs = [%d %d %d], want consecutive", got[0].Seq, got[1].Seq, got[2].Seq)
+	}
+}
+
+func TestFileRecorderFailedRecordDoesNotConsumeSequence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	rec, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	if err := rec.RecordDurably(Event{Type: BeadClosed, Payload: json.RawMessage(`{`)}); err == nil {
+		t.Fatal("RecordDurably with invalid payload error = nil")
+	}
+	if err := rec.RecordDurably(Event{Type: BeadClosed, Subject: "gc-1"}); err != nil {
+		t.Fatalf("valid RecordDurably: %v", err)
+	}
+	got, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("events = %+v, want one valid event at seq 1", got)
+	}
+}
+
+func TestFileRecorderRecordDurablyRefreshesStaleDescriptorAfterRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rotator, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rotator.Close() //nolint:errcheck // test cleanup
+	stale, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close() //nolint:errcheck // test cleanup
+
+	rotator.Record(Event{Type: BeadCreated, Actor: "seed"})
+	result, err := rotator.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if !result.Rotated {
+		t.Fatalf("ForceRotate result = %+v, want rotation", result)
+	}
+	rotator.WaitForRotations()
+
+	if err := stale.RecordDurably(
+		Event{Type: BeadClosed, Actor: "controller", Subject: "gc-1"},
+		Event{Type: MoleculeResolved, Actor: "controller", Subject: "gc-1"},
+	); err != nil {
+		t.Fatalf("RecordDurably from stale recorder: %v", err)
+	}
+	got, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	var lifecycleTypes []string
+	for _, event := range got {
+		if event.Type == BeadClosed || event.Type == MoleculeResolved {
+			lifecycleTypes = append(lifecycleTypes, event.Type)
+		}
+	}
+	if len(lifecycleTypes) != 2 || lifecycleTypes[0] != BeadClosed || lifecycleTypes[1] != MoleculeResolved {
+		t.Fatalf("lifecycle event order after rotation = %v, want [%s %s]; all events=%+v", lifecycleTypes, BeadClosed, MoleculeResolved, got)
+	}
+}
+
+func TestFileRecorderRecordSerializesWithCrossRecorderRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rotator, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rotator.Close() //nolint:errcheck // test cleanup
+	writer, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close() //nolint:errcheck // test cleanup
+	rotator.Record(Event{Type: BeadCreated, Actor: "seed"})
+
+	activeLock := mustOpenSiblingLock(t, path)
+	var releaseOnce sync.Once
+	releaseActive := func() {
+		releaseOnce.Do(func() {
+			_ = syscall.Flock(int(activeLock.Fd()), syscall.LOCK_UN)
+			_ = activeLock.Close()
+		})
+	}
+	defer releaseActive()
+
+	writeDone := make(chan struct{})
+	go func() {
+		writer.Record(Event{Type: BeadClosed, Actor: "controller", Subject: "gc-1"})
+		close(writeDone)
+	}()
+	waitForEventLogPathLock(t, path+".lock")
+
+	type rotationOutcome struct {
+		result RotationResult
+		err    error
+	}
+	rotationDone := make(chan rotationOutcome, 1)
+	go func() {
+		result, err := rotator.ForceRotate()
+		rotationDone <- rotationOutcome{result: result, err: err}
+	}()
+	select {
+	case outcome := <-rotationDone:
+		t.Fatalf("rotation completed before blocked writer released path lock: result=%+v err=%v", outcome.result, outcome.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	releaseActive()
+	select {
+	case <-writeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer did not finish after active inode lock release")
+	}
+	var outcome rotationOutcome
+	select {
+	case outcome = <-rotationDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotation did not finish after writer released path lock")
+	}
+	if outcome.err != nil || !outcome.result.Rotated {
+		t.Fatalf("ForceRotate result=%+v err=%v, want successful rotation", outcome.result, outcome.err)
+	}
+	rotator.WaitForRotations()
+
+	got, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	closedCount := 0
+	var previousSeq uint64
+	for _, event := range got {
+		if event.Seq <= previousSeq {
+			t.Fatalf("non-increasing sequence after serialized rotation: previous=%d current=%d events=%+v", previousSeq, event.Seq, got)
+		}
+		previousSeq = event.Seq
+		if event.Type == BeadClosed {
+			closedCount++
+		}
+	}
+	if closedCount != 1 {
+		t.Fatalf("bead.closed count = %d, want 1; events=%+v", closedCount, got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestNewFileRecorderSerializesOrphanRecoveryBeforeSeedingSequence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	rotatingPath := filepath.Join(dir, "events.jsonl.rotating-20260716T120000Z-seq-1-2")
+	writeJSONLEvents(t, rotatingPath, 1, 2)
+
+	releaseMaintenance := mustHoldRotationMaintenanceLock(t, path)
+	defer releaseMaintenance()
+
+	type constructorOutcome struct {
+		recorder *FileRecorder
+		err      error
+	}
+	constructorDone := make(chan constructorOutcome, 1)
+	go func() {
+		recorder, err := NewFileRecorder(path, io.Discard)
+		constructorDone <- constructorOutcome{recorder: recorder, err: err}
+	}()
+
+	select {
+	case outcome := <-constructorDone:
+		if outcome.recorder != nil {
+			_ = outcome.recorder.Close()
+		}
+		t.Fatalf("NewFileRecorder completed while orphan recovery maintenance lock was held: %v", outcome.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	releaseMaintenance()
+	var outcome constructorOutcome
+	select {
+	case outcome = <-constructorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NewFileRecorder did not finish after orphan recovery maintenance lock was released")
+	}
+	if outcome.err != nil {
+		t.Fatalf("NewFileRecorder: %v", outcome.err)
+	}
+	defer outcome.recorder.Close() //nolint:errcheck // test cleanup
+
+	if err := outcome.recorder.RecordDurably(Event{Type: BeadCreated, Actor: "after-recovery"}); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3: %+v", len(events), events)
+	}
+	for i, event := range events {
+		wantSeq := uint64(i + 1)
+		if event.Seq != wantSeq {
+			t.Fatalf("events[%d].Seq = %d, want %d; events=%+v", i, event.Seq, wantSeq, events)
+		}
+	}
+}
+
+func TestNewFileRecorderSerializesSequenceReadAndOpenWithPathLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, path, 1)
+
+	releasePathLock := mustHoldEventLogPathLock(t, path)
+	defer releasePathLock()
+	type constructorOutcome struct {
+		recorder *FileRecorder
+		err      error
+	}
+	constructorDone := make(chan constructorOutcome, 1)
+	go func() {
+		recorder, err := NewFileRecorder(path, io.Discard)
+		constructorDone <- constructorOutcome{recorder: recorder, err: err}
+	}()
+
+	select {
+	case outcome := <-constructorDone:
+		if outcome.recorder != nil {
+			_ = outcome.recorder.Close()
+		}
+		t.Fatalf("NewFileRecorder completed while event-log path lock was held: %v", outcome.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	releasePathLock()
+	var outcome constructorOutcome
+	select {
+	case outcome = <-constructorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NewFileRecorder did not finish after event-log path lock was released")
+	}
+	if outcome.err != nil {
+		t.Fatalf("NewFileRecorder: %v", outcome.err)
+	}
+	defer outcome.recorder.Close() //nolint:errcheck // test cleanup
+	if err := outcome.recorder.RecordDurably(Event{Type: BeadCreated, Actor: "after-open"}); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
+		t.Fatalf("events = %+v, want consecutive seqs 1,2", events)
+	}
+}
+
+func TestNewFileRecorderDoesNotSweepLiveRotationCompression(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rotator, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rotator.Close() //nolint:errcheck // test cleanup
+	if err := rotator.RecordDurably(Event{Type: BeadCreated, Actor: "before-rotation"}); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+
+	releaseMaintenance := mustHoldRotationMaintenanceLock(t, path)
+	defer releaseMaintenance()
+	result, err := rotator.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if !result.Rotated {
+		t.Fatalf("ForceRotate result = %+v, want rotation", result)
+	}
+
+	type constructorOutcome struct {
+		recorder *FileRecorder
+		err      error
+	}
+	constructorDone := make(chan constructorOutcome, 1)
+	go func() {
+		recorder, err := NewFileRecorder(path, &stderr)
+		constructorDone <- constructorOutcome{recorder: recorder, err: err}
+	}()
+
+	select {
+	case <-result.Done:
+		t.Fatal("rotation compression completed while maintenance lock was held")
+	case <-time.After(25 * time.Millisecond):
+	}
+	select {
+	case outcome := <-constructorDone:
+		if outcome.recorder != nil {
+			_ = outcome.recorder.Close()
+		}
+		t.Fatalf("NewFileRecorder swept a live rotation while maintenance lock was held: %v", outcome.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	releaseMaintenance()
+	select {
+	case <-result.Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotation compression did not finish after maintenance lock was released")
+	}
+	var outcome constructorOutcome
+	select {
+	case outcome = <-constructorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NewFileRecorder did not finish after maintenance lock was released")
+	}
+	if outcome.err != nil {
+		t.Fatalf("NewFileRecorder: %v", outcome.err)
+	}
+	defer outcome.recorder.Close() //nolint:errcheck // test cleanup
+	if err := outcome.recorder.RecordDurably(Event{Type: BeadClosed, Actor: "after-rotation"}); err != nil {
+		t.Fatalf("RecordDurably after rotation: %v", err)
+	}
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3: %+v", len(events), events)
+	}
+	for i, event := range events {
+		wantSeq := uint64(i + 1)
+		if event.Seq != wantSeq {
+			t.Fatalf("events[%d].Seq = %d, want %d; events=%+v", i, event.Seq, wantSeq, events)
+		}
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "events.jsonl.rotating-*")); err != nil {
+		t.Fatalf("Glob rotating files: %v", err)
+	} else if len(matches) != 0 {
+		t.Fatalf("rotating files remain after compression: %v", matches)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "*.gz.tmp")); err != nil {
+		t.Fatalf("Glob gzip temp files: %v", err)
+	} else if len(matches) != 0 {
+		t.Fatalf("gzip temp files remain after compression: %v", matches)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "events.jsonl.archive-*.gz")); err != nil {
+		t.Fatalf("Glob archives: %v", err)
+	} else if len(matches) != 1 {
+		t.Fatalf("archives = %v, want exactly one", matches)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func mustHoldRotationMaintenanceLock(t *testing.T, eventPath string) func() {
+	t.Helper()
+	return mustHoldEventLogLock(t, eventPath+".rotation.lock")
+}
+
+func mustHoldEventLogPathLock(t *testing.T, eventPath string) func() {
+	t.Helper()
+	return mustHoldEventLogLock(t, eventPath+".lock")
+}
+
+func mustHoldEventLogLock(t *testing.T, lockPath string) func() {
+	t.Helper()
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open event-log lock %q: %v", lockPath, err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lockFile.Close()
+		t.Fatalf("hold event-log lock %q: %v", lockPath, err)
+	}
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
+		})
+	}
+}
+
+func waitForEventLogPathLock(t *testing.T, lockPath string) {
+	t.Helper()
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for {
+		probe, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			t.Fatalf("open path-lock probe: %v", err)
+		}
+		err = syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			_ = probe.Close()
+			return
+		}
+		if err != nil {
+			_ = probe.Close()
+			t.Fatalf("probe path lock: %v", err)
+		}
+		_ = syscall.Flock(int(probe.Fd()), syscall.LOCK_UN)
+		_ = probe.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not acquire event-log path lock")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestFileRecorderRecordDurablyReturnsErrorAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	rec, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := rec.RecordDurably(Event{Type: BeadClosed}); err == nil {
+		t.Fatal("RecordDurably after Close error = nil")
 	}
 }
 
@@ -333,6 +849,30 @@ func TestFakeRecordsEvents(t *testing.T) {
 	}
 }
 
+func TestFakeRecordDurablyPreservesBatchAndReportsBrokenProvider(t *testing.T) {
+	f := NewFake()
+	if err := f.RecordDurably(
+		Event{Type: BeadClosed, Actor: "controller"},
+		Event{Type: MoleculeResolved, Actor: "controller"},
+	); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+	if len(f.Events) != 2 || f.Events[0].Type != BeadClosed || f.Events[1].Type != MoleculeResolved {
+		t.Fatalf("events = %+v, want ordered lifecycle pair", f.Events)
+	}
+	if f.Events[0].Seq+1 != f.Events[1].Seq {
+		t.Fatalf("event seqs = [%d %d], want consecutive", f.Events[0].Seq, f.Events[1].Seq)
+	}
+
+	broken := NewFailFake()
+	if err := broken.RecordDurably(Event{Type: BeadClosed}); err == nil {
+		t.Fatal("RecordDurably on broken fake error = nil")
+	}
+	if len(broken.Events) != 0 {
+		t.Fatalf("broken fake recorded %d events, want zero", len(broken.Events))
+	}
+}
+
 func TestFakeList(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
@@ -533,6 +1073,75 @@ func TestReadFiltered(t *testing.T) {
 			t.Errorf("got %v, want nil", got)
 		}
 	})
+}
+
+func TestEventReadersIgnoreUnterminatedJSONRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	data, err := json.Marshal(Event{Seq: 1, Type: BeadClosed, Subject: "gc-1"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	all, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("ReadFiltered unterminated events = %+v, want none", all)
+	}
+	tail, err := ReadFilteredTail(path, Filter{}, 1)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if len(tail) != 0 {
+		t.Fatalf("ReadFilteredTail unterminated events = %+v, want none", tail)
+	}
+	latest, err := ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq: %v", err)
+	}
+	if latest != 0 {
+		t.Fatalf("ReadLatestSeq unterminated = %d, want 0", latest)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	segment, err := activeSegmentReader(f, int64(len(data)))
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("activeSegmentReader: %v", err)
+	}
+	var (
+		segmentEvents []Event
+		maxSeq        uint64
+	)
+	done, err := segment.readInto(Filter{}, &maxSeq, &segmentEvents, 10)
+	segment.close()
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("segment read: %v", err)
+	}
+	if !done || len(segmentEvents) != 0 || maxSeq != 0 {
+		t.Fatalf("segment done=%v events=%+v maxSeq=%d, want completed with no committed events", done, segmentEvents, maxSeq)
+	}
+
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("terminate record: %v", err)
+	}
+	committed, err := ReadAll(path)
+	if err != nil {
+		t.Fatalf("ReadAll committed: %v", err)
+	}
+	if len(committed) != 1 || committed[0].Seq != 1 {
+		t.Fatalf("committed events = %+v, want seq 1 after newline", committed)
+	}
 }
 
 func TestReadFilteredMissingFile(t *testing.T) {

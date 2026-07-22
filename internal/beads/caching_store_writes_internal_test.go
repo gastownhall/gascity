@@ -4,7 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
+	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
@@ -60,12 +66,249 @@ type cacheWriteNotification struct {
 	payload   json.RawMessage
 }
 
+type latchedLegacyCloseStore struct {
+	Store
+	blockedID string
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *latchedLegacyCloseStore) Close(id string) error {
+	if id == s.blockedID {
+		close(s.entered)
+		<-s.release
+	}
+	return s.Store.Close(id)
+}
+
+type latchedCommittedCloseStore struct {
+	Store
+	committed chan struct{}
+	release   chan struct{}
+}
+
+type latchedLegacyCloseReopenStore struct {
+	*latchedCommittedCloseStore
+	reopenEntered chan struct{}
+}
+
+func (s *latchedLegacyCloseReopenStore) Reopen(id string) error {
+	close(s.reopenEntered)
+	return s.Store.Reopen(id)
+}
+
+func (s *latchedCommittedCloseStore) Close(id string) error {
+	err := s.Store.Close(id)
+	close(s.committed)
+	<-s.release
+	return err
+}
+
+func (s *latchedCommittedCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	n, err := s.Store.CloseAll(ids, metadata)
+	close(s.committed)
+	<-s.release
+	return n, err
+}
+
+func (s *latchedCommittedCloseStore) CloseAllWithTransitions(ids []string, metadata map[string]string) (CloseAllTransitionResult, error) {
+	transitioner, ok := CloseAllTransitionerFor(s.Store)
+	if !ok {
+		return CloseAllTransitionResult{}, ErrCloseAllTransitionUnsupported
+	}
+	result, err := transitioner.CloseAllWithTransitions(ids, metadata)
+	close(s.committed)
+	<-s.release
+	return result, err
+}
+
+// reconcileAcrossPausedMutation starts reconciliation while a backing mutation
+// is paused after commit. Reconciliation may finish first on an implementation
+// that does not serialize the two; otherwise release the mutation once the
+// unknown-scope reconciliation is observably queued, then await its completion.
+func reconcileAcrossPausedMutation(t *testing.T, cache *CachingStore, release chan struct{}) {
+	t.Helper()
+	reconcileDone := make(chan struct{})
+	go func() {
+		cache.runReconciliation()
+		close(reconcileDone)
+	}()
+
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-reconcileDone:
+			close(release)
+			return
+		default:
+		}
+
+		cache.closeStateMu.Lock()
+		waiters := cache.unknownMutationWaiters
+		cache.closeStateMu.Unlock()
+		if waiters > 0 {
+			close(release)
+			select {
+			case <-reconcileDone:
+				return
+			case <-timer.C:
+				t.Fatal("reconciliation did not complete after paused mutation released")
+			}
+		}
+
+		select {
+		case <-timer.C:
+			t.Fatal("reconciliation neither completed nor queued on mutation scope")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+type latchedAtomicCloseReopenStore struct {
+	Store
+	closeCommitted chan struct{}
+	releaseClose   chan struct{}
+	reopenEntered  chan struct{}
+}
+
+type commitThenErrorAtomicCloseStore struct {
+	Store
+	closeErr       error
+	getCalls       int
+	stripOwnership bool
+}
+
+type commitThenErrorLegacyCloseStore struct {
+	Store
+	closeErr error
+	getCalls int
+}
+
+func (s *commitThenErrorLegacyCloseStore) Get(id string) (Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
+}
+
+func (s *commitThenErrorLegacyCloseStore) Close(id string) error {
+	if err := s.Store.Close(id); err != nil {
+		return err
+	}
+	return s.closeErr
+}
+
+type commitThenZeroErrorCloseAllStore struct {
+	Store
+	closeErr error
+	getCalls int
+}
+
+func (s *commitThenZeroErrorCloseAllStore) Get(id string) (Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
+}
+
+func (s *commitThenZeroErrorCloseAllStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if _, err := s.Store.CloseAll(ids, metadata); err != nil {
+		return 0, err
+	}
+	return 0, s.closeErr
+}
+
+func (s *commitThenErrorAtomicCloseStore) Get(id string) (Bead, error) {
+	s.getCalls++
+	return s.Store.Get(id)
+}
+
+func (s *commitThenErrorAtomicCloseStore) CloseWithReasonIfOpen(id, reason string) (CloseTransition, error) {
+	closer, ok := CloseTransitionerFor(s.Store)
+	if !ok {
+		return CloseTransition{}, ErrCloseTransitionUnsupported
+	}
+	transition, err := closer.CloseWithReasonIfOpen(id, reason)
+	if err != nil {
+		return CloseTransition{}, err
+	}
+	if s.stripOwnership {
+		transition.Transitioned = false
+	}
+	return transition, s.closeErr
+}
+
+func (s *latchedAtomicCloseReopenStore) CloseWithReasonIfOpen(id, reason string) (CloseTransition, error) {
+	closer, ok := CloseTransitionerFor(s.Store)
+	if !ok {
+		return CloseTransition{}, ErrCloseTransitionUnsupported
+	}
+	transition, err := closer.CloseWithReasonIfOpen(id, reason)
+	close(s.closeCommitted)
+	<-s.releaseClose
+	return transition, err
+}
+
+func (s *latchedAtomicCloseReopenStore) Reopen(id string) error {
+	close(s.reopenEntered)
+	return s.Store.Reopen(id)
+}
+
+func waitForCacheMutationWaiter(t *testing.T, cache *CachingStore, id string) {
+	t.Helper()
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	for {
+		cache.closeStateMu.Lock()
+		entry := cache.closeStateLocks[id]
+		refs := 0
+		if entry != nil {
+			refs = entry.refs
+		}
+		cache.closeStateMu.Unlock()
+		if refs >= 2 {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("mutation did not reach the in-flight per-ID serialization point")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
 type releaseRefreshFailOnceStore struct {
 	Store
 	failNextGet bool
+	getCalls    int
+}
+
+type closeIfMatchRefreshGateStore struct {
+	*MemStore
+	gateRefresh   atomic.Bool
+	closeReturned chan struct{}
+	refreshRead   chan struct{}
+	allowRefresh  chan struct{}
+}
+
+func (s *closeIfMatchRefreshGateStore) CloseIfMatch(id string, expectedRevision int64) error {
+	if err := s.MemStore.CloseIfMatch(id, expectedRevision); err != nil {
+		return err
+	}
+	s.gateRefresh.Store(true)
+	close(s.closeReturned)
+	return nil
+}
+
+func (s *closeIfMatchRefreshGateStore) Get(id string) (Bead, error) {
+	if s.gateRefresh.CompareAndSwap(true, false) {
+		close(s.refreshRead)
+		<-s.allowRefresh
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
+	s.getCalls++
 	if s.failNextGet {
 		s.failNextGet = false
 		return Bead{}, errors.New("injected refresh failure")
@@ -1157,13 +1400,17 @@ func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
+func TestCachingStoreCloseKeepsFailedRefreshDirtyUntilBackingConverges(t *testing.T) {
 	t.Parallel()
 
-	// When the post-close refresh Get fails, Close must still fall back to the
-	// cached-status synthesis (today's behavior) rather than dropping the entry.
+	// This wrapper intentionally exposes only Store, not CloseTransitioner, so
+	// the legacy close+refresh fallback remains covered. A locally synthesized
+	// closed row has no authoritative post-close revision and must stay dirty.
 	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
-	cache := NewCachingStoreForTest(backing, nil)
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -1171,27 +1418,1172 @@ func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	notes = nil
 
 	backing.failNextGet = true
 	if err := cache.Close(b.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// The synthesis keeps the entry cached (distinguishing it from an evict,
-	// whose follow-up Get would fall through to the backing and also report
-	// closed).
 	cache.mu.RLock()
 	_, inBeads := cache.beads[b.ID]
+	_, dirty := cache.dirty[b.ID]
 	cache.mu.RUnlock()
 	if !inBeads {
-		t.Fatal("entry missing from the cache after Close with failed refresh; want the cached-status synthesis, not an evict")
+		t.Fatal("entry missing after Close with failed refresh; want a dirty synthesis until the next read")
+	}
+	if !dirty {
+		t.Fatal("failed-refresh synthesis is clean; the next Get could serve a fabricated post-close revision")
+	}
+	if len(notes) != 0 {
+		t.Fatalf("failed-refresh close notifications = %+v, want no fabricated snapshot", notes)
 	}
 
+	getCallsBefore := backing.getCalls
 	got, err := cache.Get(b.ID)
 	if err != nil {
 		t.Fatalf("cache Get after close with failed refresh: %v", err)
 	}
+	if backing.getCalls != getCallsBefore+1 {
+		t.Fatalf("backing Get calls = %d, want %d; dirty entry must re-read backing", backing.getCalls, getCallsBefore+1)
+	}
 	if got.Status != "closed" {
-		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
+		t.Fatalf("status after convergence = %q, want closed", got.Status)
+	}
+	cache.mu.RLock()
+	_, dirty = cache.dirty[b.ID]
+	cache.mu.RUnlock()
+	if dirty {
+		t.Fatal("entry remains dirty after an authoritative backing read")
+	}
+}
+
+func TestCachingStoreFailedPostWriteRefreshNeverPublishesPatchedSnapshot(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*testing.T, *MemStore, string)
+		mutate func(*CachingStore, *releaseRefreshFailOnceStore, string) error
+		assert func(*testing.T, Bead)
+	}{
+		{
+			name: "Reopen",
+			setup: func(t *testing.T, store *MemStore, id string) {
+				t.Helper()
+				if err := store.Close(id); err != nil {
+					t.Fatalf("setup close: %v", err)
+				}
+			},
+			mutate: func(cache *CachingStore, _ *releaseRefreshFailOnceStore, id string) error {
+				return cache.Reopen(id)
+			},
+			assert: func(t *testing.T, bead Bead) {
+				t.Helper()
+				if bead.Status != "open" {
+					t.Fatalf("durable status = %q, want open", bead.Status)
+				}
+			},
+		},
+		{
+			name: "SetMetadata",
+			mutate: func(cache *CachingStore, _ *releaseRefreshFailOnceStore, id string) error {
+				return cache.SetMetadata(id, "written", "single")
+			},
+			assert: func(t *testing.T, bead Bead) {
+				t.Helper()
+				if bead.Metadata["written"] != "single" {
+					t.Fatalf("durable metadata = %+v, want single write", bead.Metadata)
+				}
+			},
+		},
+		{
+			name: "SetMetadataBatch",
+			mutate: func(cache *CachingStore, _ *releaseRefreshFailOnceStore, id string) error {
+				return cache.SetMetadataBatch(id, map[string]string{"written": "batch"})
+			},
+			assert: func(t *testing.T, bead Bead) {
+				t.Helper()
+				if bead.Metadata["written"] != "batch" {
+					t.Fatalf("durable metadata = %+v, want batch write", bead.Metadata)
+				}
+			},
+		},
+		{
+			name: "TxClose",
+			mutate: func(cache *CachingStore, backing *releaseRefreshFailOnceStore, id string) error {
+				return cache.Tx("close before failed refresh", func(tx Tx) error {
+					if err := tx.Close(id); err != nil {
+						return err
+					}
+					backing.failNextGet = true
+					return nil
+				})
+			},
+			assert: func(t *testing.T, bead Bead) {
+				t.Helper()
+				if bead.Status != "closed" {
+					t.Fatalf("durable status = %q, want closed", bead.Status)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := NewMemStore()
+			created, err := base.Create(Bead{
+				Title:       "authoritative refresh only",
+				Description: "must survive",
+				Metadata:    StringMap{"existing": "kept"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if tt.setup != nil {
+				tt.setup(t, base, created.ID)
+			}
+			backing := &releaseRefreshFailOnceStore{Store: base}
+			var notes []cacheWriteNotification
+			cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+				notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			if tt.name != "TxClose" {
+				backing.failNextGet = true
+			}
+			if err := tt.mutate(cache, backing, created.ID); err != nil {
+				t.Fatalf("mutate: %v", err)
+			}
+			if len(notes) != 0 {
+				t.Fatalf("failed-refresh notifications = %+v, want none", notes)
+			}
+			cache.mu.RLock()
+			_, dirty := cache.dirty[created.ID]
+			cache.mu.RUnlock()
+			if !dirty {
+				t.Fatal("failed post-write refresh left a clean cached row")
+			}
+			fresh, err := cache.Get(created.ID)
+			if err != nil {
+				t.Fatalf("authoritative Get: %v", err)
+			}
+			if fresh.Description != "must survive" || fresh.Metadata["existing"] != "kept" {
+				t.Fatalf("authoritative row lost unrelated fields: %+v", fresh)
+			}
+			tt.assert(t, fresh)
+		})
+	}
+}
+
+func TestCachingStoreCloseIfMatchDoesNotRewriteRacingReopenAsClosed(t *testing.T) {
+	backing := &closeIfMatchRefreshGateStore{
+		MemStore:      NewMemStore(),
+		closeReturned: make(chan struct{}),
+		refreshRead:   make(chan struct{}),
+		allowRefresh:  make(chan struct{}),
+	}
+	created, err := backing.Create(Bead{Title: "conditional close race"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- cache.CloseIfMatch(created.ID, created.Revision) }()
+	select {
+	case <-backing.closeReturned:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("conditional close did not commit")
+	}
+	select {
+	case <-backing.refreshRead:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("conditional close refresh did not pause")
+	}
+	if err := backing.Reopen(created.ID); err != nil {
+		t.Fatalf("racing Reopen: %v", err)
+	}
+	close(backing.allowRefresh)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("CloseIfMatch: %v", err)
+	}
+
+	for _, note := range notes {
+		payload, ok := DecodeBeadEventPayload(note.payload)
+		if note.eventType == "bead.closed" || ok && payload.Status == "closed" {
+			t.Fatalf("racing reopen was rewritten as closed: notification=%+v payload=%+v", note, payload)
+		}
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.updated" {
+		t.Fatalf("notifications = %+v, want one exact bead.updated observation", notes)
+	}
+	observed, ok := DecodeBeadEventPayload(notes[0].payload)
+	if !ok || observed.Status != "open" {
+		t.Fatalf("updated payload = %#v ok=%v, want exact reopened row", observed, ok)
+	}
+	durable, err := backing.MemStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("durable Get: %v", err)
+	}
+	if durable.Status != "open" {
+		t.Fatalf("durable status = %q, want open", durable.Status)
+	}
+}
+
+func TestCachingStoreReopenRestoresDependenciesDroppedByClose(t *testing.T) {
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "open blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	target, err := backing.Create(Bead{Title: "blocked target", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if _, err := cache.CloseAll([]string{target.ID}, nil); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	notes = nil
+
+	if err := cache.Reopen(target.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.updated" {
+		t.Fatalf("notifications = %+v, want one bead.updated", notes)
+	}
+	payload, ok := DecodeBeadEventPayload(notes[0].payload)
+	if !ok || len(payload.Dependencies) != 1 || payload.Dependencies[0].DependsOnID != blocker.ID {
+		t.Fatalf("updated payload = %#v ok=%v, want restored blocker %s", payload, ok, blocker.ID)
+	}
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after Reopen")
+	}
+	for _, bead := range ready {
+		if bead.ID == target.ID {
+			t.Fatalf("reopened target %s became ready despite open blocker %s", target.ID, blocker.ID)
+		}
+	}
+}
+
+func TestCachingStoreClosePreservesStampedReasonThroughAtomicBacking(t *testing.T) {
+	const reason = "reason stamped before ordinary close"
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "close payload blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	created, err := backing.Create(Bead{
+		Title:    "pre-stamped close",
+		Metadata: StringMap{"close_reason": reason},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.DepAdd(created.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+
+	if err := cache.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	durable, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := durable.Metadata["close_reason"]; got != reason {
+		t.Fatalf("durable close_reason = %q, want %q", got, reason)
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.closed" {
+		t.Fatalf("notifications = %+v, want one bead.closed", notes)
+	}
+	decoded, ok := DecodeBeadEventPayload(notes[0].payload)
+	if !ok {
+		t.Fatalf("decode notification payload: %s", notes[0].payload)
+	}
+	if got := decoded.Metadata["close_reason"]; got != reason {
+		t.Fatalf("notification close_reason = %q, want %q", got, reason)
+	}
+	if len(decoded.Dependencies) != 1 || decoded.Dependencies[0].DependsOnID != blocker.ID {
+		t.Fatalf("notification dependencies = %#v, want blocker %s", decoded.Dependencies, blocker.ID)
+	}
+}
+
+func TestCachingStoreCloseNotifiesOnceWhenCacheIsNotLive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state cacheState
+	}{{"uninitialized", cacheUninitialized}, {"degraded", cacheDegraded}} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := NewMemStore()
+			created, err := backing.Create(Bead{Title: "close once"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var notes []cacheWriteNotification
+			cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+				notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+			})
+			cache.mu.Lock()
+			cache.state = tc.state
+			cache.mu.Unlock()
+
+			if err := cache.Close(created.ID); err != nil {
+				t.Fatalf("first Close: %v", err)
+			}
+			if err := cache.Close(created.ID); err != nil {
+				t.Fatalf("second Close: %v", err)
+			}
+
+			closed := 0
+			for _, note := range notes {
+				if note.eventType == "bead.closed" && note.beadID == created.ID {
+					closed++
+				}
+			}
+			if closed != 1 {
+				t.Fatalf("bead.closed notifications = %d, want exactly 1: %+v", closed, notes)
+			}
+		})
+	}
+}
+
+func TestCachingStoreCloseWithoutObserverDoesNotMuteConcurrentClose(t *testing.T) {
+	base := NewMemStore()
+	silent, err := base.Create(Bead{Title: "unprovable autoclose"})
+	if err != nil {
+		t.Fatalf("Create(silent): %v", err)
+	}
+	loud, err := base.Create(Bead{Title: "unrelated user close"})
+	if err != nil {
+		t.Fatalf("Create(loud): %v", err)
+	}
+	backing := &latchedLegacyCloseStore{
+		Store:     base,
+		blockedID: silent.ID,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+
+	silentDone := make(chan error, 1)
+	go func() { silentDone <- cache.CloseWithoutObserver(silent.ID) }()
+	select {
+	case <-backing.entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("observer-suppressed close did not reach backing store")
+	}
+
+	if err := cache.Close(loud.ID); err != nil {
+		t.Fatalf("concurrent Close(loud): %v", err)
+	}
+	close(backing.release)
+	select {
+	case err := <-silentDone:
+		if err != nil {
+			t.Fatalf("CloseWithoutObserver(silent): %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("observer-suppressed close did not complete")
+	}
+
+	if len(notes) != 1 || notes[0].eventType != "bead.closed" || notes[0].beadID != loud.ID {
+		t.Fatalf("notifications = %+v, want only the committed legacy close edge for %s", notes, loud.ID)
+	}
+}
+
+func TestCachingStoreCloseWithoutObserverSuppressesConcurrentReconcile(t *testing.T) {
+	tests := []struct {
+		name  string
+		close func(*CachingStore, string) error
+	}{
+		{
+			name: "single close",
+			close: func(cache *CachingStore, id string) error {
+				return cache.CloseWithoutObserver(id)
+			},
+		},
+		{
+			name: "batch close",
+			close: func(cache *CachingStore, id string) error {
+				_, err := cache.CloseAllWithoutObserver([]string{id}, map[string]string{"close_reason": "sidecar cleanup"})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := NewMemStore()
+			created, err := base.Create(Bead{Title: "suppressed close target"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			backing := &latchedCommittedCloseStore{
+				Store:     base,
+				committed: make(chan struct{}),
+				release:   make(chan struct{}),
+			}
+			var notes []cacheWriteNotification
+			cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+				notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.close(cache, created.ID) }()
+			select {
+			case <-backing.committed:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("observer-suppressed close did not commit in backing store")
+			}
+
+			reconcileAcrossPausedMutation(t, cache, backing.release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("observer-suppressed close: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("observer-suppressed close did not complete")
+			}
+
+			for _, note := range notes {
+				if note.eventType == "bead.closed" && note.beadID == created.ID {
+					t.Fatalf("reconciliation emitted suppressed close notification: %+v", notes)
+				}
+			}
+		})
+	}
+}
+
+func TestCachingStoreCloseEmitsOnceAcrossConcurrentReconcile(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		close     func(*CachingStore, string) error
+	}{
+		{
+			// A legacy Close is a committed close (bead.closed); the concurrent
+			// reconcile must not synthesize a SECOND bead.closed when it evicts the
+			// already-closed cache row (len(notes)==1 proves the edge fires once).
+			name:      "single close",
+			eventType: "bead.closed",
+			close: func(cache *CachingStore, id string) error {
+				return cache.Close(id)
+			},
+		},
+		{
+			name:      "batch close",
+			eventType: "bead.closed",
+			close: func(cache *CachingStore, id string) error {
+				_, err := cache.CloseAll([]string{id}, map[string]string{"close_reason": "batch close"})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := NewMemStore()
+			created, err := base.Create(Bead{Title: "close target"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			backing := &latchedCommittedCloseStore{
+				Store:     base,
+				committed: make(chan struct{}),
+				release:   make(chan struct{}),
+			}
+			var notes []cacheWriteNotification
+			cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+				notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.close(cache, created.ID) }()
+			select {
+			case <-backing.committed:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("close did not commit in backing store")
+			}
+
+			reconcileAcrossPausedMutation(t, cache, backing.release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("close: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("close did not complete")
+			}
+
+			matched := 0
+			for _, note := range notes {
+				if note.eventType == tc.eventType && note.beadID == created.ID {
+					matched++
+				}
+			}
+			if matched != 1 || len(notes) != 1 {
+				t.Fatalf("%s notifications = %d, want exactly 1: %+v", tc.eventType, matched, notes)
+			}
+		})
+	}
+}
+
+func TestCachingStoreAtomicCloseEmitsOnceAcrossConcurrentReconcile(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "atomic close target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &latchedAtomicCloseReopenStore{
+		Store:          base,
+		closeCommitted: make(chan struct{}),
+		releaseClose:   make(chan struct{}),
+		reopenEntered:  make(chan struct{}),
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.CloseWithReasonIfOpen(created.ID, "atomic close")
+		done <- err
+	}()
+	select {
+	case <-backing.closeCommitted:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("atomic close did not commit in backing store")
+	}
+
+	reconcileAcrossPausedMutation(t, cache, backing.releaseClose)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CloseWithReasonIfOpen: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("atomic close did not complete")
+	}
+
+	closed := 0
+	for _, note := range notes {
+		if note.eventType == "bead.closed" && note.beadID == created.ID {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("bead.closed notifications = %d, want exactly 1: %+v", closed, notes)
+	}
+}
+
+func TestCachingStoreAtomicCloseCommittedErrorPublishesAuthoritativeTransition(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "ambiguous atomic close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ambiguousErr := errors.New("connection reset after atomic close")
+	backing := &commitThenErrorAtomicCloseStore{Store: base, closeErr: ambiguousErr}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if _, err := cache.CloseWithReasonIfOpen(created.ID, "committed before disconnect"); !errors.Is(err, ambiguousErr) {
+		t.Fatalf("CloseWithReasonIfOpen error = %v, want %v", err, ambiguousErr)
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.closed" || notes[0].beadID != created.ID {
+		t.Fatalf("notifications = %+v, want one authoritative bead.closed result", notes)
+	}
+
+	getCallsBefore := backing.getCalls
+	got, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after ambiguous close: %v", err)
+	}
+	if backing.getCalls != getCallsBefore {
+		t.Fatalf("backing Get calls = %d, want %d; authoritative transition should refresh the cache", backing.getCalls, getCallsBefore)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status after backing read = %q, want closed", got.Status)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("notifications after backing read = %+v, want no duplicate after the authoritative close", notes)
+	}
+}
+
+func TestCachingStoreAtomicCloseAmbiguousCommitPublishesConservativeUpdate(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "ambiguous atomic close without ownership"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ambiguousErr := errors.New("connection reset after atomic close")
+	backing := &commitThenErrorAtomicCloseStore{
+		Store:          base,
+		closeErr:       ambiguousErr,
+		stripOwnership: true,
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if _, err := cache.CloseWithReasonIfOpen(created.ID, "committed before disconnect"); !errors.Is(err, ambiguousErr) {
+		t.Fatalf("CloseWithReasonIfOpen error = %v, want %v", err, ambiguousErr)
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.updated" || notes[0].beadID != created.ID {
+		t.Fatalf("notifications = %+v, want one conservative bead.updated for the changed authoritative snapshot", notes)
+	}
+	closed, _, err := decodeCacheEvent(notes[0].payload)
+	if err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("bead.updated status = %q, want closed", closed.Status)
+	}
+}
+
+func TestCachingStoreSuppressedAmbiguousCloseReturnsBarrierWithoutNotification(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "suppressed ambiguous atomic close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ambiguousErr := errors.New("connection reset after atomic close")
+	backing := &commitThenErrorAtomicCloseStore{
+		Store:          base,
+		closeErr:       ambiguousErr,
+		stripOwnership: true,
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	delivery, err := cache.CloseWithoutObserverWithDelivery(created.ID)
+	if !errors.Is(err, ambiguousErr) {
+		t.Fatalf("CloseWithoutObserverWithDelivery error = %v, want %v", err, ambiguousErr)
+	}
+	if len(notes) != 0 {
+		t.Fatalf("notifications = %+v, want observer-suppressed close to remain silent", notes)
+	}
+	if delivery == nil {
+		t.Fatal("CloseWithoutObserverWithDelivery delivery = nil, want ordering barrier")
+	}
+	delivered := false
+	delivery.AfterDelivery(func() { delivered = true })
+	if !delivered {
+		t.Fatal("suppressed ambiguous close barrier was not delivered")
+	}
+}
+
+func TestCachingStoreLegacyCloseAmbiguousErrorDirtiesAndRefencesTarget(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "ambiguous legacy close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ambiguousErr := errors.New("connection reset after legacy close")
+	backing := &commitThenErrorLegacyCloseStore{Store: base, closeErr: ambiguousErr}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	seqBefore := cache.mutationSeq
+	cache.mu.RUnlock()
+	if err := cache.Close(created.ID); !errors.Is(err, ambiguousErr) {
+		t.Fatalf("Close error = %v, want %v", err, ambiguousErr)
+	}
+
+	cache.mu.RLock()
+	seqAfter := cache.beadSeq[created.ID]
+	_, dirty := cache.dirty[created.ID]
+	cache.mu.RUnlock()
+	if seqAfter < seqBefore+2 {
+		t.Fatalf("beadSeq after ambiguous close = %d, want at least %d (entry fence plus error fence)", seqAfter, seqBefore+2)
+	}
+	if !dirty {
+		t.Fatal("ambiguous legacy close left the cached row clean")
+	}
+
+	getCallsBefore := backing.getCalls
+	got, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after ambiguous close: %v", err)
+	}
+	if backing.getCalls != getCallsBefore+1 {
+		t.Fatalf("backing Get calls = %d, want %d", backing.getCalls, getCallsBefore+1)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status after backing read = %q, want closed", got.Status)
+	}
+}
+
+func TestCachingStoreCloseAllZeroCountAmbiguousErrorDirtiesAndRefencesEveryTarget(t *testing.T) {
+	base := NewMemStore()
+	first, err := base.Create(Bead{Title: "first ambiguous batch close"})
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	second, err := base.Create(Bead{Title: "second ambiguous batch close"})
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	ambiguousErr := errors.New("connection reset after batch close")
+	backing := &commitThenZeroErrorCloseAllStore{Store: base, closeErr: ambiguousErr}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	seqBefore := cache.mutationSeq
+	cache.mu.RUnlock()
+	ids := []string{first.ID, second.ID}
+	closed, err := cache.CloseAll(ids, map[string]string{"close_reason": "ambiguous batch"})
+	if !errors.Is(err, ambiguousErr) {
+		t.Fatalf("CloseAll error = %v, want %v", err, ambiguousErr)
+	}
+	if closed != 0 {
+		t.Fatalf("CloseAll closed = %d, want reported 0", closed)
+	}
+
+	cache.mu.RLock()
+	for _, id := range ids {
+		if seq := cache.beadSeq[id]; seq < seqBefore+2 {
+			cache.mu.RUnlock()
+			t.Fatalf("beadSeq[%s] after ambiguous batch = %d, want at least %d", id, seq, seqBefore+2)
+		}
+		if _, dirty := cache.dirty[id]; !dirty {
+			cache.mu.RUnlock()
+			t.Fatalf("ambiguous batch left %s clean", id)
+		}
+	}
+	cache.mu.RUnlock()
+
+	getCallsBefore := backing.getCalls
+	for _, id := range ids {
+		got, getErr := cache.Get(id)
+		if getErr != nil {
+			t.Fatalf("Get(%s) after ambiguous batch: %v", id, getErr)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("Get(%s) status = %q, want closed", id, got.Status)
+		}
+	}
+	if backing.getCalls != getCallsBefore+len(ids) {
+		t.Fatalf("backing Get calls = %d, want %d", backing.getCalls, getCallsBefore+len(ids))
+	}
+}
+
+func TestCachingStoreBatchCloseEmitsAfterSuppressedReconcileEviction(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "long batch close target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &latchedCommittedCloseStore{
+		Store:     base,
+		committed: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.CloseAll([]string{created.ID}, map[string]string{"close_reason": "long batch close"})
+		done <- err
+	}()
+	select {
+	case <-backing.committed:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("batch close did not commit in backing store")
+	}
+
+	// Model an in-flight close older than recentLocalMutation's five-second
+	// window without adding a wall-clock sleep to the test.
+	cache.mu.Lock()
+	cache.localBeadAt[created.ID] = time.Now().Add(-6 * time.Second)
+	cache.mu.Unlock()
+	reconcileAcrossPausedMutation(t, cache, backing.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CloseAll: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("batch close did not complete")
+	}
+
+	closed := 0
+	for _, note := range notes {
+		if note.eventType == "bead.closed" && note.beadID == created.ID {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("bead.closed notifications = %d, want exactly 1 after suppressed eviction: %+v", closed, notes)
+	}
+}
+
+func TestCachingStoreCloseWithoutObserverRejectsStaleConcurrentCreatedSnapshot(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "cold close target"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &latchedLegacyCloseStore{
+		Store:     base,
+		blockedID: created.ID,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	var notes []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- cache.CloseWithoutObserver(created.ID) }()
+	select {
+	case <-backing.entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("observer-suppressed close did not reach backing store")
+	}
+
+	reconcileAcrossPausedMutation(t, cache, backing.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CloseWithoutObserver: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("observer-suppressed close did not complete")
+	}
+
+	// The close wins the mutation scope before reconciliation can merge its
+	// older open-row snapshot. The close's sequence fence must reject that
+	// snapshot rather than publish bead.created after the durable close. This
+	// operation suppresses its own bead.closed callback, so no cache observer
+	// notification is expected.
+	if len(notes) != 0 {
+		t.Fatalf("notifications = %+v, want none from the stale pre-close snapshot", notes)
+	}
+}
+
+func TestCachingStoreCloseCannotOverwriteConcurrentReopen(t *testing.T) {
+	tests := []struct {
+		name       string
+		newBacking func(Store) (Store, chan struct{}, chan struct{}, chan struct{})
+		close      func(*CachingStore, string) error
+	}{
+		{
+			name: "legacy close",
+			newBacking: func(base Store) (Store, chan struct{}, chan struct{}, chan struct{}) {
+				committed := make(chan struct{})
+				release := make(chan struct{})
+				reopenEntered := make(chan struct{})
+				return &latchedLegacyCloseReopenStore{
+					latchedCommittedCloseStore: &latchedCommittedCloseStore{
+						Store:     base,
+						committed: committed,
+						release:   release,
+					},
+					reopenEntered: reopenEntered,
+				}, committed, release, reopenEntered
+			},
+			close: func(cache *CachingStore, id string) error {
+				return cache.Close(id)
+			},
+		},
+		{
+			name: "atomic close",
+			newBacking: func(base Store) (Store, chan struct{}, chan struct{}, chan struct{}) {
+				committed := make(chan struct{})
+				release := make(chan struct{})
+				reopenEntered := make(chan struct{})
+				return &latchedAtomicCloseReopenStore{
+					Store:          base,
+					closeCommitted: committed,
+					releaseClose:   release,
+					reopenEntered:  reopenEntered,
+				}, committed, release, reopenEntered
+			},
+			close: func(cache *CachingStore, id string) error {
+				_, err := cache.CloseWithReasonIfOpen(id, "racing close")
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := NewMemStore()
+			created, err := base.Create(Bead{Title: "close-reopen race"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			backing, closeCommitted, releaseClose, reopenEntered := tc.newBacking(base)
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- tc.close(cache, created.ID) }()
+			select {
+			case <-closeCommitted:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("close did not commit in backing store")
+			}
+
+			reopenDone := make(chan error, 1)
+			go func() { reopenDone <- cache.Reopen(created.ID) }()
+			waitForCacheMutationWaiter(t, cache, created.ID)
+			select {
+			case <-reopenEntered:
+				t.Fatal("reopen reached backing store before close finalization")
+			default:
+			}
+			close(releaseClose)
+
+			select {
+			case err := <-closeDone:
+				if err != nil {
+					t.Fatalf("close: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("close did not complete")
+			}
+			select {
+			case err := <-reopenDone:
+				if err != nil {
+					t.Fatalf("Reopen: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("reopen did not complete")
+			}
+
+			for name, store := range map[string]Store{"cache": cache, "backing": base} {
+				got, err := store.Get(created.ID)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", name, err)
+				}
+				if got.Status != "open" {
+					t.Fatalf("%s status = %q, want durable reopened status", name, got.Status)
+				}
+			}
+		})
+	}
+}
+
+func TestCachingStoreCloseReopenNotificationsFollowDurableOrder(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "notification order race"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closedCallbackEntered := make(chan struct{})
+	releaseClosedCallback := make(chan struct{})
+	var notes []string
+	cache := NewCachingStoreForTest(base, func(eventType, beadID string, _ json.RawMessage) {
+		if beadID != created.ID {
+			return
+		}
+		if eventType == "bead.closed" {
+			close(closedCallbackEntered)
+			<-releaseClosedCallback
+		}
+		notes = append(notes, eventType)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- cache.Close(created.ID) }()
+	select {
+	case <-closedCallbackEntered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("close observer was not invoked")
+	}
+
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	close(releaseClosedCallback)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("Close did not finish after releasing its observer")
+	}
+
+	want := []string{"bead.closed", "bead.updated"}
+	if !slices.Equal(notes, want) {
+		t.Fatalf("notification order = %v, want %v", notes, want)
+	}
+	for name, store := range map[string]Store{"cache": cache, "backing": base} {
+		got, err := store.Get(created.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", name, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open", name, got.Status)
+		}
+	}
+}
+
+func TestCachingStoreCloseObserverCanReenterReopen(t *testing.T) {
+	base := NewMemStore()
+	created, err := base.Create(Bead{Title: "reentrant reopen"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var (
+		cache        *CachingStore
+		notes        []string
+		reentrantErr error
+	)
+	cache = NewCachingStoreForTest(base, func(eventType, beadID string, _ json.RawMessage) {
+		if beadID != created.ID {
+			return
+		}
+		notes = append(notes, eventType)
+		if eventType == "bead.closed" {
+			reentrantErr = cache.Reopen(beadID)
+		}
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if reentrantErr != nil {
+		t.Fatalf("reentrant Reopen: %v", reentrantErr)
+	}
+	want := []string{"bead.closed", "bead.updated"}
+	if !slices.Equal(notes, want) {
+		t.Fatalf("notification order = %v, want %v", notes, want)
+	}
+	got, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+}
+
+func TestCachingStoreCloseObserverCanReenterGetAndClose(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state cacheState
+	}{{"uninitialized", cacheUninitialized}, {"degraded", cacheDegraded}} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := NewMemStore()
+			created, err := backing.Create(Bead{Title: "reentrant close"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var (
+				cache         *CachingStore
+				notifications int
+				reentered     bool
+				callbackErr   error
+			)
+			cache = NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+				if eventType != "bead.closed" || beadID != created.ID {
+					return
+				}
+				notifications++
+				if reentered {
+					return
+				}
+				reentered = true
+				if _, err := cache.Get(created.ID); err != nil {
+					callbackErr = err
+					return
+				}
+				callbackErr = cache.Close(created.ID)
+			})
+			cache.mu.Lock()
+			cache.state = tc.state
+			cache.mu.Unlock()
+
+			done := make(chan error, 1)
+			go func() { done <- cache.Close(created.ID) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("outer Close: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Fatal("Close deadlocked while its observer re-entered Get/Close")
+			}
+			if callbackErr != nil {
+				t.Fatalf("reentrant observer: %v", callbackErr)
+			}
+			if notifications != 1 {
+				t.Fatalf("bead.closed notifications = %d, want 1", notifications)
+			}
+		})
 	}
 }

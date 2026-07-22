@@ -887,8 +887,8 @@ func TestBdStoreCloseHonestyGuardRejectsUnclosedAfterSuccess(t *testing.T) {
 		case "close":
 			// bd reports success...
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "show":
-			// ...but the bead is actually still open (race reverted it).
+		case "query":
+			// ...but the canonical row is actually still open (race reverted it).
 			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -909,7 +909,7 @@ func TestBdStoreCloseHonestyGuardRejectsUnclosedAfterSuccess(t *testing.T) {
 func TestBdStoreCloseHonestyGuardAcceptsConfirmedClose(t *testing.T) {
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
-		case "close", "show":
+		case "close", "query":
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -928,7 +928,7 @@ func TestBdStoreCloseHonestyGuardToleratesReadFailure(t *testing.T) {
 		switch args[0] {
 		case "close":
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "show":
+		case "query":
 			return nil, fmt.Errorf("exit status 1: transient backend error")
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -1043,6 +1043,18 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 				mustJSON(t, metadata),
 			)
 			return []byte(payload), nil
+		case "query --json id=bd-42 --all --limit 1":
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			payload := fmt.Sprintf(
+				`[{"id":"bd-42","title":"before","status":%q,"issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":%q,"metadata":%s}]`,
+				status,
+				description,
+				mustJSON(t, metadata),
+			)
+			return []byte(payload), nil
 		case "close --force --json --reason completed during transaction bd-42":
 			closed = true
 			description = ""
@@ -1103,9 +1115,9 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
-		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
+		"bd show --json bd-42", // close pre-read for metadata.close_reason
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
+		"bd query --json id=bd-42 --all --limit 1", // canonical honesty re-read after close
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
 		"bd show --json bd-42", // Tx final Get
 		"bd show --json bd-42", // final Get after Tx
@@ -1127,6 +1139,12 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 				status = "closed"
 			}
 			return []byte(`[{"id":"bd-42","title":"before","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"completed during transaction"}}]`), nil
+		case "query --json id=bd-42 --all --limit 1":
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-42","title":"before","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close --force --json --reason completed during transaction bd-42":
 			closed = true
 			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
@@ -1145,7 +1163,7 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
 		"bd close --force --json --reason completed during transaction bd-42",
-		"bd show --json bd-42", // honesty re-read after close
+		"bd query --json id=bd-42 --all --limit 1", // canonical honesty re-read after close
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)

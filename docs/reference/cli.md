@@ -1400,10 +1400,16 @@ gc event
 
 Record a custom event to the city event log.
 
-Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads. JSON summaries report whether submission to
-the configured provider was attempted; the event bus does not acknowledge
-durable persistence.
+Best-effort: always exits 0 so bead hooks never fail. Supports attaching
+arbitrary JSON payloads to custom event types. bead.created, bead.updated, and
+bead.closed resolve a bead ID from --bead-payload, --subject, or the caller JSON
+and replace the caller JSON with an authoritative snapshot from the owning bead
+store. bead.deleted accepts a decodable ID-only payload. bead.closed also
+requires the authoritative status to be "closed". For lifecycle events,
+--subject defaults to the resolved bead ID when omitted, and explicitly
+supplied identities must agree. An explicitly empty subject counts as supplied
+and is rejected. JSON summaries report whether submission to the configured
+provider was attempted; the event bus does not acknowledge durable persistence.
 
 ```
 gc event emit <type> [flags]
@@ -1412,7 +1418,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
-| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
+| `--bead-payload` | string |  | Owning-store bead ID for lifecycle payloads |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |

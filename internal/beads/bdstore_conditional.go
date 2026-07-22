@@ -123,7 +123,12 @@ func (s *BdStore) markConditionalWritesUnsupported() {
 // conformance row against a #4682-capable bd is the authoritative guard.
 const (
 	bdConditionalCodePreconditionFailed = "precondition-failed"
-	bdConditionalCodeUnsupported        = "conditional-write-unsupported"
+	// bd 1.1 emits the JSON spelling used by its public CLI contract. Keep the
+	// hyphenated provisional spelling above for compatibility with development
+	// builds that shipped before that contract settled.
+	bdConditionalCodePreconditionFailedJSON = "precondition_failed"
+	bdConditionalCodeUnsupported            = "conditional-write-unsupported"
+	bdConditionalCodeUnsupportedJSON        = "conditional_write_unsupported"
 )
 
 // bdConditionalErrorBody is the machine JSON bd attaches to a failed conditional
@@ -257,9 +262,9 @@ func classifyConditionalWriteResult(out []byte, err error) error {
 	// legitimately outranks the ambiguous-connection class too.
 	if bodyOK {
 		switch body.Code {
-		case bdConditionalCodePreconditionFailed:
+		case bdConditionalCodePreconditionFailed, bdConditionalCodePreconditionFailedJSON:
 			return newPreconditionFailed(body, out, err)
-		case bdConditionalCodeUnsupported:
+		case bdConditionalCodeUnsupported, bdConditionalCodeUnsupportedJSON:
 			return ErrConditionalWriteUnsupported
 		}
 	}
@@ -412,7 +417,15 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 		return nil
 	}
 	args = append(args, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
-	return s.runConditionalWrite(id, expectedRevision, args...)
+	if !bdUpdateRequiresLifecycleMutationLease(opts) {
+		return s.runConditionalWrite(id, expectedRevision, args...)
+	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking conditional bd lifecycle update for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	return s.runConditionalWriteWithEnv(id, expectedRevision, lease.CommandEnv(), args...)
 }
 
 // CloseIfMatch closes id only if its revision still equals expectedRevision. It
@@ -423,8 +436,13 @@ func (s *BdStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking conditional bd close for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	args := append(bdCloseArgs("", id), conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
-	return s.runConditionalWrite(id, expectedRevision, args...)
+	return s.runConditionalWriteWithEnv(id, expectedRevision, lease.CommandEnv(), args...)
 }
 
 // DeleteIfMatch deletes id only if its revision still equals expectedRevision.
@@ -432,8 +450,13 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking conditional bd delete for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	args := []string{"delete", "--force", "--json", id, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10)}
-	return s.runConditionalWrite(id, expectedRevision, args...)
+	return s.runConditionalWriteWithEnv(id, expectedRevision, lease.CommandEnv(), args...)
 }
 
 // runConditionalWrite runs a single fenced bd write (…--if-revision N) and
@@ -461,6 +484,13 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // The doltlite --dolt-auto-commit prefix is applied once via bdTransientWriteArgs
 // so a doltlite backend still gets it; the argv is not re-prefixed per attempt.
 func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ...string) error {
+	return s.runConditionalWriteWithEnv(id, expectedRevision, nil, args...)
+}
+
+// runConditionalWriteWithEnv is the transition-owning variant of
+// runConditionalWrite. It preserves the existing retry and typed-error
+// behavior while supplying the lifecycle lease environment to bd.
+func (s *BdStore) runConditionalWriteWithEnv(id string, expectedRevision int64, env map[string]string, args ...string) error {
 	verb := ""
 	if len(args) > 0 {
 		verb = args[0]
@@ -471,7 +501,7 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 		lastErr error
 	)
 	for attempt := 1; ; attempt++ {
-		out, err := s.runner(s.dir, "bd", prefixed...)
+		out, err := s.runCommandWithEnv(env, s.dir, "bd", prefixed...)
 		if err == nil {
 			return nil
 		}
@@ -543,6 +573,11 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return false, fmt.Errorf("locking bd metadata compare-and-set for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	for attempt := 1; ; attempt++ {
 		b, err := s.Get(id)
 		if err != nil {
@@ -560,7 +595,7 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		// misclassify a precondition into the surface-as-is default.
 		args := append(bdUpdateArgs(id, UpdateOpts{Metadata: map[string]string{key: next}}),
 			conditionalWriteFlag, strconv.FormatInt(b.Revision, 10))
-		err = s.runConditionalWrite(id, b.Revision, args...)
+		err = s.runConditionalWriteWithEnv(id, b.Revision, lease.CommandEnv(), args...)
 		switch {
 		case err == nil:
 			return true, nil

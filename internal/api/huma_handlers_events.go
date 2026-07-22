@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -248,7 +249,7 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 // /v0/city/{cityName}/events/rotate.
 func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateInput) (*EventRotateOutput, error) {
 	ep := s.state.EventProvider()
-	rec, ok := ep.(*events.FileRecorder)
+	rec, ok := ep.(events.RotatingProvider)
 	if !ok {
 		return nil, apierr.MethodNotAllowed.Msg(
 			fmt.Sprintf("rotation is only supported for the file-backed events provider; current provider is '%s'", eventProviderName(s.state, ep)),
@@ -257,6 +258,11 @@ func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateIn
 
 	result, err := rec.ForceRotate()
 	if err != nil {
+		if errors.Is(err, events.ErrRotationUnsupported) {
+			return nil, apierr.MethodNotAllowed.Msg(
+				fmt.Sprintf("rotation is only supported for the file-backed events provider; current provider is '%s'", eventProviderName(s.state, ep)),
+			)
+		}
 		return nil, apierr.Internal.Msg("rotation failed: " + err.Error())
 	}
 
@@ -278,6 +284,11 @@ func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateIn
 }
 
 func eventProviderName(state State, ep events.Provider) string {
+	if named, ok := ep.(interface{ ActiveEventProviderName() string }); ok {
+		if provider := strings.TrimSpace(named.ActiveEventProviderName()); provider != "" {
+			return provider
+		}
+	}
 	if state != nil {
 		if cfg := state.Config(); cfg != nil {
 			if provider := strings.TrimSpace(cfg.Events.Provider); provider != "" {

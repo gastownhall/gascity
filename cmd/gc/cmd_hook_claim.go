@@ -34,6 +34,12 @@ var hookClaimMutationTimeout = 10 * time.Second
 
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
+// hookClaimCommandEnvRunnerWithEnvContext is the command-local environment
+// counterpart of hookClaimCommandRunnerWithEnvContext. Lifecycle mutations
+// (claim, status transitions) attach per-command lease env through this
+// runner; tests stub both seams together so no bd subprocess escapes.
+var hookClaimCommandEnvRunnerWithEnvContext = beads.ExecCommandEnvRunnerWithEnvContext
+
 type hookClaimOptions struct {
 	Assignee           string
 	IdentityCandidates []string
@@ -1221,7 +1227,9 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 // so a best-effort claim-time write cannot outlast the caller's deadline even if
 // the underlying bd update stalls.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
-	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
+	overrides := hookClaimEnvMap(env, dir, actor)
+	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, overrides),
+		beads.WithBdStoreCommandEnvRunner(hookClaimCommandEnvRunnerWithEnvContext(ctx, overrides)))
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {

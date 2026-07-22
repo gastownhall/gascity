@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,6 +80,46 @@ func ApplyFilter(evts []Event, filter Filter) []Event {
 
 func limitReached(count int, filter Filter) bool {
 	return filter.Limit > 0 && count >= filter.Limit
+}
+
+// scanCommittedJSONLLines recognizes only newline-terminated records. A final
+// parseable JSON object without '\n' can be the prefix of a failed append and is
+// not committed; the recorder truncates it before the next write.
+func scanCommittedJSONLLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		end := i
+		if end > 0 && data[end-1] == '\r' {
+			end--
+		}
+		return i + 1, data[:end], nil
+	}
+	if atEOF {
+		return len(data), nil, nil
+	}
+	return 0, nil, nil
+}
+
+func committedEventLogSize(file *os.File, size int64) (int64, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if size <= 0 {
+			return 0, nil
+		}
+		var last [1]byte
+		if _, err := file.ReadAt(last[:], size-1); err == nil {
+			if last[0] == '\n' {
+				return size, nil
+			}
+			return lastEventLogNewline(file, size)
+		} else if !errors.Is(err, io.EOF) {
+			return 0, fmt.Errorf("read event-log commit boundary: %w", err)
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return 0, fmt.Errorf("restat event-log commit boundary: %w", err)
+		}
+		size = info.Size()
+	}
+	return 0, errors.New("event log changed repeatedly while capturing commit boundary")
 }
 
 // ReadAll reads all events from the JSONL file at path, transparently
@@ -159,6 +200,7 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
+	scanner.Split(scanCommittedJSONLLines)
 	for scanner.Scan() {
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
@@ -338,6 +380,7 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(scanCommittedJSONLLines)
 	for scanner.Scan() {
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
@@ -377,7 +420,12 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
-	if size <= 0 {
+	var err error
+	size, err = committedEventLogSize(f, size)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
 		return nil, nil
 	}
 	const chunkSize int64 = 64 * 1024

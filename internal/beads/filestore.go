@@ -149,7 +149,12 @@ type FileStore struct {
 	freshness fileFreshness
 }
 
-var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*FileStore)(nil)
+	_ CloseTransitioner             = (*FileStore)(nil)
+	_ CloseAllTransitioner          = (*FileStore)(nil)
+	_ UpdateTransitioner            = (*FileStore)(nil)
+)
 
 type fileFreshness struct {
 	known   bool
@@ -350,6 +355,31 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// UpdateWithTransition atomically reloads, updates, snapshots, and persists a
+// bead while holding both the in-process and cross-process file-store locks.
+func (fs *FileStore) UpdateWithTransition(id string, opts UpdateOpts) (UpdateTransition, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return UpdateTransition{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return UpdateTransition{}, err
+	}
+
+	snap := fs.snapshotLocked()
+	transition, err := fs.MemStore.UpdateWithTransition(id, opts)
+	if err != nil {
+		return UpdateTransition{}, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return UpdateTransition{}, err
+	}
+	return transition, nil
+}
+
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee, while holding the file-store write lock.
 func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
@@ -395,6 +425,31 @@ func (fs *FileStore) Close(id string) error {
 		return err
 	}
 	return nil
+}
+
+// CloseWithReasonIfOpen atomically reloads, closes, and persists a live bead
+// with its close reason while holding the cross-process file lock.
+func (fs *FileStore) CloseWithReasonIfOpen(id, reason string) (CloseTransition, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return CloseTransition{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return CloseTransition{}, err
+	}
+
+	snap := fs.snapshotLocked()
+	transition, err := fs.MemStore.CloseWithReasonIfOpen(id, reason)
+	if err != nil || !transition.Transitioned {
+		return transition, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return CloseTransition{}, err
+	}
+	return transition, nil
 }
 
 // Reopen delegates to MemStore.Reopen and flushes to disk.
@@ -445,27 +500,45 @@ func (fs *FileStore) Delete(id string) error {
 
 // CloseAll closes multiple beads and sets metadata, then flushes once.
 func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	result, err := fs.closeAll(ids, metadata, false)
+	return result.Count, err
+}
+
+// CloseAllWithTransitions persists the same batch mutation as CloseAll and
+// returns snapshots only after the file flush succeeds. A failed flush rolls
+// back both the in-memory state and every reported transition.
+func (fs *FileStore) CloseAllWithTransitions(ids []string, metadata map[string]string) (CloseAllTransitionResult, error) {
+	return fs.closeAll(ids, metadata, true)
+}
+
+func (fs *FileStore) closeAll(ids []string, metadata map[string]string, captureTransitions bool) (CloseAllTransitionResult, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.locker.Lock(); err != nil {
-		return 0, err
+		return CloseAllTransitionResult{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
 	if err := fs.reloadFromDisk(); err != nil {
-		return 0, err
+		return CloseAllTransitionResult{}, err
 	}
 	snap := fs.snapshotLocked()
-	closed, err := fs.MemStore.CloseAll(ids, metadata)
-	if err != nil {
-		return 0, err
+	var result CloseAllTransitionResult
+	var err error
+	if captureTransitions {
+		result, err = fs.MemStore.CloseAllWithTransitions(ids, metadata)
+	} else {
+		result.Count, err = fs.MemStore.CloseAll(ids, metadata)
 	}
-	if closed > 0 {
+	if err != nil {
+		return CloseAllTransitionResult{}, err
+	}
+	if result.Count > 0 {
 		if err := fs.save(); err != nil {
 			fs.restoreFrom(snap.seq, snap.beads, snap.deps)
-			return 0, err
+			return CloseAllTransitionResult{}, err
 		}
 	}
-	return closed, nil
+	return result, nil
 }
 
 // SetMetadata delegates to MemStore.SetMetadata and flushes to disk.

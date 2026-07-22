@@ -453,15 +453,21 @@ func TestCachingStoreConditionalWriteEvictsOnLaggedRefresh(t *testing.T) {
 		if cached.Title != title {
 			t.Fatalf("post-write read = %q, want the backing's committed %q", cached.Title, title)
 		}
-		if len(notes) != 1 || notes[0].eventType != "bead.updated" {
-			t.Fatalf("notifications = %+v, want exactly one bead.updated", notes)
+		if len(notes) != 0 {
+			t.Fatalf("notifications = %+v, want no lagged replacement event", notes)
 		}
 	})
 
 	t.Run("close_status", func(t *testing.T) {
 		t.Parallel()
 		backing := &casBackingStore{Store: NewMemStore()}
-		cache := newConditionalCacheForTest(t, backing)
+		var notes []cacheWriteNotification
+		cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+			notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+		})
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
 		b, err := cache.Create(Bead{Title: "close-lag"})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -470,6 +476,7 @@ func TestCachingStoreConditionalWriteEvictsOnLaggedRefresh(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
+		notes = nil
 		snapshot := cloneBead(got)
 		backing.staleNextGet = &snapshot
 		if err := cache.CloseIfMatch(b.ID, got.Revision); err != nil {
@@ -481,6 +488,9 @@ func TestCachingStoreConditionalWriteEvictsOnLaggedRefresh(t *testing.T) {
 		}
 		if cached.Status != "closed" {
 			t.Fatalf("post-close read = %q, want the backing's committed closed status", cached.Status)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("notifications = %+v, want no stale open observation", notes)
 		}
 	})
 

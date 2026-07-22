@@ -118,6 +118,15 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	unlock := c.lockCloseState(id)
+	var drain func()
+	defer func() {
+		unlock()
+		if drain != nil {
+			drain()
+		}
+	}()
+
 	if err := writer.UpdateIfMatch(id, expectedRevision, opts); err != nil {
 		c.applyConditionalWriteFailure(id, err)
 		return err
@@ -129,10 +138,12 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	// revision would then succeed on fabricated content, defeating OCC). The
 	// next read consults the backing. The refresh, when it succeeds, feeds
 	// the change notification only — verbatim, never overlaid.
-	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after conditional update")
+	fresh, _, refreshed := c.refreshBeadWithDepsAfterWrite(id, "refresh bead after conditional update")
 	c.evictForConditionalWrite(id)
-	if refreshed {
-		c.notifyChange("bead.updated", fresh)
+	if refreshed && fresh.Revision > expectedRevision {
+		drain, _ = c.enqueueOrderedCompleteChange("bead.updated", fresh)
+	} else {
+		c.retainPendingPublication(id, "bead.updated")
 	}
 	return nil
 }
@@ -141,30 +152,57 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 // refresh that reports ErrNotFound is tolerated silently — backings that hide
 // closed beads from Get do this on every successful close — and resolves to an
 // evict, so the next read reports exactly what the backing itself would.
-// Unlike the unconditional Close, a fenced re-close of an already-closed bead
-// is not suppressed and re-fires bead.closed: fenced paths carry no
-// idempotence short-circuits, and only the backing evaluates the fence.
+// A fenced re-close of an already-closed bead is a no-op at the same revision
+// and emits nothing. If the revision advanced, the exact observed row is
+// published: bead.closed for a proven close, bead.updated when a later writer
+// has already reopened it.
 func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	unlock := c.lockCloseState(id)
+	var drain func()
+	defer func() {
+		unlock()
+		if drain != nil {
+			drain()
+		}
+	}()
+	before, hadBefore := c.conditionalSnapshotAtRevision(id, expectedRevision)
+
 	if err := writer.CloseIfMatch(id, expectedRevision); err != nil {
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
-	fresh, err := c.backing.Get(id)
+	fresh, _, err := c.readBeadWithDeps(id)
 	c.evictForConditionalWrite(id)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
 			c.recordProblem("refresh bead after conditional close", fmt.Errorf("%s: %w", id, err))
 		}
+		if hadBefore && before.Status != "closed" {
+			c.retainPendingPublication(id, "bead.closed")
+		}
 		return nil
 	}
-	// The close is proven committed; forcing the status onto the event
-	// payload states that fact without installing anything in the cache.
-	fresh.Status = "closed"
-	c.notifyChange("bead.closed", fresh)
+	if fresh.Revision <= expectedRevision {
+		// A visibility-lagged Get can return the pre-close row, while closing an
+		// already-closed bead is a no-op at the fenced revision. Neither result
+		// proves a lifecycle transition, so suppress both.
+		if hadBefore && before.Status != "closed" {
+			c.retainPendingPublication(id, "bead.closed")
+		}
+		return nil
+	}
+	if hadBefore && before.Status == "closed" {
+		return nil
+	}
+	eventType := "bead.updated"
+	if hadBefore && before.Status != "closed" && fresh.Status == "closed" {
+		eventType = "bead.closed"
+	}
+	drain, _ = c.enqueueOrderedCompleteChange(eventType, fresh)
 	return nil
 }
 
@@ -176,6 +214,15 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	unlock := c.lockCloseState(id)
+	var drain func()
+	defer func() {
+		unlock()
+		if drain != nil {
+			drain()
+		}
+	}()
+
 	deleted, haveDeleted := c.snapshotBeadBeforeDelete(id)
 	if err := writer.DeleteIfMatch(id, expectedRevision); err != nil {
 		c.applyConditionalWriteFailure(id, err)
@@ -190,7 +237,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
-		c.notifyChange("bead.deleted", deleted)
+		drain, _ = c.enqueueOrderedCompleteChange("bead.deleted", deleted)
 	}
 	return nil
 }
@@ -206,6 +253,15 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}
+	unlock := c.lockCloseState(id)
+	var drain func()
+	defer func() {
+		unlock()
+		if drain != nil {
+			drain()
+		}
+	}()
+
 	swapped, err := writer.CompareAndSetMetadataKey(id, key, expected, next)
 	if err != nil {
 		c.applyConditionalWriteFailure(id, err)
@@ -215,12 +271,41 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 		c.evictForConditionalWrite(id)
 		return false, nil
 	}
-	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after conditional metadata swap")
+	fresh, _, refreshed := c.refreshBeadWithDepsAfterWrite(id, "refresh bead after conditional metadata swap")
 	c.evictForConditionalWrite(id)
-	if refreshed {
-		c.notifyChange("bead.updated", fresh)
+	if refreshed && fresh.Metadata[key] != expected {
+		drain, _ = c.enqueueOrderedCompleteChange("bead.updated", fresh)
+	} else {
+		c.retainPendingPublication(id, "bead.updated")
 	}
 	return true, nil
+}
+
+// conditionalSnapshotAtRevision captures only a row whose revision is exactly
+// the fence the backing writer will evaluate. Such a row is immutable evidence
+// of the pre-write status after the conditional call succeeds; a stale or
+// unavailable snapshot must never be used to claim close-transition ownership.
+func (c *CachingStore) conditionalSnapshotAtRevision(id string, expectedRevision int64) (Bead, bool) {
+	c.mu.RLock()
+	if _, dirty := c.dirty[id]; !dirty {
+		if cached, ok := c.beads[id]; ok && cached.Revision == expectedRevision {
+			c.mu.RUnlock()
+			return cloneBead(cached), true
+		}
+	}
+	c.mu.RUnlock()
+
+	fresh, err := c.backing.Get(id)
+	if err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			c.recordProblem("snapshot bead before conditional close", fmt.Errorf("%s: %w", id, err))
+		}
+		return Bead{}, false
+	}
+	if fresh.ID != id || fresh.Revision != expectedRevision {
+		return Bead{}, false
+	}
+	return fresh, true
 }
 
 // applyConditionalWriteFailure maps the backing writer's error class onto the

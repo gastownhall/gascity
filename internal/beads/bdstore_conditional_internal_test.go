@@ -31,9 +31,11 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	})
 
 	t.Run("precondition from flat body", func(t *testing.T) {
-		out := []byte(`{"error":"revision precondition failed","code":"precondition-failed","expected_revision":5,"current_revision":8}`)
-		err := errors.New("exit status 1")
-		assertPrecondition(t, classifyConditionalWriteResult(out, err), 5, 8)
+		for _, code := range []string{"precondition-failed", "precondition_failed"} {
+			out := []byte(fmt.Sprintf(`{"error":"revision precondition failed","code":%q,"expected_revision":5,"current_revision":8}`, code))
+			err := errors.New("exit status 1")
+			assertPrecondition(t, classifyConditionalWriteResult(out, err), 5, 8)
+		}
 	})
 
 	t.Run("precondition from data-wrapped envelope", func(t *testing.T) {
@@ -93,10 +95,12 @@ func TestClassifyConditionalWriteResult(t *testing.T) {
 	})
 
 	t.Run("unsupported from machine body code latches", func(t *testing.T) {
-		out := []byte(`{"error":"conditional writes not supported","code":"conditional-write-unsupported"}`)
-		err := errors.New("exit status 1")
-		if got := classifyConditionalWriteResult(out, err); !IsConditionalWriteUnsupported(got) {
-			t.Fatalf("classify = %v, want ErrConditionalWriteUnsupported", got)
+		for _, code := range []string{"conditional-write-unsupported", "conditional_write_unsupported"} {
+			out := []byte(fmt.Sprintf(`{"error":"conditional writes not supported","code":%q}`, code))
+			err := errors.New("exit status 1")
+			if got := classifyConditionalWriteResult(out, err); !IsConditionalWriteUnsupported(got) {
+				t.Fatalf("classify code %q = %v, want ErrConditionalWriteUnsupported", code, got)
+			}
 		}
 	})
 

@@ -42,20 +42,27 @@ type bdStoreBridgeUpdateRequest struct {
 }
 
 type bdStoreBridgeBead struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"`
-	Type        string            `json:"type"`
-	Priority    *int              `json:"priority,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee,omitempty"`
-	From        string            `json:"from,omitempty"`
-	ParentID    string            `json:"parent_id,omitempty"`
-	Ref         string            `json:"ref,omitempty"`
-	Needs       []string          `json:"needs,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Labels      []string          `json:"labels,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID           string            `json:"id"`
+	Title        string            `json:"title"`
+	Status       string            `json:"status"`
+	Type         string            `json:"type"`
+	Priority     *int              `json:"priority,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at,omitempty"`
+	Revision     int64             `json:"revision,omitempty"`
+	Assignee     string            `json:"assignee,omitempty"`
+	From         string            `json:"from,omitempty"`
+	ParentID     string            `json:"parent_id,omitempty"`
+	Ref          string            `json:"ref,omitempty"`
+	Needs        []string          `json:"needs,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Labels       []string          `json:"labels,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Dependencies []beads.Dep       `json:"dependencies,omitempty"`
+	Ephemeral    bool              `json:"ephemeral,omitempty"`
+	NoHistory    bool              `json:"no_history,omitempty"`
+	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
+	IsBlocked    *bool             `json:"is_blocked,omitempty"`
 }
 
 func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -139,7 +146,9 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		return fmt.Errorf("missing --port")
 	}
 	password := bdStoreBridgePassword()
-	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
+	env := bdStoreBridgeEnv(dir, host, port, user, password)
+	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env),
+		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnv(env)))
 	switch op {
 	case "create":
 		var req bdStoreBridgeCreateRequest
@@ -399,19 +408,26 @@ func bridgeBeads(items []beads.Bead) []bdStoreBridgeBead {
 
 func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 	return bdStoreBridgeBead{
-		ID:          item.ID,
-		Title:       item.Title,
-		Status:      item.Status,
-		Type:        item.Type,
-		Priority:    item.Priority,
-		CreatedAt:   item.CreatedAt,
-		Assignee:    item.Assignee,
-		From:        item.From,
-		ParentID:    item.ParentID,
-		Ref:         item.Ref,
-		Needs:       item.Needs,
-		Description: item.Description,
-		Labels:      item.Labels,
-		Metadata:    item.Metadata,
+		ID:           item.ID,
+		Title:        item.Title,
+		Status:       item.Status,
+		Type:         item.Type,
+		Priority:     item.Priority,
+		CreatedAt:    item.CreatedAt,
+		UpdatedAt:    item.UpdatedAt,
+		Revision:     item.Revision,
+		Assignee:     item.Assignee,
+		From:         item.From,
+		ParentID:     item.ParentID,
+		Ref:          item.Ref,
+		Needs:        item.Needs,
+		Description:  item.Description,
+		Labels:       item.Labels,
+		Metadata:     item.Metadata,
+		Dependencies: append([]beads.Dep(nil), item.Dependencies...),
+		Ephemeral:    item.Ephemeral,
+		NoHistory:    item.NoHistory,
+		DeferUntil:   item.DeferUntil,
+		IsBlocked:    item.IsBlocked,
 	}
 }

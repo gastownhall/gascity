@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -27,6 +28,11 @@ const (
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
+
+// CommandEnvRunner executes a command with overrides that apply to that child
+// only. BdStore uses this seam to pass lifecycle-lease inheritance to mutating
+// bd children without changing the gc process environment.
+type CommandEnvRunner func(dir, name string, env map[string]string, args ...string) ([]byte, error)
 
 var (
 	bdCommandTimeout = 120 * time.Second
@@ -74,7 +80,45 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 	return execCommandRunnerWithEnv(ctx, env)
 }
 
+// ExecCommandEnvRunnerWithEnv returns a command-local environment runner on
+// top of the supplied base overrides.
+func ExecCommandEnvRunnerWithEnv(env map[string]string) CommandEnvRunner {
+	return execCommandEnvRunnerWithEnv(context.Background(), env)
+}
+
+// ExecCommandEnvRunnerWithEnvContext is the context-bound variant of
+// ExecCommandEnvRunnerWithEnv.
+func ExecCommandEnvRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandEnvRunner {
+	return execCommandEnvRunnerWithEnv(ctx, env)
+}
+
+func execCommandEnvRunnerWithEnv(parent context.Context, base map[string]string) CommandEnvRunner {
+	return func(dir, name string, overrides map[string]string, args ...string) ([]byte, error) {
+		env := commandChildEnv(base, overrides)
+		return execCommandRunnerWithResolvedEnv(parent, env)(dir, name, args...)
+	}
+}
+
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		return execCommandRunnerWithResolvedEnv(parent, commandChildEnv(env, nil))(dir, name, args...)
+	}
+}
+
+func commandChildEnv(base, explicit map[string]string) map[string]string {
+	env := maps.Clone(base)
+	delete(env, lifecycleMutationScopeEnv)
+	delete(env, lifecycleMutationTokenEnv)
+	if len(explicit) > 0 {
+		if env == nil {
+			env = make(map[string]string, len(explicit))
+		}
+		maps.Copy(env, explicit)
+	}
+	return env
+}
+
+func execCommandRunnerWithResolvedEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
 		trace := newBDExecTrace(start, dir, name, args)
@@ -100,7 +144,9 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		baseEnv := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), lifecycleMutationScopeEnv)
+		baseEnv = envWithout(baseEnv, lifecycleMutationTokenEnv)
+		cmd.Env = execEnvFor(name, baseEnv, env)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -292,16 +338,21 @@ type PurgeResult struct {
 // BdStore implements Store by shelling out to the bd CLI (beads v0.55.1+).
 // It delegates all persistence to bd's embedded Dolt database.
 type BdStore struct {
-	dir         string          // city root directory (where .beads/ lives)
-	runner      CommandRunner   // injectable for testing
-	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
-	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	dir         string           // city root directory (where .beads/ lives)
+	runner      CommandRunner    // injectable for testing
+	envRunner   CommandEnvRunner // command-local environment injection for lifecycle mutations
+	purgeRunner PurgeRunnerFunc  // injectable for testing; nil uses exec default
+	idPrefix    string           // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
+
+	closeTransitionMu      sync.Mutex
+	closeTransitionChecked bool
+	closeTransitionErr     error
 
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
@@ -327,7 +378,20 @@ const (
 	bdTransientReadAttempts  = 3
 )
 
-var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
+	_ CanonicalGetter               = (*BdStore)(nil)
+	_ CloseTransitioner             = (*BdStore)(nil)
+	_ CloseAllTransitioner          = (*BdStore)(nil)
+	_ UpdateTransitioner            = (*BdStore)(nil)
+)
+
+// GetCanonical retrieves the exact logical bead through bd's cross-tier query
+// path. Unlike Get, it cannot prefer a stale issues row over the canonical wisp
+// row when bd temporarily exposes both for the same ID.
+func (s *BdStore) GetCanonical(id string) (Bead, error) {
+	return s.readCanonicalCloseSnapshot(id)
+}
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
@@ -338,6 +402,15 @@ type BdStoreOption func(*BdStore)
 func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
+	}
+}
+
+// WithBdStoreCommandEnvRunner configures command-local environment overrides
+// for lifecycle mutations. Production BdStore constructors should pair this
+// with the same base environment/context as their ordinary CommandRunner.
+func WithBdStoreCommandEnvRunner(runner CommandEnvRunner) BdStoreOption {
+	return func(s *BdStore) {
+		s.envRunner = runner
 	}
 }
 
@@ -632,6 +705,7 @@ type bdIssue struct {
 	NoHistory    bool         `json:"no_history,omitempty"`
 	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
+	CloseReason  string       `json:"close_reason,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
@@ -772,6 +846,13 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
+	metadata := maps.Clone(b.Metadata)
+	if b.CloseReason != "" {
+		if metadata == nil {
+			metadata = make(StringMap)
+		}
+		metadata["close_reason"] = b.CloseReason
+	}
 	return Bead{
 		ID:           b.ID,
 		Title:        b.Title,
@@ -787,7 +868,7 @@ func (b *bdIssue) toBead() Bead {
 		Needs:        b.Needs,
 		Description:  b.Description,
 		Labels:       b.Labels,
-		Metadata:     b.Metadata,
+		Metadata:     metadata,
 		Dependencies: deps,
 		Ephemeral:    b.Ephemeral,
 		NoHistory:    b.NoHistory,
@@ -983,7 +1064,16 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 		}
 		args = append(args, "--metadata", string(metaJSON))
 	}
-	out, err := s.runBDTransientCreateOutput(hasStableID, args...)
+	var commandEnv map[string]string
+	if b.ParentID != "" || strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != "" {
+		lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+		if err != nil {
+			return Bead{}, fmt.Errorf("locking bd create lifecycle topology: %w", err)
+		}
+		defer lease.Unlock()
+		commandEnv = lease.CommandEnv()
+	}
+	out, err := s.runBDTransientCreateOutputWithEnv(commandEnv, hasStableID, args...)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
 	}
@@ -1134,6 +1224,10 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	return args
 }
 
+func bdUpdateRequiresLifecycleMutationLease(opts UpdateOpts) bool {
+	return opts.Status != nil || opts.Type != nil || opts.ParentID != nil || len(opts.Metadata) > 0
+}
+
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	args := bdUpdateArgs(id, opts)
@@ -1141,10 +1235,19 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if len(args) == 3 {
 		return nil
 	}
+	var commandEnv map[string]string
+	if bdUpdateRequiresLifecycleMutationLease(opts) {
+		lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+		if err != nil {
+			return fmt.Errorf("locking bd lifecycle update for bead %q: %w", id, err)
+		}
+		defer lease.Unlock()
+		commandEnv = lease.CommandEnv()
+	}
 	// Internal store callers supply canonical full IDs; the exact-ID collision
 	// guard lives at the CLI/API entry points (cmd_bd.go, huma_handlers_beads.go)
 	// where user-typed short IDs originate (gcy-g4o).
-	err := s.runBDTransientWrite(args...)
+	err := s.runBDTransientWriteWithEnv(commandEnv, args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
@@ -1152,6 +1255,67 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// UpdateWithTransition applies one revision-fenceable bd row update while one
+// lifecycle lease owns the canonical before snapshot, mutation, and canonical
+// after snapshot.
+func (s *BdStore) UpdateWithTransition(id string, opts UpdateOpts) (UpdateTransition, error) {
+	// bd's whole-row revision guard intentionally rejects parent and label
+	// edits: those are separate relation writes that the row revision cannot
+	// fence. Return unsupported before applying anything so the cache can take
+	// its conservative legacy path without claiming close ownership.
+	if opts.ParentID != nil || len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		return UpdateTransition{}, fmt.Errorf("bd update transition cannot revision-fence parent or label edits: %w", ErrUpdateTransitionUnsupported)
+	}
+	capable, capabilityErr := s.conditionalWritesCapable()
+	if !capable {
+		if capabilityErr != nil {
+			return UpdateTransition{}, fmt.Errorf("probing bd update revision fencing: %w: %w", capabilityErr, ErrUpdateTransitionUnsupported)
+		}
+		return UpdateTransition{}, ErrUpdateTransitionUnsupported
+	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return UpdateTransition{}, fmt.Errorf("locking bd update transition for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+
+	before, err := s.readCanonicalTransitionSnapshot(id)
+	if err != nil {
+		return UpdateTransition{}, err
+	}
+	args := bdUpdateArgs(id, opts)
+	if len(args) == 3 {
+		return UpdateTransition{Before: before, After: cloneBead(before)}, nil
+	}
+	args = append(args, conditionalWriteFlag, strconv.FormatInt(before.Revision, 10))
+	updateErr := s.runConditionalWriteWithEnv(id, before.Revision, lease.CommandEnv(), args...)
+	var wrappedUpdateErr error
+	if updateErr != nil {
+		switch {
+		case errors.Is(updateErr, ErrConditionalWriteUnsupported):
+			return UpdateTransition{}, fmt.Errorf("bd rejected update revision fencing: %w", ErrUpdateTransitionUnsupported)
+		case isBdNotFound(updateErr) || errors.Is(updateErr, ErrNotFound):
+			wrappedUpdateErr = fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
+		default:
+			wrappedUpdateErr = fmt.Errorf("updating bead %q: %w", id, updateErr)
+		}
+	}
+	after, err := s.readCanonicalTransitionSnapshot(id)
+	if err != nil {
+		if wrappedUpdateErr != nil {
+			return UpdateTransition{Before: before}, errors.Join(wrappedUpdateErr, err)
+		}
+		return UpdateTransition{Before: before}, err
+	}
+	transition := UpdateTransition{
+		Before: before,
+		After:  after,
+		TransitionedToClosed: opts.Status != nil && *opts.Status == "closed" &&
+			updateErr == nil && before.Status != "closed" && after.Status == "closed",
+	}
+	return transition, wrappedUpdateErr
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
@@ -1170,11 +1334,16 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
 // (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return false, fmt.Errorf("locking bd release-if-current for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+	out, err := s.runBDTransientWriteOutputWithEnv(lease.CommandEnv(), "sql", "--json", query)
 	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
 			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee)
@@ -1330,9 +1499,10 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "bd sql") &&
+	return (strings.Contains(msg, "bd sql") &&
 		strings.Contains(msg, "not yet supported") &&
-		strings.Contains(msg, "embedded mode")
+		strings.Contains(msg, "embedded mode")) ||
+		strings.Contains(msg, "embedded dolt requires a cgo build")
 }
 
 func bdSQLStringLiteral(value string) string {
@@ -1347,7 +1517,12 @@ func bdSQLStringLiteral(value string) string {
 // The caller controls the claim actor through the store's CommandRunner
 // environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
-	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("locking bd claim for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	out, err := s.runBDTransientWriteOutputWithEnv(lease.CommandEnv(), "update", id, "--claim", "--json")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
@@ -1432,7 +1607,16 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(args) == baseLen {
 		return 0, nil
 	}
-	if err := s.runBDTransientWrite(args...); err != nil {
+	var commandEnv map[string]string
+	if bdUpdateRequiresLifecycleMutationLease(opts) {
+		lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+		if err != nil {
+			return 0, fmt.Errorf("locking bd batch lifecycle update: %w", err)
+		}
+		defer lease.Unlock()
+		commandEnv = lease.CommandEnv()
+	}
+	if err := s.runBDTransientWriteWithEnv(commandEnv, args...); err != nil {
 		if isBdNotFound(err) {
 			return 0, fmt.Errorf("batch updating beads %v: %w", ids, ErrNotFound)
 		}
@@ -1514,7 +1698,16 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
-	err := s.runBDTransientWrite("update", "--json", id,
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd metadata update for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	return s.setMetadataWithEnv(id, key, value, lease.CommandEnv())
+}
+
+func (s *BdStore) setMetadataWithEnv(id, key, value string, commandEnv map[string]string) error {
+	err := s.runBDTransientWriteWithEnv(commandEnv, "update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
 		if isBdNotFound(err) {
@@ -1532,6 +1725,18 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
 		return nil
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd metadata batch update for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	return s.setMetadataBatchWithEnv(id, kvs, lease.CommandEnv())
+}
+
+func (s *BdStore) setMetadataBatchWithEnv(id string, kvs map[string]string, commandEnv map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
 	args := []string{"update", "--json", id}
 	keys := make([]string, 0, len(kvs))
 	for k := range kvs {
@@ -1541,7 +1746,7 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	for _, k := range keys {
 		args = append(args, "--set-metadata", k+"="+kvs[k])
 	}
-	err := s.runBDTransientWrite(args...)
+	err := s.runBDTransientWriteWithEnv(commandEnv, args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
@@ -1856,36 +2061,43 @@ func removedLabels(original, current []string) []string {
 	return removed
 }
 
-func (s *BdStore) runBDTransientWrite(args ...string) error {
-	_, err := s.runBDTransientWriteOutput(args...)
+func (s *BdStore) runBDTransientWriteWithEnv(env map[string]string, args ...string) error {
+	_, err := s.runBDTransientWriteOutputWithEnv(env, args...)
 	return err
 }
 
-func (s *BdStore) runBDTransientWriteOutput(args ...string) ([]byte, error) {
-	return s.runBDTransientWriteOutputWhen(isBdTransientWriteError, args...)
+func (s *BdStore) runBDTransientWriteOutputWithEnv(env map[string]string, args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhenWithEnv(isBdTransientWriteError, env, args...)
 }
 
-func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) ([]byte, error) {
-	return s.runBDTransientWriteOutputWhen(func(err error) bool {
+func (s *BdStore) runBDTransientCreateOutputWithEnv(env map[string]string, hasStableID bool, args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhenWithEnv(func(err error) bool {
 		if !isBdTransientWriteError(err) {
 			return false
 		}
 		return hasStableID || !isBdAmbiguousWriteError(err)
-	}, args...)
+	}, env, args...)
 }
 
-func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
+func (s *BdStore) runBDTransientWriteOutputWhenWithEnv(shouldRetry func(error) bool, env map[string]string, args ...string) ([]byte, error) {
 	var err error
 	var out []byte
 	args = s.bdTransientWriteArgs(args)
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
-		out, err = s.runner(s.dir, "bd", args...)
+		out, err = s.runCommandWithEnv(env, s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
 			return out, err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
 	return out, err
+}
+
+func (s *BdStore) runCommandWithEnv(env map[string]string, dir, name string, args ...string) ([]byte, error) {
+	if len(env) > 0 && s.envRunner != nil {
+		return s.envRunner(dir, name, env, args...)
+	}
+	return s.runner(dir, name, args...)
 }
 
 // runBDTransientRead runs a read-only bd command, retrying on transient Dolt
@@ -2013,11 +2225,181 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return 0, fmt.Errorf("locking bd close batch: %w", err)
+	}
+	defer lease.Unlock()
+	return s.closeAllWithLifecycleLease(ids, metadata, lease.CommandEnv())
+}
 
+// CloseAllWithTransitions performs the CloseAll contract as revision-fenced
+// per-ID mutations while one lifecycle lease owns their canonical snapshots.
+// Successful duplicate IDs retain BdStore's existing occurrence-based count;
+// successfully classified IDs remain available when another ID fails.
+func (s *BdStore) CloseAllWithTransitions(ids []string, metadata map[string]string) (CloseAllTransitionResult, error) {
+	if len(ids) == 0 {
+		return CloseAllTransitionResult{}, nil
+	}
+	capable, capabilityErr := s.conditionalWritesCapable()
+	if !capable {
+		if capabilityErr != nil {
+			return CloseAllTransitionResult{}, fmt.Errorf("probing bd close-all revision fencing: %w: %w", capabilityErr, ErrCloseAllTransitionUnsupported)
+		}
+		return CloseAllTransitionResult{}, ErrCloseAllTransitionUnsupported
+	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return CloseAllTransitionResult{}, fmt.Errorf("locking bd close batch transition: %w", err)
+	}
+	defer lease.Unlock()
+
+	unique := uniqueBatchIDs(ids)
+	result := CloseAllTransitionResult{
+		Transitions: make(map[string]CloseTransition, len(unique)),
+	}
+	occurrences := make(map[string]int, len(unique))
+	for _, id := range ids {
+		occurrences[id]++
+	}
+	var closeErr error
+	mutationPossible := false
+	for _, id := range unique {
+		transition, idMutationPossible, err := s.closeAllIDWithTransition(id, metadata, lease.CommandEnv())
+		mutationPossible = mutationPossible || idMutationPossible
+		if transition.Before.ID == id && transition.After.ID == id {
+			result.Transitions[id] = transition
+		}
+		if err != nil {
+			if errors.Is(err, ErrConditionalWriteUnsupported) {
+				if !mutationPossible && closeErr == nil {
+					return CloseAllTransitionResult{}, ErrCloseAllTransitionUnsupported
+				}
+				closeErr = errors.Join(closeErr,
+					errors.New("bd rejected revision fencing during close-all after state may have mutated"))
+				break
+			}
+			closeErr = errors.Join(closeErr, err)
+			continue
+		}
+		result.Count += occurrences[id]
+	}
+	return result, closeErr
+}
+
+func (s *BdStore) closeAllIDWithTransition(id string, metadata map[string]string, commandEnv map[string]string) (CloseTransition, bool, error) {
+	before, err := s.readCanonicalTransitionSnapshot(id)
+	if err != nil {
+		return CloseTransition{}, false, err
+	}
+	current := before
+	mutationPossible := false
+	if len(metadata) > 0 {
+		var metadataMutationPossible bool
+		current, metadataMutationPossible, err = s.setMetadataForCloseTransition(id, current, metadata, commandEnv)
+		mutationPossible = mutationPossible || metadataMutationPossible
+		if err != nil {
+			return CloseTransition{Before: before, After: current}, mutationPossible, err
+		}
+	}
+	if current.Status == "closed" {
+		return CloseTransition{Before: before, After: current}, mutationPossible, nil
+	}
+
+	reason := strings.TrimSpace(metadata["close_reason"])
+	args := append(bdCloseArgs(reason, id), conditionalWriteFlag, strconv.FormatInt(current.Revision, 10))
+	closeErr := s.runConditionalWriteWithEnv(id, current.Revision, commandEnv, args...)
+	mutationPossible = mutationPossible || bdConditionalWriteMayHaveMutated(closeErr)
+	after, readErr := s.readCanonicalTransitionSnapshot(id)
+	if readErr != nil {
+		return CloseTransition{Before: before}, mutationPossible, errors.Join(closeErr, readErr)
+	}
+	transition := CloseTransition{Before: before, After: after}
+	if closeErr != nil {
+		if errors.Is(closeErr, ErrConditionalWriteUnsupported) {
+			return transition, mutationPossible, fmt.Errorf("bd rejected revision fencing during close-all: %w", ErrConditionalWriteUnsupported)
+		}
+		if IsPreconditionFailed(closeErr) && after.Status == "closed" {
+			return transition, mutationPossible, nil
+		}
+		return transition, mutationPossible, fmt.Errorf("closing bead %q in batch: %w", id, closeErr)
+	}
+	if after.Status != "closed" {
+		return transition, mutationPossible, fmt.Errorf("closing bead %q in batch: bd close exited 0 but status is %q", id, after.Status)
+	}
+	transition.Transitioned = true
+	return transition, mutationPossible, nil
+}
+
+func (s *BdStore) setMetadataForCloseTransition(id string, current Bead, metadata map[string]string, commandEnv map[string]string) (Bead, bool, error) {
+	mutationPossible := false
+	for attempt := 1; attempt <= casEmulationMaxAttempts; attempt++ {
+		args := bdUpdateArgs(id, UpdateOpts{Metadata: metadata})
+		args = append(args, conditionalWriteFlag, strconv.FormatInt(current.Revision, 10))
+		err := s.runConditionalWriteWithEnv(id, current.Revision, commandEnv, args...)
+		if err == nil {
+			mutationPossible = true
+			refreshed, readErr := s.readCanonicalTransitionSnapshot(id)
+			return refreshed, mutationPossible, readErr
+		}
+		mutationPossible = mutationPossible || bdConditionalWriteMayHaveMutated(err)
+		if errors.Is(err, ErrConditionalWriteUnsupported) {
+			return current, mutationPossible, fmt.Errorf("bd rejected revision fencing during close-all metadata update: %w", ErrConditionalWriteUnsupported)
+		}
+		if !IsPreconditionFailed(err) {
+			refreshed, readErr := s.readCanonicalTransitionSnapshot(id)
+			if readErr != nil {
+				return current, mutationPossible, errors.Join(
+					fmt.Errorf("setting metadata on %q for close-all: %w", id, err),
+					readErr,
+				)
+			}
+			return refreshed, mutationPossible, fmt.Errorf("setting metadata on %q for close-all: %w", id, err)
+		}
+		refreshed, readErr := s.readCanonicalTransitionSnapshot(id)
+		if readErr != nil {
+			return current, mutationPossible, errors.Join(err, readErr)
+		}
+		current = refreshed
+		if attempt < casEmulationMaxAttempts {
+			conditionalWriteSleep(conditionalWriteBackoff(attempt))
+		}
+	}
+	return current, mutationPossible, fmt.Errorf("setting metadata on %q for close-all: revision changed %d times", id, casEmulationMaxAttempts)
+}
+
+func bdConditionalWriteMayHaveMutated(err error) bool {
+	// Only machine-confirmed non-commit outcomes are safe to classify false.
+	// Unknown transport and acknowledgement errors remain conservative because
+	// the fenced write may already be durable when bd reports them.
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrConditionalWriteUnsupported) || errors.Is(err, ErrNotFound) || IsPreconditionFailed(err) {
+		return false
+	}
+	var refusal *GateRefusalError
+	return !errors.As(err, &refusal)
+}
+
+func uniqueBatchIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique
+}
+
+func (s *BdStore) closeAllWithLifecycleLease(ids []string, metadata map[string]string, commandEnv map[string]string) (int, error) {
 	// Set metadata on all beads first (before closing, since some stores
 	// prevent metadata writes on closed beads).
 	if len(metadata) > 0 {
-		if err := s.setMetadataBatchAll(ids, metadata); err != nil {
+		if err := s.setMetadataBatchAll(ids, metadata, commandEnv); err != nil {
 			return 0, err
 		}
 	}
@@ -2025,13 +2407,13 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	// Batch close: bd close [--reason "..."] id1 id2 id3 ...
 	reason := strings.TrimSpace(metadata["close_reason"])
 	args := bdCloseArgs(reason, ids...)
-	err := s.runBDTransientWrite(args...)
+	err := s.runBDTransientWriteWithEnv(commandEnv, args...)
 	if err != nil {
 		// Fall back to individual closes on batch failure.
 		closed := 0
 		var fallbackErr error
 		for _, id := range ids {
-			if closeErr := s.close(id, reason); closeErr == nil {
+			if closeErr := s.closeWithoutScopeLock(id, reason, commandEnv); closeErr == nil {
 				closed++
 			} else {
 				fallbackErr = errors.Join(fallbackErr, closeErr)
@@ -2045,7 +2427,7 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	return len(ids), nil
 }
 
-func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error {
+func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string, commandEnv map[string]string) error {
 	if len(ids) == 0 || len(kvs) == 0 {
 		return nil
 	}
@@ -2059,7 +2441,7 @@ func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error
 	for _, k := range keys {
 		args = append(args, "--set-metadata", k+"="+kvs[k])
 	}
-	err := s.runBDTransientWrite(args...)
+	err := s.runBDTransientWriteWithEnv(commandEnv, args...)
 	if err == nil {
 		return nil
 	}
@@ -2081,13 +2463,19 @@ func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return 0, fmt.Errorf("locking bd close batch: %w", err)
+	}
+	defer lease.Unlock()
+	commandEnv := lease.CommandEnv()
 	reason = strings.TrimSpace(reason)
-	err := s.runBDTransientWrite(bdCloseArgs(reason, ids...)...)
+	err = s.runBDTransientWriteWithEnv(commandEnv, bdCloseArgs(reason, ids...)...)
 	if err != nil {
 		closed := 0
 		var fallbackErr error
 		for _, id := range ids {
-			if closeErr := s.close(id, reason); closeErr == nil {
+			if closeErr := s.closeWithoutScopeLock(id, reason, commandEnv); closeErr == nil {
 				closed++
 			} else {
 				fallbackErr = errors.Join(fallbackErr, closeErr)
@@ -2118,11 +2506,16 @@ func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
 // the supplied reason; it forwards what the caller set, or omits
 // --reason entirely when no metadata is set.
 func (s *BdStore) Close(id string) error {
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd close for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	reason := ""
-	if b, err := s.Get(id); err == nil {
+	if b, getErr := s.Get(id); getErr == nil {
 		reason = strings.TrimSpace(b.Metadata["close_reason"])
 	}
-	return s.close(id, reason)
+	return s.closeWithoutScopeLock(id, reason, lease.CommandEnv())
 }
 
 // CloseWithReason closes a bead with an explicit reason without first reading
@@ -2141,9 +2534,21 @@ func bdCloseArgs(reason string, ids ...string) []string {
 }
 
 func (s *BdStore) close(id, reason string) error {
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd close for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	return s.closeWithoutScopeLock(id, reason, lease.CommandEnv())
+}
+
+// closeWithoutScopeLock performs the bd mutation while its caller holds the
+// cooperative close-transition scope. Keep public and transactional callers on
+// close; batch callers use this helper to avoid recursively taking the lock.
+func (s *BdStore) closeWithoutScopeLock(id, reason string, commandEnv map[string]string) error {
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
-	err := s.runBDTransientWrite(bdCloseArgs(reason, id)...)
+	err := s.runBDTransientWriteWithEnv(commandEnv, bdCloseArgs(reason, id)...)
 	if err != nil {
 		// Some bd error paths collapse to a bare exit status without a helpful
 		// not-found string. Re-read the bead to distinguish "already closed" from
@@ -2158,10 +2563,14 @@ func (s *BdStore) close(id, reason string) error {
 	// Honesty guard: bd close can exit 0 yet leave the bead un-closed when an
 	// import-revert race (gastownhall/beads#3948) rolls the committed close
 	// back to open after the CLI has already returned. Trust the store, not the
-	// exit code — re-read and confirm the status landed. A failed re-read is
-	// not positive evidence of a revert, so we keep trusting the reported
-	// success in that case rather than masking it with a synthetic failure.
-	if b, getErr := s.Get(id); getErr == nil && b.Status != "closed" {
+	// exit code — re-read and confirm the status landed. Read the canonical
+	// cross-tier row (bd query), not bd show: in the bd 1.1 duplicate-row state a
+	// stale issues row can still read open after the wisp this close targeted has
+	// gone closed, which would otherwise fabricate a #3948 revert error. A failed
+	// re-read is not positive evidence of a revert, so we keep trusting the
+	// reported success in that case rather than masking it with a synthetic
+	// failure.
+	if b, getErr := s.GetCanonical(id); getErr == nil && b.Status != "closed" {
 		return fmt.Errorf("closing bead %q: bd close exited 0 but status is %q, not closed; suspected gastownhall/beads#3948 import-revert race", id, b.Status)
 	}
 	return nil
@@ -2169,7 +2578,12 @@ func (s *BdStore) close(id, reason string) error {
 
 // Reopen sets a closed bead's status to open via bd reopen.
 func (s *BdStore) Reopen(id string) error {
-	err := s.runBDTransientWrite("reopen", "--json", id)
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd reopen for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
+	err = s.runBDTransientWriteWithEnv(lease.CommandEnv(), "reopen", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
@@ -2181,9 +2595,14 @@ func (s *BdStore) Reopen(id string) error {
 
 // Delete permanently removes a bead from the store via bd delete.
 func (s *BdStore) Delete(id string) error {
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd delete for bead %q: %w", id, err)
+	}
+	defer lease.Unlock()
 	// Internal callers supply canonical full IDs; exact-ID guard lives at the
 	// CLI/API entry points (gcy-g4o).
-	err := s.runBDTransientWrite("delete", "--force", "--json", id)
+	err = s.runBDTransientWriteWithEnv(lease.CommandEnv(), "delete", "--force", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
@@ -2215,6 +2634,15 @@ const bdDeleteBatchChunk = 256
 // chunks, letting a caching layer reconcile exactly those instead of treating
 // the whole batch as untouched.
 func (s *BdStore) DeleteBatch(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd batch delete: %w", err)
+	}
+	defer lease.Unlock()
+	commandEnv := lease.CommandEnv()
 	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
 		end := start + bdDeleteBatchChunk
 		if end > len(ids) {
@@ -2225,7 +2653,7 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 		args = append(args, "delete")
 		args = append(args, chunk...)
 		args = append(args, "--force")
-		if err := s.runBDTransientWrite(args...); err != nil {
+		if err := s.runBDTransientWriteWithEnv(commandEnv, args...); err != nil {
 			return &BatchDeleteError{
 				Committed: append([]string(nil), ids[:start]...),
 				Err:       fmt.Errorf("batch delete of %d bead(s): %w", len(chunk), err),
@@ -2687,7 +3115,16 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 	}
-	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
+	var commandEnv map[string]string
+	if depType == "parent-child" {
+		lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+		if err != nil {
+			return fmt.Errorf("locking bd parent dependency update for bead %q: %w", issueID, err)
+		}
+		defer lease.Unlock()
+		commandEnv = lease.CommandEnv()
+	}
+	err := s.runBDTransientWriteWithEnv(commandEnv, "dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {
 		return fmt.Errorf("adding dep %s→%s: %w", issueID, dependsOnID, err)
 	}
@@ -2696,7 +3133,12 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency via bd dep remove.
 func (s *BdStore) DepRemove(issueID, dependsOnID string) error {
-	err := s.runBDTransientWrite("dep", "remove", issueID, dependsOnID)
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return fmt.Errorf("locking bd dependency removal for bead %q: %w", issueID, err)
+	}
+	defer lease.Unlock()
+	err = s.runBDTransientWriteWithEnv(lease.CommandEnv(), "dep", "remove", issueID, dependsOnID)
 	if err != nil {
 		return fmt.Errorf("removing dep %s→%s: %w", issueID, dependsOnID, err)
 	}

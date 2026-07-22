@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -49,6 +50,76 @@ func TestGzipAndArchiveCompressesAndRemovesSource(t *testing.T) {
 	}
 }
 
+func TestGzipAndArchivePreservesSourceWhenArchiveDirectorySyncFails(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "events.jsonl.rotating-20260507T180000Z-seq-1-1")
+	const body = "acknowledged event\n"
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 18, 0, 0, 0, time.UTC), 1, 1))
+	syncErr := errors.New("injected archive directory sync failure")
+
+	err := gzipAndArchiveWithParentSync(src, dest, io.Discard, func(path string) error {
+		if path != dest {
+			t.Fatalf("sync path = %q, want archive %q", path, dest)
+		}
+		return syncErr
+	})
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("gzipAndArchiveWithParentSync error = %v, want %v", err, syncErr)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("source removed before archive directory sync: %v", err)
+	}
+	got, err := readGzipFile(dest)
+	if err != nil {
+		t.Fatalf("read durable-candidate archive: %v", err)
+	}
+	if got != body {
+		t.Fatalf("archive body = %q, want %q", got, body)
+	}
+}
+
+func TestGzipAndArchiveSyncsDirectoryAfterSourceRemoval(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "events.jsonl.rotating-20260507T180000Z-seq-1-1")
+	const body = "acknowledged event\n"
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 18, 0, 0, 0, time.UTC), 1, 1))
+	syncErr := errors.New("injected source removal directory sync failure")
+	syncCalls := 0
+
+	err := gzipAndArchiveWithParentSync(src, dest, io.Discard, func(path string) error {
+		if path != dest {
+			t.Fatalf("sync path = %q, want archive %q", path, dest)
+		}
+		syncCalls++
+		if syncCalls == 2 {
+			return syncErr
+		}
+		return nil
+	})
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("gzipAndArchiveWithParentSync error = %v, want %v", err, syncErr)
+	}
+	if syncCalls != 2 {
+		t.Fatalf("directory sync calls = %d, want 2", syncCalls)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source should be removed before the second directory sync: %v", err)
+	}
+	got, err := readGzipFile(dest)
+	if err != nil {
+		t.Fatalf("read archive after source removal: %v", err)
+	}
+	if got != body {
+		t.Fatalf("archive body = %q, want %q", got, body)
+	}
+}
+
 func TestGzipAndArchiveCollisionGuard(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "events.jsonl.rotating-20260507T180000Z")
@@ -79,6 +150,46 @@ func TestGzipAndArchiveCollisionGuard(t *testing.T) {
 	}
 	if string(contents) != existing {
 		t.Errorf("destination overwritten: got %q, want %q", string(contents), existing)
+	}
+}
+
+func TestGzipAndArchiveIfNeededAcceptsPeerCompletion(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "events.jsonl.rotating-20260507T180000Z-seq-1-3")
+	dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 18, 0, 0, 0, time.UTC), 1, 3))
+	if err := os.WriteFile(dest, []byte("peer-completed archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if err := gzipAndArchiveIfNeeded(src, dest, &stderr); err != nil {
+		t.Fatalf("gzipAndArchiveIfNeeded after peer completion: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestGzipAndArchiveIfNeededPreservesCollisionGuard(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "events.jsonl.rotating-20260507T180000Z-seq-1-3")
+	dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 18, 0, 0, 0, time.UTC), 1, 3))
+	if err := os.WriteFile(src, []byte("unarchived source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte("existing archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if err := gzipAndArchiveIfNeeded(src, dest, &stderr); err == nil {
+		t.Fatal("gzipAndArchiveIfNeeded collision error = nil")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("source removed despite collision: %v", err)
+	}
+	if !strings.Contains(stderr.String(), filepath.Base(dest)) {
+		t.Fatalf("stderr = %q, want collision archive name %q", stderr.String(), filepath.Base(dest))
 	}
 }
 

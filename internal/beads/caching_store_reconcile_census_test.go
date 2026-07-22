@@ -91,12 +91,24 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	}
 	excludedStore := map[string]bool{
 		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
-		"onChange": true, "problemf": true, "problemLog": true,
+		"closeObserverSuppressions": true, // operation coordination; dedicated close/reconcile race tests cover it
+		"mutationScopeMu":           true, // known/unknown mutation serialization; dedicated write-race tests cover it
+		"mutationGeneration":        true, // cross-handle snapshot fence; dedicated replacement/reconcile race test covers it
+		"unknownMutationWaiters":    true,
+		"closeStateMu":              true, // per-ID mutation serialization; dedicated write-race tests cover it
+		"closeStateLocks":           true,
+		"orderedNotificationMu":     true, // callback-safe delivery ordering; dedicated reentrant/order tests cover it
+		"orderedNotificationQueues": true,
+		"pendingPublications":       true, // failed-refresh recovery intent; dedicated pending-publication recovery tests in caching_store_observer_truth_test.go cover it
+		"pendingRecoveryFailures":   true, // pending-recovery backoff counter; written outside the merge seam (recordPendingRecoveryOutcomeLocked); dedicated nextReconcileDelay backoff tests cover it
+		"lastPendingRecoveryAt":     true, // pending-recovery backoff anchor; written outside the merge seam; dedicated nextReconcileDelay backoff tests cover it
+		"onChange":                  true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
-		"applyEventBeforeCommitForTest": true,
+		"applyEventBeforeCommitForTest":                           true,
+		"reconcileAfterMergeBeforeNotificationReservationForTest": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -107,7 +119,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	excludedStats := map[string]bool{
 		"TotalBeads": true, "TotalDeps": true, "LastReconcileMs": true,
 		"ReconcileRecoveries": true, "ReconcileCloseDeferrals": true,
-		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
+		"SyncFailures": true, "PendingRecoveryFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
 	}

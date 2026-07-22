@@ -27,7 +27,8 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	return beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnvContext(ctx, env),
+		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnvContext(ctx, env))), nil
 }
 
 // scopedBdStoreForRig is scopedBdStoreForCity for a rig-scoped store.
@@ -39,7 +40,8 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	return beads.NewBdStore(rigDir, beads.ExecCommandRunnerWithEnvContext(ctx, env),
+		beads.WithBdStoreCommandEnvRunner(beads.ExecCommandEnvRunnerWithEnvContext(ctx, env))), nil
 }
 
 // bdStoreBacking unwraps store through any CachingStore/beadPolicyStore

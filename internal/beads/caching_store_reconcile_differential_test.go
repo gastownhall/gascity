@@ -306,7 +306,7 @@ type mergeImplResult struct {
 func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
-	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, 0, in.now)
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }
@@ -381,19 +381,19 @@ func legacyBranchAMerge(
 			adds++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
-				bead:      cloneBead(freshBead),
+				bead:      reconcileNotificationPayload(freshBead, freshDeps, useFreshDeps),
 			})
 		case beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
-				bead:      cloneBead(freshBead),
+				bead:      reconcileNotificationPayload(freshBead, freshDeps, useFreshDeps),
 			})
 		case depsChanged(c.deps[id], freshDeps):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
-				bead:      cloneBead(freshBead),
+				bead:      reconcileNotificationPayload(freshBead, freshDeps, useFreshDeps),
 			})
 		}
 
@@ -483,19 +483,19 @@ func legacyBranchBMerge(
 			adds++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
-				bead:      cloneBead(beadForCache),
+				bead:      reconcileNotificationPayload(beadForCache, freshDeps, useFreshDeps),
 			})
 		case !preservedRecentLocal && beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
-				bead:      cloneBead(freshBead),
+				bead:      reconcileNotificationPayload(freshBead, freshDeps, useFreshDeps),
 			})
 		case !preservedRecentLocal && depsChanged(c.deps[id], freshDeps):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
-				bead:      cloneBead(freshBead),
+				bead:      reconcileNotificationPayload(freshBead, freshDeps, useFreshDeps),
 			})
 		}
 	}

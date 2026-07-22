@@ -1078,7 +1078,7 @@ type managedCity struct {
 	status     string
 	cancel     context.CancelFunc
 	done       chan struct{} // closed when the city goroutine exits
-	closer     io.Closer     // FileRecorder (or nil); closed on city stop
+	closer     io.Closer     // configured events provider (or nil); closed on city stop
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
 }
 
@@ -2034,11 +2034,12 @@ func reconcileCities(
 
 		rec := events.Discard
 		var eventProv events.Provider
-		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
-		if frErr == nil {
-			rec = fr
-			eventProv = fr
+		configuredEventProv, eventProvErr := newCityEventsProvider(path, cfg.Events, stderr)
+		if eventProvErr == nil {
+			stableProvider := newReloadableEventsProvider(configuredEventProv)
+			stableProvider.setActiveProviderName(effectiveEventsProviderConfig(cfg.Events).provider)
+			rec = stableProvider
+			eventProv = stableProvider
 		}
 
 		dops := newDrainOps(sp)
@@ -2052,7 +2053,7 @@ func reconcileCities(
 		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
-		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
+		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: eventProv}
 
 		convergenceReqCh := make(chan convergenceRequest, 16)
 		controlDispatcherCh := make(chan struct{}, 1)
@@ -2099,6 +2100,10 @@ func reconcileCities(
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
+			cityCancel()
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
+			}
 			continue
 		}
 		mc.cr = cityRuntime
@@ -2111,6 +2116,11 @@ func reconcileCities(
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
+			cityCancel()
+			cityRuntime.shutdown()
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
+			}
 			continue
 		}
 		cs.ct = cityRuntime.crashTrack()
@@ -2136,6 +2146,11 @@ func reconcileCities(
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
+			cityCancel()
+			cityRuntime.shutdown()
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
+			}
 			continue
 		}
 
@@ -2154,8 +2169,8 @@ func reconcileCities(
 			})
 			cityCancel()
 			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
 			}
 			continue
 		}
@@ -2167,8 +2182,8 @@ func reconcileCities(
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
 			cityCancel()
 			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
 			}
 			cr.BatchUpdate(func(
 				cities map[string]*managedCity,
@@ -2192,8 +2207,8 @@ func reconcileCities(
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
 			cityCancel()
 			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
 			}
 			cr.BatchUpdate(func(
 				cities map[string]*managedCity,
@@ -2218,8 +2233,8 @@ func reconcileCities(
 			lock.Close()                                                                                //nolint:errcheck // lock released last
 			cityCancel()
 			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
 			}
 			cr.BatchUpdate(func(
 				cities map[string]*managedCity,
@@ -2241,8 +2256,8 @@ func reconcileCities(
 			lock.Close()                                                                                   //nolint:errcheck // lock released last
 			cityCancel()
 			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
+			if eventProv != nil {
+				eventProv.Close() //nolint:errcheck
 			}
 			cr.BatchUpdate(func(
 				cities map[string]*managedCity,
@@ -2271,7 +2286,7 @@ func reconcileCities(
 			ul.SetUnlinkOnClose(false)
 		}
 
-		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
+		go func(n, p string, cityEvents events.Provider, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
 			// Recovery and close(done) defer is pushed FIRST so it
 			// executes LAST (Go LIFO), preserving the invariant that
 			// completion is signaled only after all resource cleanup.
@@ -2302,10 +2317,10 @@ func reconcileCities(
 					if err := shutdownBeadsProvider(p); err != nil {
 						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 					}
-					// Close the file recorder (only on panic — normal exit
+					// Close the city events provider (only on panic — normal exit
 					// leaves it for the external caller via mc.closer).
-					if cityFr != nil {
-						cityFr.Close() //nolint:errcheck
+					if cityEvents != nil {
+						cityEvents.Close() //nolint:errcheck
 					}
 					// Record panic for crash-loop backoff and remove from
 					// cities map in a single batch update.
@@ -2371,7 +2386,7 @@ func reconcileCities(
 			defer l.Close() //nolint:errcheck // close listener (after socket removal)
 			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
 			cityRuntime.run(cityCtx)
-		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
+		}(cityName, path, eventProv, lis, sockPath, sockInfo, lock)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 		telemetry.RecordControllerLifecycle(context.Background(), "started")

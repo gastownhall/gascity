@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -28,6 +29,8 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	if !c.ownsBeadID(patch.ID) {
 		return
 	}
+	unlock, serializedAfterMutation := c.lockCloseStateContended(patch.ID)
+	defer unlock()
 
 	now := time.Now()
 	c.mu.RLock()
@@ -119,7 +122,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 		verifiedRecentLocal = true
 		verifiedRecentLocalBase = conflictBase
-	} else {
+	} else if !recentlyLocal || !serializedAfterMutation {
 		if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
 			return
 		}
@@ -136,6 +139,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 		if verifyErr != nil {
 			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			if serializedAfterMutation && locallyMutated {
+				return
+			}
 		}
 	}
 
@@ -347,6 +353,9 @@ func (c *CachingStore) setEventDepsLocked(id string, deps []Dep) bool {
 // dependency snapshot. bd hook payloads that omit dependency fields still flow
 // through ApplyEvent and fall back to reconciliation.
 func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
+	unlock := c.lockCloseState(beadID)
+	defer unlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -648,14 +657,83 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	return b, fields, nil
 }
 
-func (c *CachingStore) notifyChange(eventType string, b Bead) {
-	if c.onChange == nil {
+type cacheObserverNotification struct {
+	eventType   string
+	beadID      string
+	runID       string
+	sessionID   string
+	stepID      string
+	payload     json.RawMessage
+	occurredAt  time.Time
+	pendingGate uint64
+	delivery    *cacheObserverDelivery
+	deliver     func(cacheObserverNotification)
+}
+
+// cacheObserverDelivery is the nonblocking completion receipt attached to an
+// ordered observer notification. Follow-up callbacks are retained until the
+// observer returns, then invoked without holding either the receipt mutex or
+// the notification-queue mutex.
+type cacheObserverDelivery struct {
+	mu        sync.Mutex
+	delivered bool
+	after     []func()
+}
+
+func (d *cacheObserverDelivery) AfterDelivery(fn func()) {
+	if d == nil || fn == nil {
 		return
+	}
+	d.mu.Lock()
+	if !d.delivered {
+		d.after = append(d.after, fn)
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Unlock()
+	fn()
+}
+
+func (d *cacheObserverDelivery) markDelivered() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	if d.delivered {
+		d.mu.Unlock()
+		return
+	}
+	d.delivered = true
+	after := d.after
+	d.after = nil
+	d.mu.Unlock()
+
+	for _, fn := range after {
+		fn()
+	}
+}
+
+func (d *cacheObserverDelivery) isDelivered() bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.delivered
+}
+
+func (c *CachingStore) prepareObserverNotification(eventType string, b Bead) (cacheObserverNotification, bool) {
+	return c.prepareObserverNotificationAt(eventType, b, time.Time{})
+}
+
+func (c *CachingStore) prepareObserverNotificationAt(eventType string, b Bead, occurredAt time.Time) (cacheObserverNotification, bool) {
+	if c.onChange == nil {
+		return cacheObserverNotification{}, false
 	}
 	payload, err := json.Marshal(b)
 	if err != nil {
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
-		return
+		return cacheObserverNotification{}, false
 	}
 	// Resolve the opaque run/session correlation ids from the bead's metadata at
 	// the record site and pass ONLY those two ids to onChange — never the
@@ -669,18 +747,432 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// bead carries its own gc.step_id, so a bead.created/closed on one stamps that
 	// step. Non-work beads (sessions, mail, …) carry none → empty, omitted at export.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, payload)
+	if occurredAt.IsZero() {
+		occurredAt = beadEventOccurrenceTime(eventType, b)
+	}
+	return cacheObserverNotification{
+		eventType:  eventType,
+		beadID:     b.ID,
+		runID:      runID,
+		sessionID:  sessionID,
+		stepID:     stepID,
+		payload:    payload,
+		occurredAt: occurredAt.UTC(),
+		deliver:    c.deliverObserverNotification,
+	}, true
+}
+
+func beadEventOccurrenceTime(eventType string, b Bead) time.Time {
+	switch eventType {
+	case "bead.created":
+		if !b.CreatedAt.IsZero() {
+			return b.CreatedAt.UTC()
+		}
+	case "bead.updated", "bead.closed":
+		if !b.UpdatedAt.IsZero() {
+			return b.UpdatedAt.UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
+func (c *CachingStore) deliverObserverNotification(notification cacheObserverNotification) {
+	c.onChange(
+		notification.eventType,
+		notification.beadID,
+		notification.runID,
+		notification.sessionID,
+		notification.stepID,
+		notification.payload,
+		notification.occurredAt,
+	)
+}
+
+func (c *CachingStore) notifyChange(eventType string, b Bead) {
+	notification, ok := c.prepareObserverNotification(eventType, b)
+	if !ok {
+		return
+	}
+	c.deliverObserverNotification(notification)
+}
+
+// enqueueOrderedChange reserves an ordinary notification without consuming an
+// older failed-refresh intent. The returned drain function must run only after
+// the caller releases its mutation lock. A nil drain means another callback is
+// already draining this ID; it will deliver the queued notification before
+// finishing.
+func (c *CachingStore) enqueueOrderedChange(eventType string, b Bead) (drain func(), delivery *cacheObserverDelivery) {
+	return c.enqueueOrderedChangeAt(eventType, b, time.Time{})
+}
+
+func (c *CachingStore) enqueueOrderedChangeAt(eventType string, b Bead, occurredAt time.Time) (drain func(), delivery *cacheObserverDelivery) {
+	return c.enqueueOrderedChangeResolvingPending(eventType, b, occurredAt, false)
+}
+
+// enqueueOrderedCompleteChange may resolve an older pending intent because b is
+// an authoritative, dependency-complete snapshot obtained from
+// readBeadWithDeps or an equivalent complete transition contract.
+func (c *CachingStore) enqueueOrderedCompleteChange(eventType string, b Bead) (drain func(), delivery *cacheObserverDelivery) {
+	return c.enqueueOrderedCompleteChangeAt(eventType, b, time.Time{})
+}
+
+func (c *CachingStore) enqueueOrderedCompleteChangeAt(eventType string, b Bead, occurredAt time.Time) (drain func(), delivery *cacheObserverDelivery) {
+	return c.enqueueOrderedChangeResolvingPending(eventType, b, occurredAt, true)
+}
+
+// enqueueOrderedChangeResolvingPending reserves an exact observer snapshot and,
+// when requested, delivers any older failed-refresh publication for the same
+// bead. The resolving mutation's OWN current event is the newest snapshot for
+// the bead, so it must deliver after everything already queued: the retained
+// pending events take the gate's reserved position, and the current event goes
+// to the queue tail unless it can coalesce onto the final pending event with no
+// intervening notification for that ID. Callers that resolve pending state hold
+// the shared mutation scope and per-ID ordering lock through this reservation.
+func (c *CachingStore) enqueueOrderedChangeResolvingPending(eventType string, b Bead, occurredAt time.Time, resolvePending bool) (drain func(), delivery *cacheObserverDelivery) {
+	pending, hasPending := cachePendingPublication{}, false
+	if resolvePending && c.pendingPublications != nil {
+		pending, hasPending = c.pendingPublications.current(b.ID)
+	}
+	if occurredAt.IsZero() {
+		occurredAt = beadEventOccurrenceTime(eventType, b)
+	}
+
+	currentNotification, ok := c.prepareObserverNotificationAt(eventType, b, occurredAt)
+	if !ok {
+		return nil, nil
+	}
+	if !hasPending {
+		return c.enqueueOrderedNotification(currentNotification)
+	}
+
+	pendingEvents := pending.events()
+	if len(pendingEvents) == 0 {
+		// A gate with no recorded events cannot happen through retain (it always
+		// merges at least one event), but guard defensively: release the gate,
+		// clear the intent, and deliver only the current event at the tail.
+		gateDrain := c.releaseOrderedPendingGate(b.ID, pending.gate)
+		c.pendingPublications.clearIfToken(b.ID, pending.token)
+		tailDrain, tailDelivery := c.enqueueOrderedNotification(currentNotification)
+		if gateDrain != nil {
+			return gateDrain, tailDelivery
+		}
+		return tailDrain, tailDelivery
+	}
+
+	last := len(pendingEvents) - 1
+	sameTypeCoalesce := pendingEvents[last].eventType == eventType
+	createdSubsumesUpdate := len(pendingEvents) == 1 &&
+		pendingEvents[0].eventType == "bead.created" && eventType == "bead.updated"
+	currentCoalesces := sameTypeCoalesce || createdSubsumesUpdate
+
+	// The current event may coalesce onto the gate position ONLY when nothing was
+	// enqueued for this bead between the gate and the tail; an intervening
+	// notification means the current (newest) snapshot must deliver last, so it is
+	// split off to the tail. Intermediate notifications can only be drained (never
+	// added) while the caller holds the per-ID scope, so a stale "true" at most
+	// forces a harmless extra delivery — it never lets the current overtake a live
+	// intermediate.
+	coalesceAtGate := currentCoalesces && !c.pendingGateHasIntermediateNotification(b.ID, pending.gate)
+
+	var gateNotifications []cacheObserverNotification
+	for i, pendingEvent := range pendingEvents {
+		if coalesceAtGate && sameTypeCoalesce && i == last {
+			// The current snapshot satisfies the final pending publication; it takes
+			// the gate position and carries the current occurrence time.
+			gateNotifications = append(gateNotifications, currentNotification)
+			continue
+		}
+		notification, ok := c.prepareObserverNotificationAt(pendingEvent.eventType, b, pendingEvent.occurredAt)
+		if !ok {
+			return nil, nil
+		}
+		gateNotifications = append(gateNotifications, notification)
+	}
+
+	gateDrain, deliveries, reserved := c.resolveOrderedPendingGate(b.ID, pending.gate, gateNotifications)
+	if !reserved {
+		c.recordProblem("resolve pending observer gate", fmt.Errorf("%s: gate %d missing", b.ID, pending.gate))
+		return nil, nil
+	}
+	drain = gateDrain
+	if coalesceAtGate {
+		// The final gate-position notification carries the current event (same type
+		// took the current snapshot; created-subsumes-update publishes the one
+		// complete creation), so its receipt is the current event's receipt.
+		delivery = deliveries[len(deliveries)-1]
+	} else {
+		tailDrain, tailDelivery := c.enqueueOrderedNotification(currentNotification)
+		if drain == nil {
+			drain = tailDrain
+		}
+		delivery = tailDelivery
+	}
+
+	if !c.pendingPublications.clearIfToken(b.ID, pending.token) {
+		// The intent advanced concurrently (believed unreachable under the
+		// mutation-scope locking; defense in depth). The surviving intent carries
+		// the same gate number, which this call just consumed, so re-reserve a
+		// placeholder for it — an end-of-queue position is acceptable degraded
+		// ordering — otherwise its later recovery would hit "gate missing" and drop
+		// the publication.
+		c.reserveOrderedPendingGate(b.ID, pending.gate)
+		c.recordProblem("clear pending observer publication", fmt.Errorf("%s: intent %d changed during reservation", b.ID, pending.token))
+	}
+	return drain, delivery
+}
+
+// pendingGateHasIntermediateNotification reports whether a deliverable
+// notification for id sits behind its reserved gate in the ordered queue. It is
+// how gate resolution decides whether the resolving mutation's current event can
+// coalesce onto the gate position or must be split off to the tail so it does
+// not overtake a strictly older queued snapshot.
+func (c *CachingStore) pendingGateHasIntermediateNotification(id string, gate uint64) bool {
+	c.orderedNotificationMu.Lock()
+	defer c.orderedNotificationMu.Unlock()
+	queue := c.orderedNotificationQueues[id]
+	if queue == nil {
+		return false
+	}
+	gateIndex := -1
+	for i := range queue.pending {
+		if queue.pending[i].pendingGate == gate {
+			gateIndex = i
+			break
+		}
+	}
+	if gateIndex < 0 {
+		return false
+	}
+	for i := gateIndex + 1; i < len(queue.pending); i++ {
+		// Only a deliverable snapshot notification can be overtaken. Barriers
+		// (empty eventType receipts) and other gate placeholders carry no snapshot,
+		// so they do not force the current event off the gate position.
+		if queue.pending[i].pendingGate == 0 && queue.pending[i].eventType != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// reserveOrderedPendingGate puts a non-delivering placeholder at the durable
+// mutation's original observer position. Draining stops at an unresolved gate,
+// so later notifications and barriers cannot overtake a failed-refresh event.
+func (c *CachingStore) reserveOrderedPendingGate(id string, gate uint64) {
+	if id == "" || gate == 0 {
+		return
+	}
+	c.orderedNotificationMu.Lock()
+	defer c.orderedNotificationMu.Unlock()
+	if c.orderedNotificationQueues == nil {
+		c.orderedNotificationQueues = make(map[string]*cacheOrderedNotificationQueue)
+	}
+	queue := c.orderedNotificationQueues[id]
+	if queue == nil {
+		queue = &cacheOrderedNotificationQueue{}
+		c.orderedNotificationQueues[id] = queue
+	}
+	for _, notification := range queue.pending {
+		if notification.pendingGate == gate {
+			return
+		}
+	}
+	queue.pending = append(queue.pending, cacheObserverNotification{beadID: id, pendingGate: gate})
+}
+
+// resolveOrderedPendingGate atomically replaces an unresolved placeholder with
+// exact prepared notifications at the same queue position.
+func (c *CachingStore) resolveOrderedPendingGate(id string, gate uint64, notifications []cacheObserverNotification) (drain func(), deliveries []*cacheObserverDelivery, ok bool) {
+	if id == "" || gate == 0 || len(notifications) == 0 {
+		return nil, nil, false
+	}
+	c.orderedNotificationMu.Lock()
+	queue := c.orderedNotificationQueues[id]
+	if queue == nil {
+		c.orderedNotificationMu.Unlock()
+		return nil, nil, false
+	}
+	gateIndex := -1
+	for i := range queue.pending {
+		if queue.pending[i].pendingGate == gate {
+			gateIndex = i
+			break
+		}
+	}
+	if gateIndex < 0 {
+		c.orderedNotificationMu.Unlock()
+		return nil, nil, false
+	}
+
+	prepared := make([]cacheObserverNotification, len(notifications))
+	deliveries = make([]*cacheObserverDelivery, len(notifications))
+	for i, notification := range notifications {
+		delivery := &cacheObserverDelivery{}
+		notification.delivery = delivery
+		prepared[i] = notification
+		deliveries[i] = delivery
+	}
+	replacement := make([]cacheObserverNotification, 0, len(queue.pending)-1+len(prepared))
+	replacement = append(replacement, queue.pending[:gateIndex]...)
+	replacement = append(replacement, prepared...)
+	replacement = append(replacement, queue.pending[gateIndex+1:]...)
+	queue.pending = replacement
+	if queue.draining {
+		c.orderedNotificationMu.Unlock()
+		return nil, deliveries, true
+	}
+	queue.draining = true
+	c.orderedNotificationMu.Unlock()
+	return func() { c.drainOrderedChanges(id, queue) }, deliveries, true
+}
+
+// releaseOrderedPendingGate removes an unresolved gate placeholder for an
+// abandoned pending publication (its bead was deleted out-of-band, so no
+// replacement notification will ever resolve it). If deliverable notifications
+// remain queued and no callback is draining, it claims the drain and returns a
+// drain func with the same contract as resolveOrderedPendingGate; the caller
+// runs it after releasing its locks so the blocked notifications flow. An
+// emptied queue is deleted.
+func (c *CachingStore) releaseOrderedPendingGate(id string, gate uint64) func() {
+	if id == "" || gate == 0 {
+		return nil
+	}
+	c.orderedNotificationMu.Lock()
+	queue := c.orderedNotificationQueues[id]
+	if queue == nil {
+		c.orderedNotificationMu.Unlock()
+		return nil
+	}
+	gateIndex := -1
+	for i := range queue.pending {
+		if queue.pending[i].pendingGate == gate {
+			gateIndex = i
+			break
+		}
+	}
+	if gateIndex < 0 {
+		c.orderedNotificationMu.Unlock()
+		return nil
+	}
+	queue.pending = slices.Delete(queue.pending, gateIndex, gateIndex+1)
+	if len(queue.pending) == 0 {
+		if c.orderedNotificationQueues[id] == queue {
+			delete(c.orderedNotificationQueues, id)
+		}
+		c.orderedNotificationMu.Unlock()
+		return nil
+	}
+	if queue.draining {
+		c.orderedNotificationMu.Unlock()
+		return nil
+	}
+	queue.draining = true
+	c.orderedNotificationMu.Unlock()
+	return func() { c.drainOrderedChanges(id, queue) }
+}
+
+// enqueueOrderedBarrier reserves a receipt in the same per-ID queue as
+// observer notifications without invoking the observer itself. It lets a
+// caller that deliberately suppressed a notification publish its replacement
+// only after every earlier snapshot for the ID has been delivered.
+func (c *CachingStore) enqueueOrderedBarrier(id string) (drain func(), delivery *cacheObserverDelivery) {
+	return c.enqueueOrderedNotification(cacheObserverNotification{beadID: id})
+}
+
+func (c *CachingStore) enqueueOrderedNotification(notification cacheObserverNotification) (drain func(), delivery *cacheObserverDelivery) {
+	delivery = &cacheObserverDelivery{}
+	notification.delivery = delivery
+
+	c.orderedNotificationMu.Lock()
+	if c.orderedNotificationQueues == nil {
+		c.orderedNotificationQueues = make(map[string]*cacheOrderedNotificationQueue)
+	}
+	queue := c.orderedNotificationQueues[notification.beadID]
+	if queue == nil {
+		queue = &cacheOrderedNotificationQueue{}
+		c.orderedNotificationQueues[notification.beadID] = queue
+	}
+	queue.pending = append(queue.pending, notification)
+	if queue.draining {
+		c.orderedNotificationMu.Unlock()
+		return nil, delivery
+	}
+	queue.draining = true
+	c.orderedNotificationMu.Unlock()
+
+	return func() { c.drainOrderedChanges(notification.beadID, queue) }, delivery
+}
+
+func (c *CachingStore) drainOrderedChanges(id string, queue *cacheOrderedNotificationQueue) {
+	for {
+		c.orderedNotificationMu.Lock()
+		if len(queue.pending) == 0 {
+			if c.orderedNotificationQueues[id] == queue {
+				delete(c.orderedNotificationQueues, id)
+			}
+			queue.draining = false
+			c.orderedNotificationMu.Unlock()
+			return
+		}
+		notification := queue.pending[0]
+		if notification.pendingGate != 0 {
+			queue.draining = false
+			c.orderedNotificationMu.Unlock()
+			return
+		}
+		queue.pending[0] = cacheObserverNotification{}
+		queue.pending = queue.pending[1:]
+		c.orderedNotificationMu.Unlock()
+
+		if notification.eventType != "" && notification.deliver != nil {
+			notification.deliver(notification)
+		}
+		notification.delivery.markDelivered()
+	}
 }
 
 type cacheNotification struct {
-	eventType string
-	bead      Bead
+	eventType      string
+	bead           Bead
+	occurredAt     time.Time
+	resolvePending bool
 }
 
-func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
+// enqueueOrderedChanges reserves a batch of per-ID notifications in mutation
+// order. Callers reserve while holding their mutation scope, release that
+// scope, and only then invoke the returned drain functions.
+func (c *CachingStore) enqueueOrderedChanges(notifications []cacheNotification) []func() {
+	drains := make([]func(), 0, len(notifications))
 	for _, notification := range notifications {
-		c.notifyChange(notification.eventType, notification.bead)
+		var drain func()
+		if notification.resolvePending {
+			drain, _ = c.enqueueOrderedCompleteChangeAt(notification.eventType, notification.bead, notification.occurredAt)
+		} else {
+			drain, _ = c.enqueueOrderedChangeAt(notification.eventType, notification.bead, notification.occurredAt)
+		}
+		if drain != nil {
+			drains = append(drains, drain)
+		}
 	}
+	return drains
+}
+
+// enqueueReconcileChanges reserves reconciliation notifications without
+// allowing an incomplete ordinary diff to consume a failed-refresh intent.
+// Only a notification built from a targeted complete recovery opts in.
+func (c *CachingStore) enqueueReconcileChanges(notifications []cacheNotification) []func() {
+	drains := make([]func(), 0, len(notifications))
+	for _, notification := range notifications {
+		var drain func()
+		if notification.resolvePending {
+			drain, _ = c.enqueueOrderedCompleteChangeAt(notification.eventType, notification.bead, notification.occurredAt)
+		} else {
+			drain, _ = c.enqueueOrderedChangeAt(notification.eventType, notification.bead, notification.occurredAt)
+		}
+		if drain != nil {
+			drains = append(drains, drain)
+		}
+	}
+	return drains
 }
 
 func beadChanged(old, fresh Bead, skipLabels bool) bool {

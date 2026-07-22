@@ -52,6 +52,14 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	})
 }
 
+func bdCommandEnvRunnerForCity(cityPath string) beads.CommandEnvRunner {
+	return bdCommandEnvRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvWithError(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		return env, err
+	})
+}
+
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
@@ -62,7 +70,7 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		bdStoreOptionsWithCommandEnv(cfg, bdCommandEnvRunnerForCity(cityPath))...,
 	)
 }
 
@@ -84,7 +92,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		bdStoreOptionsWithCommandEnv(cfg, bdCommandEnvRunnerForRig(cityPath, cfg, rigDir))...,
 	)
 }
 
@@ -93,6 +101,11 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
 	}
 	return nil
+}
+
+func bdStoreOptionsWithCommandEnv(cfg *config.City, runner beads.CommandEnvRunner) []beads.BdStoreOption {
+	opts := append([]beads.BdStoreOption(nil), bdStoreOptionsForConfig(cfg)...)
+	return append(opts, beads.WithBdStoreCommandEnvRunner(runner))
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -181,7 +194,7 @@ func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStor
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		bdStoreOptionsWithCommandEnv(cfg, controlBdCommandEnvRunnerForCity(cityPath))...,
 	)
 }
 
@@ -200,7 +213,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		bdStoreOptionsWithCommandEnv(cfg, controlBdCommandEnvRunnerForRig(cityPath, cfg, rigDir))...,
 	)
 }
 
@@ -213,8 +226,25 @@ func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	})
 }
 
+func controlBdCommandEnvRunnerForCity(cityPath string) beads.CommandEnvRunner {
+	return bdCommandEnvRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvWithError(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		applyControllerBdEnv(env)
+		return env, err
+	})
+}
+
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+		applyControllerBdEnv(env)
+		return env, err
+	})
+}
+
+func controlBdCommandEnvRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandEnvRunner {
+	return bdCommandEnvRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
 		return env, err
@@ -262,6 +292,12 @@ func readScopeIssuePrefix(scopeRoot string) string {
 
 func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		return bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+	})
+}
+
+func bdCommandEnvRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandEnvRunner {
+	return bdCommandEnvRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		return bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 	})
 }
@@ -773,6 +809,7 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandEnvRunnerWithEnv          = beads.ExecCommandEnvRunnerWithEnv
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
 	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
 )
@@ -1099,7 +1136,23 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 }
 
 func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunner {
+	envRunner := bdCommandEnvRunnerWithManagedRetryErr(cityPath, envFn)
 	return func(dir, name string, args ...string) ([]byte, error) {
+		return envRunner(dir, name, nil, args...)
+	}
+}
+
+func bdCommandUsesRevisionFence(args []string) bool {
+	for _, arg := range args {
+		if arg == "--if-revision" || strings.HasPrefix(arg, "--if-revision=") {
+			return true
+		}
+	}
+	return false
+}
+
+func bdCommandEnvRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandEnvRunner {
+	return func(dir, name string, overrides map[string]string, args ...string) ([]byte, error) {
 		env, envErr := envFn(dir)
 		if envErr != nil {
 			return nil, envErr
@@ -1109,8 +1162,13 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		ensureProjectedDoltEnvExplicit(env)
 		ensureProjectedPostgresEnvExplicit(env)
-		runner := beadsExecCommandRunnerWithEnv(env)
-		out, err := runner(dir, name, args...)
+		var out []byte
+		var err error
+		if len(overrides) > 0 {
+			out, err = beadsExecCommandEnvRunnerWithEnv(env)(dir, name, overrides, args...)
+		} else {
+			out, err = beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+		}
 		if name != "bd" {
 			return out, err
 		}
@@ -1129,6 +1187,15 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
 			return out, err
 		}
+		// A revision-fenced write can commit before its transport loses the
+		// acknowledgement. Replaying the same revision then returns a
+		// precondition failure and hides the ambiguous commit from BdStore's
+		// ownership classifier, suppressing the lifecycle event. Let the
+		// conditional-write layer inspect the original error; only unfenced
+		// commands participate in managed transport retry.
+		if err != nil && bdCommandUsesRevisionFence(args) {
+			return out, err
+		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
 			return out, err
 		}
@@ -1141,10 +1208,15 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
 		}
+		if retryEnv == nil {
+			retryEnv = map[string]string{}
+		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		ensureProjectedPostgresEnvExplicit(retryEnv)
-		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
-		return retryRunner(dir, name, args...)
+		if len(overrides) > 0 {
+			return beadsExecCommandEnvRunnerWithEnv(retryEnv)(dir, name, overrides, args...)
+		}
+		return beadsExecCommandRunnerWithEnv(retryEnv)(dir, name, args...)
 	}
 }
 

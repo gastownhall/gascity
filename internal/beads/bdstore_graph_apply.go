@@ -57,7 +57,12 @@ func (s *BdStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyP
 	if noHistory {
 		args = append(args, "--no-history")
 	}
-	out, err := s.runner(s.dir, "bd", args...)
+	lease, err := acquireLifecycleMutationLease(s.dir, inheritedLifecycleMutationFromEnv())
+	if err != nil {
+		return nil, fmt.Errorf("locking bd graph apply lifecycle topology: %w", err)
+	}
+	defer lease.Unlock()
+	out, err := s.runCommandWithEnv(lease.CommandEnv(), s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}

@@ -85,6 +85,81 @@ esac
 	}
 }
 
+func TestRecordDurablyPreservesInputOrder(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "records.jsonl")
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  record) printf '%s\n' "$(cat)" >> "`+outFile+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	if err := p.RecordDurably(
+		events.Event{Type: events.BeadClosed, Subject: "gc-1"},
+		events.Event{Type: events.MoleculeResolved, Subject: "gc-1"},
+	); err != nil {
+		t.Fatalf("RecordDurably: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read records: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("recorded lines = %d, want 2: %q", len(lines), data)
+	}
+	var got [2]events.Event
+	for i := range lines {
+		if err := json.Unmarshal([]byte(lines[i]), &got[i]); err != nil {
+			t.Fatalf("unmarshal record %d: %v", i, err)
+		}
+	}
+	if got[0].Type != events.BeadClosed || got[1].Type != events.MoleculeResolved {
+		t.Fatalf("record order = [%s %s], want [%s %s]", got[0].Type, got[1].Type, events.BeadClosed, events.MoleculeResolved)
+	}
+}
+
+func TestRecordDurablyReturnsFirstScriptFailure(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "records.jsonl")
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  record)
+    event="$(cat)"
+    case "$event" in
+      *'"type":"molecule.resolved"'*) echo "injected durable record failure" >&2; exit 1 ;;
+    esac
+    printf '%s\n' "$event" >> "`+outFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	err := p.RecordDurably(
+		events.Event{Type: events.BeadClosed, Subject: "gc-1"},
+		events.Event{Type: events.MoleculeResolved, Subject: "gc-1"},
+		events.Event{Type: events.SessionStopped, Subject: "session-1"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "injected durable record failure") {
+		t.Fatalf("RecordDurably error = %v, want script failure", err)
+	}
+	data, readErr := os.ReadFile(outFile)
+	if readErr != nil {
+		t.Fatalf("read records: %v", readErr)
+	}
+	if got := strings.Count(strings.TrimSpace(string(data)), "\n") + 1; got != 1 {
+		t.Fatalf("recorded lines before failure = %d, want 1: %q", got, data)
+	}
+	if !strings.Contains(string(data), events.BeadClosed) || strings.Contains(string(data), events.SessionStopped) {
+		t.Fatalf("records after failure = %q, want only first event", data)
+	}
+}
+
 func TestList(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())

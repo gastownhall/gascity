@@ -1,7 +1,9 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 )
@@ -29,6 +31,9 @@ func NewFileFlock(path string) *FileFlock {
 
 // Lock acquires an exclusive flock, creating the lock file if needed.
 func (fl *FileFlock) Lock() error {
+	if fl.f != nil {
+		return errors.New("flock lock: already locked")
+	}
 	f, err := os.OpenFile(fl.path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("flock open: %w", err)
@@ -38,6 +43,52 @@ func (fl *FileFlock) Lock() error {
 		return fmt.Errorf("flock lock: %w", err)
 	}
 	fl.f = f
+	return nil
+}
+
+// TryLock attempts to acquire an exclusive flock without blocking. The
+// returned boolean is false only when another process currently owns the
+// lock; other failures are returned as errors.
+func (fl *FileFlock) TryLock() (bool, error) {
+	if fl.f != nil {
+		return false, errors.New("flock try-lock: already locked")
+	}
+	f, err := os.OpenFile(fl.path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false, fmt.Errorf("flock open: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return false, nil
+		}
+		return false, fmt.Errorf("flock try-lock: %w", err)
+	}
+	fl.f = f
+	return true, nil
+}
+
+// WriteLocked replaces the contents of the already-locked file without
+// replacing its inode. Callers use this for owner records that must describe
+// the holder of this exact flock.
+func (fl *FileFlock) WriteLocked(data []byte) error {
+	if fl.f == nil {
+		return errors.New("flock write: not locked")
+	}
+	if err := fl.f.Truncate(0); err != nil {
+		return fmt.Errorf("flock truncate: %w", err)
+	}
+	if _, err := fl.f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("flock seek: %w", err)
+	}
+	if len(data) > 0 {
+		if _, err := fl.f.Write(data); err != nil {
+			return fmt.Errorf("flock write: %w", err)
+		}
+	}
+	if err := fl.f.Sync(); err != nil {
+		return fmt.Errorf("flock sync: %w", err)
+	}
 	return nil
 }
 

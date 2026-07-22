@@ -49,7 +49,7 @@ stderr 'could not auto-discover the supervisor API'
 
 # --- gc event emit (external event recording) ---
 
-exec gc event emit bead.updated --subject gc-1 --message 'Updated title'
+exec gc event emit bead.updated --subject gc-1 --message 'Updated title' --bead-payload gc-1
 exec grep 'bead.updated' .gc/events.jsonl
 exec grep 'gc-1' .gc/events.jsonl
 
