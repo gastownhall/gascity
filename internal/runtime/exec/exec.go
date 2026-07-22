@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -79,18 +79,15 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	// Run the adapter in its own process group so cooperative cancellation
-	// reaches a foreground child (e.g. a readiness sleep in the adapter), not
-	// just the shell leader. Without this the shell defers its rollback trap
-	// until the child returns, and WaitDelay force-kills it first — leaking any
-	// resource the adapter already created (e.g. a Docker container).
-	setProcessGroup(cmd)
-	var cancellationAccepted atomic.Bool
-	cmd.Cancel = interruptThenKill(cmd, &cancellationAccepted)
-	// WaitDelay ensures Go forcibly closes I/O pipes after the context
-	// expires, even if grandchild processes (e.g. sleep in a shell script)
-	// still hold them open.
-	cmd.WaitDelay = 2 * time.Second
+	// Run the adapter in its own process group with interrupt-then-kill
+	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
+	// foreground child (e.g. a readiness sleep in the adapter), not just the
+	// shell leader — without this the shell defers its rollback trap until
+	// the child returns, and the forced kill wins first, leaking any resource
+	// the adapter already created (e.g. a Docker container). The grace also
+	// ensures Go forcibly closes I/O pipes after the context expires, even if
+	// grandchild processes (e.g. sleep in a shell script) still hold them open.
+	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -116,30 +113,6 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
 	return "", p.runError(err, stderr.String(), args)
-}
-
-// interruptThenKill builds a [exec.Cmd.Cancel] that first interrupts the
-// adapter's process group so a cooperative adapter — and any foreground child
-// blocking its rollback trap — can roll back before cancellation becomes a
-// forced kill, recording in accepted whether cancellation was delivered so the
-// caller can let it win over the adapter's own exit status. Platforms without
-// process groups or os.Interrupt (such as Windows) fall back to Kill.
-func interruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
-	return func() error {
-		err := interruptProcessGroup(cmd)
-		if err == nil {
-			accepted.Store(true)
-			return nil
-		}
-		if errors.Is(err, os.ErrProcessDone) {
-			return err
-		}
-		err = cmd.Process.Kill()
-		if err == nil {
-			accepted.Store(true)
-		}
-		return err
-	}
 }
 
 // cancellationError formats the error returned when a delivered cancellation
