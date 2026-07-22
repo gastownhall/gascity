@@ -136,3 +136,65 @@ func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
 		}
 	}
 }
+
+// TestNotifyOnHumanGateCreationOrder pins the notify-on-human-gate-creation
+// order's event contract: it wakes on bead.created — the event synthesized for
+// any newly-appeared bead — and runs the notify-on-human-gate-creation script.
+func TestNotifyOnHumanGateCreationOrder(t *testing.T) {
+	assertEventExecOrder(t, "notify-on-human-gate-creation.toml", "bead.created", "notify-on-human-gate-creation.sh")
+}
+
+// TestNotifyOnHumanGateCreationScriptContract guards the load-bearing behaviors
+// of the notify script. Each property, if it regresses, breaks the order
+// silently (failures are best-effort and swallowed at runtime), so they are
+// pinned here:
+//
+//   - The bead.created payload does NOT carry await_type, so a human gate is
+//     indistinguishable from a timer/gh gate at the event alone. The script
+//     must re-fetch the bead via `gc bd show` and gate on await_type == "human"
+//     AND status == "open" — otherwise it would notify on every gate creation
+//     (or none).
+//   - Addressee resolution must consult gc.deferred_assignee: formula/molecule
+//     gates strip the assignee to that metadata key at create time, so a naive
+//     `.assignee`-only lookup finds an empty addressee and misroutes to the
+//     human fallback for exactly the automated gates that name a real one.
+//   - Notification must ride `gc mail send --notify`, the one primitive that
+//     mails AND nudges a real session while natively skipping the tmux-nudge
+//     for the sessionless "human" recipient (cmd_mail.go `to != "human"`). A
+//     hand-rolled `gc session nudge` would fail on the human channel.
+//   - The prefix->rig lookup must exclude the HQ entry (`gc rig list` reports
+//     the city root as an hq=true pseudo-rig `gc --rig <cityName>` cannot
+//     resolve), matching the cross-rig convention in the sibling scripts.
+//   - Loud-fail: an undeliverable send must surface and NOT be recorded as
+//     done, so the next sweep retries it (gastownhall/gascity#4543).
+func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/notify-on-human-gate-creation.sh")
+	if err != nil {
+		t.Fatalf("reading notify-on-human-gate-creation.sh: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`.payload.bead.issue_type == "gate"`, // filter events to gate creations
+		"gc bd show",                         // re-fetch (event lacks await_type)
+		`"$AWAIT_TYPE" = "human"`,            // human gates only
+		`"$STATUS" = "open"`,                 // skip already-resolved gates
+		`gc.deferred_assignee`,               // formula/molecule addressee
+		"--notify",                           // mail + nudge, human-safe primitive
+		".hq != true",                        // exclude HQ from prefix->rig lookup
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("notify-on-human-gate-creation.sh missing load-bearing element %q", want)
+		}
+	}
+
+	// Loud-fail: the send must be conditional (retry on failure), and the
+	// failure path must surface to stderr rather than silently record the gate
+	// as notified. The dedup record must live on the SUCCESS branch only.
+	if !strings.Contains(body, "if gc mail send") {
+		t.Error("notify-on-human-gate-creation.sh must branch on the mail-send result (loud-fail retry), not fire-and-forget")
+	}
+	if !strings.Contains(body, "will retry next sweep") {
+		t.Error("notify-on-human-gate-creation.sh must surface an undeliverable send to stderr (loud-fail #4543)")
+	}
+}
