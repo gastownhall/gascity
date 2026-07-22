@@ -645,6 +645,102 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
+// TestDoPrimeWithHook_SuppressedSessionStartInjectsUnreadMail drives the full
+// SessionStart hook payload (doPrimeWithHookFormat) on the suppressed-startup-
+// prompt path — the promptless-wake shape (dip-bj7pgj) where the rendered
+// startup prompt is delivered out of band, so only hook-only context survives.
+// With unread mail waiting for the self-recipient, the mail <system-reminder>
+// block must land in additionalContext alongside the beacon (and after the
+// suppressed prompt), for both the codex and gemini hook formats.
+func TestDoPrimeWithHook_SuppressedSessionStartInjectsUnreadMail(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	for _, hookFormat := range []string{hookOutputFormatCodex, hookOutputFormatGemini} {
+		hookFormat := hookFormat
+		t.Run(hookFormat, func(t *testing.T) {
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_SOURCE", "startup")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			t.Setenv(startupPromptDeliveredEnv, "1")
+			withPrimeHookStdin(t)
+
+			// Seed unread mail for the self-recipient (worker) through the real
+			// city provider so the SessionStart injection path is exercised end
+			// to end.
+			mp, code := openCityMailProvider(io.Discard, "test seed")
+			if mp == nil {
+				t.Fatalf("openCityMailProvider returned nil (code=%d)", code)
+			}
+			if _, err := mp.Send("boss", "worker", "restart handoff", "resume the migration"); err != nil {
+				t.Fatalf("seed Send: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if got := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookFormat, false); got != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", got, stderr.String())
+			}
+
+			var out struct {
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			context := out.HookSpecificOutput.AdditionalContext
+			if strings.Contains(context, promptContent) {
+				t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+			}
+			if !strings.Contains(context, "[gastown] worker") {
+				t.Fatalf("additionalContext = %q, want hook beacon", context)
+			}
+			if !strings.Contains(context, "<system-reminder>") {
+				t.Fatalf("additionalContext = %q, want mail system-reminder block", context)
+			}
+			if !strings.Contains(context, "unread message(s)") {
+				t.Fatalf("additionalContext = %q, want unread-mail count", context)
+			}
+			if !strings.Contains(context, "resume the migration") {
+				t.Fatalf("additionalContext = %q, want seeded mail body", context)
+			}
+			// Ordering: the mail block folds in after the beacon (which carries
+			// the suppressed prompt slot), matching writePrimePromptWithFormat.
+			if strings.Index(context, "[gastown] worker") > strings.Index(context, "<system-reminder>") {
+				t.Fatalf("additionalContext = %q, want beacon before mail block", context)
+			}
+		})
+	}
+}
+
 // mustCreateInProgressStore creates a bead in a beads.Store and transitions it
 // to in_progress. It mirrors the MemStore helper in wisp_step_inject_test.go
 // but works against the concrete city store opened on disk.
