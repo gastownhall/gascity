@@ -226,6 +226,90 @@ source = "`+gastownPackDir+`"
 	}
 }
 
+// TestOrderRunResolvesFormulaFromAnyConfiguredLayerNotJustItsOwn is the
+// regression for #4378: a city-authored order (living in <city>/orders/,
+// not inside any pack) references a formula shipped by an imported pack.
+// gc formula list/show resolve the formula fine (they search the full
+// aggregated city+rig layer set), but order dispatch restricted its search
+// to just the order's own discovery layer (a.FormulaLayer, here the city's
+// local formulas dir) — which never contains a pack-provided formula, so
+// the two resolvers disagreed. The two are different things: FormulaLayer
+// records where the ORDER FILE was found (for name-collision precedence),
+// not which layers its FORMULA may live in.
+func TestOrderRunResolvesFormulaFromAnyConfiguredLayerNotJustItsOwn(t *testing.T) {
+	cityDir := t.TempDir()
+	opsPackDir := filepath.Join(cityDir, "packs", "ops")
+
+	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
+		filepath.Join(cityDir, "orders"),
+		filepath.Join(opsPackDir, "formulas"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "testcity"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+`)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+`)
+	writeFile(t, filepath.Join(opsPackDir, "pack.toml"), `
+[pack]
+name = "ops"
+schema = 2
+`)
+	writeFile(t, filepath.Join(opsPackDir, "formulas", "pack-formula.toml"), `
+formula = "pack-formula"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`)
+	// City-authored order, NOT inside any pack — its own FormulaLayer is
+	// the city's local formulas dir, which does not contain pack-formula.
+	writeFile(t, filepath.Join(cityDir, "orders", "my-order.toml"), `
+[order]
+formula = "pack-formula"
+trigger = "cooldown"
+interval = "24h"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	discovered, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+	order, ok := findOrder(discovered, "my-order", "")
+	if !ok {
+		t.Fatalf("missing my-order in %#v", discovered)
+	}
+	packFormulaDir := filepath.Join(opsPackDir, "formulas")
+	if order.FormulaLayer == packFormulaDir {
+		t.Fatalf("test setup invalid: order's own FormulaLayer %q unexpectedly matches the pack formula dir — bug wouldn't reproduce", order.FormulaLayer)
+	}
+	assertContainsString(t, cfg.FormulaLayers.City, packFormulaDir)
+
+	store := beads.NewMemStore()
+	var stdout bytes.Buffer
+	code := doOrderRun(discovered, "my-order", "", cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0 (formula lives in an imported pack layer, not the order's own layer); stderr: %s", code, stderr.String())
+	}
+}
+
 func assertContainsString(t *testing.T, got []string, want string) {
 	t.Helper()
 	for _, item := range got {
