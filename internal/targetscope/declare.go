@@ -162,6 +162,47 @@ func Declare(store DeclareStore, memberID string, scope Scope) (Outcome, error) 
 	return OutcomeNoop, fmt.Errorf("%w: member %s lost the declaration race but shows no declared scope on re-read", ErrDeclarationRace, memberID)
 }
 
+// StampMemberScope declares a member scope with a plain, unfenced write, for the
+// specific callers whose single-writer exclusion comes from an EXTERNAL lock
+// rather than a store compare-and-set — a drain item's ItemRootKey lock, for
+// one. It exists so those callers are not FAIL-CLOSED when their store forwards
+// reads and writes but not the metadata-CAS capability (a decorating store, a
+// backend without value-CAS): the launch is served by a guarded stamp instead of
+// rejected.
+//
+// It is deliberately NOT a fallback inside Declare. Declare stays CAS-only with
+// no unfenced write path, because the general caller has no external lock and an
+// unfenced absent->value write there would reintroduce the lost-update race the
+// protocol exists to close. A caller reaches for this ONLY when it can name the
+// lock that serializes it.
+//
+// The IMMUTABILITY guard is preserved EXPLICITLY — it is the enforcement the CAS
+// would otherwise carry, and dropping the CAS without it would ship a silent
+// retarget. A present-valid-different member rejects, a present-valid-equal
+// member no-ops, an invalid one rejects, and only an absent member is written.
+// The ONLY thing given up versus Declare is the atomic absent->value transition,
+// which the caller's lock and a deterministic per-member scope make safe.
+func StampMemberScope(store beads.Store, memberID string, scope Scope) (Outcome, error) {
+	if memberID == "" {
+		return OutcomeNoop, fmt.Errorf("targetscope: stamp requires a member id")
+	}
+	blob, err := Marshal(scope)
+	if err != nil {
+		return OutcomeNoop, err
+	}
+	current, err := readDeclared(store, memberID)
+	if err != nil {
+		return OutcomeNoop, err
+	}
+	if decided, outcome, err := decideAgainst(current, scope, memberID); decided {
+		return outcome, err
+	}
+	if err := store.SetMetadata(memberID, beadmeta.TargetScopeMetadataKey, blob); err != nil {
+		return OutcomeNoop, fmt.Errorf("stamping target scope on %s: %w", memberID, err)
+	}
+	return OutcomeCommitted, nil
+}
+
 // raceBarrier, when set, runs between the read and the compare-and-set.
 //
 // It exists because the interleaving that makes an unconditional write unsafe
