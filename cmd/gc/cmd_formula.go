@@ -662,6 +662,10 @@ conflicting live workflow from the same source is an error.`,
 						}
 						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
+						cookScope, cookMembers, err := resolveCookLaunchScope(store, inv.Formula, vars, cookVars, attach, inv.InputConvoy, scope.storeRoot)
+						if err != nil {
+							return err
+						}
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 						if err != nil {
 							return fmt.Errorf("compile: %w", err)
@@ -707,6 +711,14 @@ conflicting live workflow from the same source is an error.`,
 						source, err := store.Get(attach)
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
+						}
+						// Declare every member, then stamp the root — BEFORE the root
+						// is materialized, so a rejection costs a launch and never an
+						// orphaned graph. The attach target is a member of this input
+						// convoy (a single-item convoy created in this store), so it is
+						// declared here alongside the others.
+						if err := prepareCookLaunch(recipe, cookScope, cookMembers); err != nil {
+							return err
 						}
 						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
 							Title:            title,
@@ -755,6 +767,10 @@ conflicting live workflow from the same source is an error.`,
 				}
 				printGraphV2Deprecations(stderr, inv.Deprecations)
 				cookVars = inv.Vars
+				cookScope, cookMembers, err := resolveCookLaunchScope(store, inv.Formula, vars, cookVars, attach, inv.InputConvoy, scope.storeRoot)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
@@ -764,6 +780,13 @@ conflicting live workflow from the same source is an error.`,
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
+				// A legacy attach's source is in no input convoy, so cookMembers is
+				// empty and this only stamps the root; a graph attach that reached
+				// this path with a convoy declares its members first. Before
+				// materialization either way (§5b phase order).
+				if err := prepareCookLaunch(recipe, cookScope, cookMembers); err != nil {
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
+				}
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
@@ -809,6 +832,16 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
+			// A standalone cook has no attach target and no input convoy, so the
+			// scope resolves from cookVars' own inputs and no member is declared —
+			// the generated stages inherit the stamped root. Resolved once here so
+			// both the graph and legacy branches compile with the reconciled
+			// carrier already in cookVars.
+			cookScope, cookMembers, err := resolveCookLaunchScope(store, inv.Formula, vars, cookVars, "", inv.InputConvoy, scope.storeRoot)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			}
+
 			var result *molecule.Result
 			if isGraphFormula {
 				// Stamp the run root with its store/scope identity before
@@ -833,6 +866,9 @@ conflicting live workflow from the same source is an error.`,
 					unlock := graphv2.LockKey(graphRootKey)
 					defer unlock()
 				}
+				if err := prepareCookLaunch(recipe, cookScope, cookMembers); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 				result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
 					Title:          title,
 					Vars:           cookVars,
@@ -842,7 +878,22 @@ conflicting live workflow from the same source is an error.`,
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 			} else {
-				result, err = molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
+				// molecule.Cook compiles and instantiates in one call, leaving no
+				// seam to stamp the scope between them. Inline it — compile, stamp,
+				// then instantiate — mirroring the graph branch above rather than
+				// changing molecule.Cook's shared signature (its other callers do
+				// not launch a scoped root).
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				if err := prepareCookLaunch(recipe, cookScope, cookMembers); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
 					Title: title,
 					Vars:  cookVars,
 				})
