@@ -571,6 +571,10 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
+	if disabledPath, blocked := disabledSupervisorLaunchdInstallPath(); blocked && !supervisorInstallForce {
+		fmt.Fprintf(stderr, "gc supervisor start: refusing to start because disabled host-role invariant is recorded by %q; remove the disabled marker only after this host is allowed to run a supervisor\n", disabledPath) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1768,6 +1772,13 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	if disabledPath, blocked := disabledSupervisorLaunchdInstallPath(); blocked {
+		if !supervisorInstallForce {
+			fmt.Fprintf(stderr, "gc supervisor install: refusing to recreate %q because disabled host-role invariant is recorded by %q; remove the disabled marker only after this host is allowed to run a supervisor, or pass --force to override the invariant\n", supervisorLaunchdPlistPath(), disabledPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "gc supervisor install: --force violates disabled host-role invariant recorded by %q; recreating %q\n", disabledPath, supervisorLaunchdPlistPath()) //nolint:errcheck // best-effort stderr
+	}
 	sweepStaleIsolatedSupervisorServices(stderr)
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
 	if err != nil {
@@ -1836,6 +1847,36 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 
 	fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// disabledSupervisorLaunchdInstallPath reports the durable host-role marker
+// created by the documented launchd disable procedure. A disabled marker is
+// stronger evidence than a missing active plist: it means an operator
+// intentionally removed this machine from the supervisor substrate, so a
+// later gc init/install must not silently recreate it.
+func disabledSupervisorLaunchdInstallPath() (string, bool) {
+	if supervisorRuntimeGOOS != "darwin" {
+		return "", false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", false
+	}
+	launchAgentsDir := filepath.Join(home, "Library", "LaunchAgents")
+	entries, err := os.ReadDir(launchAgentsDir)
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "_disabled-") {
+			continue
+		}
+		marker := filepath.Join(launchAgentsDir, entry.Name(), defaultSupervisorLaunchdLabel+".plist")
+		if info, err := os.Stat(marker); err == nil && !info.IsDir() {
+			return marker, true
+		}
+	}
+	return "", false
 }
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {

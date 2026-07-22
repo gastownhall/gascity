@@ -3184,6 +3184,119 @@ func TestInstallSupervisorLaunchdWritesPrivatePlist(t *testing.T) {
 	}
 }
 
+func TestInstallSupervisorLaunchdRefusesDisabledHostRoleMarker(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "darwin"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", "")
+	marker := filepath.Join(homeDir, "Library", "LaunchAgents", "_disabled-2026-05-28-mac-is-not-substrate", defaultSupervisorLaunchdLabel+".plist")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("disabled supervisor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldForce := supervisorInstallForce
+	supervisorInstallForce = false
+	t.Cleanup(func() { supervisorInstallForce = oldForce })
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc",
+		LogPath:      filepath.Join(homeDir, ".gc", "supervisor.log"),
+		GCHome:       filepath.Join(homeDir, ".gc"),
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	}
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 1 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "disabled host-role invariant") {
+		t.Fatalf("stderr = %q, want disabled host-role invariant", stderr.String())
+	}
+	if _, err := os.Stat(supervisorLaunchdPlistPath()); !os.IsNotExist(err) {
+		t.Fatalf("active supervisor plist was written despite disabled marker; err=%v", err)
+	}
+}
+
+func TestInstallSupervisorLaunchdForceReportsDisabledHostRoleInvariant(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "darwin"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", "")
+	marker := filepath.Join(homeDir, "Library", "LaunchAgents", "_disabled-2026-05-28-mac-is-not-substrate", defaultSupervisorLaunchdLabel+".plist")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("disabled supervisor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldForce := supervisorInstallForce
+	supervisorInstallForce = true
+	t.Cleanup(func() { supervisorInstallForce = oldForce })
+	oldRun := supervisorLaunchctlRun
+	supervisorLaunchctlRun = func(_ ...string) error { return nil }
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc",
+		LogPath:      filepath.Join(homeDir, ".gc", "supervisor.log"),
+		GCHome:       filepath.Join(homeDir, ".gc"),
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	}
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--force violates disabled host-role invariant") {
+		t.Fatalf("stderr = %q, want forced invariant violation", stderr.String())
+	}
+	if _, err := os.Stat(supervisorLaunchdPlistPath()); err != nil {
+		t.Fatalf("forced install did not write active supervisor plist: %v", err)
+	}
+}
+
+func TestEnsureSupervisorRunningRefusesDisabledHostRoleMarker(t *testing.T) {
+	oldGOOS := supervisorRuntimeGOOS
+	supervisorRuntimeGOOS = "darwin"
+	t.Cleanup(func() { supervisorRuntimeGOOS = oldGOOS })
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", "")
+	marker := filepath.Join(homeDir, "Library", "LaunchAgents", "_disabled-2026-05-28-mac-is-not-substrate", defaultSupervisorLaunchdLabel+".plist")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("disabled supervisor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldForce := supervisorInstallForce
+	supervisorInstallForce = false
+	t.Cleanup(func() { supervisorInstallForce = oldForce })
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 1 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "disabled host-role invariant") {
+		t.Fatalf("stderr = %q, want disabled host-role invariant", stderr.String())
+	}
+	if _, err := os.Stat(supervisorLaunchdPlistPath()); !os.IsNotExist(err) {
+		t.Fatalf("active supervisor plist was written despite disabled marker; err=%v", err)
+	}
+}
+
 func TestInstallSupervisorLaunchdEnablesAndKickstartsLoadedService(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
