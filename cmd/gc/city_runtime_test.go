@@ -5274,6 +5274,100 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	}
 }
 
+// writeSkillMaterializationTestConfig writes a minimal city.toml with a
+// single city-scoped, stage-1-eligible agent (tmux session provider,
+// claude agent provider) — no builtin pack imports, so the config has
+// exactly one agent and no implicit extras to confuse a materialization
+// assertion. Extra raw TOML fragments (e.g. "[orders]\nskip = [...]\n")
+// may be appended to force a real revision change between two writes
+// without touching workspace.name, which rejects live reload.
+func writeSkillMaterializationTestConfig(t *testing.T, tomlPath string, extra ...string) {
+	t.Helper()
+	// A city-root pack.toml is required for the loader to discover
+	// PackSkillsDir at all — DiscoverPackAttachmentRoots only runs inside
+	// LoadWithIncludesOptions' city-pack.toml branch (the city IS the
+	// local/root pack, per the Pack primitive), not unconditionally.
+	packTomlPath := filepath.Join(filepath.Dir(tomlPath), "pack.toml")
+	if err := os.WriteFile(packTomlPath, []byte("[pack]\nname = \"test-city\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	var buf strings.Builder
+	buf.WriteString("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"tmux\"\n\n")
+	buf.WriteString("[providers.claude]\nbase = \"builtin:claude\"\n\n")
+	buf.WriteString("[[agent]]\nname = \"mayor\"\nscope = \"city\"\nprovider = \"claude\"\n\n")
+	for _, fragment := range extra {
+		buf.WriteString(fragment)
+	}
+	if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// TestCityRuntimeReloadMaterializesNewlyAddedSkill is the regression for
+// #3459: Stage-1 skill materialization (runStage1SkillMaterialization)
+// has exactly two call sites -- gc start, and prepareCityForSupervisor,
+// which reconcileCities invokes only for cities not yet running (the
+// toStart filter). A config reload on an already-adopted, already-running
+// city never ran it at all, so a skill added to a running city was
+// advertised in the catalog/prompt appendix but never materialized into
+// the vendor sink until a full supervisor restart -- contradicting the
+// code's own "runs on every tick" comment. reloadConfigTraced must also
+// materialize on every applied reload, not just at city start.
+func TestCityRuntimeReloadMaterializesNewlyAddedSkill(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// Add a skill to the running city (the reported live scenario: a
+	// skill added to a pack already in the city, discovered by the
+	// city-root skills/ convention) and force a real revision change via
+	// a harmless, live-reloadable field (orders.skip) -- not
+	// workspace.name, which rejects live reload and requires a restart --
+	// so the reload takes the "applied" branch, not the same-revision
+	// no-op.
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	writeSkillMaterializationTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
+
+	lastProviderName := "tmux"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	link := filepath.Join(cityPath, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("skill not materialized after reload: lstat %q: %v; stdout=%q stderr=%q", link, err, stdout.String(), stderr.String())
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%q is not a symlink", link)
+	}
+}
+
 func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
