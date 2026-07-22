@@ -116,14 +116,14 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 94
+baseline_files = 35
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
@@ -133,23 +133,23 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its packet listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
@@ -202,6 +202,28 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveRejectsStaleSocket"
+resources = ["net_listen"]
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "herdr stale-socket liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection"
+migration_target = "P0.4c-listener"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveDetectsLiveServer"
+resources = ["net_listen"]
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "herdr live-server liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[medium]]
@@ -356,10 +378,10 @@ baseline_calls = 92
 baseline_files = 34
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]
@@ -369,23 +391,23 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]

@@ -595,7 +595,7 @@ func matchedResourcesForCall(call *ast.CallExpr, bindings bindingInfo, testingOb
 		}
 		return nil
 	}
-	if err := appendImported(ResourceNetListen, "net", "Listen"); err != nil {
+	if err := appendImported(ResourceNetListen, "net", "Listen", "ListenTCP", "ListenUnix"); err != nil {
 		return nil, err
 	}
 	matched, err := isNetListenConfigCall(call, bindings)
@@ -605,7 +605,7 @@ func matchedResourcesForCall(call *ast.CallExpr, bindings bindingInfo, testingOb
 	if matched {
 		resources = append(resources, ResourceNetListenConfig)
 	}
-	if err := appendImported(ResourceNetListenUnixgram, "net", "ListenUnixgram"); err != nil {
+	if err := appendImported(ResourceNetListenPacket, "net", "ListenPacket", "ListenUDP", "ListenIP", "ListenUnixgram", "ListenMulticastUDP"); err != nil {
 		return nil, err
 	}
 	if err := appendImported(ResourceSyscallListen, "syscall", "Listen"); err != nil {

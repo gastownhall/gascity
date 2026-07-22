@@ -42,11 +42,14 @@ const (
 	ResourceSlowProcessGate Resource = "slow_process_gate"
 	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
 	ResourceHTTPTestServer Resource = "http_test_server"
-	// ResourceNetListen counts direct listeners opened by net.Listen.
+	// ResourceNetListen counts direct stream listeners opened by package-level
+	// net constructors.
 	ResourceNetListen Resource = "net_listen"
-	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
-	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
-	// ResourceNetListenConfig counts direct listeners opened through net.ListenConfig.Listen.
+	// ResourceNetListenPacket counts direct packet listeners opened by
+	// package-level net constructors.
+	ResourceNetListenPacket Resource = "net_listen_packet"
+	// ResourceNetListenConfig counts direct listeners opened through
+	// net.ListenConfig methods.
 	ResourceNetListenConfig Resource = "net_listen_config"
 	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
 	ResourceSyscallListen Resource = "syscall_listen"
@@ -55,17 +58,17 @@ const (
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess:        {},
-	ResourceFixedSleep:        {},
-	ResourceEnvironment:       {},
-	ResourceCWD:               {},
-	ResourceSlowProcessGate:   {},
-	ResourceHTTPTestServer:    {},
-	ResourceNetListen:         {},
-	ResourceNetListenConfig:   {},
-	ResourceNetListenUnixgram: {},
-	ResourceSyscallListen:     {},
-	ResourceTmux:              {},
+	ResourceSubprocess:      {},
+	ResourceFixedSleep:      {},
+	ResourceEnvironment:     {},
+	ResourceCWD:             {},
+	ResourceSlowProcessGate: {},
+	ResourceHTTPTestServer:  {},
+	ResourceNetListen:       {},
+	ResourceNetListenConfig: {},
+	ResourceNetListenPacket: {},
+	ResourceSyscallListen:   {},
+	ResourceTmux:            {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -222,14 +225,14 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
-			BaselineFiles:   34,
+			BaselineCalls:   94,
+			BaselineFiles:   35,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "each owning test closes its listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its stream listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -239,23 +242,23 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its configured listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
 			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListenUnixgram,
+			Resource:        ResourceNetListenPacket,
 			BaselineCalls:   3,
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its packet listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -306,6 +309,28 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup",
 			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
 			MigrationTarget: "P0.4b/P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/herdr",
+			PackageName:     "herdr",
+			Owner:           "TestServerAliveRejectsStaleSocket",
+			Resources:       []Resource{ResourceNetListen},
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "herdr stale-socket liveness regression is a checked Medium stream-listener owner",
+			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection",
+			MigrationTarget: "P0.4c-listener",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/herdr",
+			PackageName:     "herdr",
+			Owner:           "TestServerAliveDetectsLiveServer",
+			Resources:       []Resource{ResourceNetListen},
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "herdr live-server liveness regression is a checked Medium stream-listener owner",
+			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -458,10 +483,10 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   34,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -471,23 +496,23 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
 			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListenUnixgram,
+			Resource:        ResourceNetListenPacket,
 			BaselineCalls:   3,
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -1004,7 +1029,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram":
+			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenIP", "ListenMulticastUDP", "ListenPacket", "ListenTCP", "ListenUDP", "ListenUnix", "ListenUnixgram":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:
@@ -1163,7 +1188,7 @@ func netListenReceiverExpressions(file *ast.File) []ast.Expr {
 			return true
 		}
 		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "Listen" {
+		if ok && (selector.Sel.Name == "Listen" || selector.Sel.Name == "ListenPacket") {
 			receivers = append(receivers, unparen(selector.X))
 		}
 		return true
@@ -1312,7 +1337,7 @@ func isNetListenConfigValue(expression ast.Expr, bindings bindingInfo) (bool, er
 
 func isNetListenConfigCall(call *ast.CallExpr, bindings bindingInfo) (bool, error) {
 	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != "Listen" {
+	if !ok || (selector.Sel.Name != "Listen" && selector.Sel.Name != "ListenPacket") {
 		return false, nil
 	}
 	receiver := unparen(selector.X)

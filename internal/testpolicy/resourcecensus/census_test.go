@@ -287,13 +287,14 @@ func TestNetListen(t *testing.T) {
 	t.Run("nested", func(t *testing.T) {
 		_, _ = (((sockets)).Listen)("unix", "socket")
 	})
+	_, _ = sockets.ListenTCP("tcp", nil)
+	_, _ = sockets.ListenUnix("unix", nil)
 
 	local := localNet{}
 	_, _ = local.Listen("tcp", "local shadow")
 	_, _ = foreign.Listen("tcp", "foreign package")
 	lc := sockets.ListenConfig{}
 	_, _ = lc.Listen(t.Context(), "tcp", "listen config method")
-	_, _ = sockets.ListenTCP("tcp", nil)
 	_ = "sockets.Listen(\"tcp\", \"string literal\")"
 	// sockets.Listen("tcp", "comment")
 }
@@ -329,14 +330,14 @@ func TestSiblingShadow() {
 	if err != nil {
 		t.Fatalf("ScanFS: %v", err)
 	}
-	assertCount(t, got, ScopeAll, ResourceNetListen, 4, 2)
-	assertCount(t, got, ScopeUntagged, ResourceNetListen, 3, 1)
+	assertCount(t, got, ScopeAll, ResourceNetListen, 6, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListen, 5, 1)
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "TestNetListen", true, false)
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListen, "helper", false, false)
 	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListen, "TestTaggedNetListen", true, true)
 }
 
-func TestScanCountsNetListenUnixgramByImportIdentityAndRunnableOwnership(t *testing.T) {
+func TestScanCountsNetListenPacketByImportIdentityAndRunnableOwnership(t *testing.T) {
 	t.Parallel()
 
 	files := fstest.MapFS{
@@ -348,23 +349,29 @@ import (
 )
 
 type localNet struct{}
+func (localNet) ListenPacket(string, string) (any, error) { return nil, nil }
+func (localNet) ListenUDP(string, *sockets.UDPAddr) (any, error) { return nil, nil }
 func (localNet) ListenUnixgram(string, *sockets.UnixAddr) (any, error) { return nil, nil }
 
-func TestNetListenUnixgram(t *testing.T) {
-	_, _ = ((sockets.ListenUnixgram))("unixgram", nil)
+func TestNetListenPacket(t *testing.T) {
+	_, _ = ((sockets.ListenPacket))("udp", "127.0.0.1:0")
+	_, _ = sockets.ListenUDP("udp", nil)
+	_, _ = sockets.ListenIP("ip", nil)
 	t.Run("nested", func(t *testing.T) {
 		_, _ = (((sockets)).ListenUnixgram)("unixgram", nil)
 	})
+	_, _ = sockets.ListenMulticastUDP("udp", nil, nil)
 
 	local := localNet{}
+	_, _ = local.ListenPacket("udp", "local shadow")
+	_, _ = local.ListenUDP("udp", nil)
 	_, _ = local.ListenUnixgram("unixgram", nil)
-	_, _ = foreign.ListenUnixgram("unixgram", nil)
+	_, _ = foreign.ListenPacket("udp", "foreign package")
 	lc := sockets.ListenConfig{}
-	_, _ = lc.Listen(t.Context(), "unixgram", "listen config method")
+	_, _ = lc.ListenPacket(t.Context(), "udp", "listen config method")
 	_, _ = sockets.ListenUnix("unixgram", nil)
-	_, _ = sockets.ListenUDP("udp", nil)
-	_ = "sockets.ListenUnixgram(\"unixgram\", nil)"
-	// sockets.ListenUnixgram("unixgram", nil)
+	_ = "sockets.ListenPacket(\"udp\", \"string literal\")"
+	// sockets.ListenUDP("udp", nil)
 }
 
 func helper() {
@@ -378,8 +385,8 @@ import (
 	sockets "net"
 	"testing"
 )
-func TestTaggedNetListenUnixgram(t *testing.T) {
-	_, _ = sockets.ListenUnixgram("unixgram", nil)
+func TestTaggedNetListenPacket(t *testing.T) {
+	_, _ = sockets.ListenUDP("udp", nil)
 }
 `)},
 		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
@@ -398,11 +405,11 @@ func TestSiblingShadow() {
 	if err != nil {
 		t.Fatalf("ScanFS: %v", err)
 	}
-	assertCount(t, got, ScopeAll, ResourceNetListenUnixgram, 4, 2)
-	assertCount(t, got, ScopeUntagged, ResourceNetListenUnixgram, 3, 1)
-	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "TestNetListenUnixgram", true, false)
-	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenUnixgram, "helper", false, false)
-	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenUnixgram, "TestTaggedNetListenUnixgram", true, true)
+	assertCount(t, got, ScopeAll, ResourceNetListenPacket, 7, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenPacket, 6, 1)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenPacket, "TestNetListenPacket", true, false)
+	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenPacket, "helper", false, false)
+	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenPacket, "TestTaggedNetListenPacket", true, true)
 }
 
 func TestScanCountsSyscallListenByImportIdentityAndRunnableOwnership(t *testing.T) {
@@ -485,6 +492,7 @@ import (
 
 type localListenConfig struct{}
 func (localListenConfig) Listen(any, string, string) (any, error) { return nil, nil }
+func (localListenConfig) ListenPacket(any, string, string) (any, error) { return nil, nil }
 func newListenConfig() sockets.ListenConfig { return sockets.ListenConfig{} }
 func newListenConfigPointer() *sockets.ListenConfig { return &sockets.ListenConfig{} }
 type listenConfigAlias = sockets.ListenConfig
@@ -513,9 +521,15 @@ func TestNetListenConfig(t *testing.T) {
 
 	local := localListenConfig{}
 	_, _ = local.Listen(nil, "tcp", "local shadow")
+	_, _ = local.ListenPacket(nil, "udp", "local shadow")
 	foreignConfig := foreign.ListenConfig{}
 	_, _ = foreignConfig.Listen(nil, "tcp", "foreign package")
+	_, _ = foreignConfig.ListenPacket(nil, "udp", "foreign package")
 	_, _ = value.ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = newListenConfigPointer().ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = new(sockets.ListenConfig).ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = holder.Config.ListenPacket(nil, "udp", "127.0.0.1:0")
+	_, _ = configs[0].ListenPacket(nil, "udp", "127.0.0.1:0")
 	_, _ = sockets.Listen("tcp", "127.0.0.1:0")
 	_ = "value.Listen(nil, \"tcp\", \"string literal\")"
 	// value.Listen(nil, "tcp", "comment")
@@ -534,7 +548,7 @@ import (
 )
 func TestTaggedNetListenConfig(t *testing.T) {
 	config := sockets.ListenConfig{}
-	_, _ = config.Listen(nil, "tcp", "127.0.0.1:0")
+	_, _ = config.ListenPacket(nil, "udp", "127.0.0.1:0")
 }
 `)},
 		"shadow/shadow.go": &fstest.MapFile{Data: []byte(`package shadow
@@ -553,8 +567,8 @@ func TestSiblingShadow() {
 	if err != nil {
 		t.Fatalf("ScanFS: %v", err)
 	}
-	assertCount(t, got, ScopeAll, ResourceNetListenConfig, 14, 2)
-	assertCount(t, got, ScopeUntagged, ResourceNetListenConfig, 13, 1)
+	assertCount(t, got, ScopeAll, ResourceNetListenConfig, 19, 2)
+	assertCount(t, got, ScopeUntagged, ResourceNetListenConfig, 18, 1)
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "TestNetListenConfig", true, false)
 	assertOccurrenceOwner(t, got, "sample/resources_test.go", ResourceNetListenConfig, "helper", false, false)
 	assertOccurrenceOwner(t, got, "sample/tagged_test.go", ResourceNetListenConfig, "TestTaggedNetListenConfig", true, true)
@@ -1673,17 +1687,41 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 	}
 }
 
-func TestBootstrapPolicyOwnsNetListenDebt(t *testing.T) {
+func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
-	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
-		row := findRow(t, rows, ScopeUntagged, ResourceNetListen)
-		if row.BaselineCalls != 92 || row.BaselineFiles != 34 {
-			t.Fatalf("net.Listen baseline = %d/%d, want 92/34", row.BaselineCalls, row.BaselineFiles)
+	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
+	if debt.BaselineCalls != 94 || debt.BaselineFiles != 35 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 94/35, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	}
+	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
+	if smallDebt.BaselineCalls != 92 || smallDebt.BaselineFiles != 34 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 92/34", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	}
+	for _, row := range []*Baseline{debt, smallDebt} {
+		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("stream-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+	}
+
+	wantOwners := map[string]bool{
+		"TestServerAliveDetectsLiveServer":  true,
+		"TestServerAliveRejectsStaleSocket": true,
+	}
+	for _, row := range bootstrapPolicy.Medium {
+		if row.PackageDir != "internal/runtime/herdr" || row.PackageName != "herdr" || !wantOwners[row.Owner] {
+			continue
 		}
+		if len(row.Resources) != 1 || row.Resources[0] != ResourceNetListen {
+			t.Fatalf("herdr Medium owner %s resources = %v, want net_listen", row.Owner, row.Resources)
+		}
+		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
+		}
+		delete(wantOwners, row.Owner)
+	}
+	if len(wantOwners) != 0 {
+		t.Fatalf("missing exact herdr stream-listener Medium owners: %v", wantOwners)
 	}
 }
 
@@ -1693,24 +1731,24 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
-			t.Fatalf("net.ListenConfig.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
+			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.ListenConfig.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
 
-func TestBootstrapPolicyOwnsNetListenUnixgramDebt(t *testing.T) {
+func TestBootstrapPolicyOwnsNetListenPacketDebt(t *testing.T) {
 	t.Parallel()
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
-		row := findRow(t, rows, ScopeUntagged, ResourceNetListenUnixgram)
+		row := findRow(t, rows, ScopeUntagged, ResourceNetListenPacket)
 		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
-			t.Fatalf("net.ListenUnixgram baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
+			t.Fatalf("packet-listener baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("net.ListenUnixgram owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("packet-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
