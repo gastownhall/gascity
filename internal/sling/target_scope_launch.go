@@ -151,17 +151,26 @@ func launchScopeMembers(convoyID string, scope targetscope.Scope, deps SlingDeps
 // molecule_id write that makes it the claimable unit.
 //
 // It is a plain SetMetadata, non-fatal like the molecule_id write beside it,
-// NOT a CAS member declaration. Two facts make that correct rather than a
-// weakening. First, immutability is already enforced upstream: ResolveLaunchScope
-// reads this bead's existing scope into the member layer and rejects the launch
-// before any materialization if the resolved scope differs — so by the time we
-// reach this stamp the scope either EQUALS what the bead already carries (an
-// idempotent re-stamp) or the bead was unscoped (a fresh stamp); there is no
-// path here that silently retargets a governed bead. Second, the exclusion the
-// member CAS would add is already held by the source-workflow lock that
-// serializes attaches on this bead, and the write must match molecule_id's
-// non-fatal contract because a legacy source can live in a validation-only
-// querier absent from the declaration store.
+// NOT a CAS member declaration, because a legacy source can live in a
+// validation-only querier absent from the declaration store, where a CAS
+// declaration fails closed and breaks the most common sling path.
+//
+// The single-writer guarantee this weakens, stated HONESTLY (an earlier draft of
+// this comment over-claimed a lock that this path does not hold):
+//
+//   - Against an ALREADY-DECLARED scope, immutability holds. ResolveLaunchScope
+//     reads the bead's existing scope into the member layer and rejects the
+//     launch before materialization when the resolved scope differs, so a
+//     GOVERNED bead is never silently retargeted.
+//   - Two CONCURRENT legacy attaches on the same still-UNSCOPED bead are NOT
+//     serialized here. The sourceworkflow lock wraps only the graph-attach
+//     boundaries, not this legacy run(); both launches read the bead as absent
+//     before either stamps, so the last stamp wins. Both write VALID scopes (no
+//     corruption), but the winner is non-deterministic. The graph-attach path is
+//     the CAS-serialized single-winner path; closing this residual legacy race
+//     needs the source declared BEFORE materialization, which the
+//     validation-only-querier constraint makes a larger change — tracked
+//     separately, out of scope for this hardening.
 //
 // An unknown scope is still stamped (§2c): absence is what re-enables the cwd
 // writers, so "no branch to record" is a present-valid field-empty object, not
