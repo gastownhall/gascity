@@ -50,6 +50,8 @@ const (
 	ResourceNetListenConfig Resource = "net_listen_config"
 	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
 	ResourceSyscallListen Resource = "syscall_listen"
+	// ResourceTmux counts typed tmux test helpers, production constructors, and literal tmux process calls.
+	ResourceTmux Resource = "tmux"
 )
 
 var knownResources = map[Resource]struct{}{
@@ -63,6 +65,7 @@ var knownResources = map[Resource]struct{}{
 	ResourceNetListenConfig:   {},
 	ResourceNetListenUnixgram: {},
 	ResourceSyscallListen:     {},
+	ResourceTmux:              {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -268,6 +271,19 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4c",
 			Expires:         "2026-10-01",
 		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceTmux,
+			BaselineCalls:   6,
+			BaselineFiles:   2,
+			ReportedCalls:   6,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test confines tmux processes and sockets to its isolated namespace and cleanup",
+			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
 	},
 	Medium: []MediumOwner{
 		{
@@ -285,11 +301,22 @@ var bootstrapPolicy = Ledger{
 			PackageDir:      "cmd/gc",
 			PackageName:     "main",
 			Owner:           "TestMain",
-			Resources:       []Resource{ResourceEnvironment},
+			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
 			OwnerBead:       "ga-80po0c.2.1",
-			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner",
-			ResourceOwner:   "only environment calls lexically inside TestMain leave Small debt",
-			MigrationTarget: "P0.4b",
+			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup",
+			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4b/P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/tmux",
+			PackageName:     "tmux",
+			Owner:           "TestMain",
+			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup",
+			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -474,6 +501,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceTmux,
+			BaselineCalls:   0,
+			BaselineFiles:   0,
+			ReportedCalls:   0,
+			ReportedFiles:   0,
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -933,7 +973,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" {
+			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" || importPath == "github.com/gastownhall/gascity/internal/runtime/tmux" || importPath == "github.com/gastownhall/gascity/test/tmuxtest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -964,7 +1004,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram", "NewServer", "NewTLSServer", "NewUnstartedServer":
+			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:

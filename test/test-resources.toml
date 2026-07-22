@@ -165,6 +165,19 @@ resource_owner = "each owning test closes its listening file descriptor and remo
 migration_target = "P0.4c"
 expires = "2026-10-01"
 
+[[debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 6
+baseline_files = 2
+reported_calls = 6
+reported_files = 2
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test confines tmux processes and sockets to its isolated namespace and cleanup"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-01"
+
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
@@ -184,11 +197,22 @@ expires = "2026-10-01"
 package_dir = "cmd/gc"
 package_name = "main"
 owner = "TestMain"
-resources = ["environment"]
+resources = ["environment", "tmux"]
 owner_bead = "ga-80po0c.2.1"
-invariant = "cmd/gc TestMain is the checked package-level Medium owner"
-resource_owner = "only environment calls lexically inside TestMain leave Small debt"
-migration_target = "P0.4b"
+invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/tmux"
+package_name = "tmux"
+owner = "TestMain"
+resources = ["environment", "tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"
 
 [[medium]]
@@ -375,4 +399,17 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 0
+baseline_files = 0
+reported_calls = 0
+reported_files = 0
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"

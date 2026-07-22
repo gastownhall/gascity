@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -616,6 +617,39 @@ func matchedResourcesForCall(call *ast.CallExpr, bindings bindingInfo, testingOb
 	if err := appendImported(ResourceSubprocess, "os/exec", "Command", "CommandContext"); err != nil {
 		return nil, err
 	}
+	for _, callFamily := range []struct {
+		importPath string
+		names      []string
+	}{
+		{
+			importPath: "github.com/gastownhall/gascity/test/tmuxtest",
+			names:      []string{"ConfigureProcessEnv", "KillAllTestSessions", "NewGuard", "NewGuardWithSocket", "RequireTmux"},
+		},
+		{
+			importPath: "github.com/gastownhall/gascity/internal/runtime/tmux",
+			names:      []string{"NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewTmux", "NewTmuxWithConfig"},
+		},
+	} {
+		if err := appendImported(ResourceTmux, callFamily.importPath, callFamily.names...); err != nil {
+			return nil, err
+		}
+	}
+	for _, command := range []struct {
+		name     string
+		argument int
+	}{
+		{name: "Command", argument: 0},
+		{name: "CommandContext", argument: 1},
+		{name: "LookPath", argument: 0},
+	} {
+		matched, err := isImportedCallWithLiteralArgument(call, bindings, "os/exec", command.argument, "tmux", command.name)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			resources = append(resources, ResourceTmux)
+		}
+	}
 	if err := appendImported(ResourceFixedSleep, "time", "Sleep"); err != nil {
 		return nil, err
 	}
@@ -643,4 +677,20 @@ func matchedResourcesForCall(call *ast.CallExpr, bindings bindingInfo, testingOb
 		resources = append(resources, ResourceSlowProcessGate)
 	}
 	return resources, nil
+}
+
+func isImportedCallWithLiteralArgument(call *ast.CallExpr, bindings bindingInfo, importPath string, argument int, want string, names ...string) (bool, error) {
+	matched, err := isImportedCall(call, bindings, importPath, names...)
+	if err != nil || !matched || argument >= len(call.Args) {
+		return false, err
+	}
+	literal, ok := unparen(call.Args[argument]).(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return false, nil
+	}
+	value, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return false, fmt.Errorf("decoding resource command literal %s: %w", literal.Value, err)
+	}
+	return value == want, nil
 }
