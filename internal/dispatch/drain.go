@@ -1054,10 +1054,20 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	}
 	runtimeVars := drainItemRuntimeVars(recipe, vars)
 	stampDrainItemRecipe(recipe, control, unit, member, count, row, itemFormula, runtimeVars)
+	itemScope, err := resolveDrainItemScope(store, control, runtimeVars, opts.StorePath)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", control.ID, err)
+	}
 	if opts.PrepareRecipe != nil {
 		if err := opts.PrepareRecipe(recipe, control); err != nil {
 			return "", false, fmt.Errorf("%w: %s: preparing drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 		}
+	}
+	// Declare the tracked member, then stamp the item root — BEFORE
+	// materialization, so a rejected declaration costs a launch and never an
+	// orphaned graph (§5b phase order).
+	if err := prepareDrainItemLaunch(recipe, itemScope, member, store, opts); err != nil {
+		return "", false, fmt.Errorf("%s: declaring drain item target scope: %w", control.ID, err)
 	}
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
 		Vars:             runtimeVars,

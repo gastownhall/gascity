@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/targetscope"
 )
 
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
@@ -66,12 +67,57 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 	return true
 }
 
+// workRecordCloseLocation decides WHERE the gate probes git and WHICH branch it
+// probes, giving a declared gc.target_scope authority over the flat gc.work_*
+// keys.
+//
+// This is the direct-read migration (design §7). The flat keys are stamped from
+// the claiming session's cwd, so on a scoped bead they describe wherever the
+// worker happened to be standing — exactly the value the gate must not trust.
+//
+// The three states are deliberately NOT collapsed:
+//
+//   - valid   → the declared branch/worktree win. A field the scope leaves
+//     unknown falls back to the process's own scopeRoot, never to the bead's
+//     flat key: unknown means "not declared", not "use the poison".
+//   - invalid → the scoped read FAILED. Falling back to the flat keys here is
+//     the defect reopening, so this reports a violation instead.
+//   - absent  → legacy behavior, unchanged: flat gc.work_dir then scopeRoot.
+func workRecordCloseLocation(store beads.Store, bead beads.Bead, scopeRoot string, envelope targetscope.Envelope) (repoDir, declaredBranch, violation string) {
+	switch res := targetscope.ResolveForReader(store, bead, envelope); res.State {
+	case targetscope.StateValid:
+		repoDir = res.Scope.Worktree
+		if repoDir == "" {
+			repoDir = scopeRoot
+		}
+		return repoDir, res.Scope.Branch, ""
+	case targetscope.StateInvalid:
+		return "", "", fmt.Sprintf("%s is unusable (%v); refusing to validate against the claim-time %s/%s instead",
+			beadmeta.TargetScopeMetadataKey, res.Reason, beadmeta.WorkDirMetadataKey, beadmeta.WorkBranchMetadataKey)
+	default:
+		repoDir = strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+		if repoDir == "" {
+			repoDir = scopeRoot
+		}
+		return repoDir, "", ""
+	}
+}
+
 // validateWorkRecordOnClose checks bead against the typed work-record contract
 // and returns a human-readable message for each violation (empty slice ⇒ the
 // bead satisfies the contract). commitReachable reports whether a commit SHA is
 // an ancestor of a branch; it is injected so the rule is unit-testable without
 // a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
-func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
+//
+// declaredBranch, when non-empty, is the branch a gc.target_scope declared for
+// this bead; it is the branch the commit must be reachable on, in place of the
+// claim-stamped gc.work_branch.
+//
+// gc.work_branch is still REQUIRED on a shipped record even under a declared
+// scope: the scope says where the work was supposed to land, the work record
+// says where it actually did, and dropping the latter would erase the very
+// attribution that makes a divergence visible.
+func validateWorkRecordOnClose(bead beads.Bead, declaredBranch string, commitReachable func(commit, branch string) bool) []string {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
 		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
@@ -93,8 +139,14 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	if branch == "" {
 		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
 	}
-	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
+	// The declared scope, when present, is the authority the commit is checked
+	// against — never the claim-stamped branch.
+	probeBranch, probeLabel := branch, beadmeta.WorkBranchMetadataKey
+	if declaredBranch != "" {
+		probeBranch, probeLabel = declaredBranch, "declared "+beadmeta.TargetScopeMetadataKey+" branch"
+	}
+	if commit != "" && probeBranch != "" && !commitReachable(commit, probeBranch) {
+		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, probeLabel, probeBranch))
 	}
 	return violations
 }
@@ -171,13 +223,13 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, stderr 
 		// Cannot verify — never block a close on our own read failure.
 		return false
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, scopeRoot, workRecordEnforceEnabled(), stderr)
+	return evaluateWorkRecordCloseGate(bdArgs, store, scopeRoot, cityPath, workRecordEnforceEnabled(), stderr)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
 // from the IO wrapper so it is unit-testable with an in-memory store. It logs
 // each violation and reports whether the close should be blocked.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot, cityPath string, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -186,16 +238,21 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 	if enforce {
 		mode = "enforced"
 	}
+	envelope := targetscope.Envelope{CityPath: cityPath, StorePath: scopeRoot}
 	for _, id := range ids {
 		bead, getErr := store.Get(id)
 		if getErr != nil || !isWorkRecordGatedBead(bead) {
 			continue
 		}
-		repoDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
-		if repoDir == "" {
-			repoDir = scopeRoot
+		repoDir, declaredBranch, scopeViolation := workRecordCloseLocation(store, bead, scopeRoot, envelope)
+		if scopeViolation != "" {
+			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, scopeViolation) //nolint:errcheck // best-effort stderr
+			if enforce {
+				block = true
+			}
+			continue
 		}
-		violations := validateWorkRecordOnClose(bead, func(commit, branch string) bool {
+		violations := validateWorkRecordOnClose(bead, declaredBranch, func(commit, branch string) bool {
 			return gitCommitReachableOnBranch(repoDir, commit, branch)
 		})
 		for _, v := range violations {

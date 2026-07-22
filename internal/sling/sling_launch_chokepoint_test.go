@@ -58,7 +58,7 @@ func TestLaunchWorkflowDuplicateAttemptReturnsSameLiveRoot(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			res, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps)
+			res, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, LaunchScope{})
 			if err != nil {
 				errs[i] = err
 				return
@@ -100,7 +100,7 @@ func TestLaunchWorkflowUsesCrossProcessFileLock(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	opts := molecule.Options{Vars: map[string]string{"convoy_id": convoy.ID}}
 
-	if _, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps); err != nil {
+	if _, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, LaunchScope{}); err != nil {
 		t.Fatalf("InstantiateSlingFormula: %v", err)
 	}
 
@@ -137,11 +137,11 @@ func TestLaunchWorkflowLegitimateDistinctLaunchesAllowed(t *testing.T) {
 
 	optsA := molecule.Options{Vars: map[string]string{"convoy_id": convoyA.ID}}
 	optsB := molecule.Options{Vars: map[string]string{"convoy_id": convoyB.ID}}
-	rootA, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsA, "", "default", "", a, deps)
+	rootA, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsA, "", "default", "", a, deps, LaunchScope{})
 	if err != nil {
 		t.Fatalf("launch A: %v", err)
 	}
-	rootB, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsB, "", "default", "", a, deps)
+	rootB, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsB, "", "default", "", a, deps, LaunchScope{})
 	if err != nil {
 		t.Fatalf("launch B: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestLaunchWorkflowLegitimateDistinctLaunchesAllowed(t *testing.T) {
 	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.Store, rootA.RootID); err != nil {
 		t.Fatalf("close root A: %v", err)
 	}
-	relaunch, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsA, "", "default", "", a, deps)
+	relaunch, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsA, "", "default", "", a, deps, LaunchScope{})
 	if err != nil {
 		t.Fatalf("relaunch after close: %v", err)
 	}

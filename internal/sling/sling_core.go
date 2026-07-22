@@ -343,8 +343,21 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
+	// Resolve the target scope BEFORE compiling: the reconciled branch has to
+	// be in formulaVars before template substitution, or the formula
+	// substitutes one branch while the scope records another. A rejection here
+	// costs a launch and nothing else, because nothing is materialized yet.
+	launchScope, err := ResolveLaunchScope(opts.BeadOrFormula, "", opts.Vars, formulaVars, inv.Formula, invocationConvoyID(inv, isGraph), a, deps)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars)
 	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
+	// Declare every member, then stamp the root — both before the instantiate
+	// call below materializes anything.
+	if err := launchScope.PrepareLaunchScope(recipe); err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
 	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
@@ -416,6 +429,17 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	if isGraph {
 		formulaVars = graphInv.Vars
 		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
+	}
+	// Resolve the target scope BEFORE any compile — including the validation
+	// compile below. The reconciled branch has to be in formulaVars before
+	// template substitution runs, or the formula substitutes one branch while
+	// the scope records another. Both branches of this function launch the same
+	// formula onto the same bead, so the scope is resolved once, here.
+	launchScope, err := ResolveLaunchScope(formulaName, beadID, opts.Vars, formulaVars, graphInv.Formula, invocationConvoyID(graphInv, isGraph), a, deps)
+	if err != nil {
+		return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+	}
+	if isGraph {
 		if err := validateSlingFormulaRuntimeVars(context.Background(), formulaName, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  formulaVars,
@@ -437,7 +461,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				Title:            opts.Title,
 				Vars:             formulaVars,
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
-			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
+			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, launchScope, opts.Force)
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
@@ -469,7 +493,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title:            opts.Title,
 			Vars:             formulaVars,
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps, launchScope)
 		if err != nil {
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
@@ -483,6 +507,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			result.MetadataErrors = append(result.MetadataErrors,
 				fmt.Sprintf("setting molecule_id on %s: %v", beadID, err))
 		}
+		// The source bead is the claimable, close-gated unit on this legacy
+		// path, and the inheritance walk cannot reach the wisp root's stamp
+		// through molecule_id — so it carries its own scope, stamped here beside
+		// the molecule_id write it shares a fate with.
+		stampClaimableSourceScope(deps, beadID, launchScope.Scope, &result)
 		result.WispRootID = wispRootID
 		result.FormulaName = formulaName
 		// Route the SOURCE bead, not wispRootID. An attached wisp (--on
@@ -502,7 +531,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title:            opts.Title,
 			Vars:             formulaVars,
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps, launchScope)
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
@@ -1187,17 +1216,25 @@ func sourceWorkflowRootByIDInStore(store beads.Store, sourceBeadID, workflowID, 
 }
 
 // attachBatchFormula launches one batch-child formula. The caller passes the
-// pre-computed isGraph flag from the one-shot formula compile at the top of
-// DoSlingBatch so that compiling N times for N children becomes a single
-// compile per batch.
-func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool) (SlingResult, error) {
+// pre-computed isGraph flag and the loaded formula from the one-shot formula
+// compile at the top of DoSlingBatch so that compiling N times for N children
+// becomes a single compile per batch.
+//
+// The SCOPE, unlike the formula, is resolved per child: the member layer and
+// the repo dir are properties of the bead being launched onto, so N children
+// are N independent resolutions even though they share one formula.
+func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool, f *formula.Formula) (SlingResult, error) {
 	childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
+	launchScope, err := ResolveLaunchScope(formulaName, child.ID, opts.Vars, childVars, f, "", a, deps)
+	if err != nil {
+		return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
+	}
 	run := func() (SlingResult, error) {
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
 			PriorityOverride: ClonePriorityPtr(child.Priority),
-		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps, launchScope)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
@@ -1217,6 +1254,10 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 			result.MetadataErrors = append(result.MetadataErrors,
 				fmt.Sprintf("setting molecule_id on %s: %v", child.ID, err))
 		}
+		// The batch child is the claimable, close-gated unit on this legacy
+		// path; it carries its own scope for the same reason the --on source
+		// does, stamped beside its molecule_id write.
+		stampClaimableSourceScope(deps, child.ID, launchScope.Scope, &result)
 		return result, nil
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
@@ -1224,7 +1265,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 			Title:            opts.Title,
 			Vars:             childVars,
 			PriorityOverride: ClonePriorityPtr(child.Priority),
-		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps, launchScope)
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
@@ -1438,11 +1479,22 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	// once here and again per child, turning an O(1) compile into O(N) disk
 	// reads + template expansions for an N-child batch.
 	var isGraph bool
+	// The loaded formula is threaded for the same reason: scope resolution
+	// needs the declared vars (defaults, and which carrier this formula
+	// consumes), and loading it per child would restore the O(N) reads the
+	// one-shot compile above exists to avoid. The SCOPE itself is still
+	// resolved per child inside the helper — it depends on the bead, not the
+	// formula.
+	var batchFormula *formula.Formula
 	if useFormula != "" {
 		formulaVars := BuildSlingFormulaVars(useFormula, "", opts.Vars, a, deps)
 		searchPaths := SlingFormulaSearchPaths(deps, a)
 		var err error
 		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars)
+		if err != nil {
+			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
+		}
+		batchFormula, err = graphv2.LoadFormula(useFormula, searchPaths)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
 		}
@@ -1508,7 +1560,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			if opts.OnFormula == "" {
 				formulaLabel = "default formula"
 			}
-			formulaResult, err := attachBatchFormula(context.Background(), opts, deps, child, a, useFormula, formulaLabel, batchMethod, isGraph)
+			formulaResult, err := attachBatchFormula(context.Background(), opts, deps, child, a, useFormula, formulaLabel, batchMethod, isGraph, batchFormula)
 			if err != nil {
 				childResult.Failed = true
 				childResult.FailReason = err.Error()

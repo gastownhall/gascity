@@ -194,7 +194,7 @@ type = "task"
 		"wf-test",
 		[]string{formulaDir},
 		molecule.Options{},
-		"", "", "", a, deps,
+		"", "", "", a, deps, sling.LaunchScope{},
 	)
 	if err != nil {
 		t.Fatalf("InstantiateSlingFormula: %v", err)

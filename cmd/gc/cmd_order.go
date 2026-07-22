@@ -730,7 +730,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// GraphApplyStore and silently fall back to sequential creation. store stays
 	// the typed wrapper for the order-tracking bead operations below.
 	genericStore := store.Store
-	recipe, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
+	recipe, wispScope, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars, storeTarget.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -754,6 +754,14 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 
 	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, genericStore, cityName, cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Stamp the scope after routing decoration and before materialization, so
+	// the root that becomes claimable is already scoped and no claim can write
+	// cwd onto it.
+	if err := stampOrderWispRoot(recipe, wispScope); err != nil {
+		fmt.Fprintf(stderr, "gc order run: target scope stamp failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

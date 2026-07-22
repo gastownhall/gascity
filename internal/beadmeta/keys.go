@@ -188,6 +188,7 @@ const (
 	StepTimeoutMetadataKey         = "gc.step_timeout"
 	SyntheticKindMetadataKey       = "gc.synthetic_kind"
 	SyntheticMetadataKey           = "gc.synthetic"
+	TargetScopeMetadataKey         = "gc.target_scope"
 	TemplateMetadataKey            = "gc.template"
 	TerminalMetadataKey            = "gc.terminal"
 	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
@@ -222,6 +223,22 @@ const (
 //
 // The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
 // commit on the branch" rule live with the close gate in cmd/gc.
+
+// TargetScopeMetadataKey ("gc.target_scope") is the DECLARED counterpart to the
+// gc.work_* family above, and the distinction is the whole point of the key.
+//
+// gc.work_branch and gc.work_dir are OBSERVATIONS: they record where a claiming
+// session happened to be standing. gc.target_scope is INTENT: it records where
+// the work was declared to belong, is written at instantiation from trusted
+// sources only, and is immutable once declared. Keeping the two in one field is
+// what let a parked shared checkout overwrite a declared location — an
+// observation silently outranking an instruction.
+//
+// The value is a JSON object {"v":1,"branch":...,"worktree":...} owned by
+// internal/targetscope; nothing outside that package should parse it by hand.
+// Its absence is meaningful (it re-enables legacy cwd behavior), so writers must
+// stamp a valid field-empty {"v":1} rather than omit the key when no field is
+// known. See internal/targetscope for the full tri-state contract.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -425,6 +442,7 @@ var KnownMetadataKeys = []string{
 	StepTimeoutMetadataKey,
 	SyntheticKindMetadataKey,
 	SyntheticMetadataKey,
+	TargetScopeMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,

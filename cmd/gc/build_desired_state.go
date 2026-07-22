@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/targetscope"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -3944,7 +3945,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		if sessionName != "" && strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
-		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+			mayStampCwdWorkDir(store, wb, stderr) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -3958,6 +3960,36 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
 		stampRunRootFromStep(store, wb, sessionName, workDir, stampedRoots, stderr)
+	}
+}
+
+// mayStampCwdWorkDir reports whether reconcile may derive gc.work_dir for bead
+// from the session's cwd.
+//
+// This guards BOTH work-dir writers. Guarding only the work-bead patch would be
+// insufficient: stampRunRootFromStep is an independent writer that copies the
+// same session cwd onto the run ROOT, and every later stage inherits the root's
+// value through the root-chain walk -- so an unguarded root writer re-poisons
+// the whole run one hop removed.
+//
+// Only an ABSENT scope permits the cwd stamp. present-invalid is deliberately
+// treated the same as present-valid here: an unusable object is never
+// permission to write cwd.
+//
+// Note this guards the field actually read -- the session's legacy work_dir --
+// which is a different session key from gc.work_dir.
+func mayStampCwdWorkDir(store beads.Store, bead beads.Bead, stderr io.Writer) bool {
+	switch res := targetscope.ResolveInherited(store, bead); res.State {
+	case targetscope.StateValid:
+		return false
+	case targetscope.StateInvalid:
+		if stderr != nil {
+			fmt.Fprintf(stderr, "stampRunSessionIdentity: %s has an unusable %s; leaving %s unset rather than stamping session cwd: %v\n",
+				bead.ID, beadmeta.TargetScopeMetadataKey, beadmeta.WorkDirMetadataKey, res.Reason) //nolint:errcheck
+		}
+		return false
+	default:
+		return true
 	}
 }
 
@@ -3985,7 +4017,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	if sessionName != "" && strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
-	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+		mayStampCwdWorkDir(store, root, stderr) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {

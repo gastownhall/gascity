@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/targetscope"
 )
 
 const hookClaimCommandName = "hook"
@@ -57,6 +58,18 @@ type hookClaimOps struct {
 	// repo / detached HEAD) omits the branch key — the session back-reference is
 	// still stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
+	// ResolveTargetScope reports the declared target scope governing a bead,
+	// resolved through the inherited walk (bead → parent → gc.root_bead_id).
+	//
+	// This is a STORE-BACKED op rather than a bead-local metadata read because
+	// formula-generated stages — precisely the class that carries no declared
+	// location of its own — hold only a symbolic root reference, not a copy of
+	// root metadata. A bead-local check would miss exactly the beads this guard
+	// exists to protect.
+	//
+	// A nil op means "no store available", which resolves absent and preserves
+	// legacy behavior.
+	ResolveTargetScope hookResolveTargetScopeFunc
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -75,6 +88,7 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(dir string) string
+	hookResolveTargetScopeFunc    func(dir string, env []string, bead beads.Bead) targetscope.Resolution
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
 )
@@ -195,6 +209,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
+	}
+	if ops.ResolveTargetScope == nil {
+		ops.ResolveTargetScope = hookResolveTargetScope
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
@@ -535,9 +552,11 @@ func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClai
 // so the caller issues no write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
-	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
-		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
-		patch[beadmeta.WorkBranchMetadataKey] = branch
+	if hookClaimMayStampCwdBranch(ops, opts, bead, dir) {
+		if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+			strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+			patch[beadmeta.WorkBranchMetadataKey] = branch
+		}
 	}
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
 		!beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
@@ -550,6 +569,53 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		}
 	}
 	return patch
+}
+
+// hookClaimMayStampCwdBranch reports whether the claim hook may derive
+// gc.work_branch from the claiming session's cwd.
+//
+// This is the inversion of the original defect. The pre-existing compare-and-
+// skip guard only suppressed an IDENTICAL rewrite; it still overwrote a
+// differing declared value with wherever the claimant happened to be standing,
+// which is how a pool session parked on a shared checkout poisoned every bead
+// it touched.
+//
+// Only an ABSENT scope permits the cwd stamp:
+//   - present-valid  → the declared scope is authoritative for the WHOLE scope.
+//     A missing branch field means unknown, never "fill it from cwd" — filling
+//     one field from cwd is how a half-poisoned object would be born.
+//   - present-invalid → refuse to stamp and warn. An unusable object must never
+//     be treated as permission to write cwd; collapsing it to "absent" is the
+//     defect reopening.
+func hookClaimMayStampCwdBranch(ops hookClaimOps, opts hookClaimOptions, bead beads.Bead, dir string) bool {
+	if ops.ResolveTargetScope == nil {
+		return true
+	}
+	switch res := ops.ResolveTargetScope(dir, opts.Env, bead); res.State {
+	case targetscope.StateValid:
+		return false
+	case targetscope.StateInvalid:
+		fmt.Fprintf(os.Stderr, "gc hook --claim: %s has an unusable %s; leaving %s unset rather than stamping the claiming worktree: %v\n",
+			bead.ID, beadmeta.TargetScopeMetadataKey, beadmeta.WorkBranchMetadataKey, res.Reason) //nolint:errcheck
+		return false
+	default:
+		return true
+	}
+}
+
+// hookResolveTargetScope is the production ResolveTargetScope op: it resolves
+// the declared scope through the inherited walk against the same bd store the
+// rest of the claim path talks to, bound to the claiming worktree's dir/env.
+//
+// The walk is store-backed on purpose (see ResolveTargetScope's doc): a
+// formula-generated stage carries only gc.root_bead_id, so the scope governing
+// it lives on the root, not on the bead in hand.
+//
+// Read-only, so it needs no actor attribution. A store that cannot answer makes
+// ResolveInherited report INVALID, which suppresses the cwd stamp rather than
+// silently reopening the defect.
+func hookResolveTargetScope(dir string, env []string, bead beads.Bead) targetscope.Resolution {
+	return targetscope.ResolveInherited(hookClaimBdStore(dir, env, ""), bead)
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

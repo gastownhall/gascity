@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/targetscope"
 )
 
 const (
@@ -1416,12 +1417,64 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+// prepareOrderWispRecipe compiles an order's formula and resolves the target
+// scope the compiled root must be stamped with.
+//
+// SCOPE IS RESOLVED FROM THE FORMULA DEFAULTS ALONE — see orderScopeSources for
+// the source-measured reason. It is resolved here, alongside the compile,
+// because this is the one function both order boundaries share.
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string, scopeRoot string) (*formula.Recipe, targetscope.Scope, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
-		return nil, err
+		return nil, targetscope.Scope{}, err
 	}
-	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	resolved, err := targetscope.Resolve(orderScopeSources(inv.Formula), scopeRoot)
+	if err != nil {
+		return nil, targetscope.Scope{}, fmt.Errorf("resolving target scope for order %s: %w", a.ScopedName(), err)
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	if err != nil {
+		return nil, targetscope.Scope{}, err
+	}
+	return recipe, resolved.Scope, nil
+}
+
+// orderScopeSources builds the trusted-source set for an order — the formula
+// defaults, and ONLY the formula defaults.
+//
+// This is narrower than the design's §5 order row (which names the rig and the
+// order's effective vars), and the narrowing is a source-measured correctness
+// requirement, not a shortcut. Both order boundaries materialize with
+// molecule.Instantiate(recipe, molecule.Options{}) — an EMPTY options — so a
+// step body's {{base_branch}} is substituted from applyVarDefaults(nil,
+// recipe.Vars): the FORMULA DEFAULT, and nothing else. The order's caller vars
+// and its rig formula_vars never reach that substitution (verified end to end:
+// an order run with base_branch=CALLER and a rig declaring base_branch=RIG both
+// still materialize a step titled with the formula default).
+//
+// So the formula default is the one value the work actually runs against, and
+// scope.branch must equal it or the close gate would validate a branch the work
+// never touched — the exact §3c divergence the equality invariant forbids.
+// Resolving from the rig or the explicit layer would stamp a branch that is
+// real intent but not the executed reality, manufacturing that divergence. The
+// gap it exposes — that orders ignore their own vars at substitution — is a
+// pre-existing order-path limitation, out of scope here and worth its own bead;
+// this boundary stamps the honest branch rather than papering the gap with a
+// scope that lies.
+func orderScopeSources(f *formula.Formula) targetscope.Sources {
+	return targetscope.Sources{FormulaDefaults: targetscope.FormulaDefaultVars(f)}
+}
+
+// stampOrderWispRoot stamps the resolved scope on an order's recipe root before
+// materialization.
+//
+// Orders launch with targetID "" and therefore have no input convoy and no
+// members, so the declaration phase has nothing to declare — but the root is
+// still stamped, including when the scope is unknown. §2c: a boundary leaves a
+// present-valid field-empty object, never nothing at all, because absence is
+// what lets the next claim or reconcile write cwd.
+func stampOrderWispRoot(recipe *formula.Recipe, scope targetscope.Scope) error {
+	return targetscope.PrepareLaunch(recipe, scope, nil)
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -1539,7 +1592,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, wispScope, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars, target.ScopeRoot)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -1584,6 +1637,21 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// unreachable graph in the store while reporting the order as completed.
 	if err := applyOrderRecipeRouting(recipe, pool, vars, target, store, m.cityName, cityPath, m.cfg); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: err.Error(),
+		})
+		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		return
+	}
+
+	// Stamp the scope after routing decoration and before materialization, so
+	// the root that becomes claimable is already scoped and no claim can write
+	// cwd onto it.
+	if err := stampOrderWispRoot(recipe, wispScope); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: target scope stamp failed: %v", scoped, err)
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",

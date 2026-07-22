@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/targetscope"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -1128,25 +1129,94 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 // rigNameForAgent so agents whose Dir is a filesystem path still resolve
 // to the correct rig.
 func mergeRigFormulaVars(vars map[string]string, cfg *config.City, a config.Agent) {
+	for k, v := range rigFormulaVars(cfg, a) {
+		if _, explicit := vars[k]; explicit {
+			continue
+		}
+		vars[k] = v
+	}
+}
+
+// rigFormulaVars returns the rig-scoped formula_vars layer on its own, un-merged.
+//
+// Target-scope resolution needs the layers kept APART: precedence is decided
+// per layer, and a merged map has already collapsed "explicit --var base_branch"
+// and "rig default base_branch" into one indistinguishable entry. The merge in
+// mergeRigFormulaVars is expressed in terms of this so the two callers cannot
+// drift on which rig a given agent resolves to.
+//
+// The returned map is the LIVE config map, not a copy — callers must treat it
+// as read-only. Both consumers qualify: mergeRigFormulaVars only reads it, and
+// targetscope.Resolve copies each layer through single() before inspecting it.
+func rigFormulaVars(cfg *config.City, a config.Agent) map[string]string {
 	if cfg == nil {
-		return
+		return nil
 	}
 	rigName := rigNameForAgent(cfg, a)
 	if rigName == "" {
-		return
+		return nil
 	}
 	for i := range cfg.Rigs {
 		if cfg.Rigs[i].Name != rigName {
 			continue
 		}
-		for k, v := range cfg.Rigs[i].FormulaVars {
-			if _, explicit := vars[k]; explicit {
-				continue
-			}
-			vars[k] = v
-		}
-		return
+		return cfg.Rigs[i].FormulaVars
 	}
+	return nil
+}
+
+// SlingFormulaScopeSources builds the provenance-typed trusted-source set that
+// targetscope.Resolve consumes, from the same inputs buildSlingFormulaVars gets.
+//
+// It is deliberately SEPARATE from buildSlingFormulaVars rather than a second
+// return value from it, for two reasons found at the source:
+//
+//  1. buildSlingFormulaVars runs BEFORE the formula is loaded, so it cannot see
+//     the [vars.*].default layer. The design requires the formula default to be
+//     able to supply scope.branch (§11 #16 default-only case), so resolution has
+//     to happen where the effective vars exist — after graphv2.PrepareInvocation
+//     overlays EffectiveRuntimeVars, or after the legacy compile. The caller
+//     fills FormulaDefaults there and resolves.
+//  2. On the graph path the map buildSlingFormulaVars returns is DISCARDED and
+//     replaced by inv.Vars, so a carrier written into it would never reach
+//     instantiation. Keeping the sources separate lets the boundary apply the
+//     reconciled winner to the map that actually survives.
+//
+// Explicit stays raw and unflattened so a doubled carrier (--var base_branch=X
+// --var base_branch=Y) still reaches the resolver as a conflict to reject
+// instead of a last-write-wins silent pick.
+func SlingFormulaScopeSources(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) targetscope.Sources {
+	return targetscope.Sources{
+		Explicit: userVars,
+		Rig:      rigFormulaVars(deps.Cfg, a),
+		Routing:  slingRoutingScopeVars(formulaName, beadID, a, deps),
+	}
+}
+
+// slingRoutingScopeVars models the routing-injected branch layer exactly as the
+// injector in buildSlingFormulaVars applies it: the auto-resolved target branch,
+// under whichever carrier this formula conventionally consumes.
+//
+// The name predicates are the right authority HERE — this layer's job is to
+// report what routing actually injects today, and today that is name-driven. A
+// formula the predicates do not match genuinely receives no routed branch, so an
+// empty layer is the faithful answer and the formula default then decides.
+func slingRoutingScopeVars(formulaName, beadID string, a config.Agent, deps SlingDeps) map[string]string {
+	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
+	if autoBranch == "" {
+		return nil
+	}
+	routing := make(map[string]string, 2)
+	if SlingFormulaUsesBaseBranch(formulaName) {
+		routing[targetscope.VarBaseBranch] = autoBranch
+	}
+	if SlingFormulaUsesTargetBranch(formulaName) {
+		routing[targetscope.VarCarrierTargetBranch] = autoBranch
+	}
+	if len(routing) == 0 {
+		return nil
+	}
+	return routing
 }
 
 // ResolveSlingEnv returns extra env vars for the sling command.
@@ -1281,7 +1351,15 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
 // graph routing if the formula is a graph.v2 workflow.
-func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
+//
+// THE LAUNCH SCOPE IS A REQUIRED PARAMETER, not an option. §5 requires every
+// Ready-visible launch to be scoped, and the defence against a boundary that
+// silently forgets is not diligence at five call sites — it is that there is no
+// unscoped entry point to call. A caller with nothing to declare passes the
+// zero LaunchScope, which stamps the valid field-empty object (§2c "unknown"):
+// that is a deliberate state suppressing the cwd writers, and it is NOT the
+// same as writing nothing.
+func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, launch LaunchScope, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
 	compileStart := time.Now()
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
@@ -1290,6 +1368,14 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		return nil, err
 	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+	// Declare every member, then stamp the root — both strictly before the
+	// instantiate call below materializes anything. An error here is a launch
+	// REJECTION: it costs a launch, whereas the same rejection after the root
+	// exists costs an orphaned graph.
+	if err := launch.PrepareLaunchScope(recipe); err != nil {
+		SlingTracef("instantiate scope-rejected formula=%s err=%v", formulaName, err)
+		return nil, err
+	}
 	return InstantiateCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, a, deps, forceGraphV2Replace...)
 }
 
