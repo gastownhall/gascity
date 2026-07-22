@@ -118,7 +118,7 @@ func TestMain(m *testing.M) {
 	// skips defers, so those paths remove the parent explicitly below; the
 	// deferred removal here additionally covers a setup panic (which unwinds
 	// through defers) so it cannot leak the parent until a later aged sweep.
-	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp")
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
 	tmuxSocketAliveSentinel = tmuxSentinel
 	defer func() {
 		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it

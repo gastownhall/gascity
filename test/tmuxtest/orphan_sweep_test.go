@@ -1,6 +1,9 @@
 package tmuxtest
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,12 +42,12 @@ func pidPrefixedTestDir(t *testing.T, root, prefix string, pid int) string {
 	return dir
 }
 
-func TestSweepOrphanPIDPrefixedDirsRemovesStaleDeadPID(t *testing.T) {
+func TestSweepOrphanPIDPrefixedDirsRemovesStaleDeadPIDWithNilDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 	backdatePastSweepAge(t, dir)
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", nil)
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("stale dead-PID dir survived sweep: %s", dir)
@@ -62,7 +65,7 @@ func TestSweepOrphanPIDPrefixedDirsPreservesHeldSentinel(t *testing.T) {
 	}
 	defer func() { _ = sentinel.Close() }()
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
 
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("dir with held sentinel was removed by sweep: %v", err)
@@ -81,10 +84,15 @@ func TestSweepOrphanPIDPrefixedDirsRemovesFreeSentinel(t *testing.T) {
 
 	backdatePastSweepAge(t, dir)
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	var diagnostics bytes.Buffer
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", &diagnostics)
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("dir with free sentinel survived sweep: %s", dir)
+	}
+	wantDiagnostics := fmt.Sprintf("tmuxtest: removing orphaned socket parent %s (free sentinel)\n", dir)
+	if got := diagnostics.String(); got != wantDiagnostics {
+		t.Errorf("diagnostics = %q, want %q", got, wantDiagnostics)
 	}
 }
 
@@ -93,7 +101,7 @@ func TestSweepOrphanPIDPrefixedDirsSkipsYoungDir(t *testing.T) {
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 	// No backdate: dir is fresh, inside the min-age window.
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
 
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("young dir was removed by sweep despite age guard: %v", err)
@@ -105,7 +113,7 @@ func TestSweepOrphanPIDPrefixedDirsSkipsSelfPID(t *testing.T) {
 	dir := pidPrefixedTestDir(t, root, "pfx-", os.Getpid())
 	backdatePastSweepAge(t, dir)
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
 
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("sweep removed a dir carrying its own PID: %v", err)
@@ -118,7 +126,7 @@ func TestSweepOrphanPIDPrefixedDirsSkipsNonDirectories(t *testing.T) {
 	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Error("SweepOrphanPIDPrefixedDirs removed a non-directory file")
 	}
@@ -127,7 +135,7 @@ func TestSweepOrphanPIDPrefixedDirsSkipsNonDirectories(t *testing.T) {
 func TestNewSocketParentDirCreatesSentinelHeldDir(t *testing.T) {
 	root := t.TempDir()
 
-	dir, sentinel, err := NewSocketParentDir(root)
+	dir, sentinel, err := NewSocketParentDir(root, io.Discard)
 	if err != nil {
 		t.Fatalf("NewSocketParentDir: %v", err)
 	}
@@ -152,7 +160,8 @@ func TestNewSocketParentDirReapsOrphanedSibling(t *testing.T) {
 	orphan := pidPrefixedTestDir(t, root, SocketParentDirPrefix, nonLivePID(t))
 	backdatePastSweepAge(t, orphan)
 
-	dir, sentinel, err := NewSocketParentDir(root)
+	var diagnostics bytes.Buffer
+	dir, sentinel, err := NewSocketParentDir(root, &diagnostics)
 	if err != nil {
 		t.Fatalf("NewSocketParentDir: %v", err)
 	}
@@ -164,6 +173,10 @@ func TestNewSocketParentDirReapsOrphanedSibling(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("freshly created dir missing: %v", err)
+	}
+	wantDiagnostics := fmt.Sprintf("tmuxtest: removing orphaned socket parent %s (pid dead, no sentinel)\n", orphan)
+	if got := diagnostics.String(); got != wantDiagnostics {
+		t.Errorf("diagnostics = %q, want %q", got, wantDiagnostics)
 	}
 }
 
@@ -182,7 +195,7 @@ func TestSweepOrphanPIDPrefixedDirsPreservesLegacyNoDashDir(t *testing.T) {
 	}
 	backdatePastSweepAge(t, legacy)
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-")
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
 
 	if _, err := os.Stat(legacy); err != nil {
 		t.Errorf("legacy no-separator dir was removed by sweep: %v", err)

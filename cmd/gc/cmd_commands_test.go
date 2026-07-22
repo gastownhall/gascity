@@ -11,8 +11,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/spf13/cobra"
 )
 
@@ -267,6 +269,10 @@ type packCommandProcessResult struct {
 }
 
 func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...string) packCommandProcessResult {
+	return runPackCommandProcessWithEnv(t, cityPath, scenario, nil, args...)
+}
+
+func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extraEnv []string, args ...string) packCommandProcessResult {
 	t.Helper()
 	afterRun := filepath.Join(t.TempDir(), "after-run")
 	commandArgs := []string{
@@ -279,7 +285,7 @@ func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...stri
 	commandArgs = append(commandArgs, args...)
 	cmd := exec.Command(os.Args[0], commandArgs...)
 	cmd.Dir = cityPath
-	cmd.Env = packCommandProcessEnv()
+	cmd.Env = packCommandProcessEnv(extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -296,6 +302,34 @@ func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...stri
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
 	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
+
+func createAgedFreeTmuxSocketParent(t *testing.T) (string, string) {
+	t.Helper()
+	const fakePID = 2147483647 // Above the Linux and Darwin process-ID ranges.
+	root, err := os.MkdirTemp("/tmp", "gctroot-*")
+	if err != nil {
+		t.Fatalf("create isolated tmux socket-parent root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	dir, err := os.MkdirTemp(root, fmt.Sprintf("%s%d-*", tmuxtest.SocketParentDirPrefix, fakePID))
+	if err != nil {
+		t.Fatalf("create orphaned tmux socket parent: %v", err)
+	}
+	sentinel, err := tmuxtest.HoldAliveSentinel(dir)
+	if err != nil {
+		t.Fatalf("hold orphaned tmux socket sentinel: %v", err)
+	}
+	if err := sentinel.Close(); err != nil {
+		t.Fatalf("release orphaned tmux socket sentinel: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatalf("backdate orphaned tmux socket parent: %v", err)
+	}
+	return root, dir
 }
 
 func setupPackExitCity(t *testing.T) string {
@@ -2289,7 +2323,13 @@ func TestPackCommandExitReturnsThroughRun(t *testing.T) {
 
 	for _, scenario := range []string{"eager", "lazy"} {
 		t.Run(scenario, func(t *testing.T) {
-			result := runPackCommandProcess(t, cityPath, scenario, "backstage", "hello")
+			root, orphan := createAgedFreeTmuxSocketParent(t)
+			result := runPackCommandProcessWithEnv(t, cityPath, scenario, []string{
+				testTmuxSocketParentRootEnv + "=" + root,
+			}, "backstage", "hello")
+			if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("child TestMain did not remove eligible tmux socket parent %q: %v", orphan, err)
+			}
 			if result.exitCode != 42 {
 				t.Fatalf("helper exit code = %d, want 42; stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
 			}

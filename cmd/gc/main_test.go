@@ -243,7 +243,11 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot)
+	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
+	if tmuxSocketParentRoot == "" {
+		tmuxSocketParentRoot = "/tmp"
+	}
+	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot, tmuxSocketParentRoot)
 	if err != nil {
 		panic(err)
 	}
