@@ -285,6 +285,23 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
+	// Fence a stale/superseded runtime session BEFORE the city-suspension,
+	// agent-resolution, and agent-suspension early returns below. A stale
+	// incarnation in a suspended city, or one whose template was removed from
+	// config (resolveAgentIdentity fails), or whose agent was suspended, would
+	// otherwise hit one of those bare `return 1` paths, and its startup wrapper
+	// would keep retrying the plain failure instead of seeing the terminal
+	// stale-session drain result and exiting. The fence reads the runtime's own
+	// identity from the environment; it is a no-op for a non-session runtime (no
+	// GC_SESSION_ID / GC_INSTANCE_TOKEN) and fails open for an eligible session or a
+	// transient session-store fault, so a healthy worker still falls through to the
+	// suspension and config checks below.
+	if opts.Claim {
+		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
+			return code
+		}
+	}
+
 	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
@@ -422,10 +439,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return out, err
 	}
 	if opts.Claim {
+		// The stale-session fence already ran before agent resolution above; this
+		// sessionID feeds only the claim assignee identity.
 		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
-		if code, handled := fenceHookClaimSession(cityPath, cfg, sessionID, opts, stdout, stderr); handled {
-			return code
-		}
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)

@@ -3,6 +3,7 @@ package tmuxtest
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,7 +124,7 @@ func TestSweepOrphanReapsRealSIGKILLedProcess(t *testing.T) {
 		t.Fatalf("orphaned dirs before sweep = %d, want 1", got)
 	}
 
-	SweepOrphanPIDPrefixedDirs(root, prefix)
+	SweepOrphanPIDPrefixedDirs(root, prefix, io.Discard)
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("SIGKILL'd process's socket parent dir survived sweep: %s", dir)
@@ -134,7 +135,7 @@ func TestSweepOrphanReapsRealSIGKILLedProcess(t *testing.T) {
 
 	// A subsequent legitimate creation must succeed and leave the leak
 	// count tightly bounded at exactly the one dir it owns.
-	newDir, sentinel, err := NewSocketParentDir(root)
+	newDir, sentinel, err := NewSocketParentDir(root, io.Discard)
 	if err != nil {
 		t.Fatalf("NewSocketParentDir after reap: %v", err)
 	}

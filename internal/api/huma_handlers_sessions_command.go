@@ -391,7 +391,7 @@ type sessionTranscriptGetResponse struct {
 	ResetReason        string                      `json:"reset_reason,omitempty" doc:"Structured reset reason when operation is reset."`
 	History            *SessionStructuredHistory   `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
 	Turns              []outputTurn                `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages           []SessionRawMessageFrame    `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	Messages           *[]SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
 	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
 	Pagination         *sessionlog.PaginationInfo  `json:"pagination,omitempty"`
 }
@@ -438,11 +438,30 @@ func structuredMessagesField(messages []SessionStructuredMessage) *[]SessionStru
 	return &messages
 }
 
+func nonNilRawMessages(messages []SessionRawMessageFrame) []SessionRawMessageFrame {
+	if messages == nil {
+		return []SessionRawMessageFrame{}
+	}
+	return messages
+}
+
+func rawMessagesField(messages []SessionRawMessageFrame) *[]SessionRawMessageFrame {
+	messages = nonNilRawMessages(messages)
+	return &messages
+}
+
 func structuredTranscriptMessages(response sessionTranscriptGetResponse) []SessionStructuredMessage {
 	if response.StructuredMessages == nil {
 		return nil
 	}
 	return *response.StructuredMessages
+}
+
+func rawTranscriptMessages(response sessionTranscriptGetResponse) []SessionRawMessageFrame {
+	if response.Messages == nil {
+		return nil
+	}
+	return *response.Messages
 }
 
 // Schema publishes session transcript responses as a discriminated union over

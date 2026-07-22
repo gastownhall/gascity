@@ -146,6 +146,7 @@ jobs:
               - '**/*.go'
               - 'scripts/test-integration-shard'
               - 'scripts/test-go-test-shard'
+              - 'scripts/runtime-tmux-tests.manifest'
               - 'scripts/go-test-observable'
               - 'examples/gastown/**'
             openclaw_bridge:

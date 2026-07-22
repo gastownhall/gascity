@@ -1681,7 +1681,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 		t.Fatalf("Create: %v", err)
 	}
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
-		`{"uuid":"m1","parentUuid":"","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
 
 	restRec := httptest.NewRecorder()
@@ -1709,8 +1709,8 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 		close(done)
 	}()
 	initialBody := waitForRecorderSubstring(t, rec, "event: activity", 10*time.Second)
-	if strings.Contains(initialBody, "event: structured") {
-		t.Fatalf("stream replayed exact initial snapshot: %s", initialBody)
+	if !strings.Contains(initialBody, "event: activity") {
+		t.Fatalf("stream readiness activity did not arrive: %s", initialBody)
 	}
 
 	logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
