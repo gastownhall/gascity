@@ -841,6 +841,17 @@ func isBdNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
+	// An execution-launch failure — the `bd` binary missing from PATH or not
+	// executable — is a TRANSPORT failure, never a bead-not-found, even though
+	// its message literally contains "not found" ("executable file not found in
+	// $PATH"). Classifying it as not-found would let a caller that reads
+	// not-found as "absent" (e.g. the target-scope inherited-scope walk) fail
+	// OPEN against a store it could not actually reach. exec.ErrNotFound stays in
+	// the error chain (classifyBDExecResult wraps with %w), so this exclusion is
+	// exact and never swallows a genuine bd not-found.
+	if errors.Is(err, exec.ErrNotFound) {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no issue found") ||

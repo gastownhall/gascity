@@ -23,11 +23,14 @@ import (
 // StampMetadata writes scope into a metadata map, allocating one when meta is
 // nil, and returns the map for the caller to assign back.
 //
-// It is the only writer of the metadata key outside the member-declaration
-// protocol, and it is deliberately confined to values that have not been
-// materialized yet: recipe steps before instantiation. A bead that already
-// exists is declared, never stamped, because only the declaration protocol
-// carries the single-winner exclusion.
+// It writes recipe-step metadata that has not been materialized yet — steps
+// before instantiation — so a freshly launched root carries a scope from birth.
+// It is NOT the whole story of who writes the key: an already-existing bead is
+// normally *declared* (the CAS single-winner protocol) rather than stamped,
+// with one deliberate exception — a legacy `--on` attach stamps its claimable
+// SOURCE bead through sling.stampClaimableSourceScope (a plain SetMetadata,
+// best-effort, not serialized for concurrent unscoped-bead attaches). See that
+// function's doc for the honest single-writer guarantee.
 func StampMetadata(meta map[string]string, scope Scope) (map[string]string, error) {
 	blob, err := Marshal(scope)
 	if err != nil {
