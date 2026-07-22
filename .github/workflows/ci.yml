@@ -984,9 +984,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1022,9 +1020,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1060,9 +1056,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
