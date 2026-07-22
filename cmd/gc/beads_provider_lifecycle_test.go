@@ -6992,6 +6992,7 @@ func TestGcBeadsBdInitRetriesPlainInitWhenSchemaStillMissingAfterSuccess(t *test
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
 
 	initCountFile := filepath.Join(t.TempDir(), "bd-init-count")
 	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
@@ -7138,6 +7139,7 @@ func TestGcBeadsBdInitDropsMetadataBeforeRetryingInitAfterForcedFallback(t *test
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
 
 	initCountFile := filepath.Join(t.TempDir(), "bd-init-count")
 	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
