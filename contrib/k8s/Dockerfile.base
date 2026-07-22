@@ -78,7 +78,8 @@ WORKDIR /src/gh
 RUN go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && GH_VERSION="${GH_VERSION}" SOURCE_DATE_EPOCH="${GH_SOURCE_DATE_EPOCH}" \
        go run script/build.go bin/gh \
-    && install -m 0755 bin/gh /out/gh
+    && install -m 0755 bin/gh /out/gh \
+    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
 
 WORKDIR /src/dolt/go
 RUN case "${TARGETARCH}" in \
@@ -96,7 +97,8 @@ RUN case "${TARGETARCH}" in \
        -ldflags="-s -w" \
        -o /out/dolt \
        ./cmd/dolt \
-    && file /out/dolt | grep -Fq "statically linked"
+    && file /out/dolt | grep -Fq "statically linked" \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
