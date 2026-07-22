@@ -59,3 +59,91 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
+	const (
+		bdSourceRef    = "8e4e59d39f3459a43cf21a3236a13eca4dd874f7"
+		bdSourceSHA256 = "63597b6b368d7d26ba3fc570ae3b2fa4cd8a5155d4716cae13d178a560808d5a"
+		bdBuild        = "8e4e59d39"
+		bdBranch       = "HEAD"
+		grpcVersion    = "1.82.1"
+	)
+
+	root := repoRoot(t)
+	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
+	if bdVersion != "v1.1.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	}
+
+	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	for _, want := range []string{
+		"ARG BD_VERSION=" + bdVersion,
+		"ARG BD_SOURCE_REF=" + bdSourceRef,
+		"ARG BD_SOURCE_SHA256=" + bdSourceSHA256,
+		"ARG BD_BUILD=" + bdBuild,
+		"ARG BD_BRANCH=" + bdBranch,
+		"ARG GRPC_VERSION=" + grpcVersion,
+		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
+		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
+		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
+		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
+		`CGO_ENABLED=1 go build`,
+		`-tags="gms_pure_go"`,
+		`-X main.Version=${bd_version}`,
+		`-X main.Build=${BD_BUILD}`,
+		`-X main.Commit=${BD_SOURCE_REF}`,
+		`-X main.Branch=${BD_BRANCH}`,
+		`COPY --from=bd-builder /out/bd /usr/local/bin/bd`,
+		`CGO_ENABLED=0 go build -o gc ./cmd/gc`,
+		`RUN gc version`,
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("contrib/k8s/Dockerfile.agent missing %q", want)
+		}
+	}
+	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 1 {
+		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd grpc override %d times, want exactly 1", got)
+	}
+	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
+		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
+	}
+	baseImageArg := strings.Index(dockerfile, "ARG BASE_IMAGE=")
+	firstStage := strings.Index(dockerfile, "FROM ")
+	if baseImageArg < 0 || firstStage < 0 || baseImageArg > firstStage {
+		t.Error("contrib/k8s/Dockerfile.agent must declare BASE_IMAGE globally before its first FROM")
+	}
+
+	goMod := readFile(t, root, "go.mod")
+	wantGRPCModule := "google.golang.org/grpc v" + grpcVersion
+	if got := strings.Count(goMod, wantGRPCModule); got != 1 {
+		t.Errorf("go.mod contains %q %d times, want exactly 1 so the gc binary embeds the patched grpc", wantGRPCModule, got)
+	}
+
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	if !strings.Contains(workflow, "CGO_ENABLED=0 go build -o gc ./cmd/gc") {
+		t.Error("container scan must build gc with the release's portable CGO_ENABLED=0 configuration")
+	}
+}
+
+func TestMCPMailImagePinsPatchedGitPythonAndPillow(t *testing.T) {
+	root := repoRoot(t)
+	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
+	for _, want := range []string{
+		"gitpython>=3.1.52",
+		"pillow>=12.3.0",
+	} {
+		if !strings.Contains(input, want) {
+			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
+		}
+	}
+
+	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
+	for _, want := range []string{
+		"gitpython==3.1.54 \\",
+		"pillow==12.3.0 \\",
+	} {
+		if !strings.Contains(lock, want) {
+			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
+		}
+	}
+}
