@@ -1346,6 +1346,54 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+// TestDoSlingNudgeInstanceExpandableAgentWithRunningNamedSession is the
+// regression for #3412: an instance-expandable agent (SupportsInstanceExpansion)
+// resolves nudge targets from pool/worker session refs only. When the same
+// agent is instead fronted by a running NAMED session (e.g. an always-on
+// session bound to its own template, not a pool instance), that session is
+// not among the pool refs, so nudge fell through to "No running sessions"
+// and poked the controller — a no-op for an already-awake named session,
+// with a misleading message. The fixed-agent branch already handles this
+// correctly via lookupSessionNameOrLegacy; the instance-expansion branch
+// must fall back to the same lookup before giving up.
+func TestDoSlingNudgeInstanceExpandableAgentWithRunningNamedSession(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	// The named session is registered under the agent's own bare qualified
+	// name (the legacy/no-explicit-template convention lookupSessionNameOrLegacy
+	// falls back to) — no pool instance running.
+	_ = sp.Start(context.Background(), "polecat", runtime.Config{})
+	sp.Calls = nil
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+	opts := testOpts(a, "BL-1")
+	opts.Nudge = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No running sessions") {
+		t.Errorf("stdout = %q, want the named session nudged, not the no-running-sessions poke fallback", stdout.String())
+	}
+	pending, _, dead, err := listQueuedNudges(deps.CityPath, "polecat", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(dead) != 0 {
+		t.Fatalf("pending=%d dead=%d, want 1/0 (named session should have been nudged)", len(pending), len(dead))
+	}
+}
+
 // TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo is the write-side guard
 // for #2592: resolving and slinging a slot-suffixed pool target ("saitoc/polecat-2")
 // must record the base pool qualified name in gc.routed_to, so the pool's

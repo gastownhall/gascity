@@ -1527,6 +1527,19 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
 				return true
 			}
+			// No running pool/worker session ref matched -- an
+			// instance-expandable agent can also be fronted by a running
+			// NAMED session bound to its own template (e.g. an always-on
+			// wake_mode=resume session), which is not among the pool refs
+			// above. Fall back to the same lookup the fixed-agent branch
+			// below uses before giving up on this store (#3412).
+			if sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st); sn != "" {
+				if running, err := workerSessionTargetRunningWithConfig(cityPath, sessStore, sp, cfg, sn); err == nil && running {
+					target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
+					deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
+					return true
+				}
+			}
 			return false
 		}
 		if tryNudgeStore(store) {
