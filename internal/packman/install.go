@@ -1,7 +1,9 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -349,6 +351,14 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		seen[imp.Source] = true
 		nested, err := readPackImports(imp.Source)
 		if err != nil {
+			// A local path source that isn't materialized on disk yet (a
+			// doctor-fix in-flight rewrite, a synthetic/placeholder import,
+			// or a not-yet-created pack directory) has no transitive
+			// imports to discover -- not a hard error. Only a pack.toml
+			// that exists but fails to parse is a genuine problem.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return fmt.Errorf("local pack %q: %w", imp.Source, err)
 		}
 		return s.walkNestedImports(nested, constraints, reachable, seen, dirty)

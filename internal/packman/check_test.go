@@ -68,6 +68,28 @@ version = "^1.0"
 	assertSingleIssue(t, report, "missing-lock-entry")
 }
 
+// TestCheckInstalledToleratesMissingLocalPathSourcePack is the check.go
+// sibling of TestSyncLockToleratesMissingLocalPathSourcePack: a local path
+// source that isn't materialized on disk has no transitive imports to
+// discover and must not report an issue -- only a pack.toml that exists but
+// fails to parse is a genuine "invalid-local-pack" problem.
+func TestCheckInstalledToleratesMissingLocalPathSourcePack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: filepath.Join(city, "does-not-exist")},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none for an unmaterialized local path source", report.Issues)
+	}
+}
+
 func TestCheckInstalledReportsMissingLockfile(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

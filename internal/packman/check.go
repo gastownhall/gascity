@@ -1,7 +1,9 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -226,6 +228,12 @@ func (s *importCheckState) walkLocalImport(name string, imp config.Import) {
 	s.seen[imp.Source] = true
 	nested, err := readPackImports(imp.Source)
 	if err != nil {
+		// A local path source that isn't materialized on disk yet has no
+		// transitive imports to discover -- not a hard error. Only a
+		// pack.toml that exists but fails to parse is a genuine problem.
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
 		s.closureIncomplete = true
 		s.addIssue(CheckIssue{
 			Code:       "invalid-local-pack",

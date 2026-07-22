@@ -108,6 +108,33 @@ schema = 1
 	}
 }
 
+// TestSyncLockToleratesMissingLocalPathSourcePack is the regression for the
+// PR #4540 CI break this fix's own first landing caused: a local path
+// source that isn't materialized on disk (a doctor-fix in-flight rewrite, a
+// synthetic/placeholder import used by a test fixture, or a not-yet-created
+// pack directory) has no transitive imports to discover -- that's not a
+// hard error, it's the same "nothing to see yet" case a not-yet-resolved
+// remote source already gets. Before this, #4523's own fix turned every such
+// placeholder into `local pack "...": reading pack.toml: ... no such file or
+// directory`, breaking several existing tests and doctor-fix flows that
+// declare a local import without ever materializing it on disk.
+func TestSyncLockToleratesMissingLocalPathSourcePack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: filepath.Join(city, "does-not-exist")},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v, want no error for an unmaterialized local path source", err)
+	}
+	if len(got.Packs) != 0 {
+		t.Fatalf("Packs = %#v, want empty", got.Packs)
+	}
+}
+
 // TestSyncLockWithPolicyBlocksTransitiveInternalImport is the regression for the
 // transitive-import SSRF finding: a public top-level pack that passes the caller's
 // source fence can declare a nested internal/link-local/file import in its
