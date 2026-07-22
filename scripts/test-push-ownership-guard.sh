@@ -139,16 +139,21 @@ write_show_json() {
         "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json"
 }
 
-# run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds]
+# run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
 #
 # Runs assert_bead_still_claimed with cwd=<repo>, PATH prefixed with
-# <fake-bd-dir>, and the given env. Combined stdout+stderr is the caller's
-# to capture; the subshell's exit code is assert_bead_still_claimed's.
+# <fake-bd-dir>, and the given env. GC_SESSION_ID/GC_SESSION_NAME are
+# optional (empty by default) so existing GC_AGENT-only callers are
+# unchanged; supply them to exercise the session identity-set match.
+# Combined stdout+stderr is the caller's to capture; the subshell's exit
+# code is assert_bead_still_claimed's.
 run_guard() {
     local repo="$1" fbd="$2" agent="$3" template="$4" pog_timeout="${5:-5}"
+    local session_id="${6:-}" session_name="${7:-}"
     (
         cd "$repo" || exit 1
         PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+            GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" LIB="$LIB" \
             bash -c '. "$LIB"; assert_bead_still_claimed'
     )
@@ -193,12 +198,50 @@ test_block_on_reassigned() {
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
     write_fake_bd "$fbd"
+    # assignee differs from EVERY supplied session identity
+    # (GC_AGENT=agent-x, GC_SESSION_ID=sess-id-x, GC_SESSION_NAME=sess-name-x)
+    # → the identity-set match finds no owner → still blocks.
     write_show_json "$fbd" "ga-abc123.1" "in_progress" "someone-else" "tmpl-x" "[]"
-    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] && grep -qi "assignee" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
         record_pass "block/reassigned (rc=$rc, names the failed check + mentions --no-verify)"
     else
         record_fail "block/reassigned" "expected non-zero rc mentioning assignee+--no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# The claim path sets bead.assignee from the first non-empty of
+# GC_SESSION_NAME/GC_SESSION_ID/GC_ALIAS/GC_AGENT, so a bead legitimately
+# owned by this session can carry the session id (or name) as its assignee
+# while GC_AGENT differs. These two tests pin that the guard accepts ANY
+# current-session identity, not GC_AGENT alone (the false-block fixed here).
+test_allow_when_assignee_is_session_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "sess-id-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-session-id (rc=0, GC_AGENT differs)"
+    else
+        record_fail "allow/assignee-is-session-id" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_allow_when_assignee_is_session_name() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "sess-name-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-session-name (rc=0, GC_AGENT differs)"
+    else
+        record_fail "allow/assignee-is-session-name" "expected rc=0, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -489,6 +532,8 @@ run_all() {
     test_allow_clean_claim
     test_block_on_closed
     test_block_on_reassigned
+    test_allow_when_assignee_is_session_id
+    test_allow_when_assignee_is_session_name
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external

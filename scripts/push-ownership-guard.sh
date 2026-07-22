@@ -17,8 +17,10 @@
 # this push is for (branch name, falling back to this session's in-progress
 # assignment), re-reads its live state from bd, and returns non-zero
 # (blocking the push) unless the bead is still open/in_progress, still
-# assigned to this session, still routed to this session's config identity,
-# and not held by the mayor or an external actor.
+# assigned to one of this session's identities (any of GC_SESSION_NAME,
+# GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path), still
+# routed to this session's config identity, and not held by the mayor or an
+# external actor.
 #
 # TWO CALL SITES (defense in depth — see ga-fip9ps.1 bead notes):
 #   Layer A — .githooks/pre-push calls this unconditionally for every
@@ -167,9 +169,27 @@ assert_bead_still_claimed() {
         return 1
     fi
 
-    if [[ -n "${GC_AGENT:-}" && "$assignee" != "$GC_AGENT" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id assignee is '$assignee', not this session ($GC_AGENT); it was reassigned since this push began. Bypass with: git push --no-verify" >&2
-        return 1
+    # A session-run claim sets bead.assignee from the first non-empty of
+    # GC_SESSION_NAME, GC_SESSION_ID, GC_ALIAS, GC_AGENT (see
+    # cmd/gc/cmd_hook.go's firstNonEmptyHookValue). Accept ANY of this
+    # session's live identities — GC_AGENT alone falsely blocks a push whose
+    # bead is legitimately assigned to the session name/id. Fail-closed
+    # semantics preserved: with identities present, an assignee matching none
+    # (including empty) still blocks.
+    local -a _pog_identities=()
+    local _pog_ident
+    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
+        [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
+    done
+    if [[ ${#_pog_identities[@]} -gt 0 ]]; then
+        local _pog_owned=0
+        for _pog_ident in "${_pog_identities[@]}"; do
+            if [[ -n "$assignee" && "$assignee" == "$_pog_ident" ]]; then _pog_owned=1; break; fi
+        done
+        if [[ $_pog_owned -eq 0 ]]; then
+            echo "push-ownership-guard: BLOCKED — $id assignee is '$assignee', not any current-session identity (${_pog_identities[*]}); it was reassigned since this push began. Bypass with: git push --no-verify" >&2
+            return 1
+        fi
     fi
 
     if [[ -n "${GC_TEMPLATE:-}" && -n "$routed_to" && "$routed_to" != "$GC_TEMPLATE" ]]; then
