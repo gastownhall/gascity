@@ -1,0 +1,21 @@
+=== Scenario 1: API-envelope event, mail SUCCEEDS -> exit 0, gate recorded ===
+  stdout: notify-on-human-gate-creation: notified 1 human gate addressee(s)
+  PASS: success path (rc=0, state-has-gate=yes)
+=== Scenario 2 (Fix A): mail FAILS -> exit 1 (loud), gate NOT recorded ===
+  stderr: notify-on-human-gate-creation: FAILED to notify addressee 'mayor' of human gate sc-gate01 (will retry next sweep)
+notify-on-human-gate-creation: 1 human gate addressee(s) failed to notify (see above; will retry)
+  PASS: loud-fail nonzero + no dedup (rc=1, state-has-gate=no)
+=== Scenario 3 (Fix D): RAW local-fallback event shape, mail SUCCEEDS -> gate detected ===
+  stdout: notify-on-human-gate-creation: notified 1 human gate addressee(s)
+  PASS: fallback-shape gate detected+notified (rc=0, state-has-gate=yes)
+=== Scenario 4: non-gate creation -> exit 0, nothing notified ===
+  stdout: '' (expect empty)
+  PASS: non-gate ignored (rc=0, state-has-gate=no)
+
+=== renudge iso_to_epoch portability chain (GNU path + graceful-empty) ===
+  GNU parse 2026-07-22T13:54:16Z -> 1784728456 (expect 1784728456)
+  PASS: GNU date path
+  garbage input -> '' (expect empty)
+  PASS: garbage -> empty (gate skipped, not misaged)
+
+RESULT: 6 passed, 0 failed

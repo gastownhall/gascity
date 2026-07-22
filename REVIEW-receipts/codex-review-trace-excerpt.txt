@@ -1,0 +1,61 @@
+Reading prompt from stdin...
+OpenAI Codex v0.145.0
+--------
+workdir: /home/csauer/gascity-work/sc-lcwsqf-notify-gate
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019f8a39-f4b5-7c40-a713-0346cf32bb43
+--------
+user
+You are an INDEPENDENT adversarial code reviewer for a canonical open-source PR
+to gastownhall/gascity (a Go + bash "Gas City" agent-orchestration monorepo).
+Your lens: code correctness + canonical-repo conventions. Do NOT rubber-stamp.
+
+CWD is the repo worktree. The PR adds TWO core-pack "orders" (an order = a TOML
+trigger + a bash exec script) that notify the human addressee of a `type=human`
+gate bead: one on gate CREATION (event bead.created), one a cooldown SWEEP that
+re-nudges gates left open past a threshold.
+
+Review EXACTLY these 5 files (the diff is d9c89345a..7dfa184d3; base branch is
+origin/main @ 6ba5a29f1). Do NOT explore or comment on anything else:
+  internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh
+  internal/bootstrap/packs/core/assets/scripts/renudge-stale-human-gates.sh
+  internal/bootstrap/packs/core/orders/notify-on-human-gate-creation.toml
+  internal/bootstrap/packs/core/orders/renudge-stale-human-gates.toml
+  internal/bootstrap/packs/core/pack_orders_test.go
+
+Verify these HIGH-RISK areas against the ACTUAL code in the repo (grep/read it,
+cite file:line):
+1. CLI surface really exists as invoked: `gc events --type bead.created --since`,
+   `gc bd gate list --json --limit 0`, `gc bd show --json`, `gc rig list --json`,
+   `gc mail send <to> -s -m --notify`, and the event payload shape
+   `.payload.bead.issue_type` / `.payload.bead.id`. A wrong flag or JSON path =
+   the order silently no-ops. Confirm each against cmd/ or wherever they live.
+2. Bash correctness under `set -euo pipefail`: nested while-read loops, STATE
+   mutations persisting across heredoc-fed loops (no subshell), command-subst
+   failures that could crash the controller's order loop, `${VAR:+...}` arg
+   expansion under set -u.
+3. jq correctness: addressee resolution (assignee -> gc.deferred_assignee ->
+   escalation), the event gate-filter, and the prune expr
+   `with_entries(select((now - (.value|fromdateiso8601)) <= $keep))`.
+4. Idempotency/dedup + loud-fail (record only on delivered send).
+5. Convention parity with sibling orders (gate-sweep, orphan-sweep,
+   nudge-on-route, cascade-nudge) and whether any manifest/registration is
+   needed beyond dropping the TOML in orders/ (embed.go go:embed).
+
+OUTPUT FORMAT — findings only, most severe first. For each:
+  [SEV: blocker|major|minor|nit] file:line — one-line defect — why it breaks /
+  concrete failing input — suggested fix.
+If a risk area is CLEAN, say "CLEAN: <area>" in one line. End with a one-line
+VERDICT: SHIP or HOLD (+reason). Be terse. Cite file:line for every claim.
+
+codex
+I’ll inspect only the five PR files, using the CLI and sibling-order sources solely to verify their assumptions and conventions. I’ll return findings/CLEAN lines in the requested format.
+exec
+/bin/bash -lc 'git status --short --branch && git diff --stat d9c89345a..7dfa184d3 -- internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh internal/bootstrap/packs/core/assets/scripts/renudge-stale-human-gates.sh internal/bootstrap/packs/core/orders/notify-on-human-gate-creation.toml internal/bootstrap/packs/core/orders/renudge-stale-human-gates.toml internal/bootstrap/packs/core/pack_orders_test.go && git diff --unified=80 d9c89345a..7dfa184d3 -- internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh internal/bootstrap/packs/core/assets/scripts/renudge-stale-human-gates.sh internal/bootstrap/packs/core/orders/notify-on-human-gate-creation.toml internal/bootstrap/packs/core/orders/renudge-stale-human-gates.toml internal/bootstrap/packs/core/pack_orders_test.go' in /home/csauer/gascity-work/sc-lcwsqf-notify-gate
+ succeeded in 0ms:
+

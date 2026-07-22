@@ -98,9 +98,16 @@ duration_to_seconds() {
 
 # Parse an ISO-8601 UTC timestamp (e.g. 2026-07-22T13:54:16Z) to epoch seconds.
 # Empty on failure so callers can skip an unparseable gate rather than misage it.
+# Portable across GNU and BSD/macOS date, matching wisp-compact.sh: GNU `date -d`
+# first, then BSD `date -ju -f` (forcing UTC to match GNU), with a no-Z layout
+# for older timestamps. Without the BSD fallbacks every gate would be skipped on
+# macOS (BSD date rejects -d), silently disabling the whole sweep.
 iso_to_epoch() {
     [ -n "$1" ] || { echo ""; return 0; }
-    date -u -d "$1" +%s 2>/dev/null || echo ""
+    date -u -d "$1" +%s 2>/dev/null || \
+        date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || \
+        date -ju -f "%Y-%m-%dT%H:%M:%S" "$1" +%s 2>/dev/null || \
+        echo ""
 }
 
 THRESHOLD_S="$(duration_to_seconds "$THRESHOLD")"
@@ -129,6 +136,7 @@ STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
 echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 RENUDGED=0
+FAILED=0
 while IFS= read -r scope; do
     RIG_ARG1=""
     RIG_ARG2=""
@@ -211,6 +219,7 @@ Resolve with: gc bd gate resolve $gate_id"
             RENUDGED=$((RENUDGED + 1))
         else
             echo "renudge-stale-human-gates: FAILED to re-notify addressee '$ADDRESSEE' of stale human gate $gate_id (will retry next sweep)" >&2
+            FAILED=$((FAILED + 1))
         fi
     done <<INNER
 $HUMAN_GATES
@@ -229,4 +238,12 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$RENUDGED" -gt 0 ]; then
     echo "renudge-stale-human-gates: re-notified $RENUDGED stale human gate addressee(s)"
+fi
+
+# Loud-fail: state has been written (successful re-nudges are deduped), so a
+# non-zero exit now surfaces the per-gate failure lines above to the controller
+# log without losing the recorded successes. exit 0 would swallow them (#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "renudge-stale-human-gates: $FAILED stale human gate addressee(s) failed to re-notify (see above; will retry next sweep)" >&2
+    exit 1
 fi

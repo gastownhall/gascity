@@ -166,8 +166,15 @@ func TestNotifyOnHumanGateCreationOrder(t *testing.T) {
 //   - The prefix->rig lookup must exclude the HQ entry (`gc rig list` reports
 //     the city root as an hq=true pseudo-rig `gc --rig <cityName>` cannot
 //     resolve), matching the cross-rig convention in the sibling scripts.
+//   - Event-shape robustness: the API envelope wraps the bead under
+//     .payload.bead, but the `gc events` local fallback (API down) emits the
+//     bead fields directly under .payload. The filter must read both via
+//     `(.payload.bead // .payload)` or it silently finds no gates in fallback
+//     mode — exactly when notifications matter most.
 //   - Loud-fail: an undeliverable send must surface and NOT be recorded as
-//     done, so the next sweep retries it (gastownhall/gascity#4543).
+//     done. Surfacing requires a NON-ZERO exit — the controller logs an exec
+//     order's captured output only on a non-zero exit — so the script must
+//     exit non-zero when any send failed (gastownhall/gascity#4543).
 func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/notify-on-human-gate-creation.sh")
 	if err != nil {
@@ -176,13 +183,14 @@ func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	body := string(data)
 
 	for _, want := range []string{
-		`.payload.bead.issue_type == "gate"`, // filter events to gate creations
-		"gc bd show",                         // re-fetch (event lacks await_type)
-		`"$AWAIT_TYPE" = "human"`,            // human gates only
-		`"$STATUS" = "open"`,                 // skip already-resolved gates
-		`gc.deferred_assignee`,               // formula/molecule addressee
-		"--notify",                           // mail + nudge, human-safe primitive
-		".hq != true",                        // exclude HQ from prefix->rig lookup
+		"(.payload.bead // .payload)", // normalize API-envelope vs local-fallback event shape
+		`$b.issue_type == "gate"`,     // filter events to gate creations
+		"gc bd show",                  // re-fetch (event lacks await_type)
+		`"$AWAIT_TYPE" = "human"`,     // human gates only
+		`"$STATUS" = "open"`,          // skip already-resolved gates
+		`gc.deferred_assignee`,        // formula/molecule addressee
+		"--notify",                    // mail + nudge, human-safe primitive
+		".hq != true",                 // exclude HQ from prefix->rig lookup
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("notify-on-human-gate-creation.sh missing load-bearing element %q", want)
@@ -197,6 +205,13 @@ func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	}
 	if !strings.Contains(body, "will retry next sweep") {
 		t.Error("notify-on-human-gate-creation.sh must surface an undeliverable send to stderr (loud-fail #4543)")
+	}
+	// The controller captures an exec order's combined output but logs it only
+	// on a NON-ZERO exit (order_dispatch.go), so a fire-and-forget exit 0 would
+	// swallow the failure lines above. The script must exit non-zero when any
+	// send failed — after writing state, so recorded successes are not lost.
+	if !strings.Contains(body, `"$FAILED" -gt 0`) {
+		t.Error("notify-on-human-gate-creation.sh must exit non-zero when a send failed, or the loud-fail message is never logged (#4543)")
 	}
 }
 
@@ -263,8 +278,13 @@ func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
 //     sessionless "human" recipient (cmd_mail.go `to != "human"`).
 //   - The prefix->rig enumeration excludes the HQ pseudo-rig (`.hq != true`),
 //     matching the sibling scripts' cross-rig convention.
-//   - Loud-fail: an undeliverable send must surface and NOT be recorded, so the
-//     next sweep retries it (gastownhall/gascity#4543).
+//   - Timestamp parsing is portable: GNU-only `date -d` returns empty on
+//     BSD/macOS, skipping every gate and silently disabling the sweep, so the
+//     BSD `date -ju -f` fallback (matching wisp-compact.sh) is required.
+//   - Loud-fail: an undeliverable send must surface and NOT be recorded. As
+//     with the creation notify, surfacing requires a NON-ZERO exit (the
+//     controller logs an exec order's output only on a non-zero exit), so the
+//     script must exit non-zero when any re-nudge failed (#4543).
 func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/renudge-stale-human-gates.sh")
 	if err != nil {
@@ -273,16 +293,16 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	body := string(data)
 
 	for _, want := range []string{
-		"gc bd gate list",                    // enumerate OPEN gates (not events)
-		"--limit 0",                          // no silent 50-gate truncation
-		`.await_type == "human"`,             // human gates only
-		`.status == "open"`,                  // skip already-resolved gates
-		"GC_STALE_GATE_THRESHOLD",            // configurable staleness threshold
-		"GC_STALE_GATE_RENUDGE_INTERVAL",     // configurable repeat interval
-		"gc bd show",                         // re-fetch (list omits assignee)
-		"gc.deferred_assignee",               // formula/molecule addressee
-		"--notify",                           // mail + nudge, human-safe primitive
-		".hq != true",                        // exclude HQ from prefix->rig lookup
+		"gc bd gate list",                // enumerate OPEN gates (not events)
+		"--limit 0",                      // no silent 50-gate truncation
+		`.await_type == "human"`,         // human gates only
+		`.status == "open"`,              // skip already-resolved gates
+		"GC_STALE_GATE_THRESHOLD",        // configurable staleness threshold
+		"GC_STALE_GATE_RENUDGE_INTERVAL", // configurable repeat interval
+		"gc bd show",                     // re-fetch (list omits assignee)
+		"gc.deferred_assignee",           // formula/molecule addressee
+		"--notify",                       // mail + nudge, human-safe primitive
+		".hq != true",                    // exclude HQ from prefix->rig lookup
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renudge-stale-human-gates.sh missing load-bearing element %q", want)
@@ -297,5 +317,17 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	}
 	if !strings.Contains(body, "will retry next sweep") {
 		t.Error("renudge-stale-human-gates.sh must surface an undeliverable send to stderr (loud-fail #4543)")
+	}
+	// Timestamp parsing must be portable: GNU-only `date -d` returns empty on
+	// BSD/macOS, which skips every gate at the age check and silently disables
+	// the whole sweep. The BSD `date -ju -f` fallback (matching wisp-compact.sh)
+	// is load-bearing.
+	if !strings.Contains(body, "date -ju -f") {
+		t.Error("renudge-stale-human-gates.sh must parse timestamps portably via the BSD `date -ju -f` fallback; GNU-only `date -d` disables the sweep on macOS")
+	}
+	// Same loud-fail exit contract as the creation notify: the controller logs
+	// an exec order's output only on a non-zero exit.
+	if !strings.Contains(body, `"$FAILED" -gt 0`) {
+		t.Error("renudge-stale-human-gates.sh must exit non-zero when a re-nudge failed, or the loud-fail message is never logged (#4543)")
 	}
 }

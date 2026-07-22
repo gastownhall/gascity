@@ -29,11 +29,16 @@
 # cmd_mail.go guards `to != "human"`). That is the one wrinkle a naive
 # "nudge the assignee" would trip on.
 #
-# Loud-fail (gastownhall/gascity#4543): an undeliverable send surfaces to
-# the controller log (stderr) and is NOT recorded as done, so the next
-# sweep retries it within the lookback window. It never silently evaporates.
-# The companion staleness sweep re-notifies any human gate that stays open
-# past the event lookback, so a persistently-undeliverable gate is not lost.
+# Loud-fail (gastownhall/gascity#4543): an undeliverable send is NOT recorded
+# as done, and the script exits NON-ZERO when any send failed. The exit code is
+# load-bearing — the controller captures an exec order's combined output but
+# only logs it on a non-zero exit (order_dispatch.go), so a fire-and-forget
+# exit 0 would swallow the failure. It never silently evaporates. Retry: the
+# controller persists the bead.created cursor before the run, so this order
+# retries a failed gate only opportunistically (another bead.created within the
+# lookback window re-queries the same window); the companion staleness sweep is
+# the guaranteed backstop — it re-notifies any human gate still open past the
+# threshold, so a persistently-undeliverable gate is not lost.
 #
 # Cross-rig gate beads within a city are supported via a prefix->rig lookup
 # so `gc bd show` is scoped to the rig that owns each gate. The read routes
@@ -112,9 +117,15 @@ EVENTS="$(gc events --type bead.created --since "$LOOKBACK" 2>/dev/null)" || exi
 
 # Reduce to the unique bead ids whose issue_type is `gate`. Non-gate creations
 # (the overwhelming majority) are dropped here, before any per-bead re-fetch.
+# Normalize the payload shape: the API envelope wraps the bead under
+# .payload.bead, but the `gc events` local fallback (used when the API is down)
+# copies the raw bus payload verbatim, where the bead fields sit directly under
+# .payload. `(.payload.bead // .payload)` reads both, so a gate is never missed
+# in fallback mode (which is exactly when notifications matter most).
 GATE_IDS="$(printf '%s\n' "$EVENTS" \
-    | jq -r 'select(.payload.bead.issue_type == "gate")
-             | .payload.bead.id // empty' 2>/dev/null \
+    | jq -r '(.payload.bead // .payload) as $b
+             | select($b.issue_type == "gate")
+             | $b.id // empty' 2>/dev/null \
     | sort -u)" || GATE_IDS=""
 [ -n "$GATE_IDS" ] || exit 0
 
@@ -125,6 +136,7 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NOTIFIED=0
+FAILED=0
 while IFS= read -r gate_id; do
     [ -n "$gate_id" ] || continue
 
@@ -181,6 +193,7 @@ Resolve with: gc bd gate resolve $gate_id"
         NOTIFIED=$((NOTIFIED + 1))
     else
         echo "notify-on-human-gate-creation: FAILED to notify addressee '$ADDRESSEE' of human gate $gate_id (will retry next sweep)" >&2
+        FAILED=$((FAILED + 1))
     fi
 done <<EOF
 $GATE_IDS
@@ -198,4 +211,12 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$NOTIFIED" -gt 0 ]; then
     echo "notify-on-human-gate-creation: notified $NOTIFIED human gate addressee(s)"
+fi
+
+# Loud-fail: state has been written (successes are deduped), so a non-zero exit
+# now surfaces the per-gate failure lines above to the controller log without
+# losing the recorded successes. exit 0 would swallow them (#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "notify-on-human-gate-creation: $FAILED human gate addressee(s) failed to notify (see above; will retry)" >&2
+    exit 1
 fi
