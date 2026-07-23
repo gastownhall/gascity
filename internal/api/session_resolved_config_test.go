@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -10,11 +11,21 @@ import (
 )
 
 func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
+	t.Setenv("API_SESSION_WORKSPACE_VALUE", "expanded-workspace-value")
 	metadata := map[string]string{
 		"session_origin": "named",
 		"agent_name":     "myrig/worker-adhoc-123",
 	}
-	env := map[string]string{"API_TOKEN": "present"}
+	workspaceEnv := map[string]string{
+		"WORKSPACE_ONLY":         "$API_SESSION_WORKSPACE_VALUE",
+		"SESSION_ENV_PRECEDENCE": "workspace",
+		"GC_BIN":                 "/workspace/bin/gc",
+	}
+	env := map[string]string{
+		"API_TOKEN":              "present",
+		"SESSION_ENV_PRECEDENCE": "provider",
+		"GC_BIN":                 "/provider/bin/gc",
+	}
 	mcpServers := []runtime.MCPServerConfig{{
 		Name:    "filesystem",
 		Command: "/bin/mcp",
@@ -36,6 +47,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		workspaceEnv,
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -90,11 +102,28 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	if got, want := cfg.Runtime.SessionEnv["API_TOKEN"], "present"; got != want {
 		t.Fatalf("Runtime.SessionEnv[API_TOKEN] = %q, want %q", got, want)
 	}
+	gcBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	for key, want := range map[string]string{
+		"WORKSPACE_ONLY":         "expanded-workspace-value",
+		"SESSION_ENV_PRECEDENCE": "provider",
+		"GC_BIN":                 gcBin,
+	} {
+		if got := cfg.Runtime.SessionEnv[key]; got != want {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := cfg.Runtime.Hints.Env[key]; got != want {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
 }
 
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -178,6 +207,7 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -267,6 +297,7 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -302,7 +333,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 		"PROVIDER_TOKEN": "ok",
 	}
 
-	got := cityAnchoredSessionEnv(" \t\n ", providerEnv)
+	got := cityAnchoredSessionEnv(" \t\n ", nil, providerEnv)
 	if got["GC_CITY"] != "/provider/city" {
 		t.Fatalf("GC_CITY = %q, want provider value", got["GC_CITY"])
 	}
@@ -325,6 +356,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		nil,
 		"worker",
 		"",
 		"myrig/worker",

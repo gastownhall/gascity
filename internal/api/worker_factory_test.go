@@ -18,10 +18,17 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "api-resume-anthropic-token")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://process.example.test")
 	t.Setenv("OLLAMA_API_KEY", "api-resume-ollama-token")
+	t.Setenv("API_SESSION_WORKSPACE_VALUE", "expanded-workspace-value")
 	t.Setenv("GC_RIG", "caller-rig")
 	t.Setenv("GC_SESSION_NAME", "caller-session")
 
 	fs := newSessionFakeState(t)
+	fs.cfg.Workspace.Env = map[string]string{
+		"WORKSPACE_ONLY":         "$API_SESSION_WORKSPACE_VALUE",
+		"SESSION_ENV_PRECEDENCE": "workspace",
+		"GC_BIN":                 "/workspace/bin/gc",
+		"GC_CITY":                "/workspace/city",
+	}
 	fs.cfg.Agents[0].Provider = "resolved-worker"
 	fs.cfg.Providers["resolved-worker"] = config.ProviderSpec{
 		DisplayName:       "Resolved Worker",
@@ -33,7 +40,10 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 		ResumeCommand:     "resolved resume {{.SessionKey}}",
 		SessionIDFlag:     "--session-id-resolved",
 		Env: map[string]string{
-			"ANTHROPIC_BASE_URL": "https://resolved.example.test",
+			"ANTHROPIC_BASE_URL":     "https://resolved.example.test",
+			"SESSION_ENV_PRECEDENCE": "provider",
+			"GC_BIN":                 "/provider/bin/gc",
+			"GC_CITY":                "/provider/city",
 		},
 	}
 
@@ -95,6 +105,22 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 	}
 	if runtimeCfg.SessionEnv["GC_CITY_RUNTIME_DIR"] == "" {
 		t.Error("SessionEnv[GC_CITY_RUNTIME_DIR] = empty, want set")
+	}
+	gcBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	for key, want := range map[string]string{
+		"WORKSPACE_ONLY":         "expanded-workspace-value",
+		"SESSION_ENV_PRECEDENCE": "provider",
+		"GC_BIN":                 gcBin,
+	} {
+		if got := runtimeCfg.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := runtimeCfg.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
 	}
 	// Identity-only contract (per Copilot review): no dispatcher trace
 	// default — that must stay per-dispatcher-qualified, not reseeded
