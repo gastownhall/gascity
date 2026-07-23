@@ -1,7 +1,9 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -85,21 +87,22 @@ func CheckInstalled(cityRoot string, imports map[string]config.Import) (*CheckRe
 
 	if countRemoteImports(imports) > 0 || len(lock.Packs) > 0 {
 		if err := withRepoCacheReadLock(func() error {
-			checkLockedImports(report, lock, imports)
+			checkLockedImports(report, lock, imports, cityRoot)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	} else {
-		checkLockedImports(report, lock, imports)
+		checkLockedImports(report, lock, imports, cityRoot)
 	}
 	return report, nil
 }
 
-func checkLockedImports(report *CheckReport, lock *Lockfile, imports map[string]config.Import) {
+func checkLockedImports(report *CheckReport, lock *Lockfile, imports map[string]config.Import, cityRoot string) {
 	state := &importCheckState{
 		lock:              lock,
 		report:            report,
+		cityRoot:          cityRoot,
 		constraints:       make(map[string]string),
 		reachable:         make(map[string]struct{}),
 		seen:              make(map[string]bool),
@@ -108,7 +111,7 @@ func checkLockedImports(report *CheckReport, lock *Lockfile, imports map[string]
 
 	names := sortedImportNames(imports)
 	for _, name := range names {
-		state.walkImport(name, imports[name])
+		state.walkImport(name, imports[name], cityRoot)
 	}
 
 	state.reportStaleLockEntries()
@@ -117,6 +120,7 @@ func checkLockedImports(report *CheckReport, lock *Lockfile, imports map[string]
 type importCheckState struct {
 	lock              *Lockfile
 	report            *CheckReport
+	cityRoot          string
 	constraints       map[string]string
 	reachable         map[string]struct{}
 	seen              map[string]bool
@@ -124,8 +128,12 @@ type importCheckState struct {
 	closureIncomplete bool
 }
 
-func (s *importCheckState) walkImport(name string, imp config.Import) {
+// walkImport walks one import. declDir is the directory a relative local-path
+// source is resolved against: the city root for top-level imports, and the
+// declaring pack's own directory for nested imports.
+func (s *importCheckState) walkImport(name string, imp config.Import, declDir string) {
 	if !isRemoteSource(imp.Source) {
+		s.walkLocalImport(name, imp, declDir)
 		return
 	}
 
@@ -208,8 +216,51 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 		return
 	}
 	s.seen[imp.Source] = true
+	// A remote pack's nested relative local import (if any) resolves under
+	// the cached checkout, not the city root.
 	for _, nestedName := range sortedImportNames(nested) {
-		s.walkImport(name+"/"+nestedName, nested[nestedName])
+		s.walkImport(name+"/"+nestedName, nested[nestedName], packDir)
+	}
+}
+
+// walkLocalImport handles a local path-source import. Unlike a remote
+// import, it is never locked or cached, so it can't produce a
+// missing-lock-entry issue for itself — but its own declared imports still
+// need walking so a missing transitive remote import is caught here rather
+// than surfacing later as a load-time "not installed" error. A relative
+// source resolves against declDir, not the process working directory.
+func (s *importCheckState) walkLocalImport(name string, imp config.Import, declDir string) {
+	if !imp.ImportIsTransitive() {
+		return
+	}
+	srcDir := imp.Source
+	if !filepath.IsAbs(srcDir) {
+		srcDir = filepath.Join(declDir, srcDir)
+	}
+	if s.seen[srcDir] {
+		return
+	}
+	s.seen[srcDir] = true
+	nested, err := readPackImports(srcDir)
+	if err != nil {
+		// A local path source that isn't materialized on disk yet has no
+		// transitive imports to discover -- not a hard error. Only a
+		// pack.toml that exists but fails to parse is a genuine problem.
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		s.closureIncomplete = true
+		s.addIssue(CheckIssue{
+			Code:       "invalid-local-pack",
+			ImportName: name,
+			Source:     imp.Source,
+			Path:       filepath.Join(srcDir, "pack.toml"),
+			Message:    err.Error(),
+		})
+		return
+	}
+	for _, nestedName := range sortedImportNames(nested) {
+		s.walkImport(name+"/"+nestedName, nested[nestedName], srcDir)
 	}
 }
 

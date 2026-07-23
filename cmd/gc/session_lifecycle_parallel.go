@@ -1248,9 +1248,28 @@ func resolvePreparedTaskWorkDir(
 	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
 }
 
-// retargetPreStartWorkDir rewrites PreStart command strings rendered against
-// oldWorkDir so they instead reference newWorkDir. A no-op when the task
-// work_dir override left WorkDir unchanged, which is the common case.
+// generatedPreStartPrefixes are the exact command prefixes
+// appendMaterializeSkillsPreStart and appendProjectMCPPreStart emit. Only a
+// PreStart entry starting with one of these is eligible for retargeting —
+// see retargetPreStartWorkDir.
+var generatedPreStartPrefixes = []string{
+	`"${GC_BIN:-gc}" internal materialize-skills `,
+	`"${GC_BIN:-gc}" internal project-mcp `,
+}
+
+func isGeneratedPreStartCommand(cmd string) bool {
+	for _, prefix := range generatedPreStartPrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// retargetPreStartWorkDir rewrites the engine-generated PreStart command
+// strings rendered against oldWorkDir so they instead reference newWorkDir.
+// A no-op when the task work_dir override left WorkDir unchanged, which is
+// the common case.
 //
 // The generated materialize-skills and project-mcp PreStart commands embed the
 // workdir as a shell-quoted token (see appendMaterializeSkillsPreStart and
@@ -1259,6 +1278,13 @@ func resolvePreparedTaskWorkDir(
 // quoting even when the resolved workdir contains spaces or shell
 // metacharacters. Splicing the raw path in would break argument boundaries or
 // open a command-substitution surface.
+//
+// Only entries matching generatedPreStartPrefixes are touched. A
+// user-authored PreStart command that happens to contain the old workdir as
+// a literal path (e.g. a rig root a worktree-setup script deliberately
+// hardcodes, distinct from the per-session dir it's given via $GC_DIR) must
+// never be rewritten — a literal path in config is an explicit user choice,
+// and {{.WorkDir}} already exists for users who want the session dir.
 func retargetPreStartWorkDir(preStart []string, oldWorkDir, newWorkDir string) []string {
 	if oldWorkDir == "" || newWorkDir == "" || oldWorkDir == newWorkDir || len(preStart) == 0 {
 		return preStart
@@ -1267,7 +1293,11 @@ func retargetPreStartWorkDir(preStart []string, oldWorkDir, newWorkDir string) [
 	newToken := shellquote.Join([]string{newWorkDir})
 	retargeted := make([]string, len(preStart))
 	for i, cmd := range preStart {
-		retargeted[i] = strings.ReplaceAll(cmd, oldToken, newToken)
+		if isGeneratedPreStartCommand(cmd) {
+			retargeted[i] = strings.ReplaceAll(cmd, oldToken, newToken)
+		} else {
+			retargeted[i] = cmd
+		}
 	}
 	return retargeted
 }
