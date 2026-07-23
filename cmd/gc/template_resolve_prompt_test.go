@@ -579,7 +579,7 @@ func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
 // TestTemplateParamsToConfigInteractiveSessionEnablesMouse locks ga-c4w finding
 // #1 for the MANAGED `gc session new` deferred-start path: the reconciler starts
 // a session_origin=manual bead through templateParamsToConfig (see
-// buildPreparedStartWithWorkDirResolver). A manual session must resolve
+// buildPreparedStartForCity). A manual session must resolve
 // MouseOn=true even when the agent config sets no mouse_mode, while ephemeral
 // pool agents stay MouseOn=false (controller-poll safety). This is the seam the
 // original API-only fix missed: MouseOn for `gc session new` never flowed through

@@ -17,7 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
-func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsSharedWorktree(t *testing.T) {
+func TestPrepareStartCandidateStagesScaffoldInResolvedSessionWorkerDirWhenCWDIsSharedWorktree(t *testing.T) {
 	root := t.TempDir()
 	cityPath := filepath.Join(root, "city")
 	sharedWorktree := filepath.Join(root, "shared-builder")
@@ -46,23 +46,10 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 		Metadata: map[string]string{
 			"template":     "builder",
 			"session_name": "builder-ga-ajw1no",
+			"worker_dir":   relativeTargetWorkDir,
 		},
 	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := store.Create(beads.Bead{
-		Title: "task",
-		Metadata: map[string]string{
-			"work_dir": relativeTargetWorkDir,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := "in_progress"
-	assignee := session.ID
-	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -92,13 +79,13 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 				MaxActiveSessions: intPtrScaffoldRegression(2),
 			},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)}, io.Discard)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
 	if prepared.cfg.WorkDir != targetWorkDir {
-		t.Errorf("prepared.cfg.WorkDir = %q, want resolved task work_dir %q", prepared.cfg.WorkDir, targetWorkDir)
+		t.Errorf("prepared.cfg.WorkDir = %q, want resolved session worker_dir %q", prepared.cfg.WorkDir, targetWorkDir)
 	}
 	if prepared.cfg.Env["GC_DIR"] != targetWorkDir {
 		t.Errorf("prepared.cfg.Env[GC_DIR] = %q, want %q", prepared.cfg.Env["GC_DIR"], targetWorkDir)
@@ -156,7 +143,7 @@ func intPtrScaffoldRegression(n int) *int {
 
 // TestRetargetPreStartWorkDirPreservesShellQuoting proves that retargeting a
 // generated materialize-skills / project-mcp PreStart command onto a resolved
-// task work_dir keeps the `--workdir` argument shell-safe. The generators emit
+// session worker_dir keeps the `--workdir` argument shell-safe. The generators emit
 // the workdir as a shell-quoted token; a resolved work_dir that contains a
 // space (macOS "/Users/First Last/...") or a shell metacharacter must not be
 // spliced in raw, or the rendered `sh -c` command breaks argument boundaries or

@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -1342,10 +1341,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if apply != nil {
 			apply(&reconcileOpts)
 		}
-	}
-	effectiveStartOptions := startOptions
-	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
@@ -3724,7 +3719,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
-		effectiveStartOptions...,
+		startOptions...,
 	)
 	startedThisTick = plannedWakes
 	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
@@ -5259,58 +5254,15 @@ func clearMissingIdleProbes(dt *drainTracker, infoByID map[string]sessionpkg.Inf
 	}
 }
 
-// resolveWorkDirAgainstCity anchors a bead-stored work_dir value to the city
-// root. Worktree-per-bead dispatch stores this metadata city-relative (e.g.
-// ".gc/worktrees/gascity/builder/<slug>") so the value stays valid across
-// machines with different absolute city paths; resolving it with os.Stat
-// directly would instead resolve against the calling process's cwd, which is
-// how scaffold staging leaked into shared long-lived worktrees (ga-ajw1no).
-// Already-absolute values (the legacy convention) pass through unchanged.
+// resolveWorkDirAgainstCity anchors a session-stored worker directory to the
+// city root. Relative metadata stays valid across machines with different
+// absolute city paths instead of resolving against the controller's cwd.
+// Already-absolute values pass through unchanged.
 func resolveWorkDirAgainstCity(cityPath, workDir string) string {
 	if workDir == "" || cityPath == "" || filepath.IsAbs(workDir) {
 		return workDir
 	}
 	return filepath.Join(cityPath, workDir)
-}
-
-// resolveTaskWorkDir checks the agent's assigned task beads for a work_dir
-// metadata field. If a task bead has work_dir set and the directory exists
-// on disk, that path is returned. This lets the reconciler start the agent
-// in the worktree that the previous session (or this session's prior run)
-// created, without any prompt-side logic.
-func resolveTaskWorkDir(cityPath string, store beads.Store, assignees ...string) string {
-	if store == nil {
-		return ""
-	}
-	seen := make(map[string]bool, len(assignees))
-	for _, assignee := range assignees {
-		assignee = strings.TrimSpace(assignee)
-		if assignee == "" || seen[assignee] {
-			continue
-		}
-		seen[assignee] = true
-		assigned, err := store.List(beads.ListQuery{
-			Assignee: assignee,
-			Status:   "in_progress",
-			Live:     true,
-			TierMode: beads.TierBoth,
-			Sort:     beads.SortCreatedDesc,
-		})
-		if err != nil {
-			continue
-		}
-		for _, b := range assigned {
-			wd := strings.TrimSpace(b.Metadata["work_dir"])
-			if wd == "" {
-				continue
-			}
-			resolved := resolveWorkDirAgainstCity(cityPath, wd)
-			if info, err := os.Stat(resolved); err == nil && info.IsDir() {
-				return resolved
-			}
-		}
-	}
-	return ""
 }
 
 // dispatchOptionMetadataKey returns the bead-metadata key carrying a
@@ -5380,48 +5332,6 @@ func workBeadOptionOverrides(b beads.Bead, rp *config.ResolvedProvider) (map[str
 		overrides[opt.Key] = value
 	}
 	return overrides, sawOptions
-}
-
-type assignedTaskWorkDir struct {
-	path      string
-	createdAt time.Time
-}
-
-// newAssignedTaskWorkDirResolver resolves work_dir values from the
-// reconciler's snapshot; misses intentionally fall back to the live lookup.
-func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.Bead) taskWorkDirResolver {
-	index := make(map[string]assignedTaskWorkDir)
-	for _, bead := range assignedWorkBeads {
-		if bead.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(bead.Assignee)
-		if assignee == "" {
-			continue
-		}
-		workDir := strings.TrimSpace(bead.Metadata["work_dir"])
-		if workDir == "" {
-			continue
-		}
-		workDir = resolveWorkDirAgainstCity(cityPath, workDir)
-		info, err := os.Stat(workDir)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		current, ok := index[assignee]
-		if ok && !bead.CreatedAt.After(current.createdAt) {
-			continue
-		}
-		index[assignee] = assignedTaskWorkDir{path: workDir, createdAt: bead.CreatedAt}
-	}
-	return func(candidate startCandidate, cfg *config.City) string {
-		for _, assignee := range taskWorkDirAssignees(candidate, cfg) {
-			if workDir := index[strings.TrimSpace(assignee)].path; workDir != "" {
-				return workDir
-			}
-		}
-		return ""
-	}
 }
 
 // truncateHashForLog returns a short representation of a fingerprint hash
@@ -5559,7 +5469,7 @@ func relaunchAgentForLaunchDrift(
 		return false, nil
 	}
 	// Capture whether the bead already tracked a resumable conversation BEFORE
-	// buildPreparedStart runs. An empty session_key means any key the preparation
+	// buildPreparedStartForCity runs. An empty session_key means any key the preparation
 	// mints below (for a SessionIDFlag provider) is speculative: it names a
 	// conversation the relaunch has not created yet. Such a speculative key must
 	// never be executed as `--resume` and must never survive into the full-restart
@@ -5568,15 +5478,14 @@ func relaunchAgentForLaunchDrift(
 	// execution, and relaunchAbortResidueFold clears the key on every abort path.
 	hadResumeKeyBeforePrepare := strings.TrimSpace(info.SessionKey) != ""
 	// Derive the executable config exactly as the fresh-start / pending-create
-	// recovery paths do. cityPath resolves the session's work_dir against the city;
-	// the nil work-dir resolver is correct because both call sites sit behind the
-	// no-open-assigned-work / not-active deferral guards. Deliberately
-	// buildPreparedStart*, NOT prepareStartCandidateForCity — the session is alive,
+	// recovery paths do. cityPath resolves a relative session worker directory
+	// against the city. Deliberately
+	// buildPreparedStartForCity, NOT prepareStartCandidateForCity — the session is alive,
 	// not waking, so no preWakeCommit / named-template refresh. The SECOND return
 	// value is the fold-coherent Info: every start-prep mutation (stale-resume
 	// clear, session_key / instance_token mint) is folded onto it the moment it
 	// persists, so it is the post-prepare state on the success AND the error return.
-	prepared, preparedInfo, err := buildPreparedStartWithWorkDirResolver(startCandidate{info: info, tp: tp}, cityPath, cfg, store, nil)
+	prepared, preparedInfo, err := buildPreparedStartForCity(startCandidate{info: info, tp: tp}, cityPath, cfg, store)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: preparing relaunch config for %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
@@ -5670,7 +5579,7 @@ func relaunchAgentForLaunchDrift(
 // speculatively-minted resume key from surviving the fallback.
 //
 // When the bead carried no session_key before preparation,
-// buildPreparedStartWithWorkDirResolver minted one (persisting it to the store
+// buildPreparedStartForCity minted one (persisting it to the store
 // via SetMarker) so it could build the relaunch command. That key names a
 // conversation the aborted relaunch never created. Left in place,
 // resetConfiguredNamedSessionForConfigDrift would see a non-empty session_key
@@ -5744,7 +5653,7 @@ func rebaselineLaunchDriftHashesWithBatch(id string, sessFront *sessionpkg.Store
 // subsequent wake (firstStart=false) the fork branch is skipped and the forked
 // child resumes via its own key. wake_mode=fresh still mints a new conversation
 // via SessionIDFlag. Fork preconditions (provider support, parent staleness,
-// wake_mode) are validated upstream in buildPreparedStartWithWorkDirResolver,
+// wake_mode) are validated upstream in buildPreparedStartForCity,
 // which fails loud rather than ever silently degrading a fork to a fresh start.
 func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
 	// forceFresh is part of the fork guard so this branch is self-contained: a

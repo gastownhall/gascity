@@ -299,7 +299,6 @@ type startExecutionOptions struct {
 	asyncTracker                   *asyncStartTracker
 	asyncStopTracker               *asyncStartTracker
 	maxSessionAgeTr                maxSessionAgeTracker
-	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	// deferSessionClosesOnBoot suppresses the per-session orphan/failed-create
@@ -315,8 +314,6 @@ type startExecutionOptions struct {
 }
 
 type startExecutionOption func(*startExecutionOptions)
-
-type taskWorkDirResolver func(startCandidate, *config.City) string
 
 func withAsyncStartExecution() startExecutionOption {
 	return func(opts *startExecutionOptions) {
@@ -353,12 +350,6 @@ func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOpti
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.maxSessionAgeTr = tr
-	}
-}
-
-func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption {
-	return func(opts *startExecutionOptions) {
-		opts.workDirResolver = resolver
 	}
 }
 
@@ -809,7 +800,7 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
 }
 
 func prepareStartCandidateForCity(
@@ -821,7 +812,6 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
-	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
@@ -866,7 +856,7 @@ func prepareStartCandidateForCity(
 	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
-	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	prepared, _, err := buildPreparedStartForCity(candidate, cityPath, cfg, store)
 	return prepared, err
 }
 
@@ -909,10 +899,10 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, sessionpkg.Info, error) {
-	return buildPreparedStartWithWorkDirResolver(candidate, "", cfg, store, nil)
+	return buildPreparedStartForCity(candidate, "", cfg, store)
 }
 
-// buildPreparedStartWithWorkDirResolver builds the prepared start for a candidate,
+// buildPreparedStartForCity builds the prepared start for a candidate,
 // persisting a few start-prep mutations (stale-resume clear, session_key /
 // instance_token mints) through the session front door and folding each onto the
 // local candidate.info the moment it lands. It returns that (possibly partially
@@ -923,12 +913,11 @@ func buildPreparedStart(
 // pendingCreateResidueFold from this store-coherent Info so its infoByID snapshot
 // matches the persisted state (WI-6 R4: the former raw-bead mirror carried this
 // coherence).
-func buildPreparedStartWithWorkDirResolver(
+func buildPreparedStartForCity(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
 	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
@@ -957,7 +946,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// "effort". Apply them after core/live hash calculation because they are
 	// dispatch inputs from the current work bead, not durable session config.
 	// Explicit session template_overrides still win per key.
-	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskOptionOverrideAssignees(candidate, cfg)...)
 	if len(dispatchOptions) > 0 {
 		launchOverrides := make(map[string]string, len(dispatchOptions))
 		for k, v := range dispatchOptions {
@@ -970,16 +959,16 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
-		agentCfg.WorkDir = wd
-	} else if wd := candidate.info.WorkDir; wd != "" {
+	// Process cwd belongs to the session/worker lifecycle contract. Task and
+	// molecule artifact metadata must never redirect the provider process.
+	if wd := sessionpkg.WorkerDirFromInfo(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
 	}
-	// The task work_dir override above can replace agentCfg.WorkDir after
-	// template resolution already rendered PreStart commands (materialize-
-	// skills, MCP projection) against the pre-override directory. Retarget
-	// those already-rendered strings so scaffold staging lands next to the
-	// session it actually launches into, not the directory templating assumed.
+	// Session metadata can replace agentCfg.WorkDir after template resolution
+	// already rendered PreStart commands (materialize-skills, MCP projection)
+	// against the pre-override directory. Retarget those already-rendered
+	// strings so scaffold staging lands next to the session it actually
+	// launches into, not the directory templating assumed.
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
@@ -1233,21 +1222,6 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
-func resolvePreparedTaskWorkDir(
-	candidate startCandidate,
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	workDirResolver taskWorkDirResolver,
-) string {
-	if workDirResolver != nil {
-		if workDir := workDirResolver(candidate, cfg); workDir != "" {
-			return workDir
-		}
-	}
-	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
-}
-
 // generatedPreStartPrefixes are the exact command prefixes
 // appendMaterializeSkillsPreStart and appendProjectMCPPreStart emit. Only a
 // PreStart entry starting with one of these is eligible for retargeting —
@@ -1268,8 +1242,8 @@ func isGeneratedPreStartCommand(cmd string) bool {
 
 // retargetPreStartWorkDir rewrites the engine-generated PreStart command
 // strings rendered against oldWorkDir so they instead reference newWorkDir.
-// A no-op when the task work_dir override left WorkDir unchanged, which is
-// the common case.
+// A no-op when session metadata left WorkDir unchanged, which is the common
+// case.
 //
 // The generated materialize-skills and project-mcp PreStart commands embed the
 // workdir as a shell-quoted token (see appendMaterializeSkillsPreStart and
@@ -1302,7 +1276,7 @@ func retargetPreStartWorkDir(preStart []string, oldWorkDir, newWorkDir string) [
 	return retargeted
 }
 
-func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
+func taskOptionOverrideAssignees(candidate startCandidate, cfg *config.City) []string {
 	if strings.TrimSpace(candidate.info.ID) == "" {
 		return nil
 	}
@@ -2805,7 +2779,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {

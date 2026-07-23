@@ -99,18 +99,6 @@ func (s *failSetMetadataStore) SetMetadata(id, key, value string) error {
 	return s.MemStore.SetMetadata(id, key, value)
 }
 
-type taskWorkDirLiveListCountingStore struct {
-	beads.Store
-	liveInProgressAssigneeLists int
-}
-
-func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Live && query.Status == "in_progress" && query.Assignee != "" {
-		s.liveInProgressAssigneeLists++
-	}
-	return s.Store.List(query)
-}
-
 type panicMetadataBatchStore struct {
 	*beads.MemStore
 }
@@ -717,116 +705,111 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
-func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
-	store := beads.NewMemStore()
-	session, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
-		Metadata: map[string]string{
-			"template":     "worker",
-			"session_name": "custom-worker-1",
-			"pool_slot":    "1",
+func TestPrepareStartCandidate_WorkDirUsesSessionMetadataOnly(t *testing.T) {
+	tests := []struct {
+		name            string
+		sessionMetadata map[string]string
+		taskMetadata    map[string]string
+		wantSource      string
+	}{
+		{
+			name:         "canonical task artifact dir cannot redirect cwd",
+			taskMetadata: map[string]string{"artifact_dir": "task"},
+			wantSource:   "template",
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	workDir := t.TempDir()
-	task, err := store.Create(beads.Bead{
-		Title: "task",
-		Metadata: map[string]string{
-			"work_dir": workDir,
+		{
+			name:         "legacy task work dir cannot redirect cwd",
+			taskMetadata: map[string]string{"work_dir": "task"},
+			wantSource:   "template",
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := "in_progress"
-	assignee := session.ID
-	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
-		t.Fatal(err)
-	}
-	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
-		t.Fatalf("temp workDir not available: %v", err)
+		{
+			name: "canonical session worker dir wins over legacy session alias and task",
+			sessionMetadata: map[string]string{
+				"worker_dir": "canonical-session",
+				"work_dir":   "legacy-session",
+			},
+			taskMetadata: map[string]string{
+				"artifact_dir": "task",
+				"work_dir":     "legacy-task",
+			},
+			wantSource: "canonical-session",
+		},
+		{
+			name:            "legacy session work dir remains a worker alias",
+			sessionMetadata: map[string]string{"work_dir": "legacy-session"},
+			taskMetadata:    map[string]string{"artifact_dir": "task"},
+			wantSource:      "legacy-session",
+		},
 	}
 
-	prepared, err := prepareStartCandidate(startCandidate{
-		info: sessiontest.SeedBead(t, session),
-		tp: TemplateParams{
-			TemplateName: "frontend/worker",
-			SessionName:  "custom-worker-1",
-		},
-		order: 0,
-	}, &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
-		},
-	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
-	if err != nil {
-		t.Fatalf("prepareStartCandidate: %v", err)
-	}
-	if prepared.cfg.WorkDir != workDir {
-		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			templateDir := t.TempDir()
+			taskDir := t.TempDir()
+			canonicalSessionDir := t.TempDir()
+			legacySessionDir := t.TempDir()
+			sourceDirs := map[string]string{
+				"template":          templateDir,
+				"task":              taskDir,
+				"canonical-session": canonicalSessionDir,
+				"legacy-session":    legacySessionDir,
+				"legacy-task":       taskDir,
+			}
 
-func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
-	base := beads.NewMemStore()
-	store := &taskWorkDirLiveListCountingStore{Store: base}
-	session, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
-		Metadata: map[string]string{
-			"template":     "worker",
-			"session_name": "custom-worker-1",
-			"pool_slot":    "1",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	workDir := t.TempDir()
-	task, err := store.Create(beads.Bead{
-		Title: "task",
-		Metadata: map[string]string{
-			"work_dir": workDir,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := "in_progress"
-	assignee := session.ID
-	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
-		t.Fatal(err)
-	}
-	task, err = store.Get(task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+			store := beads.NewMemStore()
+			sessionMetadata := map[string]string{
+				"template":     "worker",
+				"session_name": "custom-worker-1",
+				"pool_slot":    "1",
+			}
+			for key, source := range tc.sessionMetadata {
+				sessionMetadata[key] = sourceDirs[source]
+			}
+			session, err := store.Create(beads.Bead{
+				Title:    "worker",
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel, "agent:frontend/worker-1"},
+				Metadata: sessionMetadata,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
-		info: sessiontest.SeedBead(t, session),
-		tp: TemplateParams{
-			TemplateName: "frontend/worker",
-			SessionName:  "custom-worker-1",
-		},
-		order: 0,
-	}, "", "", &config.City{
-		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
-		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}))
-	if err != nil {
-		t.Fatalf("prepareStartCandidateForCity: %v", err)
-	}
-	if prepared.cfg.WorkDir != workDir {
-		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
-	}
-	if store.liveInProgressAssigneeLists != 0 {
-		t.Fatalf("live in-progress assignee List calls = %d, want 0 with snapshot resolver", store.liveInProgressAssigneeLists)
+			taskMetadata := make(map[string]string, len(tc.taskMetadata))
+			for key, source := range tc.taskMetadata {
+				taskMetadata[key] = sourceDirs[source]
+			}
+			task, err := store.Create(beads.Bead{Title: "task", Metadata: taskMetadata})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := "in_progress"
+			assignee := session.ID
+			if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+				t.Fatal(err)
+			}
+
+			prepared, err := prepareStartCandidate(startCandidate{
+				info: sessiontest.SeedBead(t, session),
+				tp: TemplateParams{
+					TemplateName: "frontend/worker",
+					SessionName:  "custom-worker-1",
+					WorkDir:      templateDir,
+				},
+				order: 0,
+			}, &config.City{
+				Agents: []config.Agent{{
+					Name: "worker",
+					Dir:  "frontend",
+				}},
+			}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+			if err != nil {
+				t.Fatalf("prepareStartCandidate: %v", err)
+			}
+			if want := sourceDirs[tc.wantSource]; prepared.cfg.WorkDir != want {
+				t.Fatalf("prepared.cfg.WorkDir = %q, want %s dir %q", prepared.cfg.WorkDir, tc.wantSource, want)
+			}
+		})
 	}
 }
 

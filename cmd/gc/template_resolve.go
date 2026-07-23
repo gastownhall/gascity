@@ -818,7 +818,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // promptDelivery result it computed. The launch path (buildPreparedStart) needs
 // the Delivered decision to stamp the S19 priming markers, but it must NOT infer
 // delivery from cfg.Env[GC_STARTUP_PROMPT_DELIVERED]: the resume override in
-// buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
+// buildPreparedStartForCity re-sets that env marker to "1" for hook
 // consumption even when nothing is delivered that incarnation. Threading the
 // result avoids that trap. templateParamsToConfig is the wrapper that discards
 // the second value; all other call sites are unchanged.

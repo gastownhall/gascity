@@ -11,9 +11,8 @@ import (
 //
 // The legacy `work_dir` key was overloaded: it meant "agent process cwd"
 // when written on session beads and "work artifact directory" when
-// written on task/molecule beads. resolveTaskWorkDir in
-// cmd/gc/session_reconciler.go silently bridged the two semantics. The
-// new keys split the meaning:
+// written on task/molecule beads. The former reconciler task-work-dir lookup
+// silently bridged the two semantics. The new keys split the meaning:
 //
 //	WorkerDirKey ("worker_dir")     — agent process cwd. Session beads.
 //	ArtifactDirKey ("artifact_dir") — work artifact directory.
