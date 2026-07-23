@@ -20,6 +20,7 @@ import (
 // without standing up real git worktrees.
 type gitProbe interface {
 	IsRepo() bool
+	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
@@ -56,7 +57,35 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return false
 	}
-	workerDir := strings.TrimSpace(contract.WorkerDirFromMetadata(session.Metadata))
+	return pruneWorkerDirIfSafe(
+		strings.TrimSpace(contract.WorkerDirFromMetadata(session.Metadata)),
+		lookupRigRootForSession(session, cfg),
+		session.Metadata["session_name"],
+		cityPath,
+		stderr,
+	)
+}
+
+// pruneAgentHomeWorktreeIfSafeInfo is the session.Info form of
+// pruneAgentHomeWorktreeIfSafe. Both metadata projections route through the
+// same safety implementation so a new fail-closed gate cannot accidentally be
+// added to only one reconciliation path.
+func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
+	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		return
+	}
+	pruneWorkerDirIfSafe(
+		strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info)),
+		lookupRigRootForSessionInfo(info, cfg),
+		info.SessionNameMetadata,
+		cityPath,
+		stderr,
+	)
+}
+
+// pruneWorkerDirIfSafe applies the common fail-closed worktree safety gates
+// used by both raw-bead and typed-session reconciliation paths.
+func pruneWorkerDirIfSafe(workerDir, rigRoot, sessionName, cityPath string, stderr io.Writer) bool {
 	if workerDir == "" {
 		return false
 	}
@@ -77,6 +106,17 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	gp := newGitProbe(workerDir)
 	if !gp.IsRepo() {
 		return false
+	}
+	worktrees, err := gp.WorktreeList()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: descendant worktree probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return false
+	}
+	for _, wt := range worktrees {
+		if pathutil.PathWithin(workerDir, wt.Path) && !pathutil.SamePath(workerDir, wt.Path) {
+			fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: contains registered descendant worktree %s\n", workerDir, wt.Path) //nolint:errcheck
+			return false
+		}
 	}
 	if gp.HasUncommittedWork() {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
@@ -105,7 +145,6 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	// worktree being removed: git refuses to remove a worktree whose path
 	// equals cwd in some configurations, and operating from cwd of a
 	// directory we are about to delete is fragile in general.
-	rigRoot := lookupRigRootForSession(session, cfg)
 	if rigRoot == "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
 		return false
@@ -114,75 +153,8 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return false
 	}
-	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, session.Metadata["session_name"]) //nolint:errcheck
+	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, sessionName) //nolint:errcheck
 	return true
-}
-
-// pruneAgentHomeWorktreeIfSafeInfo is the session.Info form of
-// pruneAgentHomeWorktreeIfSafe: the worker_dir read routes through
-// session.WorkerDirFromInfo (the canonical→legacy Info fallback equivalent to
-// contract.WorkerDirFromMetadata), the rig-root lookup reads Info.Template via
-// lookupRigRootForSessionInfo, and the log line reads Info.SessionNameMetadata —
-// every safety gate and the removal itself are unchanged. Byte-identical to the
-// raw form, which survives for its test callers.
-func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
-	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
-		return
-	}
-	workerDir := strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info))
-	if workerDir == "" {
-		return
-	}
-	if !filepath.IsAbs(workerDir) {
-		return
-	}
-
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
-	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
-		return
-	}
-
-	if _, err := os.Stat(filepath.Join(workerDir, ".git")); err != nil {
-		return
-	}
-
-	gp := newGitProbe(workerDir)
-	if !gp.IsRepo() {
-		return
-	}
-	if gp.HasUncommittedWork() {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
-		return
-	}
-	hasUnpushed, err := gp.HasUnpushedCommitsResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasUnpushed {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
-		return
-	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		return
-	}
-
-	rigRoot := lookupRigRootForSessionInfo(info, cfg)
-	if rigRoot == "" {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
-		return
-	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck
 }
 
 // lookupRigRootForSession returns the filesystem path of the rig that owns

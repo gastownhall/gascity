@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
@@ -17,19 +18,24 @@ import (
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted.
 type fakeGitProbe struct {
-	isRepo         bool
-	hasUncommitted bool
-	hasUnpushed    bool
-	unpushedErr    error
-	hasStashes     bool
-	stashesErr     error
-	worktreeRemove func(path string, force bool) error
-	removedPath    string
-	removedForce   bool
-	removeInvoked  bool
+	isRepo          bool
+	hasUncommitted  bool
+	hasUnpushed     bool
+	unpushedErr     error
+	hasStashes      bool
+	stashesErr      error
+	worktrees       []git.Worktree
+	worktreeListErr error
+	worktreeRemove  func(path string, force bool) error
+	removedPath     string
+	removedForce    bool
+	removeInvoked   bool
 }
 
-func (f *fakeGitProbe) IsRepo() bool             { return f.isRepo }
+func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
+func (f *fakeGitProbe) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeListErr
+}
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
@@ -231,6 +237,83 @@ func TestPruneAgentHomeWorktreeIfSafe_NotARepo(t *testing.T) {
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
 		t.Fatal("prune returned true when IsRepo=false")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_RegisteredDescendantWorktree(t *testing.T) {
+	fx := newPruneFixture(t)
+	nested := filepath.Join(fx.workerDir, "worktrees", "task-1")
+	fx.setProbe(fx.workerDir, &fakeGitProbe{
+		isRepo: true,
+		worktrees: []git.Worktree{
+			{Path: fx.workerDir},
+			{Path: nested},
+		},
+	})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true with a registered descendant worktree")
+	}
+	if !strings.Contains(stderr.String(), "contains registered descendant worktree") {
+		t.Errorf("expected descendant-worktree reason; got %q", stderr.String())
+	}
+	if rigProbe := fx.probesByWD[fx.rigRoot]; rigProbe != nil && rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called despite registered descendant worktree")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_DescendantProbeError(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{
+		isRepo:          true,
+		worktreeListErr: errors.New("cannot list worktrees"),
+	})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true after descendant worktree probe error")
+	}
+	if !strings.Contains(stderr.String(), "descendant worktree probe failed") {
+		t.Errorf("expected descendant-probe reason; got %q", stderr.String())
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_RegisteredDescendantWorktree(t *testing.T) {
+	fx := newPruneFixture(t)
+	nested := filepath.Join(fx.workerDir, "worktrees", "task-1")
+	fx.setProbe(fx.workerDir, &fakeGitProbe{
+		isRepo: true,
+		worktrees: []git.Worktree{
+			{Path: fx.workerDir},
+			{Path: nested},
+		},
+	})
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(seedSessionInfo(fx.sessionBead()), fx.cityPath, fx.cfg, &stderr)
+	if !strings.Contains(stderr.String(), "contains registered descendant worktree") {
+		t.Errorf("expected typed path to enforce descendant-worktree gate; got %q", stderr.String())
+	}
+	if rigProbe := fx.probesByWD[fx.rigRoot]; rigProbe != nil && rigProbe.removeInvoked {
+		t.Fatal("typed path called WorktreeRemove despite registered descendant worktree")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_DescendantProbeError(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{
+		isRepo:          true,
+		worktreeListErr: errors.New("cannot list worktrees"),
+	})
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(seedSessionInfo(fx.sessionBead()), fx.cityPath, fx.cfg, &stderr)
+	if !strings.Contains(stderr.String(), "descendant worktree probe failed") {
+		t.Errorf("expected typed path to fail closed after descendant probe error; got %q", stderr.String())
+	}
+	if rigProbe := fx.probesByWD[fx.rigRoot]; rigProbe != nil && rigProbe.removeInvoked {
+		t.Fatal("typed path called WorktreeRemove after descendant probe error")
 	}
 }
 
