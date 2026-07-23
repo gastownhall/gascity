@@ -11,13 +11,13 @@ import (
 // gate ("database project_id could not be confirmed") rejects it and gc falls
 // back to the bd subprocess path.
 func TestResolveStoreScopeRootResolvesSymlinks(t *testing.T) {
-	real := t.TempDir()
+	realDir := t.TempDir()
 	link := filepath.Join(t.TempDir(), "city-link")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(realDir, link); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	got := resolveStoreScopeRoot(link, "")
-	want := resolveStoreScopeRoot(real, "")
+	want := resolveStoreScopeRoot(realDir, "")
 	if got != want {
 		t.Fatalf("symlinked city path produced different scope root:\n  link: %s\n  real: %s", got, want)
 	}
