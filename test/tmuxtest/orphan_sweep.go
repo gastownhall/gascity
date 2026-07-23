@@ -2,6 +2,7 @@ package tmuxtest
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -123,8 +124,12 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 // HoldAliveSentinel; legacy pre-sweep names with no "-" after the PID are
 // rejected by pidFromPrefixedDirName and never swept here. Dirs younger than
 // socketParentSweepMinAge are never touched, covering the window before a
-// sibling run's sentinel exists.
-func SweepOrphanPIDPrefixedDirs(root, prefix string) {
+// sibling run's sentinel exists. Each removal is described on diagnostics;
+// callers that do not surface cleanup logs should pass io.Discard.
+func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
+	if diagnostics == nil {
+		diagnostics = io.Discard
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
@@ -165,7 +170,7 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string) {
 		}
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.
-		fmt.Fprintf(os.Stderr, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
+		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
 		_ = os.RemoveAll(path)
 	}
 }
@@ -175,9 +180,10 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string) {
 // fresh one plus the *os.File holding its alive sentinel. The caller must
 // keep the returned file referenced for as long as dir must stay protected
 // from a concurrent sibling's sweep -- the runtime finalizes unreachable
-// os.Files, which releases the flock.
-func NewSocketParentDir(root string) (dir string, sentinel *os.File, err error) {
-	SweepOrphanPIDPrefixedDirs(root, SocketParentDirPrefix)
+// os.Files, which releases the flock. Sweep removal messages are written to
+// diagnostics.
+func NewSocketParentDir(root string, diagnostics io.Writer) (dir string, sentinel *os.File, err error) {
+	SweepOrphanPIDPrefixedDirs(root, SocketParentDirPrefix, diagnostics)
 	dir, err = os.MkdirTemp(root, PIDPrefixedTempPattern(SocketParentDirPrefix))
 	if err != nil {
 		return "", nil, err

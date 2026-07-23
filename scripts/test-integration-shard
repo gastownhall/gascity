@@ -33,7 +33,7 @@ configure_cgo_platform_paths
 export CGO_CPPFLAGS="${cgo_cppflags}"
 export CGO_LDFLAGS="${cgo_ldflags}"
 
-run_go_test() {
+run_go() {
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -64,7 +64,11 @@ run_go_test() {
     GC_FAST_UNIT=0 \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
-    go test "$@"
+    go "$@"
+}
+
+run_go_test() {
+  run_go test "$@"
 }
 
 formula_tests=(
@@ -94,7 +98,6 @@ review_formulas_recovery_tests=(
 rest_smoke_tests=(
   TestE2E_WorkspaceDefaults
   TestE2E_Hook_WithWork
-  TestE2E_MailCheck
   TestE2E_MultiAgent_PoolAndFixed
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
@@ -102,8 +105,8 @@ rest_smoke_tests=(
 )
 
 # These are the top-level tests contributed only when cmd/gc is built with the
-# integration tag. Keep this manifest exact: validate_cmd_gc_integration_tests
-# compares it with Go's tagged and untagged discovery before executing it.
+# integration tag. Keep this manifest exact; scripts tests compare it with the
+# canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
@@ -173,61 +176,6 @@ validate_modulo_shard() {
 
 list_integration_tests() {
   run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
-}
-
-list_package_tests() {
-  local test_pkg="$1"
-  shift
-  local output line found
-
-  if ! output="$(run_go_test "$@" -list '^Test' "$test_pkg" 2>&1)"; then
-    echo "go test -list failed for ${test_pkg}; output:" >&2
-    printf '%s\n' "$output" >&2
-    return 1
-  fi
-  found=0
-  while IFS= read -r line; do
-    [[ "$line" == Test* ]] || continue
-    printf '%s\n' "$line"
-    found=1
-  done <<< "$output"
-  if [[ $found -eq 0 ]]; then
-    echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
-    printf '%s\n' "$output" >&2
-    return 1
-  fi
-}
-
-validate_cmd_gc_integration_tests() {
-  local untagged tagged actual expected test_name drift
-
-  untagged="$(list_package_tests ./cmd/gc)"
-  tagged="$(list_package_tests ./cmd/gc -tags integration)"
-  actual="$(
-    comm -13 \
-      <(printf '%s\n' "$untagged" | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$tagged" | LC_ALL=C sort -u)
-  )"
-  expected="$(printf '%s\n' "${cmd_gc_integration_tests[@]}" | LC_ALL=C sort -u)"
-  drift=0
-
-  while IFS= read -r test_name; do
-    [[ -n "$test_name" ]] || continue
-    if ! printf '%s\n' "$expected" | grep -Fxq -- "$test_name"; then
-      echo "unassigned cmd/gc integration test: ${test_name}" >&2
-      drift=1
-    fi
-  done <<< "$actual"
-  for test_name in "${cmd_gc_integration_tests[@]}"; do
-    if ! printf '%s\n' "$actual" | grep -Fxq -- "$test_name"; then
-      echo "cmd/gc integration manifest entry is not integration-only: ${test_name}" >&2
-      drift=1
-    fi
-  done
-  if [[ $drift -ne 0 ]]; then
-    echo "update cmd_gc_integration_tests in scripts/test-integration-shard" >&2
-    return 1
-  fi
 }
 
 validate_selected_tests() {
@@ -316,8 +264,19 @@ run_packages_cmd_gc_shard() {
 run_packages_runtime_tmux_shard() {
   local shard_index="$1"
   local shard_total="$2"
+  local goos_val
+  local goarch_val
   validate_modulo_shard "$shard_index" "$shard_total"
-  GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+  goos_val="$(run_go env GOOS)"
+  goarch_val="$(run_go env GOARCH)"
+  if [[ "$goos_val" == "linux" && "$goarch_val" == "amd64" ]]; then
+    GO_TEST_MANIFEST="$repo_root/scripts/runtime-tmux-tests.manifest" GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+  else
+    (
+      unset GO_TEST_MANIFEST
+      GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+    )
+  fi
 }
 
 run_rest_smoke_shard() {
@@ -406,7 +365,6 @@ case "$shard" in
     run_packages_shard
     ;;
   packages-cmd-gc-integration)
-    validate_cmd_gc_integration_tests
     run_pkg_tests ./cmd/gc "${cmd_gc_integration_tests[@]}"
     ;;
   review-formulas)

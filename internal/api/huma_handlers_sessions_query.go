@@ -230,7 +230,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 					Template:   info.Template,
 					Provider:   info.Provider,
 					Format:     "raw",
-					Messages:   wrapRawFrameBytes(transcript.RawMessages),
+					Messages:   rawMessagesField(wrapRawFrameBytes(transcript.RawMessages)),
 					Pagination: transcript.Session.Pagination,
 				},
 			}, nil
@@ -282,7 +282,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 				Template: info.Template,
 				Provider: info.Provider,
 				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
+				Messages: rawMessagesField(nil),
 			},
 		}, nil
 	}

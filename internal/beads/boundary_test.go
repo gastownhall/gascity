@@ -16,43 +16,31 @@ func repoRoot() string {
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
-// TestNoBdExecOutsideBeads enforces the architectural invariant that all bd
-// subprocess calls must live in internal/beads/. This prevents coupling sprawl
-// and ensures all bd interactions go through the BdStore abstraction.
-//
-// Two categories of violations:
-//  1. exec.Command("bd"...) or exec.CommandContext(..."bd"...) — direct subprocess calls
-//  2. Variable assignments building bd command strings for shell execution
-//     (e.g., cmd := "bd mol cook ...")
-//
-// Not violations (allowed):
-//   - internal/beads/ — that's where bd calls belong
-//   - test/integration/ — integration tests may use real bd for setup
-//   - Config defaults returning bd command templates (WorkQuery, SlingQuery)
-//     and command-name token consts (bdReadyOracleCommand = "bd ready")
-//   - Test fixture data (map keys, runner output, assertions)
-//   - Binary existence checks (LookPath)
-//   - Provider comparisons (== "bd", != "bd")
-func TestNoBdExecOutsideBeads(t *testing.T) {
-	root := repoRoot()
+// bdExecAllowedDirs lists directories where bd calls are allowed.
+var bdExecAllowedDirs = []string{
+	filepath.Join("internal", "beads") + string(filepath.Separator),
+	filepath.Join("internal", "deps") + string(filepath.Separator),   // version checks only (bd version)
+	filepath.Join("internal", "doctor") + string(filepath.Separator), // health checks query bd config directly
+	filepath.Join("internal", "dolt") + string(filepath.Separator),   // upstream-synced from gastown
+	// env.ledger conformance probe execs `bd ready` INSIDE the provisioned
+	// box (via the runtime exec op), to verify the session's bd can reach the
+	// work ledger — a box-side capability probe, not a gc-side bd subprocess.
+	filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
+	filepath.Join("test", "integration") + string(filepath.Separator),
+	// dashboard BFF runs read-only `bd doctor` health probes against
+	// arbitrary per-rig .beads stores (supervisor-reported paths). This is
+	// the same direct-bd usage the retired cmd/gc/dashboard server had.
+	filepath.Join("internal", "api", "dashboardbff") + string(filepath.Separator),
+}
 
-	// Directories where bd calls are allowed.
-	allowedDirs := []string{
-		filepath.Join("internal", "beads") + string(filepath.Separator),
-		filepath.Join("internal", "deps") + string(filepath.Separator),   // version checks only (bd version)
-		filepath.Join("internal", "doctor") + string(filepath.Separator), // health checks query bd config directly
-		filepath.Join("internal", "dolt") + string(filepath.Separator),   // upstream-synced from gastown
-		// env.ledger conformance probe execs `bd ready` INSIDE the provisioned
-		// box (via the runtime exec op), to verify the session's bd can reach the
-		// work ledger — a box-side capability probe, not a gc-side bd subprocess.
-		filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
-		filepath.Join("test", "integration") + string(filepath.Separator),
-		// dashboard BFF runs read-only `bd doctor` health probes against
-		// arbitrary per-rig .beads stores (supervisor-reported paths). This is
-		// the same direct-bd usage the retired cmd/gc/dashboard server had.
-		filepath.Join("internal", "api", "dashboardbff") + string(filepath.Separator),
-	}
-
+// findBdExecViolations walks root looking for bd subprocess calls outside
+// bdExecAllowedDirs. It skips vendored/cache directories, including any
+// nested Go module (a directory other than root that owns its own go.mod) —
+// an in-tree GOMODCACHE, the canonical layout on CI systems that require
+// caches to live inside the checkout, otherwise gets walked as if it were
+// first-party source and flags third-party (or bd's own vendored) sources
+// as violations (#4480).
+func findBdExecViolations(root string) ([]string, error) {
 	var violations []string
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -68,6 +56,14 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
 				return filepath.SkipDir
 			}
+			// Skip nested Go modules: any directory other than root that owns
+			// its own go.mod is a separate module's source tree (a module-cache
+			// entry), not part of this repo.
+			if path != root {
+				if _, serr := os.Stat(filepath.Join(path, "go.mod")); serr == nil {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
@@ -78,7 +74,7 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, dir := range allowedDirs {
+		for _, dir := range bdExecAllowedDirs {
 			if strings.HasPrefix(rel, dir) {
 				return nil
 			}
@@ -127,6 +123,28 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 		}
 		return scanner.Err()
 	})
+	return violations, err
+}
+
+// TestNoBdExecOutsideBeads enforces the architectural invariant that all bd
+// subprocess calls must live in internal/beads/. This prevents coupling sprawl
+// and ensures all bd interactions go through the BdStore abstraction.
+//
+// Two categories of violations:
+//  1. exec.Command("bd"...) or exec.CommandContext(..."bd"...) — direct subprocess calls
+//  2. Variable assignments building bd command strings for shell execution
+//     (e.g., cmd := "bd mol cook ...")
+//
+// Not violations (allowed):
+//   - internal/beads/ — that's where bd calls belong
+//   - test/integration/ — integration tests may use real bd for setup
+//   - Config defaults returning bd command templates (WorkQuery, SlingQuery)
+//     and command-name token consts (bdReadyOracleCommand = "bd ready")
+//   - Test fixture data (map keys, runner output, assertions)
+//   - Binary existence checks (LookPath)
+//   - Provider comparisons (== "bd", != "bd")
+func TestNoBdExecOutsideBeads(t *testing.T) {
+	violations, err := findBdExecViolations(repoRoot())
 	if err != nil {
 		t.Fatalf("walking repo: %v", err)
 	}
@@ -138,6 +156,52 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 			t.Errorf("  %s", v)
 		}
 		t.Error("Move these calls to internal/beads/bdstore.go behind the BdStore abstraction.")
+	}
+}
+
+// TestFindBdExecViolationsSkipsNestedGoModules pins the fix for #4480: an
+// in-tree GOMODCACHE (the canonical CI layout when cache paths must live
+// inside the checkout) previously got walked like first-party source,
+// flagging third-party — or even bd's own vendored — sources as violations.
+// A directory that owns its own go.mod is a separate module's source tree
+// and must be skipped, while a real violation living directly in the
+// checkout must still be caught.
+func TestFindBdExecViolationsSkipsNestedGoModules(t *testing.T) {
+	root := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(root, "go.mod"), "module example.com/fixture\n")
+
+	// A real violation, directly in the checkout, outside any allowed dir.
+	mustWriteFile(t, filepath.Join(root, "cmd", "gc", "example.go"),
+		"package main\n\nfunc run() { exec.Command(\"bd\", \"prime\") }\n")
+
+	// A nested module (module-cache-shaped): its own go.mod plus a source
+	// file containing the exact same call pattern. Must be skipped entirely.
+	nestedModule := filepath.Join(root, ".cache", "go-mod", "github.com", "steveyegge", "beads@v1.1.0")
+	mustWriteFile(t, filepath.Join(nestedModule, "go.mod"), "module github.com/steveyegge/beads\n")
+	mustWriteFile(t, filepath.Join(nestedModule, "cmd", "bd", "doctor", "claude.go"),
+		"package doctor\n\nfunc run() { exec.Command(\"bd\", \"prime\") }\n")
+
+	violations, err := findBdExecViolations(root)
+	if err != nil {
+		t.Fatalf("findBdExecViolations: %v", err)
+	}
+
+	if len(violations) != 1 {
+		t.Fatalf("violations = %v, want exactly 1 (the real violation, nested module skipped)", violations)
+	}
+	if !strings.Contains(violations[0], filepath.Join("cmd", "gc", "example.go")) {
+		t.Fatalf("violations[0] = %q, want the cmd/gc/example.go violation", violations[0])
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
 

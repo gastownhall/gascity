@@ -1007,12 +1007,18 @@ exit 0
 		t.Fatal(err)
 	}
 	setScopedBeadsProviderForTest(t, cityPath, "exec:"+script)
+	publishedState := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	for _, path := range []string{providerState, publishedState} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("runtime state %s should be absent before provider start, stat err = %v", path, err)
+		}
+	}
 
 	if err := ensureBeadsProvider(cityPath); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)
 	}
 
-	published, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
+	published, err := os.ReadFile(publishedState)
 	if err != nil {
 		t.Fatalf("ReadFile(dolt-state.json): %v", err)
 	}
@@ -6992,6 +6998,7 @@ func TestGcBeadsBdInitRetriesPlainInitWhenSchemaStillMissingAfterSuccess(t *test
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
 
 	initCountFile := filepath.Join(t.TempDir(), "bd-init-count")
 	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
@@ -7138,6 +7145,7 @@ func TestGcBeadsBdInitDropsMetadataBeforeRetryingInitAfterForcedFallback(t *test
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
 
 	initCountFile := filepath.Join(t.TempDir(), "bd-init-count")
 	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
@@ -10318,81 +10326,6 @@ func TestStartBeadsLifecycleRegistersAutoGCOnlyDoltConfig(t *testing.T) {
 	}
 	if got := env["GC_DOLT_AUTO_GC_ENABLED"]; got != "false" {
 		t.Fatalf("GC_DOLT_AUTO_GC_ENABLED = %q, want false", got)
-	}
-}
-
-func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing.T) {
-	// The post-init Dolt catalog verifier needs a real MySQL-speaking
-	// server. This test wires only a bare TCP listener as the "managed
-	// Dolt port", which is enough for the rest of the lifecycle but not
-	// for SHOW DATABASES. Stub the verifier — coverage for the verifier
-	// itself lives in focused unit tests below; this lifecycle test only
-	// needs to prove startup does not require pre-existing runtime state.
-	originalVerifier := verifyManagedDoltDatabaseExistsAfterInit
-	verifyManagedDoltDatabaseExistsAfterInit = func(_, _, _ string) error { return nil }
-	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = originalVerifier })
-
-	cityPath := t.TempDir()
-	rigPath := filepath.Join(cityPath, "rig")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	callLog := filepath.Join(cityPath, "op-calls.log")
-	providerState := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-provider-state.json")
-	ln := listenOnRandomPort(t)
-	defer func() { _ = ln.Close() }()
-	port := ln.Addr().(*net.TCPAddr).Port
-	scriptBody := fmt.Sprintf(`#!/bin/sh
-echo "$@" >> %q
-if [ "$1" = "start" ]; then
-  mkdir -p "$(dirname %q)"
-	  cat > %q <<'JSON'
-	{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-14T00:00:00Z"}
-	JSON
-	fi
-if [ "$1" = "init" ]; then
-  mkdir -p "$2/.beads"
-fi
-exit 0
-	`, callLog, providerState, providerState, os.Getpid(), port, filepath.Join(cityPath, ".beads", "dolt"))
-	script := writeManagedBdTestScript(t, scriptBody)
-	writeExecStoreCityConfig(t, cityPath, "test-city", "", []config.Rig{{Name: "rig", Path: rigPath, Prefix: "rg"}})
-	seedDeferredManagedBeads(cityPath, cityPath, "tc", "hq")
-	seedDeferredManagedBeads(cityPath, rigPath, "rg", "rg")
-	if err := writeDoltRuntimeStateFile(providerState, doltRuntimeState{
-		Running:   true,
-		PID:       os.Getpid(),
-		Port:      port,
-		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Rigs:      []config.Rig{{Name: "rig", Path: rigPath, Prefix: "rg"}},
-	}
-
-	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
-		t.Fatalf("startBeadsLifecycle: %v", err)
-	}
-
-	data, err := os.ReadFile(callLog)
-	if err != nil {
-		t.Fatalf("reading call log: %v", err)
-	}
-	ops := string(data)
-	for _, needle := range []string{
-		"start",
-		"init " + cityPath + " tc hq",
-		"init " + rigPath + " rg rg",
-	} {
-		if !strings.Contains(ops, needle) {
-			t.Fatalf("call log missing %q:\n%s", needle, ops)
-		}
 	}
 }
 

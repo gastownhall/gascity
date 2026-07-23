@@ -2213,6 +2213,65 @@ func assertQueuedMailNudgeMessage(t *testing.T, cityPath, sessionID, message, st
 	}
 }
 
+func TestMailCommandsRejectMissingIDBeforeProviderCall(t *testing.T) {
+	tests := []struct {
+		name       string
+		run        func(stdout, stderr *bytes.Buffer) int
+		wantStderr string
+	}{
+		{
+			name: "reply",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdMailReply(nil, "", "", false, stdout, stderr)
+			},
+			wantStderr: "gc mail reply: missing message ID\n",
+		},
+		{
+			name: "mark-read",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailMarkRead(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail mark-read: missing message ID\n",
+		},
+		{
+			name: "mark-unread",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailMarkUnread(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail mark-unread: missing message ID\n",
+		},
+		{
+			name: "delete",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailDelete(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail delete: missing message ID\n",
+		},
+		{
+			name: "thread",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailThread(countOnlyMailProvider{}, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail thread: missing thread or message ID\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := tt.run(&stdout, &stderr); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+			if got := stderr.String(); got != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tt.wantStderr)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
 // --- gc mail mark-read / mark-unread ---
 
 func TestMailMarkReadSuccess(t *testing.T) {
@@ -2260,6 +2319,22 @@ func TestMailDeleteSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Deleted message gc-1") {
 		t.Errorf("stdout = %q, want deletion confirmation", stdout.String())
+	}
+}
+
+func TestMailDeleteNonexistentIDIsIdempotent(t *testing.T) {
+	mp := beadmail.New(beads.NewMemStore())
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{"no-such-msg-xyz"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("stderr = %q, want empty", got)
+	}
+	if got, want := stdout.String(), "Already deleted no-such-msg-xyz\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 

@@ -739,11 +739,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
 		warmupCityPath = absCityPath
 	}
+	skipRigDoltChecks := gcDoltSkip()
 	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
 		Stderr:               io.Discard,
 		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
-		SkipCityDoltCheck:    gcDoltSkip() || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
 	})
 	warmupOpts := warmup.WarmupOpts{
 		Checks: warmupChecks,

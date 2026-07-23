@@ -146,6 +146,7 @@ jobs:
               - '**/*.go'
               - 'scripts/test-integration-shard'
               - 'scripts/test-go-test-shard'
+              - 'scripts/runtime-tmux-tests.manifest'
               - 'scripts/go-test-observable'
               - 'examples/gastown/**'
             openclaw_bridge:
@@ -983,9 +984,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1021,9 +1020,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1059,9 +1056,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1288,15 +1283,33 @@ jobs:
       # @playwright/test version (from the lockfile-pinned install above). A cache
       # hit skips the ~150 MB Chromium download; --with-deps in the install step
       # below still runs (system libs aren't cached), so a hit is safe.
-      - name: Cache Playwright browsers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # Restore/save are split (rather than the combined actions/cache) so the
+      # save step can run with if: always() — a completed download still gets
+      # cached even if a later step in this job fails.
+      - name: Restore Playwright browsers cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright Chromium
-        run: npm run test:e2e:install:ci
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2 3; do
+            if npm run test:e2e:install:ci; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
         working-directory: internal/api/dashboardspa/web/frontend
-        timeout-minutes: 5
+      - name: Save Playwright browsers cache
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
       - name: Playwright render smoke (Layer B)
         run: npm run test:e2e
         working-directory: internal/api/dashboardspa/web/frontend
