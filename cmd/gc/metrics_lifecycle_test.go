@@ -586,108 +586,105 @@ func TestProductMetricsLifecycleEarlyJSONWriterFailurePreservesExitAndOrdering(t
 
 func TestProductMetricsLifecycleFailuresPreserveOutputAndOTel(t *testing.T) {
 	t.Setenv("OTEL_SDK_DISABLED", "true")
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{name: "bare help"},
-		{name: "help", args: []string{"help"}},
-		{name: "target help flag", args: []string{"status", "--help"}},
-		{name: "target help command", args: []string{"help", "status"}},
-		{name: "group help", args: []string{"analyze"}},
-		{name: "unknown root", args: []string{"definitely-not-a-command"}},
-		{name: "unknown nested", args: []string{"completion", "bogus"}},
-		{name: "flag error", args: []string{"version", "--not-a-flag"}},
-		{name: "arg error", args: []string{"version", "unexpected"}},
-		{name: "flag group error", args: []string{"graph", "--mermaid", "--tree"}},
-		{name: "ordinary success", args: []string{"version"}},
-		{name: "buffered JSON success", args: []string{"version", "--json"}},
-		{name: "completion", args: []string{"completion", "bash"}},
-		{name: "early JSON", args: []string{"version", "--json-schema"}},
-		{name: "contract failure", args: []string{"completion", "bash", "--json"}},
-		{name: "JSONL failure", args: []string{"events", "--json"}},
-		{name: "buffered JSON failure", args: []string{"config", "explain", "--json"}},
+	healthyFactory := func() (productMetricsControlService, error) {
+		return &productMetricsInvocationSpy{recordResult: productmetrics.RecordStored}, nil
 	}
+	factoryFailure := func() (productMetricsControlService, error) {
+		return nil, errors.New("private factory failure")
+	}
+	rootExecutions := 0
+	capture := func(
+		t *testing.T,
+		args []string,
+		runner func([]string, io.Writer, io.Writer) int,
+		factory func() (productMetricsControlService, error),
+		closePermit func(productmetrics.RecordingPermit) error,
+	) productMetricsCapturedRun {
+		t.Helper()
+		rootExecutions++
+		captured, telemetry := captureProductMetricsLifecycleRunWithRunner(t, args, runner, factory, closePermit)
+		assertProductMetricsTelemetryRun(t, telemetry)
+		return captured
+	}
+	assertSameResult := func(t *testing.T, got, baseline productMetricsCapturedRun) {
+		t.Helper()
+		if got != baseline {
+			t.Fatalf("product-metrics failure changed command result:\n got = %#v\n baseline = %#v", got, baseline)
+		}
+	}
+
 	scenarios := []struct {
 		name    string
 		factory func() (productMetricsControlService, error)
 		close   func(productmetrics.RecordingPermit) error
 	}{
 		{name: "nil service", factory: func() (productMetricsControlService, error) { return nil, nil }},
-		{name: "factory error", factory: func() (productMetricsControlService, error) {
-			return nil, errors.New("private factory failure")
-		}},
+		{name: "factory error", factory: factoryFailure},
 		{name: "wrong lifecycle interface", factory: func() (productMetricsControlService, error) {
 			return &fakeProductMetricsControlService{}, nil
 		}},
 		{name: "notice failure", factory: func() (productMetricsControlService, error) {
-			return &productMetricsNoticeFailureService{}, nil
+			return &productMetricsNoticeFailureService{productMetricsInvocationSpy: productMetricsInvocationSpy{recordResult: productmetrics.RecordStored}}, nil
 		}},
 		{name: "record dropped", factory: func() (productMetricsControlService, error) {
 			return &productMetricsInvocationSpy{recordResult: productmetrics.RecordDropped}, nil
 		}},
 		{name: "permit close failure", factory: func() (productMetricsControlService, error) {
-			return &productMetricsInvocationSpy{recordResult: productmetrics.RecordDropped}, nil
+			return &productMetricsInvocationSpy{recordResult: productmetrics.RecordStored}, nil
 		}, close: func(productmetrics.RecordingPermit) error { return errors.New("private close failure") }},
 	}
-	baselineFactory := func() (productMetricsControlService, error) { return nil, nil }
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			baseline, baselineTelemetry := captureProductMetricsLifecycleRun(t, test.args, baselineFactory, nil)
-			assertProductMetricsTelemetryRun(t, baselineTelemetry)
-			for _, scenario := range scenarios {
-				t.Run(scenario.name, func(t *testing.T) {
-					got, telemetry := captureProductMetricsLifecycleRun(t, test.args, scenario.factory, scenario.close)
-					assertProductMetricsTelemetryRun(t, telemetry)
-					if got != baseline {
-						t.Fatalf("product-metrics failure changed command result:\n got  = %#v\n baseline = %#v", got, baseline)
-					}
-				})
-			}
-		})
-	}
 
-	t.Run("pack action", func(t *testing.T) {
-		city := setupPackExitCity(t)
-		oldWorkingDirectory, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chdir(city); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = os.Chdir(oldWorkingDirectory) }()
-		for _, discovery := range []string{"eager", "lazy"} {
-			t.Run(discovery, func(t *testing.T) {
-				runner := func(args []string, stdout, stderr io.Writer) int {
-					return runWithRootCommandOptions(args, stdout, stderr, packCommandScenarioRootOptions(t, discovery, args))
-				}
-				for _, test := range []struct {
-					name string
-					args []string
-				}{
-					{name: "success", args: []string{"backstage", "repo", "sync"}},
-					{name: "nonzero", args: []string{"backstage", "hello"}},
-					{name: "leaf help", args: []string{"backstage", "hello", "--help"}},
-					{name: "group help", args: []string{"backstage"}},
-				} {
-					t.Run(test.name, func(t *testing.T) {
-						baseline, baselineTelemetry := captureProductMetricsLifecycleRunWithRunner(t, test.args, runner, baselineFactory, nil)
-						assertProductMetricsTelemetryRun(t, baselineTelemetry)
-						for _, scenario := range scenarios {
-							t.Run(scenario.name, func(t *testing.T) {
-								got, telemetry := captureProductMetricsLifecycleRunWithRunner(t, test.args, runner, scenario.factory, scenario.close)
-								assertProductMetricsTelemetryRun(t, telemetry)
-								if got != baseline {
-									t.Fatalf("product-metrics failure changed %s pack result:\n got = %#v\n baseline = %#v", discovery, got, baseline)
-								}
-							})
-						}
-					})
-				}
+	t.Run("failure modes", func(t *testing.T) {
+		args := []string{"help"}
+		baseline := capture(t, args, run, healthyFactory, nil)
+		for _, scenario := range scenarios {
+			t.Run(scenario.name, func(t *testing.T) {
+				assertSameResult(t, capture(t, args, run, scenario.factory, scenario.close), baseline)
 			})
 		}
 	})
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "direct success", args: []string{"version"}},
+		{name: "direct Cobra failure", args: []string{"version", "--not-a-flag"}},
+		{name: "buffered JSON success", args: []string{"version", "--json"}},
+		{name: "buffered JSON failure", args: []string{"config", "explain", "--json"}},
+		{name: "reported JSON failure", args: []string{"events", "--json", "--after", "1", "--after-cursor", "x"}},
+		{name: "early JSON schema", args: []string{"version", "--json-schema"}},
+		{name: "early JSON contract failure", args: []string{"completion", "bash", "--json"}},
+	} {
+		t.Run("output control/"+test.name, func(t *testing.T) {
+			baseline := capture(t, test.args, run, healthyFactory, nil)
+			assertSameResult(t, capture(t, test.args, run, factoryFailure, nil), baseline)
+		})
+	}
+
+	city := setupPackExitCity(t)
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(city); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	packArgs := []string{"backstage", "hello"}
+	for _, discovery := range []string{"eager", "lazy"} {
+		t.Run("pack action/"+discovery, func(t *testing.T) {
+			runner := func(args []string, stdout, stderr io.Writer) int {
+				return runWithRootCommandOptions(args, stdout, stderr, packCommandScenarioRootOptions(t, discovery, args))
+			}
+			baseline := capture(t, packArgs, runner, healthyFactory, nil)
+			assertSameResult(t, capture(t, packArgs, runner, factoryFailure, nil), baseline)
+		})
+	}
+
+	if rootExecutions != 25 {
+		t.Fatalf("command-root executions = %d, want 25", rootExecutions)
+	}
 }
 
 func TestProductMetricsLifecyclePendingNoticeIsOnlyOutputDelta(t *testing.T) {

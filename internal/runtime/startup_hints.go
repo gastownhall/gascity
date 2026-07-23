@@ -14,3 +14,12 @@ func HasManagedStartupHints(cfg Config) bool {
 		cfg.SessionSetupScript != "" ||
 		len(cfg.SessionLive) > 0
 }
+
+// ShouldAcceptStartupDialogs reports whether startup dialog handling is
+// explicitly enabled or inferred from managed process hints.
+func ShouldAcceptStartupDialogs(cfg Config) bool {
+	if cfg.AcceptStartupDialogs != nil {
+		return *cfg.AcceptStartupDialogs
+	}
+	return len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning
+}

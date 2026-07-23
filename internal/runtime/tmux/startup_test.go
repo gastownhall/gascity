@@ -1011,8 +1011,8 @@ func TestShouldAcceptStartupDialogsProviderResolution(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldAcceptStartupDialogs(tt.cfg); got != tt.want {
-				t.Fatalf("shouldAcceptStartupDialogs() = %v, want %v", got, tt.want)
+			if got := runtime.ShouldAcceptStartupDialogs(tt.cfg); got != tt.want {
+				t.Fatalf("runtime.ShouldAcceptStartupDialogs() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -41,6 +41,14 @@ type phaseMapping struct {
 // stays "complete" (the RunPhase union has no failed member, and complete is
 // what routes the lane to history).
 func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
+	// Root-terminality wins (mirrors CanonicalRunStatusForLane): a closed root is
+	// history even when a member lingers in_progress or blocked because its own
+	// close event never landed. The RunPhase union has no failed member, so the
+	// honest failure rides the label while the phase stays "complete" — which
+	// routes the lane to history and collapses the stage ladder.
+	if root, ok := findIssue(issues, rootID); ok && strings.TrimSpace(root.status) == "closed" {
+		return phaseMapping{phase: "complete", label: terminalRunLabel(root)}
+	}
 	if len(issues) > 0 {
 		allClosed := true
 		for _, i := range issues {
@@ -50,18 +58,9 @@ func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
 			}
 		}
 		if allClosed {
-			label := "complete"
-			for _, i := range issues {
-				if i.id != rootID {
-					continue
-				}
-				outcome := strings.ToLower(stringValue(i.metadata[beadmeta.OutcomeMetadataKey]))
-				if outcome == "fail" || outcome == "failed" {
-					label = "failed"
-				}
-				break
-			}
-			return phaseMapping{phase: "complete", label: label}
+			// Rootless (dangling-root) fallback: no root issue to consult, so the
+			// label defaults to "complete".
+			return phaseMapping{phase: "complete", label: terminalRunLabelByID(rootID, issues)}
 		}
 	}
 
@@ -78,6 +77,29 @@ func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
 	}
 
 	return fallbackPhase(issues)
+}
+
+// terminalRunLabel returns the honest phase label for a run whose root bead
+// closed: "failed" when the ROOT recorded a fail outcome, else "complete". Only
+// the root outcome speaks for the run — a failed-then-retried attempt bead leaves
+// outcome=fail on the attempt, not the root. Shared by the root-closed and
+// all-closed branches of mapRunPhase.
+func terminalRunLabel(root runIssue) string {
+	outcome := strings.ToLower(stringValue(root.metadata[beadmeta.OutcomeMetadataKey]))
+	if outcome == "fail" || outcome == "failed" {
+		return "failed"
+	}
+	return "complete"
+}
+
+// terminalRunLabelByID resolves the terminal label for the root identified by
+// rootID, defaulting to "complete" when no such issue is present (a rootless
+// all-closed group).
+func terminalRunLabelByID(rootID string, issues []runIssue) string {
+	if root, ok := findIssue(issues, rootID); ok {
+		return terminalRunLabel(root)
+	}
+	return "complete"
 }
 
 // structuredPhase derives the phase from the run's current step.
@@ -413,6 +435,14 @@ var runStages = [][2]string{
 func stageProgress(phase phaseMapping, formula string, hasFormula bool, issues []runIssue) []RunStage {
 	formulaStages := stagesForFormula(formula, hasFormula)
 	if len(formulaStages) > 0 {
+		if phase.phase == "complete" {
+			// Terminal root: present the ladder without ever re-deriving active or
+			// blocked from lingering raw member statuses. A stage that ran is
+			// complete; a stage that never materialized (a run that exited early)
+			// stays pending — collapsing every stage to complete would falsely show
+			// a preflight-failed run finishing Human approval and Merge-ready.
+			return formulaStageProgressTerminal(formulaStages, issues)
+		}
 		return formulaStageProgress(formulaStages, issues)
 	}
 
@@ -557,6 +587,45 @@ func formulaStageProgress(stages []formulaStage, issues []runIssue) []RunStage {
 			Label:  stage.label,
 			Status: formulaStageStatus(idx, activeIndex, furthestClosedIndex, stage, primary),
 		}
+	}
+	return out
+}
+
+// formulaStageProgressTerminal renders the stage ladder for a terminal run
+// without emitting active or blocked. A stage is complete iff it RAN — carries a
+// step that reached closed/in_progress/blocked — or precedes the furthest-run
+// stage; a stage that never materialized (a run that exited early) stays pending.
+// This matches formulaStageProgress's own no-active-step derivation for a fully
+// closed run, so a preflight-failed run keeps its trailing stages pending instead
+// of falsely reporting Human approval and Merge-ready complete.
+func formulaStageProgressTerminal(stages []formulaStage, issues []runIssue) []RunStage {
+	primary := primaryStepIssues(issues)
+	ran := make([]bool, len(stages))
+	furthest := -1
+	for idx, s := range stages {
+		for _, step := range s.steps {
+			for _, i := range stepIssues(primary, step) {
+				if i.status == "closed" || i.status == "in_progress" || i.status == "blocked" {
+					ran[idx] = true
+					break
+				}
+			}
+			if ran[idx] {
+				break
+			}
+		}
+		if ran[idx] {
+			furthest = idx
+		}
+	}
+
+	out := make([]RunStage, len(stages))
+	for idx, s := range stages {
+		status := "pending"
+		if ran[idx] || idx < furthest {
+			status = "complete"
+		}
+		out[idx] = RunStage{Key: s.key, Label: s.label, Status: status}
 	}
 	return out
 }

@@ -2361,6 +2361,13 @@ func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 			}
 		}
 		if !found {
+			if p.Dir == "" {
+				for j := range agents {
+					if agents[j].BindingQualifiedName() == p.Name {
+						return fmt.Errorf("patches.agent[%d]: agent %q not found in pack (patches match local names — did you mean %q?)", i, target, agents[j].Name)
+					}
+				}
+			}
 			return fmt.Errorf("patches.agent[%d]: agent %q not found in pack", i, target)
 		}
 	}

@@ -1,4 +1,4 @@
-package main
+package processenv
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// prependGCBinDirToPATH ensures that the directory containing the gc binary
+// PrependGCBinDirToPATH ensures that the directory containing the gc binary
 // is the first entry in env["PATH"]. If env["PATH"] is unset, falls back to
 // the calling process's PATH as the base.
 //
@@ -18,7 +18,11 @@ import (
 // gcBin is the absolute path to the gc binary (typically the value the caller
 // also writes to env["GC_BIN"]). If empty or has no directory component, the
 // function is a no-op.
-func prependGCBinDirToPATH(env map[string]string, gcBin string) {
+//
+// Both the CLI launch path (cmd/gc/template_resolve.go) and the API session-env
+// builder (internal/api cityAnchoredSessionEnv) call this so the GC_BIN/PATH
+// pair can never drift apart between the two session-launch surfaces.
+func PrependGCBinDirToPATH(env map[string]string, gcBin string) {
 	if gcBin == "" {
 		return
 	}

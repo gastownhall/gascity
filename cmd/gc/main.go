@@ -1480,7 +1480,16 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
-	return filepath.Clean(scopeRoot)
+	scopeRoot = filepath.Clean(scopeRoot)
+	// Resolve symlinks so a city reached through a linked path (e.g. ~/gc ->
+	// /real/city) yields the same scope root as the real path. Without this the
+	// native-store identity gate sees an unregistered scope and rejects it
+	// ("database project_id could not be confirmed"), silently degrading to the
+	// bd-subprocess fallback.
+	if resolved, err := filepath.EvalSymlinks(scopeRoot); err == nil {
+		scopeRoot = resolved
+	}
+	return scopeRoot
 }
 
 func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {

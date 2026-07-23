@@ -412,6 +412,65 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 	return proctable.DescendantAlive(records, roots, processNames)
 }
 
+// ObserveLiveness reports session presence (Running) and agent-process
+// liveness (Alive) in one `agent get` pass, derived from herdr's own agent
+// registry and status — the herdr analog of the tmux provider's
+// ObserveLiveness. This is the LivenessObserver fast-path that
+// runtime.ObserveLiveness prefers over the generic IsRunning + ProcessAlive
+// fold, so it is what every liveness consumer (the API observer, the session
+// manager, the worker handle, and city_runtime) actually reads.
+//
+// It deliberately does NOT consult the ProcessAlive host process-table walk.
+// That walk locates the agent by matching a configured process name against
+// the pane's process tree, widened by the GC_SESSION_ID carried in the
+// process environment — and both signals are unreliable for claude >= 2.1.x:
+// it runs as comm="<version>" (e.g. "2.1.216") rather than "claude", and it
+// does not reliably export GC_SESSION_ID through herdr's `/bin/sh -c` launch
+// wrapper (measured: most live claude procs carry no readable GC_SESSION_ID).
+// The walk therefore false-negatives a live-but-idle singleton (mayor/adjunct),
+// which upstream reads as "runtime missing" and drives an endless
+// continuation-reset / quarantine loop. herdr tracks the pane's agent process
+// directly, so its agent_status does not depend on either fragile signal and
+// keeps a live orchestrator classified alive. ProcessAlive is retained
+// unchanged for the non-observer call sites (doctor) and the caffeinate-wrapper
+// case; processNames is unused here because herdr's status supersedes it.
+func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}
+	}
+	info, present, err := p.c.getAgent(context.Background(), name)
+	return livenessFromAgent(info, present, err)
+}
+
+// livenessFromAgent folds a herdr `agent get` result into a Liveness verdict.
+// Split from ObserveLiveness so the decision is unit-testable without shelling
+// out to herdr. A failed query or an absent agent is not running; a present
+// agent is running, and its aliveness follows herdr's reported agent_status.
+func livenessFromAgent(info agentInfo, present bool, err error) runtime.Liveness {
+	if err != nil || !present {
+		return runtime.Liveness{}
+	}
+	return runtime.Liveness{Running: true, Alive: agentAliveFromStatus(info.AgentStatus)}
+}
+
+// agentAliveFromStatus maps a herdr agent_status to agent-process liveness. An
+// agent present in herdr's registry is alive unless herdr reports an explicit
+// terminal status: any active status (idle, working, done, running, …) means
+// the pane process is up, while a finished/gone marker means it has exited so a
+// genuine crash still restarts. Unknown or empty statuses fail SAFE toward
+// alive — the bug this fixes is a live singleton misread as dead (which drives
+// a destructive reset loop), so a missed restart of a truly-dead agent (visible
+// and non-destructive) is the acceptable direction to err. The terminal set is
+// validated against live herdr output during rollout; extend it there.
+func agentAliveFromStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "exited", "stopped", "dead", "gone", "terminated", "closed", "crashed":
+		return false
+	default:
+		return true
+	}
+}
+
 // Nudge injects and submits text into a running agent's input.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	ctx := context.Background()

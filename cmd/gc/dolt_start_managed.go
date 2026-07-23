@@ -1112,7 +1112,7 @@ func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches fu
 		return nil
 	}
 	_ = process.Signal(syscall.SIGKILL)
-	time.Sleep(250 * time.Millisecond)
+	waitForManagedDoltProcessExit(pid, 250*time.Millisecond, pidAlive)
 	return nil
 }
 
