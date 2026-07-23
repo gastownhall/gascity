@@ -15,6 +15,11 @@ type hookStore struct {
 	env []string
 }
 
+// hookStoreRunner runs a work query against one federated store's dir and env.
+// Injectable so the cross-store selection and claim paths can be tested without
+// a real bd subprocess.
+type hookStoreRunner func(command, dir string, env []string) (string, error)
+
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
 // every federated store attempt — the query always matches the agent's OWN
 // identity (gc.routed_to / assignee == this identity) regardless of which store
@@ -144,32 +149,86 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // normalize + unready-filter that doHook uses, so a store with only
 // deferred/blocked rows is not treated as a hit). run is injectable for tests.
 //
-// When no store has ready work, an error on the agent's OWN store (the first
-// entry) is surfaced so emitCityWorkQueryFailure can classify it — preserving
-// the single-store emit-on-timeout contract (a work-query timeout must reach
-// the reconciler, not be silently downgraded to "no work"). Errors from
-// federated rig stores are best-effort discovery (like appendRigHookStores)
-// and are not surfaced, so one flaky rig store can't wedge the hook.
-func firstStoreWithWork(command string, stores []hookStore, run func(command, dir string, env []string) (string, error)) (string, error) {
+// When no store has ready work, an error on the agent's OWN store (identified by
+// primary, not by slice position) is surfaced so emitCityWorkQueryFailure can
+// classify it — preserving the single-store emit-on-timeout contract (a
+// work-query timeout must reach the reconciler, not be silently downgraded to
+// "no work"). Errors from federated rig stores are best-effort discovery (like
+// appendRigHookStores) and are not surfaced, so one flaky rig store can't wedge
+// the hook. primary is matched by identity rather than position because the
+// federated claim loop reselects over a shrinking store set.
+func firstStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
-	for i, st := range stores {
+	for _, st := range stores {
 		out, err := run(command, st.dir, st.env)
 		if err == nil {
 			ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), time.Now())
 			if workQueryHasReadyWork(ready) {
-				return out, nil
+				return out, st, nil
 			}
 			lastOut = out
 			continue
 		}
-		if i == 0 {
+		if sameHookStore(st, primary) {
 			ownStoreOut, ownStoreErr = out, err
 		}
 	}
 	if ownStoreErr != nil {
-		return ownStoreOut, ownStoreErr
+		return ownStoreOut, hookStore{}, ownStoreErr
 	}
-	return lastOut, nil
+	return lastOut, hookStore{}, nil
+}
+
+// claimStoreWithFallback re-validates the discovery-selected store for
+// claim-time freshness, then falls back to federated re-selection when that
+// store has emptied since discovery. The returned output and store are an
+// inseparable pair: the claim mutation must use that store's dir and env.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+	selectedOut, err := run(command, selected.dir, selected.env)
+	if err != nil {
+		if sameHookStore(selected, primary) {
+			return "", hookStore{}, err
+		}
+		return firstStoreWithWork(command, stores, primary, run)
+	}
+	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
+	if workQueryHasReadyWork(ready) {
+		return selectedOut, selected, nil
+	}
+	return firstStoreWithWork(command, stores, primary, run)
+}
+
+// isZeroHookStore reports whether s is the zero hookStore returned when no
+// federated store has ready work.
+func isZeroHookStore(s hookStore) bool {
+	return strings.TrimSpace(s.dir) == "" && len(s.env) == 0
+}
+
+// removeHookStore drops the first entry equal to target. The claim loop uses
+// this after losing a mutation race so the next selection must make progress.
+func removeHookStore(stores []hookStore, target hookStore) []hookStore {
+	out := make([]hookStore, 0, len(stores))
+	removed := false
+	for _, s := range stores {
+		if !removed && sameHookStore(s, target) {
+			removed = true
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func sameHookStore(a, b hookStore) bool {
+	if a.dir != b.dir || len(a.env) != len(b.env) {
+		return false
+	}
+	for i := range a.env {
+		if a.env[i] != b.env[i] {
+			return false
+		}
+	}
+	return true
 }

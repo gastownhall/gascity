@@ -476,6 +476,183 @@ func TestDoHookClaimDrainAckOnNoWork(t *testing.T) {
 	}
 }
 
+// TestClaimHookWorkClaimsOnlyTheStoreSelectedByDiscovery is the regression for
+// colliding bead IDs across a rig and HQ. The routed-work query selects HQ, so
+// the mutation must use HQ's dir/env even though the agent's default work dir
+// is the rig and the same ID also exists there.
+func TestClaimHookWorkClaimsOnlyTheStoreSelectedByDiscovery(t *testing.T) {
+	stores := []hookStore{
+		{dir: "rig", env: []string{"GC_STORE=rig"}},
+		{dir: "hq", env: []string{"GC_STORE=hq"}},
+	}
+	var queryDirs []string
+	run := func(_, dir string, _ []string) (string, error) {
+		queryDirs = append(queryDirs, dir)
+		if dir == "hq" {
+			return `[{"id":"ac-3iv","status":"open","metadata":{"gc.routed_to":"polecat"}}]`, nil
+		}
+		// The rig also contains ac-3iv, but it is not routed to this polecat,
+		// so its work query correctly does not surface that duplicate.
+		return `[]`, nil
+	}
+	var claimDirs []string
+	var claimEnvs [][]string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimDirs = append(claimDirs, dir)
+			claimEnvs = append(claimEnvs, append([]string(nil), env...))
+			// Model the collision: either store would accept this ID. The
+			// orchestration must therefore choose the store, not the ID prefix.
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "polecat"},
+			}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "kisakcod/gastown.polecat-1",
+		IdentityCandidates: []string{"kisakcod/gastown.polecat-1"},
+		RouteTargets:       []string{"polecat"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "rig", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(queryDirs, ","); got != "rig,hq,hq" {
+		t.Fatalf("query dirs = %q, want rig,hq,hq (discovery then HQ re-validation)", got)
+	}
+	if got := strings.Join(claimDirs, ","); got != "hq" {
+		t.Fatalf("claim dirs = %q, want only hq; same-ID rig duplicate must remain untouched", got)
+	}
+	if len(claimEnvs) != 1 || len(claimEnvs[0]) != 1 || claimEnvs[0][0] != "GC_STORE=hq" {
+		t.Fatalf("claim envs = %v, want only [GC_STORE=hq]", claimEnvs)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "ac-3iv" || result.Reason != "claimed" {
+		t.Fatalf("claim result = %+v, want ac-3iv claimed", result)
+	}
+}
+
+func TestClaimHookWorkFallsBackWhenSelectedStoreEmpties(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "rig", env: []string{"GC_STORE=rig"}},
+	}
+	cityCalls := 0
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			cityCalls++
+			if cityCalls == 1 {
+				return `[{"id":"city-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+			}
+			return `[]`, nil
+		case "rig":
+			return `[{"id":"rig-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	var claimDir string
+	var claimEnv []string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimDir = dir
+			claimEnv = append([]string(nil), env...)
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimDir != "rig" {
+		t.Fatalf("claim dir = %q, want rig fallback", claimDir)
+	}
+	if len(claimEnv) != 1 || claimEnv[0] != "GC_STORE=rig" {
+		t.Fatalf("claim env = %v, want [GC_STORE=rig]", claimEnv)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "rig-1" || result.Reason != "claimed" {
+		t.Fatalf("claim result = %+v, want rig-1 claimed", result)
+	}
+}
+
+func TestClaimHookWorkRetriesLaterStoreAfterLostClaimRace(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "rig", env: []string{"GC_STORE=rig"}},
+	}
+	run := func(_, dir string, _ []string) (string, error) {
+		return fmt.Sprintf(
+			`[{"id":"%s-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`,
+			dir,
+		), nil
+	}
+	var claimDirs []string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimDirs = append(claimDirs, dir)
+			if dir == "city" {
+				return beads.Bead{}, false, nil
+			}
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimDirs, ","); got != "city,rig" {
+		t.Fatalf("claim dirs = %q, want city,rig after lost city race", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "rig-1" || result.Reason != "claimed" {
+		t.Fatalf("claim result = %+v, want rig-1 claimed after city race", result)
+	}
+}
+
 func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	var assigned []string
 	runner := func(string, string) (string, error) {

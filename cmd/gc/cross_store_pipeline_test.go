@@ -38,7 +38,7 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 		return `[]`, nil
 	}
 
-	out, err := firstStoreWithWork("fake-query", stores, run)
+	out, _, err := firstStoreWithWork("fake-query", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("firstStoreWithWork: %v", err)
 	}

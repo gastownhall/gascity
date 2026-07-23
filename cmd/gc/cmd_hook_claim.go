@@ -55,18 +55,71 @@ type hookClaimJSONResult struct {
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
 
+// hookClaimResult is the outcome of attempting a claim against one store's
+// captured work-query output. A non-terminal result has written no output, so a
+// federated caller may try a later store before writing one no-work result.
+type hookClaimResult struct {
+	terminal bool
+	code     int
+}
+
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	result := tryHookClaim(workQuery, dir, &opts, &ops, stdout, stderr)
+	if result.terminal {
+		return result.code
+	}
+	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+}
+
+func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
 	opts.Assignee = strings.TrimSpace(opts.Assignee)
 	opts.IdentityCandidates = hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
 	opts.RouteTargets = hookClaimRouteTargets(opts.RouteTargets...)
 	if opts.Assignee == "" {
 		fmt.Fprintln(stderr, "gc hook --claim: assignee not specified (set $GC_SESSION_NAME or $GC_SESSION_ID)") //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	if ops.Runner == nil {
 		fmt.Fprintln(stderr, "gc hook --claim: missing work query runner") //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
+	ops.applyDefaults()
+	now := time.Now
+	if ops.Now != nil {
+		now = ops.Now
+	}
+
+	output, err := ops.Runner(workQuery, dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
+		return hookClaimResult{terminal: true, code: 1}
+	}
+
+	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
+	normalized = filterUnreadyHookCandidates(normalized, now())
+	if !workQueryHasReadyWork(normalized) {
+		return hookClaimResult{}
+	}
+	candidates, err := decodeHookClaimBeads(normalized)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
+		return hookClaimResult{terminal: true, code: 1}
+	}
+	if len(candidates) == 0 {
+		return hookClaimResult{}
+	}
+
+	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
+		return hookClaimResult{
+			terminal: true,
+			code:     writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr),
+		}
+	}
+
+	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+}
+
+func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
 	}
@@ -79,35 +132,12 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if ops.DrainAck == nil {
 		ops.DrainAck = hookRuntimeDrainAck
 	}
-	now := time.Now
-	if ops.Now != nil {
-		now = ops.Now
-	}
+}
 
-	output, err := ops.Runner(workQuery, dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
-		return 1
-	}
-
-	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized = filterUnreadyHookCandidates(normalized, now())
-	if !workQueryHasReadyWork(normalized) {
-		return writeHookClaimNoWork(opts, ops, stdout, stderr)
-	}
-	candidates, err := decodeHookClaimBeads(normalized)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if len(candidates) == 0 {
-		return writeHookClaimNoWork(opts, ops, stdout, stderr)
-	}
-
-	if result, bead, ok := hookClaimExistingOrAssigned(candidates, opts); ok {
-		return writeHookClaimWorkResultForBead(result, bead, opts, ops, dir, stdout, stderr)
-	}
-
+// claimFirstEligibleHookCandidate claims the first unassigned, route-matched
+// candidate. It returns a non-terminal result without writing output when no
+// candidate can be claimed, allowing a federated caller to try another store.
+func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	for _, candidate := range candidates {
@@ -119,7 +149,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: claiming %s: %v\n", candidate.ID, err) //nolint:errcheck
-			return 1
+			return hookClaimResult{terminal: true, code: 1}
 		}
 		if !ok {
 			continue
@@ -143,10 +173,13 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
-		return writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)
+		return hookClaimResult{
+			terminal: true,
+			code:     writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr),
+		}
 	}
 
-	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	return hookClaimResult{}
 }
 
 func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
