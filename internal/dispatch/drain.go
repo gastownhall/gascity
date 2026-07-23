@@ -113,7 +113,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	if manifest.Context == beadmeta.DrainContextShared {
 		return advanceSharedDrain(store, bead, manifest, members, itemFormula, parentVars, opts)
 	}
-	if err := reserveDrainMembers(store, bead, members, opts); err != nil {
+	if err := reserveDrainMembers(store, bead, members, parentConvoyID, opts); err != nil {
 		if retryableDrainReservationError(err) {
 			return ControlResult{}, fmt.Errorf("%s: reserving drain members (retrying next pass): %w", bead.ID, err)
 		}
@@ -516,7 +516,7 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			return ControlResult{}, fmt.Errorf("%s: shared drain manifest/member length mismatch", bead.ID)
 		}
 		member := members[i]
-		if err := reserveDrainMember(store, bead, member, opts); err != nil {
+		if err := reserveDrainMember(store, bead, member, manifest.ParentConvoyID, opts); err != nil {
 			if retryableDrainReservationError(err) {
 				return ControlResult{}, fmt.Errorf("%s: reserving drain member %s (retrying next pass): %w", bead.ID, member.ID, err)
 			}
@@ -1224,13 +1224,55 @@ func (e drainReservationError) Error() string {
 	return fmt.Sprintf("%s: member %s already reserved by drain %s", e.ControlID, e.MemberID, e.Owner)
 }
 
+// drainCompetingDispatchError reports that an exclusive drain refused to take a
+// member because a NON-drain dispatch is already live on it. It is the mirror
+// of drainReservationError: that one excludes a competing drain (which leaves a
+// reservation), this one excludes a competing fresh/root dispatch (which does
+// not). Without it the ordering decides the outcome — drain-first is guarded by
+// the sling-side reservation veto, dispatch-first would sail through — and
+// "exclusive" would mean "exclusive only when the drain happened to arrive
+// first".
+type drainCompetingDispatchError struct {
+	ControlID string
+	MemberID  string
+	// Signature is a human-readable description of the live executor found
+	// (the open synthetic input convoy).
+	Signature string
+}
+
+func (e drainCompetingDispatchError) Error() string {
+	return fmt.Sprintf("%s: member %s already has a live dispatch (%s); exclusive drain access refused",
+		e.ControlID, e.MemberID, e.Signature)
+}
+
+// drainCompetitorProbeError wraps a store failure while checking a member for a
+// competing dispatch. It is deliberately RETRYABLE (see
+// retryableDrainReservationError): a transient convoy-listing failure must make
+// the drain wait and re-probe on the next level-triggered pass, never proceed
+// blind — proceeding-on-read-failure is the advisory posture that let the
+// dip-tlbizd double-dispatch happen. A persistent failure keeps the drain
+// visibly stuck-expanding, which is the loud signal a real store problem
+// warrants.
+type drainCompetitorProbeError struct {
+	MemberID string
+	Err      error
+}
+
+func (e drainCompetitorProbeError) Error() string {
+	return fmt.Sprintf("probing drain member %s for a competing dispatch: %v", e.MemberID, e.Err)
+}
+
+func (e drainCompetitorProbeError) Unwrap() error { return e.Err }
+
 // reserveDrainMember claims a member for exclusive drain access by stamping the
 // reservation metadata on the member bead. The member is a work bead that may
 // live in the work-class store rather than the primary graph store, so both the
 // reservation read and write route to the member's owning store
 // (drainMemberOwningStore). On origin/main the owning store is the single store,
 // matching the pre-seam store.Get/store.SetMetadata behavior exactly.
-func reserveDrainMember(store beads.Store, control, member beads.Bead, opts ProcessOptions) error {
+// ownConvoyID is the drain's own input/parent convoy, skipped by the
+// competing-dispatch probe (see refuseCompetingDrainDispatch).
+func reserveDrainMember(store beads.Store, control, member beads.Bead, ownConvoyID string, opts ProcessOptions) error {
 	if drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
 		return nil
 	}
@@ -1252,7 +1294,69 @@ func reserveDrainMember(store beads.Store, control, member beads.Bead, opts Proc
 	if owner == control.ID {
 		return nil
 	}
+	if err := refuseCompetingDrainDispatch(store, control, member, ownConvoyID); err != nil {
+		return err
+	}
 	return claimDrainReservation(memberStore, control, member)
+}
+
+// refuseCompetingDrainDispatch fails the exclusive claim when the member is
+// already being executed by a fresh/root formula dispatch — one that leaves no
+// reservation to compare against. Its on-graph signature is an OPEN synthetic
+// input convoy (gc.synthetic=true, "input convoy for <bead>") tracking the
+// member, driven by a workflow root; that is exactly what the dip-tlbizd
+// incident's second lane left on the member anchor.
+//
+// Two convoy shapes are NOT competitors and are skipped:
+//
+//   - ownConvoyID, the drain's OWN input/parent convoy. It tracks every member
+//     by construction (the drain drains its members), so it would otherwise
+//     self-veto every exclusive drain whose parent convoy is synthetic (e.g. a
+//     drain launched by a single-bead formula). This is the load-bearing
+//     exclusion; without it the guard is a self-inflicted deadlock.
+//   - Drain-unit convoys (gc.drain_control_id set): the drain-side dispatch
+//     shape. A competing DRAIN is already excluded by the reservation owner
+//     check above; this function only covers the entry point with no
+//     reservation to compare.
+//
+// Scope note: this recognizes the formula/workflow dispatch signature (a
+// synthetic convoy), which is the incident shape. A PLAIN --no-formula route,
+// which leaves no synthetic convoy, is not detected dispatch-first here — see
+// the Remaining Risks in the fix's proof doc. The drain-FIRST ordering for all
+// dispatch shapes is fully covered by the sling-side reservation veto.
+//
+// A convoy-listing failure returns a RETRYABLE drainCompetitorProbeError rather
+// than proceeding: read-failure-means-proceed is the advisory posture the
+// incident indicted. The drain waits and re-probes next pass.
+func refuseCompetingDrainDispatch(store beads.Store, control, member beads.Bead, ownConvoyID string) error {
+	if store == nil || strings.TrimSpace(member.ID) == "" {
+		return nil
+	}
+	convoys, err := convoycore.TrackingConvoysForItem(store, member.ID)
+	if err != nil {
+		return drainCompetitorProbeError{MemberID: member.ID, Err: err}
+	}
+	ownConvoyID = strings.TrimSpace(ownConvoyID)
+	for _, c := range convoys {
+		if c.ID == ownConvoyID {
+			continue
+		}
+		if convoycore.IsTerminalStatus(c.Status) || beads.HasReadyExcludedLabel(c) {
+			continue
+		}
+		if strings.TrimSpace(c.Metadata[beadmeta.SyntheticMetadataKey]) != "true" {
+			continue
+		}
+		if strings.TrimSpace(c.Metadata[beadmeta.DrainControlIDMetadataKey]) != "" {
+			continue
+		}
+		return drainCompetingDispatchError{
+			ControlID: control.ID,
+			MemberID:  member.ID,
+			Signature: fmt.Sprintf("open workflow input convoy %s", c.ID),
+		}
+	}
+	return nil
 }
 
 // claimDrainReservation claims the empty reservation slot. When the member's
@@ -1317,9 +1421,9 @@ func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalW
 	return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, lastErr)
 }
 
-func reserveDrainMembers(store beads.Store, control beads.Bead, members []beads.Bead, opts ProcessOptions) error {
+func reserveDrainMembers(store beads.Store, control beads.Bead, members []beads.Bead, ownConvoyID string, opts ProcessOptions) error {
 	for _, member := range members {
-		if err := reserveDrainMember(store, control, member, opts); err != nil {
+		if err := reserveDrainMember(store, control, member, ownConvoyID, opts); err != nil {
 			return err
 		}
 	}
@@ -1414,6 +1518,20 @@ func retryableDrainReservationError(err error) bool {
 	if errors.As(err, &re) {
 		return false
 	}
+	var cd drainCompetingDispatchError
+	if errors.As(err, &cd) {
+		// A live competing dispatch is a verdict, not contention: retrying
+		// would just re-observe the same convoy until the drain's own
+		// level-triggered passes burned out on it.
+		return false
+	}
+	var probe drainCompetitorProbeError
+	if errors.As(err, &probe) {
+		// A store failure while probing for a competitor is transient by
+		// intent — retry next pass rather than fail the drain or (worse)
+		// proceed blind past an unread competitor.
+		return true
+	}
 	if beads.IsConditionalWritesRequired(err) {
 		return false
 	}
@@ -1434,6 +1552,17 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 		metadata[beadmeta.FailureReasonMetadataKey] = "exclusive_reservation_conflict"
 		metadata[beadmeta.FailureSubjectMetadataKey] = reservationErr.MemberID
 		metadata[beadmeta.FailureOwnerMetadataKey] = reservationErr.Owner
+	}
+	var competingErr drainCompetingDispatchError
+	if errors.As(err, &competingErr) {
+		// Distinct reason from the drain-vs-drain conflict above: the owner is
+		// a live foreign dispatch (a convoy or a claim), not a
+		// reservation-holding drain, so triage looks at the named signature
+		// rather than a control bead.
+		failureReason = "exclusive_dispatch_conflict"
+		metadata[beadmeta.FailureReasonMetadataKey] = failureReason
+		metadata[beadmeta.FailureSubjectMetadataKey] = competingErr.MemberID
+		metadata[beadmeta.FailureOwnerMetadataKey] = competingErr.Signature
 	}
 	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)

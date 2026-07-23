@@ -109,6 +109,15 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Exclusive-drain reservation: refuse to mint a second dispatch authority
+	// on a bead a live drain already owns. Checked before reopenForReassign so
+	// a refused sling mutates nothing.
+	if shouldCheckExclusiveDrain(opts) {
+		if err := CheckExclusiveDrainReservation(querier, deps.Store, opts.BeadOrFormula); err != nil {
+			return result, err
+		}
+	}
+
 	// Dependency cycle check: reject slings that would create a deadlock.
 	if shouldCheckDepCycle(opts) {
 		if err := DetectCycle(opts.BeadOrFormula, deps.Store); err != nil {
@@ -251,6 +260,21 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+// shouldCheckExclusiveDrain reports whether the exclusive-drain reservation
+// veto applies. It needs a real bead ID, so a standalone formula launch
+// (BeadOrFormula is a formula NAME) and inline-text slings (the bead does not
+// exist yet, so nothing can hold a reservation on it) are out of scope.
+// --force bypasses it, matching every other preflight guard. Dry-run does NOT:
+// the veto is read-only, and a preview that hides the refusal would send the
+// operator to run the very sling that is about to be rejected.
+//
+// --reassign deliberately does not bypass it. Reassign takes a bead over from
+// an actor that has stopped; an exclusive drain reservation says a lane is
+// still running, which is a different claim and a stronger one.
+func shouldCheckExclusiveDrain(opts SlingOpts) bool {
+	return !opts.IsFormula && !opts.Force && !opts.InlineText
 }
 
 // onFormulaNeedsAttachment reports whether this is an --on sling whose target
@@ -1489,6 +1513,20 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
+
+			// Exclusive-drain reservation, per child: a batch must not route a
+			// member a live drain owns. Failing the one child (rather than the
+			// batch) keeps the remaining, unreserved children routable — the
+			// same posture as the other per-child guards below.
+			if err := CheckExclusiveDrainReservation(querier, deps.Store, child.ID); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
 		}
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
