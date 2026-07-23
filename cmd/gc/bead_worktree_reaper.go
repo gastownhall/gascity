@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -22,6 +24,7 @@ import (
 type beadWorktreeGitProbe interface {
 	IsRepo() bool
 	CurrentBranch() (string, error)
+	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
@@ -81,15 +84,31 @@ func reapClosedBeadWorktrees(
 			continue
 		}
 		rigWorktreeDir := filepath.Join(wtRoot, rigName)
-		scanDirs := []string{
-			rigWorktreeDir,
-			filepath.Join(rigWorktreeDir, "artifacts", "worktrees"),
+		resolvedRigWorktreeDir, err := resolveRigWorktreeDir(resolvedWtRoot, rigName, rigWorktreeDir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: resolving rig worktree directory %s: %v\n", rigWorktreeDir, err) //nolint:errcheck
+			}
+			continue
+		}
+		scanDirs := []struct {
+			path     string
+			expected string
+		}{
+			{
+				path:     rigWorktreeDir,
+				expected: resolvedRigWorktreeDir,
+			},
+			{
+				path:     filepath.Join(rigWorktreeDir, "artifacts", "worktrees"),
+				expected: filepath.Join(resolvedRigWorktreeDir, "artifacts", "worktrees"),
+			},
 		}
 		for _, scanDir := range scanDirs {
-			resolvedScanDir, err := resolveWorktreeScanDir(resolvedWtRoot, scanDir)
+			resolvedScanDir, err := resolveWorktreeScanDir(resolvedWtRoot, scanDir.expected, scanDir.path)
 			if err != nil {
 				if !os.IsNotExist(err) {
-					fmt.Fprintf(stderr, "reapClosedBeadWorktrees: resolving scan directory %s: %v\n", scanDir, err) //nolint:errcheck
+					fmt.Fprintf(stderr, "reapClosedBeadWorktrees: resolving scan directory %s: %v\n", scanDir.path, err) //nolint:errcheck
 				}
 				continue
 			}
@@ -141,6 +160,29 @@ func reapClosedBeadWorktrees(
 				wg := newBeadWorktreeGitProbe(worktreePath)
 				if !wg.IsRepo() {
 					recordBeadWorktreeReapSkip(rec, stderr, beadID, rigName, worktreePath, "not a git repository")
+					continue
+				}
+				worktrees, err := wg.WorktreeList()
+				if err != nil {
+					recordBeadWorktreeReapSkip(rec, stderr, beadID, rigName, worktreePath, "descendant worktree probe failed: "+err.Error())
+					continue
+				}
+				hasRegisteredDescendant := false
+				for _, wt := range worktrees {
+					if pathutil.PathWithin(worktreePath, wt.Path) && !pathutil.SamePath(worktreePath, wt.Path) {
+						recordBeadWorktreeReapSkip(
+							rec,
+							stderr,
+							beadID,
+							rigName,
+							worktreePath,
+							"contains registered descendant worktree "+wt.Path,
+						)
+						hasRegisteredDescendant = true
+						break
+					}
+				}
+				if hasRegisteredDescendant {
 					continue
 				}
 				hasUncommitted := wg.HasUncommittedWork()
@@ -254,7 +296,30 @@ func resolveWorktreeRoot(cityPath, wtRoot string) (string, error) {
 	return resolvedWtRoot, nil
 }
 
-func resolveWorktreeScanDir(resolvedWtRoot, scanDir string) (string, error) {
+func resolveRigWorktreeDir(resolvedWtRoot, rigName, rigWorktreeDir string) (string, error) {
+	if rigName == "" || rigName == "." || rigName == ".." || filepath.IsAbs(rigName) || filepath.Base(rigName) != rigName {
+		return "", fmt.Errorf("invalid rig name %q for worktree scan", rigName)
+	}
+	resolvedRigWorktreeDir, err := filepath.EvalSymlinks(rigWorktreeDir)
+	if err != nil {
+		return "", err
+	}
+	resolvedRigWorktreeDir = filepath.Clean(resolvedRigWorktreeDir)
+	expectedRigWorktreeDir := filepath.Clean(filepath.Join(resolvedWtRoot, rigName))
+	if !isStrictlyUnderDir(resolvedWtRoot, resolvedRigWorktreeDir) {
+		return "", fmt.Errorf("resolved rig worktree directory %s escapes worktree root %s", resolvedRigWorktreeDir, resolvedWtRoot)
+	}
+	if resolvedRigWorktreeDir != expectedRigWorktreeDir {
+		return "", fmt.Errorf(
+			"resolved rig worktree directory %s retargets expected rig worktree directory %s",
+			resolvedRigWorktreeDir,
+			expectedRigWorktreeDir,
+		)
+	}
+	return resolvedRigWorktreeDir, nil
+}
+
+func resolveWorktreeScanDir(resolvedWtRoot, expectedScanDir, scanDir string) (string, error) {
 	resolvedScanDir, err := filepath.EvalSymlinks(scanDir)
 	if err != nil {
 		return "", err
@@ -262,6 +327,14 @@ func resolveWorktreeScanDir(resolvedWtRoot, scanDir string) (string, error) {
 	resolvedScanDir = filepath.Clean(resolvedScanDir)
 	if !isStrictlyUnderDir(resolvedWtRoot, resolvedScanDir) {
 		return "", fmt.Errorf("resolved scan directory %s escapes worktree root %s", resolvedScanDir, resolvedWtRoot)
+	}
+	expectedScanDir = filepath.Clean(expectedScanDir)
+	if resolvedScanDir != expectedScanDir {
+		return "", fmt.Errorf(
+			"resolved scan directory %s retargets expected scan directory %s",
+			resolvedScanDir,
+			expectedScanDir,
+		)
 	}
 	return resolvedScanDir, nil
 }
@@ -271,13 +344,19 @@ func resolveWorktreeScanDir(resolvedWtRoot, scanDir string) (string, error) {
 // Duplicate rows are ambiguous even when they currently agree, so cleanup
 // fails closed until the routing/store inconsistency is resolved.
 func closedBeadForWorktreeReap(cityStore, rigStore beads.Store, beadID string) (bool, string) {
+	if cityStore == nil {
+		return false, "HQ store unavailable"
+	}
+	if rigStore == nil {
+		return false, "rig store unavailable"
+	}
 	stores := []struct {
 		name  string
 		store beads.Store
 	}{
 		{name: "HQ", store: cityStore},
 	}
-	if rigStore != cityStore {
+	if !sameComparableBeadStore(rigStore, cityStore) {
 		stores = append(stores, struct {
 			name  string
 			store beads.Store
@@ -286,10 +365,11 @@ func closedBeadForWorktreeReap(cityStore, rigStore beads.Store, beadID string) (
 
 	var found []beads.Bead
 	for _, candidate := range stores {
-		if candidate.store == nil {
-			continue
+		live := beads.HandlesFor(candidate.store).Live
+		if live == nil {
+			return false, candidate.name + " live store handle unavailable"
 		}
-		bead, err := candidate.store.Get(beadID)
+		bead, err := live.Get(beadID)
 		switch {
 		case err == nil:
 			found = append(found, bead)
@@ -308,11 +388,31 @@ func closedBeadForWorktreeReap(cityStore, rigStore beads.Store, beadID string) (
 	return true, ""
 }
 
+// sameComparableBeadStore reports identity only when comparing the two Store
+// interface values cannot panic. Store implementations are not required to
+// have comparable concrete types, so an unconditional interface comparison
+// can panic the reconciler. Treat non-comparable wrappers as distinct; probing
+// both then conservatively turns a shared row into duplicate-store ambiguity.
+func sameComparableBeadStore(left, right beads.Store) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	if leftValue.Type() != rightValue.Type() || !leftValue.Comparable() || !rightValue.Comparable() {
+		return false
+	}
+	return left == right
+}
+
 // extractBeadIDFromWorktreeName scans dash-separated substrings in name for
-// one that LooksLikeConfiguredBeadID. For each starting segment it keeps the
-// longest valid candidate, so configured hyphenated prefixes are not
-// truncated to a shorter prefix match. Returns the first positional match, or
-// "" if none. Handles names like "builder-ga-34q3ss-pr2738" → "ga-34q3ss",
+// one that LooksLikeConfiguredBeadID. For each starting segment it prefers the
+// candidate with the longest configured prefix, while retaining the shortest
+// candidate for that prefix. The latter matters for hierarchical IDs:
+// LooksLikeConfiguredBeadID intentionally ignores text after the first dot,
+// so a legacy suffix such as "-pr2738" must not become part of "ga-abc.1".
+// Returns the first positional match, or "" if none. Handles names like
+// "builder-ga-34q3ss-pr2738" → "ga-34q3ss",
 // "builder-agent-diagnostics-hnn" → "agent-diagnostics-hnn", and bare
 // "ga-06kfi6" → "ga-06kfi6".
 func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
@@ -321,15 +421,21 @@ func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 	}
 	parts := strings.Split(name, "-")
 	for start := 0; start+1 < len(parts); start++ {
-		longest := ""
+		best := ""
+		bestPrefixLen := 0
 		for end := start + 2; end <= len(parts); end++ {
 			candidate := strings.Join(parts[start:end], "-")
-			if sling.LooksLikeConfiguredBeadID(cfg, candidate) && len(candidate) > len(longest) {
-				longest = candidate
+			if !sling.LooksLikeConfiguredBeadID(cfg, candidate) {
+				continue
+			}
+			prefixLen := len(sling.BeadPrefixForCity(cfg, candidate))
+			if prefixLen > bestPrefixLen {
+				best = candidate
+				bestPrefixLen = prefixLen
 			}
 		}
-		if longest != "" {
-			return longest
+		if best != "" {
+			return best
 		}
 	}
 	return ""

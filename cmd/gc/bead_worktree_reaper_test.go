@@ -11,26 +11,33 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 type fakeBeadWorktreeGitProbe struct {
-	isRepo         bool
-	branch         string
-	branchErr      error
-	hasUncommitted bool
-	hasUnpushed    bool
-	unpushedErr    error
-	hasStashes     bool
-	stashesErr     error
-	removeErr      error
-	removeInvoked  bool
-	removedPath    string
-	removedForce   bool
+	isRepo          bool
+	branch          string
+	branchErr       error
+	worktrees       []git.Worktree
+	worktreeListErr error
+	hasUncommitted  bool
+	hasUnpushed     bool
+	unpushedErr     error
+	hasStashes      bool
+	stashesErr      error
+	removeErr       error
+	removeInvoked   bool
+	removedPath     string
+	removedForce    bool
 }
 
 func (f *fakeBeadWorktreeGitProbe) IsRepo() bool { return f.isRepo }
 func (f *fakeBeadWorktreeGitProbe) CurrentBranch() (string, error) {
 	return f.branch, f.branchErr
+}
+
+func (f *fakeBeadWorktreeGitProbe) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeListErr
 }
 
 func (f *fakeBeadWorktreeGitProbe) HasUncommittedWork() bool {
@@ -58,6 +65,37 @@ type beadWorktreeEventRecorder struct {
 
 func (r *beadWorktreeEventRecorder) Record(event events.Event) {
 	r.events = append(r.events, event)
+}
+
+type beadWorktreeTieredStore struct {
+	beads.Store
+	live beads.LiveReader
+}
+
+func (s beadWorktreeTieredStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{
+		Cached: s.Store,
+		Live:   s.live,
+		Writer: s.Store,
+	}
+}
+
+type beadWorktreeGetErrorReader struct {
+	beads.LiveReader
+	err error
+}
+
+func (r beadWorktreeGetErrorReader) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, r.err
+}
+
+type beadWorktreeNonComparableStore struct {
+	beads.Store
+	marker []string
+}
+
+type beadWorktreeNestedInterfaceStore struct {
+	beads.Store
 }
 
 func gaConfig() *config.City {
@@ -133,6 +171,213 @@ func TestReapClosedBeadWorktreesFindsCanonicalArtifactLayout(t *testing.T) {
 	}
 }
 
+func TestReapClosedBeadWorktreesFindsLegacyArtifactLayout(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRepo := filepath.Join(cityPath, "repos", "mrig")
+	worktreePath := filepath.Join(cityPath, ".gc", "worktrees", "mrig", "builder-ga-abc123-pr2738")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("creating legacy worktree path: %v", err)
+	}
+	if err := os.MkdirAll(rigRepo, 0o755); err != nil {
+		t.Fatalf("creating rig repo path: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: rigRepo}}
+	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	rigStore := beads.NewMemStore()
+	worktreeProbe := &fakeBeadWorktreeGitProbe{
+		isRepo: true,
+		branch: "polecat/ga-abc123",
+	}
+	rigProbe := &fakeBeadWorktreeGitProbe{isRepo: true}
+
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(workDir string) beadWorktreeGitProbe {
+		switch filepath.Clean(workDir) {
+		case filepath.Clean(worktreePath):
+			return worktreeProbe
+		case filepath.Clean(rigRepo):
+			return rigProbe
+		default:
+			return &fakeBeadWorktreeGitProbe{}
+		}
+	}
+
+	var stderr bytes.Buffer
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		cityStore,
+		map[string]beads.Store{"mrig": rigStore},
+		events.Discard,
+		&stderr,
+	); got != 1 {
+		t.Fatalf("reapClosedBeadWorktrees = %d for legacy layout, want 1; stderr=%s", got, stderr.String())
+	}
+	if !rigProbe.removeInvoked || rigProbe.removedPath != worktreePath {
+		t.Fatalf("legacy WorktreeRemove: invoked=%v path=%q, want true and %q",
+			rigProbe.removeInvoked, rigProbe.removedPath, worktreePath)
+	}
+	if rigProbe.removedForce {
+		t.Fatal("legacy WorktreeRemove force = true, want false")
+	}
+}
+
+func TestReapClosedBeadWorktreesUsesLiveAuthority(t *testing.T) {
+	cityPath := t.TempDir()
+	worktreePath := filepath.Join(cityPath, ".gc", "worktrees", "mrig", "artifacts", "worktrees", "ga-abc123")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("creating canonical worktree path: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: filepath.Join(cityPath, "repos", "mrig")}}
+	staleClosed := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	liveOpen := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "open",
+	}}, nil)
+	cityStore := beadWorktreeTieredStore{
+		Store: staleClosed,
+		live:  liveOpen,
+	}
+	rigStore := beads.NewMemStore()
+
+	probeInvoked := false
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(string) beadWorktreeGitProbe {
+		probeInvoked = true
+		return &fakeBeadWorktreeGitProbe{isRepo: true}
+	}
+
+	var stderr bytes.Buffer
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		cityStore,
+		map[string]beads.Store{"mrig": rigStore},
+		events.Discard,
+		&stderr,
+	); got != 0 {
+		t.Fatalf("reapClosedBeadWorktrees = %d with live-open bead, want 0", got)
+	}
+	if probeInvoked {
+		t.Fatal("git probe invoked from stale cached closed state despite authoritative live-open row")
+	}
+}
+
+func TestReapClosedBeadWorktreesNilHQStoreFailsClosed(t *testing.T) {
+	cityPath := t.TempDir()
+	worktreePath := filepath.Join(cityPath, ".gc", "worktrees", "mrig", "artifacts", "worktrees", "ga-abc123")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("creating canonical worktree path: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: filepath.Join(cityPath, "repos", "mrig")}}
+	rigStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+
+	probeInvoked := false
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(string) beadWorktreeGitProbe {
+		probeInvoked = true
+		return &fakeBeadWorktreeGitProbe{isRepo: true}
+	}
+
+	var stderr bytes.Buffer
+	rec := &beadWorktreeEventRecorder{}
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		nil,
+		map[string]beads.Store{"mrig": rigStore},
+		rec,
+		&stderr,
+	); got != 0 {
+		t.Fatalf("reapClosedBeadWorktrees = %d with nil HQ store, want 0", got)
+	}
+	if probeInvoked {
+		t.Fatal("git probe invoked without an authoritative HQ store")
+	}
+	if !strings.Contains(stderr.String(), "HQ store unavailable") {
+		t.Fatalf("stderr = %q, want unavailable-HQ reason", stderr.String())
+	}
+	if len(rec.events) != 1 || rec.events[0].Type != events.BeadWorktreeReapSkipped {
+		t.Fatalf("events = %+v, want one %s event", rec.events, events.BeadWorktreeReapSkipped)
+	}
+}
+
+func TestClosedBeadForWorktreeReapUnavailableLiveStoreFailsClosed(t *testing.T) {
+	base := beads.NewMemStore()
+	cityStore := beadWorktreeTieredStore{
+		Store: base,
+		live: beadWorktreeGetErrorReader{
+			LiveReader: base,
+			err:        errors.New("backing store unavailable"),
+		},
+	}
+
+	closed, reason := closedBeadForWorktreeReap(cityStore, beads.NewMemStore(), "ga-abc123")
+	if closed {
+		t.Fatal("closedBeadForWorktreeReap authorized cleanup after authoritative live-store failure")
+	}
+	if !strings.Contains(reason, "HQ store probe failed") || !strings.Contains(reason, "backing store unavailable") {
+		t.Fatalf("reason = %q, want authoritative HQ probe failure", reason)
+	}
+}
+
+func TestClosedBeadForWorktreeReapNonComparableStoresFailClosedWithoutPanic(t *testing.T) {
+	base := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	store := beadWorktreeNonComparableStore{
+		Store:  base,
+		marker: []string{"non-comparable"},
+	}
+
+	closed, reason := closedBeadForWorktreeReap(store, store, "ga-abc123")
+	if closed {
+		t.Fatal("closedBeadForWorktreeReap authorized cleanup through ambiguous non-comparable stores")
+	}
+	if !strings.Contains(reason, "duplicate bead rows") {
+		t.Fatalf("reason = %q, want duplicate-store ambiguity", reason)
+	}
+}
+
+func TestClosedBeadForWorktreeReapNestedNonComparableStoresFailClosedWithoutPanic(t *testing.T) {
+	base := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	inner := beadWorktreeNonComparableStore{
+		Store:  base,
+		marker: []string{"non-comparable"},
+	}
+	store := beadWorktreeNestedInterfaceStore{Store: inner}
+
+	closed, reason := closedBeadForWorktreeReap(store, store, "ga-abc123")
+	if closed {
+		t.Fatal("closedBeadForWorktreeReap authorized cleanup through nested non-comparable stores")
+	}
+	if !strings.Contains(reason, "duplicate bead rows") {
+		t.Fatalf("reason = %q, want duplicate-store ambiguity", reason)
+	}
+}
+
 func TestReapClosedBeadWorktreesDuplicateStoreRowsFailClosed(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRepo := filepath.Join(cityPath, "repos", "mrig")
@@ -198,6 +443,14 @@ func TestReapClosedBeadWorktreesProbeErrorsFailClosed(t *testing.T) {
 		probe      *fakeBeadWorktreeGitProbe
 		wantReason string
 	}{
+		{
+			name: "descendant worktree list",
+			probe: &fakeBeadWorktreeGitProbe{
+				isRepo:          true,
+				worktreeListErr: errors.New("worktree registry unreadable"),
+			},
+			wantReason: "descendant worktree probe failed",
+		},
 		{
 			name: "unpushed",
 			probe: &fakeBeadWorktreeGitProbe{
@@ -278,6 +531,68 @@ func TestReapClosedBeadWorktreesProbeErrorsFailClosed(t *testing.T) {
 	}
 }
 
+func TestReapClosedBeadWorktreesRegisteredDescendantFailsClosed(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRepo := filepath.Join(cityPath, "repos", "mrig")
+	worktreePath := filepath.Join(cityPath, ".gc", "worktrees", "mrig", "artifacts", "worktrees", "ga-abc123")
+	descendantPath := filepath.Join(worktreePath, "worktrees", "child")
+	if err := os.MkdirAll(descendantPath, 0o755); err != nil {
+		t.Fatalf("creating nested worktree paths: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: rigRepo}}
+	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	rigStore := beads.NewMemStore()
+	worktreeProbe := &fakeBeadWorktreeGitProbe{
+		isRepo: true,
+		branch: "polecat/ga-abc123",
+		worktrees: []git.Worktree{
+			{Path: worktreePath},
+			{Path: descendantPath},
+		},
+	}
+	rigProbe := &fakeBeadWorktreeGitProbe{isRepo: true}
+
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(workDir string) beadWorktreeGitProbe {
+		switch filepath.Clean(workDir) {
+		case filepath.Clean(worktreePath):
+			return worktreeProbe
+		case filepath.Clean(rigRepo):
+			return rigProbe
+		default:
+			return &fakeBeadWorktreeGitProbe{}
+		}
+	}
+
+	var stderr bytes.Buffer
+	rec := &beadWorktreeEventRecorder{}
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		cityStore,
+		map[string]beads.Store{"mrig": rigStore},
+		rec,
+		&stderr,
+	); got != 0 {
+		t.Fatalf("reapClosedBeadWorktrees = %d with registered descendant, want 0", got)
+	}
+	if worktreeProbe.removeInvoked || rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove invoked despite registered descendant worktree")
+	}
+	if !strings.Contains(stderr.String(), "contains registered descendant worktree") {
+		t.Fatalf("stderr = %q, want registered-descendant reason", stderr.String())
+	}
+	if len(rec.events) != 1 || rec.events[0].Type != events.BeadWorktreeReapSkipped {
+		t.Fatalf("events = %+v, want one %s event", rec.events, events.BeadWorktreeReapSkipped)
+	}
+}
+
 func TestReapClosedBeadWorktreesRejectsCanonicalScanSymlinkEscape(t *testing.T) {
 	cityPath := t.TempDir()
 	rigWorktreeDir := filepath.Join(cityPath, ".gc", "worktrees", "mrig")
@@ -328,6 +643,100 @@ func TestReapClosedBeadWorktreesRejectsCanonicalScanSymlinkEscape(t *testing.T) 
 	}
 }
 
+func TestReapClosedBeadWorktreesRejectsSameRootCrossRigSymlink(t *testing.T) {
+	cityPath := t.TempDir()
+	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	rigWorktreeDir := filepath.Join(wtRoot, "mrig")
+	otherArtifacts := filepath.Join(wtRoot, "other", "artifacts")
+	outsideAuthorityWorktree := filepath.Join(otherArtifacts, "worktrees", "ga-abc123")
+	if err := os.MkdirAll(rigWorktreeDir, 0o755); err != nil {
+		t.Fatalf("creating named rig worktree path: %v", err)
+	}
+	if err := os.MkdirAll(outsideAuthorityWorktree, 0o755); err != nil {
+		t.Fatalf("creating other-rig worktree path: %v", err)
+	}
+	if err := os.Symlink(otherArtifacts, filepath.Join(rigWorktreeDir, "artifacts")); err != nil {
+		t.Fatalf("creating cross-rig artifacts symlink: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: filepath.Join(cityPath, "repos", "mrig")}}
+	cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "ga-abc123",
+		Status: "closed",
+	}}, nil)
+	rigStore := beads.NewMemStore()
+
+	probeInvoked := false
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(string) beadWorktreeGitProbe {
+		probeInvoked = true
+		return &fakeBeadWorktreeGitProbe{isRepo: true}
+	}
+
+	var stderr bytes.Buffer
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		cityStore,
+		map[string]beads.Store{"mrig": rigStore},
+		events.Discard,
+		&stderr,
+	); got != 0 {
+		t.Fatalf("reapClosedBeadWorktrees = %d for same-root cross-rig symlink, want 0", got)
+	}
+	if probeInvoked {
+		t.Fatal("git probe invoked for worktree reached through same-root cross-rig symlink")
+	}
+	if !strings.Contains(stderr.String(), "retargets expected scan directory") {
+		t.Fatalf("stderr = %q, want named-rig retarget rejection", stderr.String())
+	}
+}
+
+func TestReapClosedBeadWorktreesRejectsRetargetedRigRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	otherRigDir := filepath.Join(wtRoot, "other")
+	if err := os.MkdirAll(otherRigDir, 0o755); err != nil {
+		t.Fatalf("creating other-rig worktree path: %v", err)
+	}
+	if err := os.Symlink(otherRigDir, filepath.Join(wtRoot, "mrig")); err != nil {
+		t.Fatalf("creating retargeted rig-root symlink: %v", err)
+	}
+
+	cfg := gaConfig()
+	cfg.Rigs = []config.Rig{{Name: "mrig", Path: filepath.Join(cityPath, "repos", "mrig")}}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	probeInvoked := false
+	originalFactory := newBeadWorktreeGitProbe
+	t.Cleanup(func() { newBeadWorktreeGitProbe = originalFactory })
+	newBeadWorktreeGitProbe = func(string) beadWorktreeGitProbe {
+		probeInvoked = true
+		return &fakeBeadWorktreeGitProbe{isRepo: true}
+	}
+
+	var stderr bytes.Buffer
+	if got := reapClosedBeadWorktrees(
+		cityPath,
+		cfg,
+		cityStore,
+		map[string]beads.Store{"mrig": rigStore},
+		events.Discard,
+		&stderr,
+	); got != 0 {
+		t.Fatalf("reapClosedBeadWorktrees = %d for retargeted rig root, want 0", got)
+	}
+	if probeInvoked {
+		t.Fatal("git probe invoked through retargeted rig root")
+	}
+	if !strings.Contains(stderr.String(), "retargets expected rig worktree directory") {
+		t.Fatalf("stderr = %q, want rig-root retarget rejection", stderr.String())
+	}
+}
+
 func TestExtractBeadIDFromWorktreeNameBareID(t *testing.T) {
 	cfg := gaConfig()
 	got := extractBeadIDFromWorktreeName(cfg, "ga-n0oafq")
@@ -353,6 +762,14 @@ func TestExtractBeadIDFromWorktreeNameHyphenatedConfiguredPrefix(t *testing.T) {
 	got := extractBeadIDFromWorktreeName(cfg, "builder-agent-diagnostics-hnn-pr2738")
 	if got != "agent-diagnostics-hnn" {
 		t.Errorf("got %q, want %q", got, "agent-diagnostics-hnn")
+	}
+}
+
+func TestExtractBeadIDFromWorktreeNameHierarchicalLegacySuffix(t *testing.T) {
+	cfg := gaConfig()
+	got := extractBeadIDFromWorktreeName(cfg, "builder-ga-abc.1-pr2738")
+	if got != "ga-abc.1" {
+		t.Errorf("got %q, want %q", got, "ga-abc.1")
 	}
 }
 

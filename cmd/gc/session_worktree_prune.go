@@ -47,6 +47,7 @@ var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
+//   - the worker_dir contains a registered descendant worktree
 //   - the worktree has uncommitted changes, unpushed commits, or stashes
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //
@@ -149,7 +150,9 @@ func pruneWorkerDirIfSafe(workerDir, rigRoot, sessionName, cityPath string, stde
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
 		return false
 	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+	// Keep Git's own clean-worktree refusal as a final defense against state
+	// changing after the probes above.
+	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return false
 	}

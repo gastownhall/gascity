@@ -168,8 +168,8 @@ func TestPruneAgentHomeWorktreeIfSafe_LegacyWorkDirKey(t *testing.T) {
 	if !pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
 		t.Fatalf("prune returned false on legacy work_dir; stderr=%s", stderr.String())
 	}
-	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir || !rigProbe.removedForce {
-		t.Fatalf("expected WorktreeRemove(%q, true) on rig root; got invoked=%v path=%q force=%v",
+	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir || rigProbe.removedForce {
+		t.Fatalf("expected WorktreeRemove(%q, false) on rig root; got invoked=%v path=%q force=%v",
 			fx.workerDir, rigProbe.removeInvoked, rigProbe.removedPath, rigProbe.removedForce)
 	}
 }
@@ -447,8 +447,8 @@ func TestPruneAgentHomeWorktreeIfSafe_HappyPath(t *testing.T) {
 	if rigProbe.removedPath != fx.workerDir {
 		t.Errorf("WorktreeRemove path = %q, want %q", rigProbe.removedPath, fx.workerDir)
 	}
-	if !rigProbe.removedForce {
-		t.Error("WorktreeRemove force flag = false, want true")
+	if rigProbe.removedForce {
+		t.Error("WorktreeRemove force flag = true, want false")
 	}
 	if !strings.Contains(stderr.String(), "pruned worker_dir") {
 		t.Errorf("expected success log; got %q", stderr.String())
