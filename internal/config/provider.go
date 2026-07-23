@@ -409,7 +409,11 @@ func (ps *ProviderSpec) pathCheckBinary() string {
 	if ps.PathCheck != "" {
 		return ps.PathCheck
 	}
-	return ps.Command
+	cmd := ps.Command
+	if i := strings.IndexByte(cmd, ' '); i > 0 {
+		cmd = cmd[:i]
+	}
+	return cmd
 }
 
 // boolPtr returns a pointer to the given bool for tri-state capability fields.
