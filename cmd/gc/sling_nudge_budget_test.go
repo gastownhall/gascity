@@ -7,25 +7,36 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
-type budgetSlowNudgeStore struct {
+const (
+	advancingNudgeStoreSetupOps    = 1
+	advancingNudgeStoreDeadItemOps = 4
+)
+
+type advancingNudgeStore struct {
 	beads.Store
+	fakeClock *clock.Fake
 	latency   time.Duration
 	failAfter int64
 	ops       int64
 }
 
-func (s *budgetSlowNudgeStore) tick() error {
+func (s *advancingNudgeStore) tick() error {
 	op := atomic.AddInt64(&s.ops, 1)
-	time.Sleep(s.latency)
+	s.fakeClock.Advance(s.latency)
 	if s.failAfter > 0 && op > s.failAfter {
-		return fmt.Errorf("slow nudge store operation %d exceeded test budget %d", op, s.failAfter)
+		return fmt.Errorf("advancing nudge store operation %d exceeded test budget %d", op, s.failAfter)
 	}
 	return nil
 }
 
-func (s *budgetSlowNudgeStore) List(beads.ListQuery) ([]beads.Bead, error) {
+func (s *advancingNudgeStore) operations() int64 {
+	return atomic.LoadInt64(&s.ops)
+}
+
+func (s *advancingNudgeStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	if err := s.tick(); err != nil {
 		return nil, err
 	}
@@ -38,7 +49,7 @@ func (s *budgetSlowNudgeStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	}}, nil
 }
 
-func (s *budgetSlowNudgeStore) Create(b beads.Bead) (beads.Bead, error) {
+func (s *advancingNudgeStore) Create(b beads.Bead) (beads.Bead, error) {
 	if err := s.tick(); err != nil {
 		return beads.Bead{}, err
 	}
@@ -49,33 +60,33 @@ func (s *budgetSlowNudgeStore) Create(b beads.Bead) (beads.Bead, error) {
 	return b, nil
 }
 
-func (s *budgetSlowNudgeStore) Get(id string) (beads.Bead, error) {
+func (s *advancingNudgeStore) Get(id string) (beads.Bead, error) {
 	if err := s.tick(); err != nil {
 		return beads.Bead{}, err
 	}
 	return beads.Bead{ID: id, Type: nudgeBeadType, Status: "open", Metadata: map[string]string{"state": "queued"}}, nil
 }
 
-func (s *budgetSlowNudgeStore) Close(string) error {
+func (s *advancingNudgeStore) Close(string) error {
 	return s.tick()
 }
 
-func (s *budgetSlowNudgeStore) SetMetadata(string, string, string) error {
+func (s *advancingNudgeStore) SetMetadata(string, string, string) error {
 	return s.tick()
 }
 
-func (s *budgetSlowNudgeStore) SetMetadataBatch(string, map[string]string) error {
+func (s *advancingNudgeStore) SetMetadataBatch(string, map[string]string) error {
 	return s.tick()
 }
 
-func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, reference *nudgeReference, deadCount int) []string {
+func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.Time, reference *nudgeReference, deadCount int) map[string]string {
 	t.Helper()
-	now := time.Now().UTC()
-	ids := make([]string, 0, deadCount+4)
+	now = now.UTC()
+	buckets := make(map[string]string, deadCount+4)
 	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		for i := 0; i < 2; i++ {
 			id := fmt.Sprintf("nudge-pending-preserve-%d", i)
-			ids = append(ids, id)
+			buckets[id] = "pending"
 			state.Pending = append(state.Pending, queuedNudge{
 				ID:           id,
 				BeadID:       "bead-" + id,
@@ -90,7 +101,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, reference
 		}
 		for i := 0; i < 2; i++ {
 			id := fmt.Sprintf("nudge-in-flight-preserve-%d", i)
-			ids = append(ids, id)
+			buckets[id] = "in-flight"
 			state.InFlight = append(state.InFlight, queuedNudge{
 				ID:           id,
 				BeadID:       "bead-" + id,
@@ -107,7 +118,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, reference
 		}
 		for i := 0; i < deadCount; i++ {
 			id := fmt.Sprintf("nudge-dead-preserve-%03d", i)
-			ids = append(ids, id)
+			buckets[id] = "dead"
 			state.Dead = append(state.Dead, queuedNudge{
 				ID:        id,
 				BeadID:    "bead-" + id,
@@ -123,7 +134,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, reference
 	}); err != nil {
 		t.Fatalf("seeding nudge backlog: %v", err)
 	}
-	return ids
+	return buckets
 }
 
 func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
@@ -153,35 +164,43 @@ func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
 // early exit correctly leave supersede candidates untouched" behavior is
 // asserted, not just inferred from pruneDeadQueuedNudges alone.
 func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
-	const deadBacklog = 160
+	const (
+		deadBacklog = 160
+		latency     = 40 * time.Millisecond
+	)
 	reference := &nudgeReference{Kind: "bead", ID: "ga-budget-preservation"}
 	cityPath := t.TempDir()
-	seededIDs := seedNudgeBudgetPreservationBacklog(t, cityPath, reference, deadBacklog)
-	store := &budgetSlowNudgeStore{latency: 40 * time.Millisecond, failAfter: 90}
-	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", time.Now(), queuedNudgeOptions{
+	fakeClock := &clock.Fake{Time: time.Now().UTC()}
+	seededBuckets := seedNudgeBudgetPreservationBacklog(t, cityPath, fakeClock.Now(), reference, deadBacklog)
+	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
+	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
+	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", fakeClock.Now(), queuedNudgeOptions{
 		ID:        "nudge-new-preservation",
 		Reference: reference,
 	})
 
-	start := time.Now()
-	if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{Store: store}, item); err != nil {
-		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	start := fakeClock.Now()
+	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, item, fakeClock); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStoreAndClock: %v", err)
 	}
-	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Fatalf("enqueue elapsed = %v, want budgeted foreground maintenance under 5s", elapsed.Round(time.Millisecond))
+	virtualElapsed := fakeClock.Now().Sub(start)
+	if virtualElapsed <= nudgeEnqueueMaintenanceBudget {
+		t.Fatalf("virtual enqueue elapsed = %v, want the dead backlog to exhaust the %v budget", virtualElapsed, nudgeEnqueueMaintenanceBudget)
 	}
-	if ops := atomic.LoadInt64(&store.ops); ops >= deadBacklog {
-		t.Fatalf("slow store ops = %d, want fewer than dead backlog %d to prove the maintenance budget cut in", ops, deadBacklog)
+	if maxElapsed := nudgeEnqueueMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; virtualElapsed > maxElapsed {
+		t.Fatalf("virtual enqueue elapsed = %v, want at most %v", virtualElapsed, maxElapsed)
+	}
+	if ops := store.operations(); ops > maxOps {
+		t.Fatalf("advancing store ops = %d, want at most %d to prove the maintenance budget cut in", ops, maxOps)
 	}
 
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	if got, want := len(buckets), len(seededIDs)+1; got != want {
+	if got, want := len(buckets), len(seededBuckets)+1; got != want {
 		t.Fatalf("queued item count = %d, want %d; buckets=%v", got, want, buckets)
 	}
-	for _, id := range seededIDs {
-		if bucket := buckets[id]; bucket == "" {
-			t.Fatalf("seeded queued nudge %q vanished after budgeted enqueue; buckets=%v", id, buckets)
+	for id, wantBucket := range seededBuckets {
+		if bucket := buckets[id]; bucket != wantBucket {
+			t.Fatalf("seeded queued nudge %q bucket = %q, want %q; buckets=%v", id, bucket, wantBucket, buckets)
 		}
 	}
 	for i := 0; i < 2; i++ {
@@ -204,7 +223,7 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 // the deadline check never fires regardless of nudgeEnqueueMaintenanceBudget.
 func TestSlingNudgeEnqueueEmptyBacklogFast(t *testing.T) {
 	cityPath := t.TempDir()
-	store := &budgetSlowNudgeStore{latency: 40 * time.Millisecond, failAfter: 4}
+	store := &advancingNudgeStore{fakeClock: &clock.Fake{Time: time.Now().UTC()}, failAfter: 4}
 	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", time.Now(), queuedNudgeOptions{
 		ID: "nudge-empty-backlog",
 	})
@@ -217,8 +236,8 @@ func TestSlingNudgeEnqueueEmptyBacklogFast(t *testing.T) {
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("empty-backlog enqueue elapsed = %v, want under 500ms", elapsed.Round(time.Millisecond))
 	}
-	if ops := atomic.LoadInt64(&store.ops); ops > 2 {
-		t.Fatalf("slow store ops = %d, want at most backing-bead setup ops for an empty backlog", ops)
+	if ops := store.operations(); ops > 2 {
+		t.Fatalf("advancing store ops = %d, want at most backing-bead setup ops for an empty backlog", ops)
 	}
 
 	buckets := nudgeQueueBucketsByID(t, cityPath)

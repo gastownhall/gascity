@@ -1212,6 +1212,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 
 func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
 
 	healthCalls := 0
 	cityPath := t.TempDir()

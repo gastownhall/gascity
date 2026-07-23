@@ -2850,7 +2850,7 @@ version = "` + config.BundledPackImportVersion + `"
 [imports.core]
 source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "` + config.PublicGascityPackVersion + `"
 
