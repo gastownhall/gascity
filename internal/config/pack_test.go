@@ -5364,7 +5364,7 @@ source = "../roles"
 	if err != nil {
 		t.Fatalf("LoadPackForLint: %v", err)
 	}
-	const wantSubstring = "agent_defaults does not apply to a pack's own [imports.*] agents"
+	const wantSubstring = "does not apply to a pack's own [imports.*] agents"
 	found := false
 	for _, w := range loaded.Warnings {
 		if strings.Contains(w, wantSubstring) {

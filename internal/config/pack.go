@@ -1915,7 +1915,7 @@ func warnUnusedPackAgentDefaultsForImports(agents []Agent, defaults AgentDefault
 	if len(fields) == 0 {
 		return nil
 	}
-	return []string{fmt.Sprintf("agent_defaults does not apply to a pack's own [imports.*] agents (pack-spec §2.7 scopes it to the pack's own agents/ and [[agent]] blocks only); %s", strings.Join(fields, ", "))}
+	return []string{fmt.Sprintf("agent_defaults currently does not apply to a pack's own [imports.*] agents (the loader scopes it to the pack's own agents/ and [[agent]] blocks; see pack-spec §2.7); %s", strings.Join(fields, ", "))}
 }
 
 // cachedPackField resolves topoDir to an absolute cache key, looks up its

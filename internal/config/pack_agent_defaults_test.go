@@ -21,7 +21,7 @@ func TestWarnUnusedPackAgentDefaultsForImportsProviderUnused(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Fatalf("warnings = %#v, want exactly 1", warnings)
 	}
-	const want = `agent_defaults does not apply to a pack's own [imports.*] agents (pack-spec §2.7 scopes it to the pack's own agents/ and [[agent]] blocks only); provider unused by 2 imported agent(s)`
+	const want = `agent_defaults currently does not apply to a pack's own [imports.*] agents (the loader scopes it to the pack's own agents/ and [[agent]] blocks; see pack-spec §2.7); provider unused by 2 imported agent(s)`
 	if warnings[0] != want {
 		t.Errorf("warning = %q, want %q", warnings[0], want)
 	}
@@ -74,7 +74,7 @@ func TestWarnUnusedPackAgentDefaultsForImportsCombinesMultipleFields(t *testing.
 	if len(warnings) != 1 {
 		t.Fatalf("warnings = %#v, want exactly 1", warnings)
 	}
-	const want = `agent_defaults does not apply to a pack's own [imports.*] agents (pack-spec §2.7 scopes it to the pack's own agents/ and [[agent]] blocks only); provider unused by 1 imported agent(s), default_sling_formula unused by 1 imported agent(s), append_fragments unused by 1 imported agent(s)`
+	const want = `agent_defaults currently does not apply to a pack's own [imports.*] agents (the loader scopes it to the pack's own agents/ and [[agent]] blocks; see pack-spec §2.7); provider unused by 1 imported agent(s), default_sling_formula unused by 1 imported agent(s), append_fragments unused by 1 imported agent(s)`
 	if warnings[0] != want {
 		t.Errorf("warning = %q, want %q", warnings[0], want)
 	}
