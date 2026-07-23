@@ -219,7 +219,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -582,7 +582,11 @@ func extractBdDirectoryFlag(args []string) string {
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
 // Priority: explicit rig name > explicit city > bead prefix auto-detection > -C dir rig match > GC_RIG env > enclosing rig > city root.
-func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
+//
+// stderr receives a best-effort warning when a set-but-unresolvable GC_RIG is
+// discarded (see the GC_RIG block below); pass io.Discard when the caller does
+// not care.
+func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool, stderr io.Writer) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
 		rig, ok := rigByName(cfg, rigName)
@@ -657,23 +661,44 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
 	// live under .gc/worktrees/, not the configured rig path).
 	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
+	gcRigDiscarded := ""
 	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
 		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
 			return bdRigScopeTarget(cityPath, rig), nil
 		}
-		// GC_RIG names an unknown or unbound rig — fall through to cwd/city
-		// rather than erroring, so cross-city queries still work from rig agents.
+		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
+		// (which exits 1 on the identical value), we do not error: falling
+		// through to cwd/city keeps cross-city queries working from rig agents
+		// whose GC_RIG names a rig this city does not bind. But the discard
+		// must not be silent — a stale or typo'd GC_RIG would otherwise
+		// redirect a query to a different store than the operator intended with
+		// no diagnostic, while the same value via --rig fails loudly. Record it
+		// and warn below, naming the store actually answered.
+		gcRigDiscarded = gcRig
 	}
 
+	target := cityTarget
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
 		return execStoreTarget{}, err
 	} else if ok {
 		// resolveRigForDir already skips unbound rigs, so rig.Path is
 		// guaranteed non-empty here.
-		return bdRigScopeTarget(cityPath, rig), nil
+		target = bdRigScopeTarget(cityPath, rig)
 	}
 
-	return cityTarget, nil
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+	return target, nil
+}
+
+// scopeLabel renders a store target for operator-facing diagnostics, e.g.
+// `city` or `rig "packs"`.
+func scopeLabel(t execStoreTarget) string {
+	if t.ScopeKind == "rig" && strings.TrimSpace(t.RigName) != "" {
+		return fmt.Sprintf("rig %q", t.RigName)
+	}
+	return t.ScopeKind
 }
 
 func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {
