@@ -138,9 +138,12 @@ func TestValidateReviewedHermeticBodiesRejectsDirectKnownResources(t *testing.T)
 		},
 		{name: "HTTP test server", imports: `"net/http/httptest"`, body: `_ = httptest.NewServer(nil)`, resource: ResourceHTTPTestServer},
 		{name: "net listen", imports: `"net"`, body: `_, _ = net.Listen("tcp", "127.0.0.1:0")`, resource: ResourceNetListen},
+		{name: "net typed stream listen", imports: `"net"`, body: `_, _ = net.ListenTCP("tcp", nil)`, resource: ResourceNetListen},
 		{name: "net listen config", imports: `"net"`, body: `_, _ = (net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")`, resource: ResourceNetListenConfig},
-		{name: "net listen unixgram", imports: `"net"`, body: `_, _ = net.ListenUnixgram("unixgram", nil)`, resource: ResourceNetListenUnixgram},
+		{name: "net listen config packet", imports: `"net"`, body: `_, _ = (net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")`, resource: ResourceNetListenConfig},
+		{name: "net packet listen", imports: `"net"`, body: `_, _ = net.ListenUDP("udp", nil)`, resource: ResourceNetListenPacket},
 		{name: "syscall listen", imports: `"syscall"`, body: `_ = syscall.Listen(0, 0)`, resource: ResourceSyscallListen},
+		{name: "tmux", imports: `tmuxtest "github.com/gastownhall/gascity/test/tmuxtest"`, body: `_ = tmuxtest.NewGuard(t)`, resource: ResourceTmux},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

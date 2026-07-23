@@ -21,7 +21,39 @@ type managedDoltRecoverReport struct {
 	Restarted         bool
 }
 
+type managedDoltRecoveryOps struct {
+	queryProbe       func(host, port, user string) error
+	healthCheck      func(host, port, user string) (managedDoltSQLHealthReport, error)
+	stop             func(cityPath, port string) (managedDoltStopReport, error)
+	preflightCleanup func(cityPath string) error
+	start            func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error)
+	publish          func(cityPath string) error
+	failedCleanup    func(cityPath string, pid, port int, cause error) error
+}
+
+func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
+	return managedDoltRecoveryOps{
+		queryProbe: managedDoltQueryProbe,
+		healthCheck: func(host, port, user string) (managedDoltSQLHealthReport, error) {
+			return managedDoltHealthCheck(host, port, user, true)
+		},
+		stop: func(cityPath, port string) (managedDoltStopReport, error) {
+			return stopManagedDoltProcessWithOptions(cityPath, port, false)
+		},
+		preflightCleanup: managedDoltPreflightCleanupFn,
+		start: func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
+			return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
+		},
+		publish:       publishManagedDoltRuntimeStateIfOwned,
+		failedCleanup: cleanupFailedManagedDoltRecovery,
+	}
+}
+
 func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltRecoverReport, error) {
+	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, defaultManagedDoltRecoveryOps())
+}
+
+func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel string, timeout time.Duration, ops managedDoltRecoveryOps) (managedDoltRecoverReport, error) {
 	if strings.TrimSpace(cityPath) == "" {
 		return managedDoltRecoverReport{}, fmt.Errorf("missing city path")
 	}
@@ -59,7 +91,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 			return report, waitErr
 		}
 		if observed {
-			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			lockFile = nil
@@ -81,15 +113,15 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 		if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			report.Ready = true
 			report.Healthy = true
-			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			return report, nil
 		}
 	}
 
-	if err := managedDoltQueryProbe(host, port, user); err == nil {
-		health, healthErr := managedDoltHealthCheck(host, port, user, true)
+	if err := ops.queryProbe(host, port, user); err == nil {
+		health, healthErr := ops.healthCheck(host, port, user)
 		if healthErr == nil && health.ReadOnly == "true" {
 			report.DiagnosedReadOnly = true
 		} else if healthErr == nil && health.QueryReady && health.ReadOnly == "false" {
@@ -98,7 +130,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 			if err := recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, port); err != nil {
 				return report, err
 			}
-			if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
@@ -106,7 +138,7 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 		}
 	}
 
-	stopReport, stopErr := stopManagedDoltProcessWithOptions(cityPath, port, false)
+	stopReport, stopErr := ops.stop(cityPath, port)
 	report.HadPID = stopReport.HadPID
 	report.Forced = stopReport.Forced
 	if stopReport.PID > 0 {
@@ -115,12 +147,11 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	// Match shell recover semantics: stop is best-effort before restart.
 	_ = stopErr
 
-	if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, err)
+	if err := ops.preflightCleanup(cityPath); err != nil {
+		return report, ops.failedCleanup(cityPath, report.PID, report.Port, err)
 	}
-	time.Sleep(time.Second)
 
-	startReport, err := startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
+	startReport, err := ops.start(cityPath, host, port, user, logLevel, timeout)
 	report.Restarted = true
 	report.Ready = startReport.Ready
 	if startReport.PID > 0 {
@@ -135,20 +166,20 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 		return report, err
 	}
 
-	health, err := managedDoltHealthCheck(host, strconv.Itoa(report.Port), user, true)
+	health, err := ops.healthCheck(host, strconv.Itoa(report.Port), user)
 	if err != nil {
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, err)
+		return report, ops.failedCleanup(cityPath, report.PID, report.Port, err)
 	}
 	if health.ReadOnly == "true" {
 		report.Healthy = false
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
 	}
 	report.Healthy = health.QueryReady
 	if !report.Healthy {
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
 	}
-	if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-		return report, cleanupFailedManagedDoltRecovery(cityPath, report.PID, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
+	if err := ops.publish(cityPath); err != nil {
+		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
 	}
 	return report, nil
 }

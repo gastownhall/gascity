@@ -173,6 +173,7 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning    bool
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
+	SkipRigDoltChecks    bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -382,7 +383,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
+			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
@@ -390,7 +391,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
 			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
-			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !opts.SkipRigDoltChecks {
 				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
 				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
 			}
@@ -433,7 +434,8 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
 	supervisorRunning := supervisorAliveHook() != 0
-	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipRigDoltChecks := gcDoltSkip()
+	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
 	// Resolve the rollout-gate snapshot for the doctor section from the on-disk
 	// config plus THIS doctor process's env (Resolve's default LookupEnv); a
@@ -451,6 +453,7 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time
 		SupervisorRunning:    supervisorRunning,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
+		SkipRigDoltChecks:    skipRigDoltChecks,
 		RolloutFlags:         rolloutFlags,
 		RolloutResolveErr:    rolloutResolveErr,
 	}) {

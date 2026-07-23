@@ -202,7 +202,14 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // `expected`, and without the evict a cross-process loser re-reads the same
 // stale value through the cache and re-loses until an unrelated reconcile.
 func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	writer, ok := ConditionalWriterFor(c.conditionalBacking())
+	// Resolve the NARROW capability, not ConditionalWriter: a backing that can
+	// do value-CAS but cannot soundly fence on a revision (NativeDoltStore)
+	// declares MetadataCASWriter only, and every ConditionalWriter satisfies
+	// MetadataCASWriter anyway, so this widens the backings that forward
+	// without changing behavior for fully capable ones. The trio above keeps
+	// resolving through ConditionalWriterFor — a narrow backing must not
+	// unlock a revision fence it cannot honor.
+	writer, ok := MetadataCASWriterFor(c.conditionalBacking())
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}

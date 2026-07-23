@@ -42,27 +42,33 @@ const (
 	ResourceSlowProcessGate Resource = "slow_process_gate"
 	// ResourceHTTPTestServer counts loopback servers opened by net/http/httptest.
 	ResourceHTTPTestServer Resource = "http_test_server"
-	// ResourceNetListen counts direct listeners opened by net.Listen.
+	// ResourceNetListen counts direct stream listeners opened by package-level
+	// net constructors.
 	ResourceNetListen Resource = "net_listen"
-	// ResourceNetListenUnixgram counts direct Unix datagram listeners opened by net.ListenUnixgram.
-	ResourceNetListenUnixgram Resource = "net_listen_unixgram"
-	// ResourceNetListenConfig counts direct listeners opened through net.ListenConfig.Listen.
+	// ResourceNetListenPacket counts direct packet listeners opened by
+	// package-level net constructors.
+	ResourceNetListenPacket Resource = "net_listen_packet"
+	// ResourceNetListenConfig counts direct listeners opened through
+	// net.ListenConfig methods.
 	ResourceNetListenConfig Resource = "net_listen_config"
 	// ResourceSyscallListen counts direct calls that put sockets into listening state through syscall.Listen.
 	ResourceSyscallListen Resource = "syscall_listen"
+	// ResourceTmux counts typed tmux test helpers, production constructors, and literal tmux process calls.
+	ResourceTmux Resource = "tmux"
 )
 
 var knownResources = map[Resource]struct{}{
-	ResourceSubprocess:        {},
-	ResourceFixedSleep:        {},
-	ResourceEnvironment:       {},
-	ResourceCWD:               {},
-	ResourceSlowProcessGate:   {},
-	ResourceHTTPTestServer:    {},
-	ResourceNetListen:         {},
-	ResourceNetListenConfig:   {},
-	ResourceNetListenUnixgram: {},
-	ResourceSyscallListen:     {},
+	ResourceSubprocess:      {},
+	ResourceFixedSleep:      {},
+	ResourceEnvironment:     {},
+	ResourceCWD:             {},
+	ResourceSlowProcessGate: {},
+	ResourceHTTPTestServer:  {},
+	ResourceNetListen:       {},
+	ResourceNetListenConfig: {},
+	ResourceNetListenPacket: {},
+	ResourceSyscallListen:   {},
+	ResourceTmux:            {},
 }
 
 // Scope selects the source population counted by a ledger row.
@@ -113,8 +119,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   528,
-			BaselineFiles:   161,
+			BaselineCalls:   529,
+			BaselineFiles:   162,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -126,8 +132,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   429,
-			BaselineFiles:   158,
+			BaselineCalls:   427,
+			BaselineFiles:   156,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -141,8 +147,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   393,
-			BaselineFiles:   111,
+			BaselineCalls:   394,
+			BaselineFiles:   112,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -154,8 +160,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   290,
-			BaselineFiles:   113,
+			BaselineCalls:   288,
+			BaselineFiles:   111,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -167,8 +173,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4336,
-			BaselineFiles:   204,
+			BaselineCalls:   4324,
+			BaselineFiles:   202,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -193,7 +199,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   68,
+			BaselineCalls:   57,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -219,14 +225,14 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
-			BaselineFiles:   34,
+			BaselineCalls:   94,
+			BaselineFiles:   35,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "each owning test closes its listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its stream listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -236,23 +242,23 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its configured listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
 			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListenUnixgram,
+			Resource:        ResourceNetListenPacket,
 			BaselineCalls:   3,
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test closes its packet listener and removes duplicate listener-backed coverage",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -266,6 +272,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage",
 			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceTmux,
+			BaselineCalls:   6,
+			BaselineFiles:   2,
+			ReportedCalls:   6,
+			ReportedFiles:   2,
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "each owning test confines tmux processes and sockets to its isolated namespace and cleanup",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -285,11 +304,44 @@ var bootstrapPolicy = Ledger{
 			PackageDir:      "cmd/gc",
 			PackageName:     "main",
 			Owner:           "TestMain",
-			Resources:       []Resource{ResourceEnvironment},
+			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
 			OwnerBead:       "ga-80po0c.2.1",
-			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner",
-			ResourceOwner:   "only environment calls lexically inside TestMain leave Small debt",
-			MigrationTarget: "P0.4b",
+			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup",
+			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4b/P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/herdr",
+			PackageName:     "herdr",
+			Owner:           "TestServerAliveRejectsStaleSocket",
+			Resources:       []Resource{ResourceNetListen},
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "herdr stale-socket liveness regression is a checked Medium stream-listener owner",
+			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection",
+			MigrationTarget: "P0.4c-listener",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/herdr",
+			PackageName:     "herdr",
+			Owner:           "TestServerAliveDetectsLiveServer",
+			Resources:       []Resource{ResourceNetListen},
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "herdr live-server liveness regression is a checked Medium stream-listener owner",
+			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup",
+			MigrationTarget: "P0.4c-listener",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "internal/runtime/tmux",
+			PackageName:     "tmux",
+			Owner:           "TestMain",
+			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup",
+			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -349,8 +401,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   390,
-			BaselineFiles:   109,
+			BaselineCalls:   391,
+			BaselineFiles:   110,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -362,8 +414,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   290,
-			BaselineFiles:   113,
+			BaselineCalls:   288,
+			BaselineFiles:   111,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -375,8 +427,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4330,
-			BaselineFiles:   204,
+			BaselineCalls:   4318,
+			BaselineFiles:   202,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -401,7 +453,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   68,
+			BaselineCalls:   57,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
@@ -431,10 +483,10 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   34,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -444,23 +496,23 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
 			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListenUnixgram,
+			Resource:        ResourceNetListenPacket,
 			BaselineCalls:   3,
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2",
-			Invariant:       "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline",
-			ResourceOwner:   "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener",
-			MigrationTarget: "P0.4c",
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener",
+			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-10-01",
 		},
 		{
@@ -474,6 +526,19 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
+			Expires:         "2026-10-01",
+		},
+		{
+			Scope:           ScopeUntagged,
+			Resource:        ResourceTmux,
+			BaselineCalls:   0,
+			BaselineFiles:   0,
+			ReportedCalls:   0,
+			ReportedFiles:   0,
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline",
+			ResourceOwner:   "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 	},
@@ -933,7 +998,7 @@ func validateImports(file *ast.File) error {
 			continue
 		}
 		if spec.Name != nil && spec.Name.Name == "." {
-			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" {
+			if importPath == "net" || importPath == "os/exec" || importPath == "time" || importPath == "os" || importPath == "syscall" || importPath == "testing" || importPath == "net/http/httptest" || importPath == "github.com/gastownhall/gascity/internal/runtime/tmux" || importPath == "github.com/gastownhall/gascity/test/tmuxtest" {
 				return fmt.Errorf("targeted dot import %q cannot be counted safely", importPath)
 			}
 		}
@@ -964,7 +1029,7 @@ func appendResourceCandidateCalls(calls []resourceCall, node ast.Node, owner str
 		switch function := unparen(call.Fun).(type) {
 		case *ast.SelectorExpr:
 			switch function.Sel.Name {
-			case "Command", "CommandContext", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenUnixgram", "NewServer", "NewTLSServer", "NewUnstartedServer":
+			case "Command", "CommandContext", "ConfigureProcessEnv", "KillAllTestSessions", "LookPath", "NewGuard", "NewGuardWithSocket", "NewProvider", "NewProviderWithConfig", "NewSeamBackedWithConfig", "NewServer", "NewTLSServer", "NewTmux", "NewTmuxWithConfig", "NewUnstartedServer", "RequireTmux", "Sleep", "Setenv", "Unsetenv", "Clearenv", "Chdir", "Listen", "ListenIP", "ListenMulticastUDP", "ListenPacket", "ListenTCP", "ListenUDP", "ListenUnix", "ListenUnixgram":
 				calls = append(calls, resourceCall{call: call, owner: owner, runnable: runnable})
 			}
 		case *ast.Ident:
@@ -1123,7 +1188,7 @@ func netListenReceiverExpressions(file *ast.File) []ast.Expr {
 			return true
 		}
 		selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-		if ok && selector.Sel.Name == "Listen" {
+		if ok && (selector.Sel.Name == "Listen" || selector.Sel.Name == "ListenPacket") {
 			receivers = append(receivers, unparen(selector.X))
 		}
 		return true
@@ -1272,7 +1337,7 @@ func isNetListenConfigValue(expression ast.Expr, bindings bindingInfo) (bool, er
 
 func isNetListenConfigCall(call *ast.CallExpr, bindings bindingInfo) (bool, error) {
 	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != "Listen" {
+	if !ok || (selector.Sel.Name != "Listen" && selector.Sel.Name != "ListenPacket") {
 		return false, nil
 	}
 	receiver := unparen(selector.X)

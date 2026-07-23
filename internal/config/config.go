@@ -4305,7 +4305,7 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] (skills and formulas) pinned to the registry release.
+// plus [imports.gc] (skills, formulas, and commands) pinned to the registry release.
 // The gascity formulas route their steps to role agents (gc.run-operator,
 // gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
 // the template also seeds that pack as a default rig import bound "gc" — every
@@ -4315,7 +4315,7 @@ func GastownCity(name, provider, startCommand string) City {
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
-		"gascity": {
+		"gc": {
 			Source:  PublicGascityPackSource,
 			Version: PublicGascityPackVersion,
 		},

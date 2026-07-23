@@ -862,16 +862,6 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
-func shouldAcceptStartupDialogs(cfg runtime.Config) bool {
-	if cfg.AcceptStartupDialogs != nil {
-		return *cfg.AcceptStartupDialogs
-	}
-	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
-		return false
-	}
-	return true
-}
-
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
 	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
 }
@@ -1234,7 +1224,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Step 3: Accept startup dialogs (workspace trust + bypass permissions).
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
-	if shouldAcceptStartupDialogs(cfg) {
+	if runtime.ShouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1261,7 +1251,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
-	if shouldAcceptStartupDialogs(cfg) {
+	if runtime.ShouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)

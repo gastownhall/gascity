@@ -243,7 +243,11 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot)
+	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
+	if tmuxSocketParentRoot == "" {
+		tmuxSocketParentRoot = "/tmp"
+	}
+	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot, tmuxSocketParentRoot)
 	if err != nil {
 		panic(err)
 	}
@@ -2846,7 +2850,7 @@ version = "` + config.BundledPackImportVersion + `"
 [imports.core]
 source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "` + config.PublicGascityPackVersion + `"
 

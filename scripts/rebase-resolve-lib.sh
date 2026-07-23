@@ -53,6 +53,9 @@
 #
 # Required external commands: git, awk, cmp, mktemp.
 
+# shellcheck source=./push-ownership-guard.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
+
 # is_additive_keepboth_path <path>
 #
 # Returns 0 when <path> is a test / doc / fixture file for which concatenating
@@ -360,6 +363,11 @@ attempt_trivial_conflict_resolution() {
 #        The local branch IS rebased but the remote is NOT updated. Caller
 #        falls back to route-to-builder; the next gate cycle re-fetches and
 #        retries from current state.
+#   14 — rebased cleanly, but the pre-push bead-ownership/staleness guard
+#        blocked the push (the bead was reassigned/closed/held/routed
+#        elsewhere since this attempt began). The local branch IS rebased
+#        but the remote is NOT updated. Caller falls back to
+#        route-to-builder; this is the race ga-fip9ps.1 guards against.
 attempt_bounded_self_rebase() {
     local branch="$1"
     local base_ref="${2:-main}"
@@ -382,6 +390,18 @@ attempt_bounded_self_rebase() {
 
     local before_sha
     before_sha="$(git rev-parse HEAD 2>/dev/null)" || return 10
+
+    # Snapshot our local knowledge of the remote branch's tip now, before any
+    # rebase. Bare --force-with-lease resolves its expected value through the
+    # remote's configured fetch refspec; when <branch> isn't covered by that
+    # refspec (true for on-demand branches like this one — only base_ref and
+    # validator refs are configured), git can reject the push as stale even
+    # though this tracking ref is verified fresh. Passing the SHA explicitly
+    # below sidesteps that refspec-mapping lookup while keeping the same
+    # lease semantics: a genuine concurrent push still invalidates this
+    # captured value and the push is still correctly rejected.
+    local expected_remote_sha
+    expected_remote_sha="$(git rev-parse --verify -q "refs/remotes/origin/$branch" 2>/dev/null)" || expected_remote_sha=""
 
     # Already on top of base? Then criterion 6's FAIL was stale — nothing to
     # rebase, no push needed.
@@ -428,9 +448,24 @@ attempt_bounded_self_rebase() {
         return 12
     fi
 
+    # Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
+    # immediately before this force-with-lease push executes. A mayor
+    # ruling (reassign/close/hold/reroute) that landed after this attempt
+    # began must not be clobbered by a stale push.
+    if ! assert_bead_still_claimed; then
+        return 14
+    fi
+
     # Force-push the rebased branch. --force-with-lease (NOT --force) keeps
-    # us from clobbering a concurrent push to this same branch.
-    if ! GIT_TERMINAL_PROMPT=0 git push --force-with-lease origin "$branch" >/dev/null 2>&1; then
+    # us from clobbering a concurrent push to this same branch, using the
+    # SHA captured above as the explicit expected value (see above).
+    local lease_arg
+    if [[ -n "$expected_remote_sha" ]]; then
+        lease_arg="--force-with-lease=$branch:$expected_remote_sha"
+    else
+        lease_arg="--force-with-lease=$branch"
+    fi
+    if ! GIT_TERMINAL_PROMPT=0 git push "$lease_arg" origin "$branch" >/dev/null 2>&1; then
         return 13
     fi
 

@@ -1763,9 +1763,21 @@ func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(
 
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
-	supervisorSystemctlRun = func(_ ...string) error { return nil }
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
 	supervisorSystemctlActive = func(service string) bool {
-		return service == unitName
+		if service != unitName {
+			return false
+		}
+		for _, call := range calls {
+			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
+				return false
+			}
+		}
+		return true
 	}
 	stubSupervisorRunningPreserveSignalReady(t, true)
 	t.Cleanup(func() {
