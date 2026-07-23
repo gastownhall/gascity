@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 529
-baseline_files = 162
+baseline_calls = 531
+baseline_files = 163
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -38,8 +38,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 394
-baseline_files = 112
+baseline_calls = 396
+baseline_files = 113
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -257,6 +257,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "Make/provider and suite-contract proof is a checked Medium owner"
 resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 migration_target = "P0.1"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDrift"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner"
+resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store"
+migration_target = "P0.4b"
 expires = "2026-10-01"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
