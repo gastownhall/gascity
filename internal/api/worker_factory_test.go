@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,6 +29,9 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 		"SESSION_ENV_PRECEDENCE": "workspace",
 		"GC_BIN":                 "/workspace/bin/gc",
 		"GC_CITY":                "/workspace/city",
+		// PR #4577 review (security major): a controller token configured via
+		// workspace env must be scrubbed from the resumed session env.
+		convergence.TokenEnvVar: "workspace-controller-token",
 	}
 	fs.cfg.Agents[0].Provider = "resolved-worker"
 	fs.cfg.Providers["resolved-worker"] = config.ProviderSpec{
@@ -44,6 +48,9 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 			"SESSION_ENV_PRECEDENCE": "provider",
 			"GC_BIN":                 "/provider/bin/gc",
 			"GC_CITY":                "/provider/city",
+			// PR #4577 review (security major): a controller token configured via
+			// provider env must also be scrubbed from the resumed session env.
+			convergence.TokenEnvVar: "provider-controller-token",
 		},
 	}
 
@@ -120,6 +127,23 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 		}
 		if got := runtimeCfg.Hints.Env[key]; got != want {
 			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	// PR #4577 review: the API resume path must (a) prepend the gc binary's dir
+	// to PATH so a bare `gc` in the resumed session resolves to this binary
+	// (behavioral-correctness major), and (b) scrub the controller token from
+	// both workspace and provider env layers (security major).
+	wantPATHPrefix := filepath.Dir(gcBin)
+	for name, env := range map[string]map[string]string{
+		"SessionEnv": runtimeCfg.SessionEnv,
+		"Hints.Env":  runtimeCfg.Hints.Env,
+	} {
+		parts := strings.Split(env["PATH"], string(os.PathListSeparator))
+		if len(parts) == 0 || parts[0] != wantPATHPrefix {
+			t.Errorf("%s[PATH] = %q, want first entry %q (dir of GC_BIN)", name, env["PATH"], wantPATHPrefix)
+		}
+		if got, present := env[convergence.TokenEnvVar]; present {
+			t.Errorf("%s[%s] = %q present, want scrubbed", name, convergence.TokenEnvVar, got)
 		}
 	}
 	// Identity-only contract (per Copilot review): no dispatcher trace
