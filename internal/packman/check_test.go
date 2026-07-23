@@ -68,6 +68,46 @@ version = "^1.0"
 	assertSingleIssue(t, report, "missing-lock-entry")
 }
 
+// TestCheckInstalledReportsMissingTransitiveLockEntryFromRelativeLocalPathSource
+// is the check-side regression for the relative-source half of #4523: a
+// non-git local pack stored as a city-relative path ("packs/local") must be
+// resolved against the city root, not the process working directory, so its
+// transitive remote imports are still checked against the lockfile. This runs
+// from a foreign cwd; before the fix a cwd-relative read found no pack.toml
+// and the missing transitive entry silently read as "Import state OK".
+func TestCheckInstalledReportsMissingTransitiveLockEntryFromRelativeLocalPathSource(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	// Run from a working directory different from the city so a cwd-relative
+	// read of the source would fail to find the pack.
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(city, "packs", "local"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "packs", "local", "pack.toml"), []byte(`
+[pack]
+name = "local"
+schema = 1
+
+[imports.roles]
+source = "https://example.com/roles.git"
+version = "^1.0"
+`), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: filepath.Join("packs", "local")},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lock-entry")
+}
+
 // TestCheckInstalledToleratesMissingLocalPathSourcePack is the check.go
 // sibling of TestSyncLockToleratesMissingLocalPathSourcePack: a local path
 // source that isn't materialized on disk has no transitive imports to

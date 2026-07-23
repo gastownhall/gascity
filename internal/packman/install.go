@@ -332,24 +332,37 @@ func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty); err != nil {
+		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty, s.cityRoot); err != nil {
 			return nil, nil, false, fmt.Errorf("import %q: %w", name, err)
 		}
 	}
 	return constraints, reachable, dirty, nil
 }
 
-func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
+// walkImport walks one import into the reachable closure. declDir is the
+// directory a relative local-path source is resolved against: the city root
+// for top-level imports, and the declaring pack's own directory for nested
+// imports, so a local pack's relative local imports resolve against that
+// pack's location rather than the process working directory.
+func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	if !isRemoteSource(imp.Source) {
 		// A local path-source pack is never locked or fetched from cache,
 		// but its own declared imports still need to reach the closure —
 		// read its pack.toml straight off disk instead of from a resolved
-		// git commit cache.
-		if !imp.ImportIsTransitive() || seen[imp.Source] {
+		// git commit cache. A relative source resolves against declDir, not
+		// the process working directory.
+		if !imp.ImportIsTransitive() {
 			return nil
 		}
-		seen[imp.Source] = true
-		nested, err := readPackImports(imp.Source)
+		srcDir := imp.Source
+		if !filepath.IsAbs(srcDir) {
+			srcDir = filepath.Join(declDir, srcDir)
+		}
+		if seen[srcDir] {
+			return nil
+		}
+		seen[srcDir] = true
+		nested, err := readPackImports(srcDir)
 		if err != nil {
 			// A local path source that isn't materialized on disk yet (a
 			// doctor-fix in-flight rewrite, a synthetic/placeholder import,
@@ -361,7 +374,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 			}
 			return fmt.Errorf("local pack %q: %w", imp.Source, err)
 		}
-		return s.walkNestedImports(nested, constraints, reachable, seen, dirty)
+		return s.walkNestedImports(nested, constraints, reachable, seen, dirty, srcDir)
 	}
 
 	mergedConstraint, err := mergeConstraints(constraints[imp.Source], imp.Version)
@@ -379,7 +392,8 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		return nil
 	}
 
-	if _, err := s.cachedPackPath(imp.Source, chosen.Commit); err != nil {
+	cachePath, err := s.cachedPackPath(imp.Source, chosen.Commit)
+	if err != nil {
 		return err
 	}
 	if !imp.ImportIsTransitive() {
@@ -394,17 +408,19 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	if err != nil {
 		return err
 	}
-	return s.walkNestedImports(nested, constraints, reachable, seen, dirty)
+	// A remote pack's nested relative local import (if any) resolves under
+	// the cached checkout, not the city root.
+	return s.walkNestedImports(nested, constraints, reachable, seen, dirty, cachePath)
 }
 
-func (s *syncState) walkNestedImports(nested map[string]config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
+func (s *syncState) walkNestedImports(nested map[string]config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	names := make([]string, 0, len(nested))
 	for name := range nested {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty); err != nil {
+		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty, declDir); err != nil {
 			return fmt.Errorf("nested import %q: %w", name, err)
 		}
 	}

@@ -108,6 +108,66 @@ schema = 1
 	}
 }
 
+// TestSyncLockWalksRelativeLocalPathSourceTransitiveImports is the regression
+// for the relative-source half of #4523: `gc import add` stores a non-git
+// local pack as a path relative to the city (e.g. "packs/local"), and
+// discovery must resolve that against the city root — not the process working
+// directory. Before this fix, walkImport read the source cwd-relative, so a
+// packman run from any cwd ≠ city silently found no pack.toml and wrote no
+// transitive lock entry. This test runs from a foreign cwd to pin that.
+func TestSyncLockWalksRelativeLocalPathSourceTransitiveImports(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	// Run from a working directory different from the city so a cwd-relative
+	// read of the source would fail to find the pack.
+	t.Chdir(t.TempDir())
+	stubCachedPackGit(t)
+
+	if err := os.MkdirAll(filepath.Join(city, "packs", "local"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "packs", "local", "pack.toml"), []byte(`
+[pack]
+name = "local"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^2.0"
+`), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: filepath.Join("packs", "local")},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("len(Packs) = %d, want 1: %#v", len(got.Packs), got.Packs)
+	}
+	if _, ok := got.Packs["https://example.com/b.git"]; !ok {
+		t.Fatalf("missing transitive lock entry for relative local pack's remote import b: %#v", got.Packs)
+	}
+}
+
 // TestSyncLockToleratesMissingLocalPathSourcePack is the regression for the
 // PR #4540 CI break this fix's own first landing caused: a local path
 // source that isn't materialized on disk (a doctor-fix in-flight rewrite, a
