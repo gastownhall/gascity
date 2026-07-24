@@ -35,6 +35,9 @@ type AgentPatch struct {
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// WorkQueryUnfiltered overrides the agent's WorkQueryUnfiltered flag
+	// (see Agent.WorkQueryUnfiltered for semantics).
+	WorkQueryUnfiltered *bool `toml:"work_query_unfiltered,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
@@ -454,6 +457,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.Suspended != nil {
 		a.Suspended = *p.Suspended
+	}
+	if p.WorkQueryUnfiltered != nil {
+		a.WorkQueryUnfiltered = *p.WorkQueryUnfiltered
 	}
 	if len(p.PreStart) > 0 {
 		a.PreStart = append([]string(nil), p.PreStart...)

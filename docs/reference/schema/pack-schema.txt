@@ -164,7 +164,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nPlain `gc hook` display (no --claim) additionally post-filters this\nquery's output to candidates matching this agent's own identity or\nroute targets, same as --claim always has; set WorkQueryUnfiltered to\nopt out."
+        },
+        "work_query_unfiltered": {
+          "type": "boolean",
+          "description": "WorkQueryUnfiltered, when true, exempts this agent's plain `gc hook`\ndisplay from the default route-match filter, preserving pre-filter\ncoarse/cross-cutting visibility for a role whose custom WorkQuery\nintentionally spans multiple routes (e.g. pack-author's\nlabel-OR-routed_to union). Does not affect --claim, which has always\nbeen strictly route-gated regardless of this flag."
         },
         "sling_query": {
           "type": "string",
@@ -385,6 +389,10 @@
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the agent's suspended state."
+        },
+        "work_query_unfiltered": {
+          "type": "boolean",
+          "description": "WorkQueryUnfiltered overrides the agent's WorkQueryUnfiltered flag\n(see Agent.WorkQueryUnfiltered for semantics)."
         },
         "pool": {
           "$ref": "#/$defs/PoolOverride",

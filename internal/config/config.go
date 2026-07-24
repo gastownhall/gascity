@@ -674,6 +674,9 @@ type AgentOverride struct {
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended sets the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// WorkQueryUnfiltered overrides the agent's WorkQueryUnfiltered flag
+	// (see Agent.WorkQueryUnfiltered for semantics).
+	WorkQueryUnfiltered *bool `toml:"work_query_unfiltered,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
@@ -3139,7 +3142,18 @@ type Agent struct {
 	//   3. ready unassigned work with gc.routed_to=<qualified-name>
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
+	// Plain `gc hook` display (no --claim) additionally post-filters this
+	// query's output to candidates matching this agent's own identity or
+	// route targets, same as --claim always has; set WorkQueryUnfiltered to
+	// opt out.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// WorkQueryUnfiltered, when true, exempts this agent's plain `gc hook`
+	// display from the default route-match filter, preserving pre-filter
+	// coarse/cross-cutting visibility for a role whose custom WorkQuery
+	// intentionally spans multiple routes (e.g. pack-author's
+	// label-OR-routed_to union). Does not affect --claim, which has always
+	// been strictly route-gated regardless of this flag.
+	WorkQueryUnfiltered bool `toml:"work_query_unfiltered,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,

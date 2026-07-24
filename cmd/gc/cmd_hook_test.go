@@ -240,7 +240,7 @@ name = "test-city"
 
 [[agent]]
 name = "polecat"
-work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\",\"metadata\":{\"gc.routed_to\":\"polecat\"}}]'"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -286,7 +286,7 @@ name = "test-city"
 
 [[agent]]
 name = "polecat"
-work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\",\"metadata\":{\"gc.routed_to\":\"polecat\"}}]'"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -308,6 +308,111 @@ work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work
 	}
 	if !strings.Contains(stderr.String(), "not found in config") {
 		t.Errorf("stderr = %q, want to contain \"not found in config\"", stderr.String())
+	}
+}
+
+// hookRouteFilterFixtureCandidates is the shared work_query fixture for
+// TestCmdHookDisplayFiltersByRoute and its WorkQueryUnfiltered counterpart:
+// one candidate per predicate clause of the ga-2rpi53 Option A display
+// filter, plus one candidate that matches none of them. Quotes are
+// pre-escaped for embedding inside a TOML basic ("...") string, matching
+// TestCmdHookPoolInstanceFallsBackToTemplate's work_query fixture style.
+const hookRouteFilterFixtureCandidates = `[` +
+	`{\"id\":\"ga-other-route\",\"status\":\"open\",\"metadata\":{\"gc.routed_to\":\"other\"}},` +
+	`{\"id\":\"ga-self-route\",\"status\":\"open\",\"metadata\":{\"gc.routed_to\":\"worker\"}},` +
+	`{\"id\":\"ga-self-assignee\",\"status\":\"open\",\"assignee\":\"worker\",\"metadata\":{\"gc.routed_to\":\"other\"}},` +
+	`{\"id\":\"ga-workflow-root\",\"status\":\"open\",\"metadata\":{\"gc.kind\":\"workflow\",\"gc.run_target\":\"worker\"}}` +
+	`]`
+
+// TestCmdHookDisplayFiltersByRoute verifies that plain `gc hook <agent>` (no
+// --claim) drops candidates whose routing matches neither this agent's own
+// identity nor its route targets (ga-2rpi53 Option A). Before this filter,
+// display applied zero routing check while --claim was always route-gated
+// via hookClaimMatchesRoute, so a custom label-only work_query (e.g. an
+// architect pack's `bd ready --label=needs-architecture`, no routed_to
+// clause) could over-show beads that had been rerouted to a different role.
+func TestCmdHookDisplayFiltersByRoute(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '%s'"
+`, hookRouteFilterFixtureCandidates)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"worker"}, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	// Kept: routed to self, assignee=self despite being routed elsewhere (the
+	// Tier-1 crash-recovery regression clause), and an unrouted workflow-root
+	// whose run_target is self.
+	for _, want := range []string{"ga-self-route", "ga-self-assignee", "ga-workflow-root"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want to contain kept candidate %q", out, want)
+		}
+	}
+	// Dropped: routed to a different role, no matching assignee.
+	if strings.Contains(out, "ga-other-route") {
+		t.Errorf("stdout = %q, want ga-other-route dropped (routed to a different role)", out)
+	}
+}
+
+// TestCmdHookDisplayRouteFilterOptOutWithWorkQueryUnfiltered verifies that
+// setting work_query_unfiltered=true on the agent config exempts its plain
+// `gc hook` display from the route filter entirely — including the
+// otherwise-dropped ga-other-route candidate. --claim is unaffected by this
+// flag; it has always been strictly route-gated.
+func TestCmdHookDisplayRouteFilterOptOutWithWorkQueryUnfiltered(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query_unfiltered = true
+work_query = "printf '%s'"
+`, hookRouteFilterFixtureCandidates)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"worker"}, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"ga-other-route", "ga-self-route", "ga-self-assignee", "ga-workflow-root"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want to contain %q with work_query_unfiltered=true", out, want)
+		}
 	}
 }
 
@@ -1273,7 +1378,7 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
-work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\",\"metadata\":{\"gc.routed_to\":\"worker\"}}]'"
 ` + builtinImportsTOML("core", "bd")
 	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -1474,7 +1579,7 @@ name = "worker"
 	script := fmt.Sprintf(`#!/bin/sh
 printf 'origin=%%s alias=%%s session_id=%%s template=%%s args=%%s\n' "${GC_SESSION_ORIGIN:-}" "${GC_ALIAS:-}" "${GC_SESSION_ID:-}" "${GC_TEMPLATE:-}" "$*" >> %q
 case "$*" in
-  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"hw-1","title":"routed work"}]' ;;
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"hw-1","title":"routed work","metadata":{"gc.routed_to":"worker"}}]' ;;
   *) printf '[]' ;;
 esac
 `, logPath)
@@ -1553,7 +1658,7 @@ name = "worker"
 	// Fake bd returns the routed root only for the gc.routed_to predicate.
 	script := `#!/bin/sh
 case "$*" in
-  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"graph-root","title":"routed work"}]' ;;
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"graph-root","title":"routed work","metadata":{"gc.routed_to":"worker"}}]' ;;
   *) printf '[]' ;;
 esac
 `

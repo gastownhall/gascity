@@ -496,6 +496,12 @@
               "string",
               "null"
             ]
+          },
+          "WorkQueryUnfiltered": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -505,6 +511,7 @@
           "TmuxAlias",
           "Scope",
           "Suspended",
+          "WorkQueryUnfiltered",
           "Pool",
           "Env",
           "EnvRemove",

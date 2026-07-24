@@ -433,43 +433,54 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		emitCityWorkQueryFailure(cityPath, stderr,
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
+	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
+	sessionName := strings.TrimSpace(sessionForQuery)
+	alias := strings.TrimSpace(overrides["GC_ALIAS"])
+	assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
+	// identityCandidates/routeTargets are computed unconditionally (not just
+	// under opts.Claim) because the non-claim display path below reuses them
+	// to route-filter gc hook's plain output the same way --claim always has.
+	//
+	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
+	// work (hookClaimExistingOrAssigned); it must be scoped to this
+	// session's OWN runtime identity, never the bare pool template. A
+	// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
+	// resolvedAgentName == a.QualifiedName() is the bare template, which is
+	// ALSO the [[named_session]] holder's identity — including it let a
+	// suffixed worker adopt the holder's in_progress bead (ga-80pen8). The
+	// bare template stays in RouteTargets, which governs FRESH claims of
+	// UNASSIGNED routed work. The canonical slot / named holder keep it via
+	// `alias` (GC_ALIAS == qualified bare name); only suffixed workers drop it.
+	identityCandidates := hookClaimIdentityCandidates(
+		assignee,
+		sessionID,
+		sessionName,
+		alias,
+		agentForQuery,
+	)
+	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
+	if opts.Claim {
+		// The stale-session fence already ran early (the opts.Claim guard before
+		// agent resolution above), so no re-fence here. assignee /
+		// identityCandidates / routeTargets are hoisted above the branch so the
+		// non-claim display path reuses them.
+		claimOpts := hookClaimOptions{
+			Assignee:           assignee,
+			IdentityCandidates: identityCandidates,
+			RouteTargets:       routeTargets,
+			Env:                queryEnv,
+			DrainAck:           opts.DrainAck,
+			JSON:               opts.JSON,
+		}
+		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+	}
 	runner := func(command, _ string) (string, error) {
 		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
 		emitQueryFailure(command, err)
-		return out, err
-	}
-	if opts.Claim {
-		// The stale-session fence already ran before agent resolution above; this
-		// sessionID feeds only the claim assignee identity.
-		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
-		sessionName := strings.TrimSpace(sessionForQuery)
-		alias := strings.TrimSpace(overrides["GC_ALIAS"])
-		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
-		claimOpts := hookClaimOptions{
-			Assignee: assignee,
-			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingOrAssigned); it must be scoped to this
-			// session's OWN runtime identity, never the bare pool template. A
-			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
-			// resolvedAgentName == a.QualifiedName() is the bare template, which is
-			// ALSO the [[named_session]] holder's identity — including it let a
-			// suffixed worker adopt the holder's in_progress bead (ga-80pen8). The
-			// bare template stays in RouteTargets, which governs FRESH claims of
-			// UNASSIGNED routed work. The canonical slot / named holder keep it via
-			// `alias` (GC_ALIAS == qualified bare name); only suffixed workers drop it.
-			IdentityCandidates: hookClaimIdentityCandidates(
-				assignee,
-				sessionID,
-				sessionName,
-				alias,
-				agentForQuery,
-			),
-			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			Env:          queryEnv,
-			DrainAck:     opts.DrainAck,
-			JSON:         opts.JSON,
+		if err == nil {
+			out = filterHookCandidatesByRoute(normalizeWorkQueryOutput(strings.TrimSpace(out)), identityCandidates, routeTargets, a.WorkQueryUnfiltered)
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return out, err
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -971,6 +982,72 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 func isClosedHookCandidate(item map[string]any) bool {
 	status, ok := item["status"].(string)
 	return ok && strings.EqualFold(strings.TrimSpace(status), "closed")
+}
+
+// filterHookCandidatesByRoute strips beads from non-claim `gc hook` display
+// output whose routing matches neither this session's own identity nor its
+// route targets (ga-2rpi53 Option A). `gc hook --claim` has always applied
+// this same check via hookCandidateClaimable/hookClaimMatchesRoute; plain
+// display previously showed whatever the work_query returned, so a custom
+// label-only work_query (e.g. an architect pack's `bd ready
+// --label=needs-architecture`, no routed_to clause) could over-show beads
+// that had been rerouted to a different role. unfiltered exempts an agent
+// whose work_query intentionally spans multiple routes
+// (config.Agent.WorkQueryUnfiltered).
+// Pure function over JSON, mirroring filterUnreadyHookCandidates: decode,
+// filter, re-encode, fall back to the original output un-filtered on decode
+// failure so a malformed/legacy output shape is never hidden.
+func filterHookCandidatesByRoute(output string, identityCandidates, routeTargets []string, unfiltered bool) string {
+	if output == "" || unfiltered {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if hookCandidateVisibleForDisplay(obj, identityCandidates, routeTargets) {
+			filtered = append(filtered, obj)
+		}
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+// hookCandidateVisibleForDisplay re-decodes a single raw work-query candidate
+// into a beads.Bead (reusing StringMap's metadata coercion, same as the claim
+// path's decodeHookClaimBeads) so it can apply the exact hookClaimHasIdentity
+// / hookClaimMatchesRoute predicates --claim uses, keeping display and claim
+// in agreement by construction. The hookClaimHasIdentity clause is required,
+// not an optional simplification: without it, a bead validly assignee=self but
+// never stamped gc.routed_to (e.g. manually assigned by a human, bypassing gc
+// sling) would silently vanish from this agent's own Tier-1 crash-recovery
+// display. A per-item decode failure keeps the item (fail open), matching
+// filterHookCandidatesByRoute's own fallback-on-malformed-shape behavior.
+func hookCandidateVisibleForDisplay(obj map[string]any, identityCandidates, routeTargets []string) bool {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return true
+	}
+	var candidate beads.Bead
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return true
+	}
+	return hookClaimHasIdentity(candidate.Assignee, identityCandidates) ||
+		hookClaimMatchesRoute(candidate, routeTargets)
 }
 
 func normalizeWorkQueryOutput(output string) string {

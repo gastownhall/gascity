@@ -265,11 +265,12 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,
 		// DefaultSlingFormula: deep-copied below with other pointer fields.
-		WorkQuery:          src.WorkQuery,
-		SlingQuery:         src.SlingQuery,
-		SessionSetupScript: src.SessionSetupScript,
-		OverlayDir:         src.OverlayDir,
-		SourceDir:          src.SourceDir,
+		WorkQuery:           src.WorkQuery,
+		WorkQueryUnfiltered: src.WorkQueryUnfiltered,
+		SlingQuery:          src.SlingQuery,
+		SessionSetupScript:  src.SessionSetupScript,
+		OverlayDir:          src.OverlayDir,
+		SourceDir:           src.SourceDir,
 		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		IdleTimeout:          src.IdleTimeout,
 		MaxSessionAge:        src.MaxSessionAge,

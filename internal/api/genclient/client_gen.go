@@ -994,6 +994,7 @@ type AgentPatch struct {
 	Upstream                *string           `json:"Upstream"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
+	WorkQueryUnfiltered     *bool             `json:"WorkQueryUnfiltered"`
 }
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
