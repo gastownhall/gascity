@@ -24,6 +24,16 @@ import (
 // production (.beads/dolt at ~11 GB with ~64 rows).
 const DefaultThresholdMB = 1.0
 
+// MinWarnSizeBytes is the absolute floor below which the ratio-based
+// warning never fires, regardless of row count. A pure MB-per-row ratio
+// degenerates at small denominators: a healthy young city with only a
+// handful of live rows still carries Dolt's own baseline footprint
+// (oldgen archives, system tables) well into the hundreds of MB, which
+// would otherwise permanently trip the ratio threshold with nothing for
+// maintenance to reclaim -- gc dolt compact's own commit-count gate
+// correctly finds nothing to do, but the warning can never clear (#3374).
+const MinWarnSizeBytes = 1_000_000_000 // 1 GB
+
 // Health summarizes disk and maintenance health of the Dolt bead store.
 // A pointer *Health is included in status payloads so "no data" (e.g.
 // supervisor not running) is representable as nil rather than a
@@ -64,7 +74,7 @@ func Compute(cityPath string, sizeBytes int64, retainedRows int, lastGCAt time.T
 	}
 	if retainedRows > 0 {
 		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(retainedRows))
-		h.Warning = sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(retainedRows)
+		h.Warning = sizeBytes > MinWarnSizeBytes && sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(retainedRows)
 	}
 	return h
 }

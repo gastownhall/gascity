@@ -84,7 +84,10 @@ func TestComputeZeroEverything(t *testing.T) {
 func TestComputeBoundary(t *testing.T) {
 	// Exactly at the threshold: size = 1M * rows should NOT warn
 	// (the inequality is strict ">", not ">=").
-	const rows = 10
+	// rows is large enough that the ratio threshold size clears
+	// MinWarnSizeBytes, so this exercises the ratio boundary alone,
+	// not the absolute-size floor (see TestComputeSmallStoreFloor).
+	const rows = 2000
 	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true at exact threshold, want false")
@@ -92,6 +95,39 @@ func TestComputeBoundary(t *testing.T) {
 	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false one byte over threshold, want true")
+	}
+}
+
+// TestComputeSmallStoreFloorSuppressesFalsePositive is the regression for
+// #3374: a young/small city with only a handful of live rows still carries
+// Dolt's own baseline footprint (oldgen archives, system tables) well into
+// the hundreds of MB, which permanently trips a pure MB-per-row ratio with
+// nothing for maintenance to reclaim — gc dolt compact's own commit-count
+// gate correctly finds nothing to do, but the warning could never clear.
+// Reproduces the reported numbers exactly: 343 MB at 7 live rows (~49
+// MB/row, far above the 1.0 MB/row ratio threshold) must not warn, since
+// the total size is still well under the absolute floor.
+func TestComputeSmallStoreFloorSuppressesFalsePositive(t *testing.T) {
+	const size = 343_000_000
+	h := Compute("/c", size, 7, time.Time{}, "")
+	if h.Warning {
+		t.Fatalf("Warning = true, want false (343MB/7 rows is below the absolute floor despite a high ratio)")
+	}
+	if h.RatioMB < 48 || h.RatioMB > 50 {
+		t.Fatalf("RatioMB = %v, want ~49 (the ratio itself is still reported for diagnostics)", h.RatioMB)
+	}
+}
+
+// TestComputeLargeStoreStillWarnsAboveFloor guards the fix's scope: the
+// floor only suppresses the false positive on genuinely small stores — the
+// real pathology the ratio check exists to catch (production case: ~11GB
+// at ~64 rows) must still warn once both the ratio AND the absolute floor
+// are exceeded.
+func TestComputeLargeStoreStillWarnsAboveFloor(t *testing.T) {
+	const size = 11_200_000_000
+	h := Compute("/c", size, 221, time.Time{}, "")
+	if !h.Warning {
+		t.Fatalf("Warning = false, want true (11.2GB/221 rows is well above both the ratio threshold and the absolute floor)")
 	}
 }
 

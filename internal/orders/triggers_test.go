@@ -82,11 +82,18 @@ func TestCheckTriggerCronEveryMinuteStepMatched(t *testing.T) {
 
 func TestCheckTriggerCronNotMatched(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
-	// 12:00 UTC — should not match.
+	// 12:00 UTC — should not match. Uses a warm lastRun (a minute ago, not a
+	// scheduled boundary) rather than neverRan: since #3947's fix, a never-run
+	// order's own bounded catch-up window would otherwise legitimately find
+	// today's already-elapsed 03:00 occurrence and correctly report Due — this
+	// test isolates the plain "off-schedule minute, nothing to catch up"
+	// case instead of confounding it with that separate cold-start path.
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	result := CheckTrigger(a, now, neverRan, nil, nil)
+	lastRun := now.Add(-1 * time.Minute)
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	result := CheckTrigger(a, now, lastRunFn, nil, nil)
 	if result.Due {
-		t.Errorf("Due = true, want false (schedule doesn't match 12:00)")
+		t.Errorf("Due = true, want false (schedule doesn't match 12:00, nothing to catch up since lastRun)")
 	}
 }
 
@@ -104,6 +111,43 @@ func TestCheckTriggerCronCatchesUpMissedBoundary(t *testing.T) {
 	result := CheckTrigger(a, now, lastRunFn, nil, nil)
 	if !result.Due {
 		t.Errorf("Due = false, want true (catch up the missed 04:00 occurrence); reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary is the
+// regression for #3947: the catch-up scan added by the fix above was
+// gated on a non-zero lastRun, so a freshly-installed narrow-window order
+// (e.g. a daily-once schedule) that never happens to be evaluated on its
+// exact scheduled minute could never fire at all — not even once — since
+// there was no lastRun to catch up from and no restart recovers it either.
+func TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary(t *testing.T) {
+	a := Order{Name: "janitor-worktree-gc", Trigger: "cron", Schedule: "20 4 * * *"}
+	// Scheduled minute (04:20) elapsed less than an hour ago; the
+	// controller's coarse eval cadence never landed on it exactly.
+	now := time.Date(2026, 7, 5, 5, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (never-run order should catch up its recent missed 04:20 occurrence); reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence guards the
+// #3947 fix's own safety bound: a never-run order must not reach back
+// through its full history and fire for a schedule occurrence that
+// elapsed long before it was even installed — only the warm (non-zero
+// lastRun) catch-up path gets the full year-long lookback. A daily
+// schedule's most recent occurrence is always <=24h before now, so this
+// needs a weekly schedule to construct a "most recent occurrence is
+// clearly outside the never-run bootstrap window" case.
+func TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence(t *testing.T) {
+	a := Order{Name: "weekly-report", Trigger: "cron", Schedule: "0 4 * * 0"} // Sundays 04:00
+	// 2026-07-05 is a Sunday; evaluating three days later, the most recent
+	// occurrence (07-05 04:00) is ~74h in the past — well outside any
+	// reasonable never-run bootstrap window, and next Sunday hasn't come yet.
+	now := time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (never-run bootstrap window must not reach back days); reason=%q", result.Reason)
 	}
 }
 

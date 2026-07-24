@@ -30,6 +30,14 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 	var legacy string
 	for {
 		if citylayout.HasCityConfig(dir) {
+			// Resolve symlinks so a city reached through a linked path (e.g.
+			// ~/gc -> /real/city) is identified by its real path. Otherwise
+			// cityPath-derived store scopes fail the native-store identity
+			// gate ("database project_id could not be confirmed") and every
+			// command degrades to the bd-subprocess fallback.
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				return resolved, nil
+			}
 			return dir, nil
 		}
 		if legacy == "" && !isCityDiscoveryCeiling(dir, opts.ceilingDirs) && citylayout.HasRuntimeRoot(dir) && !isIgnoredLegacyRuntimeRoot(dir, opts.ignoredLegacyRuntime) {

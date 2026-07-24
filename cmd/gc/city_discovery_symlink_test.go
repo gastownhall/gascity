@@ -76,6 +76,35 @@ func TestNormalizeDiscoveryPathFallsBackToLongestExistingAncestor(t *testing.T) 
 	}
 }
 
+// A city reached through a symlinked directory (e.g. ~/gc -> /real/city) must be
+// identified by its EvalSymlinks-resolved real path. Otherwise cityPath-derived
+// store scopes fail the native-store identity gate ("database project_id could
+// not be confirmed") and every command degrades to the bd-subprocess fallback.
+func TestFindCityResolvesSymlinkedCityDir(t *testing.T) {
+	realCity := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(realCity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Clean(resolved)
+
+	got, err := findCity(link)
+	if err != nil {
+		t.Fatalf("findCity(%q) returned error: %v", link, err)
+	}
+	if got != want {
+		t.Errorf("findCity(%q) = %q, want resolved real path %q", link, got, want)
+	}
+}
+
 func TestFindCitySymlinkedCeilingBoundsDiscovery(t *testing.T) {
 	root := t.TempDir()
 	realCeiling := filepath.Join(root, "ceiling")

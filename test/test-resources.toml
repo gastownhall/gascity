@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 529
-baseline_files = 162
+baseline_calls = 531
+baseline_files = 163
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 429
-baseline_files = 158
+baseline_calls = 427
+baseline_files = 156
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -33,13 +33,26 @@ resource_owner = "ga-80po0c.2 owns this point-in-time source census"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
+[[audit_baseline]]
+scope = "all"
+resource = "listener_helper"
+baseline_calls = 58
+baseline_files = 23
+reported_calls = 58
+reported_files = 23
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
+resource_owner = "ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-01"
+
 # Debt rows ratchet source call sites only. They are not test-size entries and
 # do not exempt or reclassify any test.
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 394
-baseline_files = 112
+baseline_calls = 396
+baseline_files = 113
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -51,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 290
-baseline_files = 113
+baseline_calls = 288
+baseline_files = 111
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -64,8 +77,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4333
-baseline_files = 203
+baseline_calls = 4324
+baseline_files = 202
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -90,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 68
+baseline_calls = 57
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -115,15 +128,28 @@ expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 94
+baseline_files = 35
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
@@ -133,23 +159,23 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its packet listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[debt]]
@@ -163,6 +189,19 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 6
+baseline_files = 2
+reported_calls = 6
+reported_files = 2
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test confines tmux processes and sockets to its isolated namespace and cleanup"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"
 
 # Exact Medium owners are keyed by source directory, package clause, and
@@ -184,11 +223,44 @@ expires = "2026-10-01"
 package_dir = "cmd/gc"
 package_name = "main"
 owner = "TestMain"
-resources = ["environment"]
+resources = ["environment", "tmux"]
 owner_bead = "ga-80po0c.2.1"
-invariant = "cmd/gc TestMain is the checked package-level Medium owner"
-resource_owner = "only environment calls lexically inside TestMain leave Small debt"
-migration_target = "P0.4b"
+invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveRejectsStaleSocket"
+resources = ["net_listen"]
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "herdr stale-socket liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection"
+migration_target = "P0.4c-listener"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveDetectsLiveServer"
+resources = ["net_listen"]
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "herdr live-server liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup"
+migration_target = "P0.4c-listener"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/tmux"
+package_name = "tmux"
+owner = "TestMain"
+resources = ["environment", "tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"
 
 [[medium]]
@@ -211,6 +283,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "Make/provider and suite-contract proof is a checked Medium owner"
 resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 migration_target = "P0.1"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDrift"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner"
+resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store"
+migration_target = "P0.4b"
 expires = "2026-10-01"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
@@ -263,8 +346,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 290
-baseline_files = 113
+baseline_calls = 288
+baseline_files = 111
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -276,8 +359,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4327
-baseline_files = 203
+baseline_calls = 4318
+baseline_files = 202
 reported_calls = 4348
 reported_files = 200
 owner_bead = "ga-80po0c.2.1"
@@ -302,7 +385,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 68
+baseline_calls = 57
 baseline_files = 24
 reported_calls = 75
 reported_files = 25
@@ -327,15 +410,28 @@ expires = "2026-10-01"
 
 [[small_debt]]
 scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 38
+baseline_files = 13
+reported_calls = 38
+reported_files = 13
+owner_bead = "ga-80po0c.2.2.3"
+invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
 resource = "net_listen"
 baseline_calls = 92
 baseline_files = 34
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]
@@ -345,23 +441,23 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
 [[small_debt]]
@@ -375,4 +471,17 @@ owner_bead = "ga-80po0c.2.2"
 invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
+expires = "2026-10-01"
+
+[[small_debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 0
+baseline_files = 0
+reported_calls = 0
+reported_files = 0
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"

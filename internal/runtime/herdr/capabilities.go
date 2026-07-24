@@ -16,6 +16,10 @@ import (
 var (
 	_ runtime.IdleWaitProvider       = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider = (*Provider)(nil)
+	// LivenessObserver lets the reconciler read aliveness from herdr's own
+	// agent-status instead of the host process-table walk (see
+	// provider.go ObserveLiveness).
+	_ runtime.LivenessObserver = (*Provider)(nil)
 )
 
 // WaitForIdle blocks until herdr reports the agent idle or the timeout elapses,

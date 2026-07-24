@@ -40,8 +40,16 @@ type CustomTypesCheck struct {
 	Dir string
 	// Label identifies this check instance (e.g., "city" or rig name).
 	Label string
-	// missing is populated by Run for use by Fix.
+	// missing is populated by Run for use by Fix. It lists required types
+	// absent from the store's types.custom CSV config.
 	missing []string
+	// tableMissing is populated by Run for use by Fix. It lists required
+	// types absent from the store's normalized custom_types table. bd's
+	// create validation reads this table, not the CSV, so the two can
+	// drift: a store can have a complete CSV yet still reject
+	// `bd create --type <t>` with "invalid issue type: <t>" because the
+	// table row was never (re)created.
+	tableMissing []string
 }
 
 // NewCustomTypesCheck creates a check for a specific store directory.
@@ -54,7 +62,12 @@ func (c *CustomTypesCheck) Name() string {
 	return "custom-types:" + c.Label
 }
 
-// Run checks that all required types are registered.
+// Run checks that all required types are registered — both in the
+// types.custom CSV config and in the store's normalized custom_types
+// table. bd's create validation reads the table, so both are checked
+// independently: a store can pass the CSV check yet still reject
+// `bd create --type <t>` if the table row is missing (see
+// TestCustomTypesCheck_TableDrift).
 func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -66,7 +79,7 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Get current custom types.
+	// Get current custom types from the CSV config.
 	current, err := getCustomTypes(c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
@@ -74,31 +87,57 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "run gc doctor --fix to set required custom types"
 		// Treat as all missing — fix will set the full list.
 		c.missing = RequiredCustomTypes
+		c.tableMissing = nil
 		return r
 	}
+	c.missing = typesNotIn(RequiredCustomTypes, current)
 
-	// Check for missing types.
-	currentSet := make(map[string]bool, len(current))
-	for _, t := range current {
-		currentSet[strings.TrimSpace(t)] = true
+	// Get registered types from the normalized custom_types table — the
+	// source of truth bd's create validation checks.
+	registered, err := getRegisteredTypes(c.Dir)
+	if err != nil {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
+		r.FixHint = "run gc doctor --fix to register required custom types"
+		c.tableMissing = RequiredCustomTypes
+		return r
 	}
-	c.missing = nil
-	for _, req := range RequiredCustomTypes {
-		if !currentSet[req] {
-			c.missing = append(c.missing, req)
-		}
-	}
+	c.tableMissing = typesNotIn(RequiredCustomTypes, registered)
 
-	if len(c.missing) == 0 {
+	if len(c.missing) == 0 && len(c.tableMissing) == 0 {
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("all %d required types registered", len(RequiredCustomTypes))
 		return r
 	}
 
+	var parts []string
+	if len(c.missing) != 0 {
+		parts = append(parts, fmt.Sprintf("missing %d custom type(s): %s", len(c.missing), strings.Join(c.missing, ", ")))
+	}
+	if len(c.tableMissing) != 0 {
+		parts = append(parts, fmt.Sprintf("%d type(s) not registered in custom_types table (validator will reject): %s", len(c.tableMissing), strings.Join(c.tableMissing, ", ")))
+	}
 	r.Status = StatusError
-	r.Message = fmt.Sprintf("missing %d custom type(s): %s", len(c.missing), strings.Join(c.missing, ", "))
+	r.Message = strings.Join(parts, "; ")
 	r.FixHint = "run gc doctor --fix to register missing types"
 	return r
+}
+
+// typesNotIn returns the entries of want that are absent from have, in
+// want's order. Entries are compared after trimming whitespace. Shared by
+// the CSV completeness check and the custom_types table drift check.
+func typesNotIn(want, have []string) []string {
+	haveSet := make(map[string]bool, len(have))
+	for _, t := range have {
+		haveSet[strings.TrimSpace(t)] = true
+	}
+	var missing []string
+	for _, w := range want {
+		if !haveSet[strings.TrimSpace(w)] {
+			missing = append(missing, w)
+		}
+	}
+	return missing
 }
 
 // CanFix returns true — missing types can be registered.
@@ -112,8 +151,13 @@ func (c *CustomTypesCheck) CanFix() bool { return true }
 // baseline (e.g., pack-specific types, user-defined types). Overwriting
 // would silently delete those, causing failures the next time code tries
 // to create beads of the deleted types.
+//
+// Fix also runs when only c.tableMissing is non-empty (CSV already
+// complete): re-issuing `bd config set types.custom` with the same CSV
+// value is what reconciles a drifted custom_types table, since bd's set
+// path is what keeps the table in sync with the CSV.
 func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
-	if len(c.missing) == 0 {
+	if len(c.missing) == 0 && len(c.tableMissing) == 0 {
 		return nil
 	}
 	// Read the current list so we can preserve user-added types.
@@ -167,6 +211,44 @@ func parseCustomTypesJSON(out []byte) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(raw, ","), nil
+}
+
+// getRegisteredTypes reads the bd store's normalized custom_types table —
+// the source of truth bd's create validation checks — as opposed to
+// getCustomTypes, which reads the types.custom CSV config value.
+func getRegisteredTypes(dir string) ([]string, error) {
+	start := time.Now()
+	args := []string{"types", "--json"}
+	cmd := exec.Command("bd", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	beads.TraceBDCall("go:doctor.getRegisteredTypes", dir, args, start, exitCode, err)
+	if err != nil {
+		return nil, err
+	}
+	return parseRegisteredTypesJSON(out)
+}
+
+// parseRegisteredTypesJSON decodes the output of `bd types --json` and
+// returns its custom_types field — the table-backed list, distinct from
+// parseCustomTypesJSON's CSV-config value.
+func parseRegisteredTypesJSON(out []byte) ([]string, error) {
+	var parsed struct {
+		CustomTypes []string `json:"custom_types"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing bd types output: %w", err)
+	}
+	return parsed.CustomTypes, nil
 }
 
 // setCustomTypes writes the types.custom config to a bd store.
