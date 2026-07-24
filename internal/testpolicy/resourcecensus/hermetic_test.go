@@ -158,6 +158,28 @@ func TestValidateReviewedHermeticBodiesRejectsDirectKnownResources(t *testing.T)
 	}
 }
 
+func TestValidateReviewedHermeticBodiesRejectsDirectListenerHelper(t *testing.T) {
+	t.Parallel()
+
+	census := scanHermeticFixture(t, fstest.MapFS{
+		"cmd/gc/helpers.go": &fstest.MapFile{Data: []byte(`package main
+func runSupervisor() {}
+`)},
+		"cmd/gc/resource_test.go": &fstest.MapFile{Data: []byte(`package main
+import "testing"
+func TestHermetic(t *testing.T) { ((runSupervisor))() }
+`)},
+	})
+	row := ReviewedHermeticBody{
+		PackageDir:    "cmd/gc",
+		PackageName:   "main",
+		Owner:         "TestHermetic",
+		EffectiveSize: "medium",
+		MediumReason:  "package TestMain mutates process state",
+	}
+	requireErrorContains(t, validateReviewedHermeticBodies([]ReviewedHermeticBody{row}, census), "listener_helper")
+}
+
 func TestValidateReviewedHermeticBodiesFollowsHelpersWithoutShadowFalseMatches(t *testing.T) {
 	t.Parallel()
 
