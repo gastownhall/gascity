@@ -1354,6 +1354,13 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
+			// Demand must not count rows the claim path refuses. Ready normally
+			// excludes self-blocked work, but repeat the exact predicate here so
+			// a lossy or stale store projection fails closed rather than driving
+			// a zero-claim respawn loop.
+			if beads.IsSelfBlockedBead(b) {
+				continue
+			}
 			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue

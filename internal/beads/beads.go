@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -90,6 +91,12 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// blockedByStatus records the provenance of an IsBlocked=true marker that
+	// bdIssue.toBead synthesized from bd's raw status=="blocked". Cache
+	// dependency invalidation may clear dependency-derived IsBlocked projections,
+	// but must not clear this independent status dimension. It is intentionally
+	// store-internal: IsBlocked remains the stable wire representation.
+	blockedByStatus bool
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -237,6 +244,7 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	}
 	return b.Status == "open" &&
 		!IsReadyExcludedBead(b) &&
+		!IsSelfBlockedBead(b) &&
 		!IsDeferred(b, now)
 }
 
@@ -253,6 +261,18 @@ func IsReadyExcludedBead(b Bead) bool {
 		}
 	}
 	return false
+}
+
+// IsSelfBlockedBead reports whether a bead carries its own blocked marker,
+// independent of dependency-graph readiness. It mirrors the claim path's
+// predicate so Ready and controller demand cannot count work the worker will
+// refuse. Both spellings are accepted for native stores; bd-backed stores carry
+// raw status "blocked" through mapBdStatus as IsBlocked.
+func IsSelfBlockedBead(b Bead) bool {
+	if b.blockedByStatus || (b.IsBlocked != nil && *b.IsBlocked) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(b.Status), "blocked")
 }
 
 // IsDeferred reports whether a bead is hidden by a future defer_until,

@@ -685,6 +685,72 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 	}
 }
 
+// A worker can explicitly park routed work with status "blocked" while leaving
+// its dependencies clean. The claim path refuses that row. Demand must refuse it
+// too, or each zero-claim drain leaves the same demand standing and immediately
+// starts another worker.
+func TestDefaultScaleCheckCountsExcludesRoutedButUnclaimableWork(t *testing.T) {
+	const template = "example/worker"
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "routed open task",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": template},
+	}); err != nil {
+		t.Fatalf("create routed open bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:     "routed task marked blocked",
+		Type:      "task",
+		Status:    "open",
+		IsBlocked: boolPtr(true),
+		Metadata:  map[string]string{"gc.routed_to": template},
+	}); err != nil {
+		t.Fatalf("create routed blocked bead: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:example",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1; blocked routed work is not claimable", template, got)
+	}
+}
+
+// Repeat the predicate at the demand boundary even if a store's Ready
+// projection leaks a non-claimable row. Cover both surviving shapes because the
+// claim path rejects `is_blocked == true` OR raw `status == "blocked"`.
+func TestDefaultScaleCheckCountsExcludesUnclaimableRowsLeakedByReady(t *testing.T) {
+	const template = "example/worker"
+	routed := map[string]string{"gc.routed_to": template}
+	store := &readyStaticStore{
+		Store: beads.NewMemStore(),
+		ready: []beads.Bead{
+			{ID: "task-open", Title: "routed open task", Type: "task", Status: "open", Metadata: routed},
+			{ID: "task-marker", Title: "is_blocked marker", Type: "task", Status: "open", IsBlocked: boolPtr(true), Metadata: routed},
+			{ID: "task-status", Title: "raw bd status", Type: "task", Status: "blocked", Metadata: routed},
+		},
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:example",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1; only task-open is claimable", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasAssigned(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	backing := beads.NewMemStore()

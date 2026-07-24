@@ -676,27 +676,45 @@ func (b *bdIssue) toBead() Bead {
 		}
 	}
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
-		IsBlocked:    b.IsBlocked.ptr(),
+		ID:              b.ID,
+		Title:           b.Title,
+		Status:          mapBdStatus(b.Status),
+		Type:            b.IssueType,
+		Priority:        cloneIntPtr(b.Priority),
+		CreatedAt:       b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:       b.UpdatedAt.Truncate(time.Second),
+		Assignee:        b.Assignee,
+		From:            from,
+		ParentID:        parentID,
+		Ref:             b.Ref,
+		Needs:           b.Needs,
+		Description:     b.Description,
+		Labels:          b.Labels,
+		Metadata:        b.Metadata,
+		Dependencies:    deps,
+		Ephemeral:       b.Ephemeral,
+		NoHistory:       b.NoHistory,
+		DeferUntil:      cloneTimePtr(b.DeferUntil),
+		IsBlocked:       b.blockedFlag(),
+		blockedByStatus: b.statusBlocked(),
 	}
+}
+
+// blockedFlag combines bd's two independent not-ready channels. Gas City's
+// three-status projection folds status "blocked" onto "open", so that status
+// must force the surviving IsBlocked marker even if bd also emits the
+// dependency-derived is_blocked column as false. For every other status, retain
+// the optional column exactly; in particular, absent stays nil.
+func (b *bdIssue) blockedFlag() *bool {
+	if b.statusBlocked() {
+		blocked := true
+		return &blocked
+	}
+	return b.IsBlocked.ptr()
+}
+
+func (b *bdIssue) statusBlocked() bool {
+	return strings.EqualFold(strings.TrimSpace(b.Status), "blocked")
 }
 
 func (b *bdIssue) normalizedDependencies() []Dep {

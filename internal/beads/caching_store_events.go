@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -357,7 +358,7 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 
 func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	b, ok := c.beads[id]
-	if !ok || b.IsBlocked == nil {
+	if !ok || b.IsBlocked == nil || b.blockedByStatus {
 		return false
 	}
 	b.IsBlocked = nil
@@ -415,6 +416,21 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	}
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
+		switch {
+		case patch.blockedByStatus:
+			// Raw bd hook payloads preserve status=="blocked".
+			merged.blockedByStatus = true
+		case !hasCacheEventField(fields, "is_blocked") ||
+			patch.IsBlocked == nil || !*patch.IsBlocked:
+			// A definitely-unblocked non-blocked status clears provenance.
+			merged.blockedByStatus = false
+			// status=="open" plus IsBlocked=true is ambiguous: it can be a
+			// dependency-derived marker, or a folded status-blocked Bead emitted by
+			// another CachingStore (blockedByStatus is intentionally off-wire).
+			// Preserve existing provenance in that one case. A backing refresh or
+			// reconciliation has the authoritative store-internal bit and can clear
+			// it; conservatively retaining it cannot create false demand.
+		}
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type
@@ -638,6 +654,7 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 		return Bead{}, nil, err
 	}
 	b := wire.Bead
+	b.blockedByStatus = strings.EqualFold(strings.TrimSpace(b.Status), "blocked")
 	if wire.Metadata != nil {
 		b.Metadata = map[string]string(wire.Metadata)
 	}
@@ -688,7 +705,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Description != fresh.Description ||
 		old.Ephemeral != fresh.Ephemeral ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
-		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) ||
+		old.blockedByStatus != fresh.blockedByStatus {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {

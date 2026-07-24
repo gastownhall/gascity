@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -133,11 +134,98 @@ func TestIsReadyCandidate(t *testing.T) {
 			bead: Bead{Status: "open", Type: "task", DeferUntil: &future},
 			want: false,
 		},
+		{
+			// mapBdStatus projects bd's "blocked" onto "open", so this marker is
+			// the only surviving signal that the claim path will refuse the row.
+			name: "self-blocked marker on an open-projected row",
+			bead: Bead{Status: "open", Type: "task", IsBlocked: readyCandidateBoolPtr(true)},
+			want: false,
+		},
+		{
+			name: "explicit not-blocked marker stays ready",
+			bead: Bead{Status: "open", Type: "task", IsBlocked: readyCandidateBoolPtr(false)},
+			want: true,
+		},
+		{
+			name: "raw blocked status from a store that does not fold it",
+			bead: Bead{Status: "blocked", Type: "task"},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsReadyCandidate(tt.bead, now); got != tt.want {
 				t.Fatalf("IsReadyCandidate(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
+func readyCandidateBoolPtr(v bool) *bool { return &v }
+
+// bd reports not-ready state through two independent channels: the
+// dependency-derived is_blocked column and the explicit status value "blocked".
+// mapBdStatus folds the latter onto "open" to keep Gas City's three-status
+// model, so blockedFlag must preserve the status signal even when the dependency
+// column explicitly says false.
+func TestBdIssueToBeadPreservesBlockedStatusAsIsBlockedMarker(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantStatus string
+		wantBlock  *bool
+	}{
+		{
+			name:       "status blocked with no is_blocked column",
+			raw:        `{"id":"task-blocked","title":"routed work","status":"blocked","issue_type":"task"}`,
+			wantStatus: "open",
+			wantBlock:  readyCandidateBoolPtr(true),
+		},
+		{
+			name:       "blocked status wins over explicit dependency false",
+			raw:        `{"id":"task-blocked","title":"routed work","status":"blocked","issue_type":"task","is_blocked":false}`,
+			wantStatus: "open",
+			wantBlock:  readyCandidateBoolPtr(true),
+		},
+		{
+			name:       "non-blocked status preserves explicit dependency false",
+			raw:        `{"id":"task-open","title":"routed work","status":"open","issue_type":"task","is_blocked":false}`,
+			wantStatus: "open",
+			wantBlock:  readyCandidateBoolPtr(false),
+		},
+		{
+			name:       "plain open row keeps an absent marker",
+			raw:        `{"id":"ki-open","title":"routed work","status":"open","issue_type":"task"}`,
+			wantStatus: "open",
+			wantBlock:  nil,
+		},
+		{
+			name:       "other folded bd statuses are not treated as blocked",
+			raw:        `{"id":"ki-rev","title":"routed work","status":"review","issue_type":"task"}`,
+			wantStatus: "open",
+			wantBlock:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var issue bdIssue
+			if err := json.Unmarshal([]byte(tt.raw), &issue); err != nil {
+				t.Fatalf("unmarshal bd row: %v", err)
+			}
+			got := issue.toBead()
+			if got.Status != tt.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			switch {
+			case tt.wantBlock == nil && got.IsBlocked != nil:
+				t.Fatalf("IsBlocked = %v, want nil (bd did not say)", *got.IsBlocked)
+			case tt.wantBlock != nil && got.IsBlocked == nil:
+				t.Fatalf("IsBlocked = nil, want %v", *tt.wantBlock)
+			case tt.wantBlock != nil && *got.IsBlocked != *tt.wantBlock:
+				t.Fatalf("IsBlocked = %v, want %v", *got.IsBlocked, *tt.wantBlock)
+			}
+			if tt.wantBlock != nil && *tt.wantBlock && IsReadyCandidate(got, time.Now()) {
+				t.Fatal("IsReadyCandidate = true for a bd-blocked row; demand would count what claim refuses")
 			}
 		})
 	}
