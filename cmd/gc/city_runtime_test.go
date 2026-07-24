@@ -5368,6 +5368,89 @@ func TestCityRuntimeReloadMaterializesNewlyAddedSkill(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeReloadRejectsCollidingSkillMaterialization guards the
+// collision gate the reload path shares with `gc start` and the
+// supervisor tick (checkSkillCollisions before materialize). Two
+// city-scoped claude agents that each provide an agent-local skill of
+// the same name collide on the shared city sink; on a live reload that
+// introduces the collision the reload must still be applied (the config
+// already passed agent validation), but materialization is skipped so no
+// half-written/conflicting symlink is produced, and a collision warning
+// is surfaced to the operator.
+func TestCityRuntimeReloadRejectsCollidingSkillMaterialization(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// Introduce a collision on reload: two city-scoped claude agents each
+	// carry an agent-local skill named "plan" (discovered by the
+	// agents/<name>/skills convention), which both target the same
+	// .claude/skills/plan sink under the city scope root. Adding the
+	// second agent bumps the revision, so the reload takes the applied
+	// branch.
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "mayor", "skills", "plan"))
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "deputy", "skills", "plan"))
+	writeSkillMaterializationTestConfig(t, tomlPath,
+		"[[agent]]\nname = \"deputy\"\nscope = \"city\"\nprovider = \"claude\"\n\n")
+
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+
+	// (a) The reload is still applied — a collision does not abort it.
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+
+	// (b) No conflicting symlink was written — materialization was skipped.
+	link := filepath.Join(cityPath, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected no materialized skill on collision, lstat %q err = %v", link, err)
+	}
+
+	// (c) The collision is surfaced to the operator, via the reply
+	// Warnings and the stderr warning channel.
+	var sawWarning bool
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, "skill collision") {
+			sawWarning = true
+			break
+		}
+	}
+	if !sawWarning {
+		t.Fatalf("reply warnings missing skill collision: %#v; stderr=%q", reply.Warnings, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "skill collision") {
+		t.Fatalf("stderr missing skill collision warning: %q", stderr.String())
+	}
+}
+
 func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

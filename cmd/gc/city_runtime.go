@@ -2058,7 +2058,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// restart (#3459). Idempotent — a converged pass creates nothing new;
 	// per-agent errors are logged to stderr internally and never abort
 	// the reload.
-	_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	//
+	// Match the start/supervisor invariant: validate skill collisions
+	// before materializing so a colliding live-reload config can't write
+	// half-written/conflicting sinks. The config is already applied and
+	// passed agent validation; on collision we keep the previously
+	// materialized sink in place (supervisor semantics) and surface a
+	// warning rather than aborting the reload.
+	if err := checkSkillCollisions(nextCfg, cr.cityPath); err != nil {
+		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
+	} else {
+		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
