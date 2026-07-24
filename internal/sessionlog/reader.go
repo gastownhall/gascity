@@ -783,23 +783,40 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 // "" and telemetry silently records nothing, consistent with the bounded
 // best-effort contract.
 func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.Time, window time.Duration) string {
+	path, _ := FindCodexSessionFileNearScan(searchPaths, workDir, anchor, window)
+	return path
+}
+
+// FindCodexSessionFileNearScan is FindCodexSessionFileNear with a clean-scan
+// signal. scanClean is false when ANY os.ReadDir or cwd-probe open during the scan
+// failed with a non-ENOENT IO fault (EMFILE/ESTALE/EACCES and similar), so a
+// caller that must decide whether an empty result is permanent can tell a genuine
+// zero/ambiguous match (scanClean true — retrying cannot change it) from a
+// transient scan fault (scanClean false — a later, unclouded scan may find the
+// rollout). A hit and an ambiguity refusal both return scanClean true regardless
+// of unrelated IO noise elsewhere in the window: each is definitive. Bad inputs
+// (empty workDir, zero anchor, non-positive window) return ("", true) — a clean
+// no-op, not a fault. FindCodexSessionFileNear is the string-only wrapper; its
+// callers that do not act on scan cleanliness are unaffected.
+func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) (string, bool) {
 	if workDir == "" || anchor.IsZero() || window <= 0 {
-		return ""
+		return "", true
 	}
 	start := anchor.Add(-time.Minute)
 	end := anchor.Add(window)
 	var matches []string
 	seen := make(map[string]bool)
+	dirty := false
 	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches)
+		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches, &dirty)
 		if len(matches) > 1 {
-			return ""
+			return "", true // ambiguous: a definitive refusal, independent of scan noise
 		}
 	}
-	if len(matches) != 1 {
-		return ""
+	if len(matches) == 1 {
+		return matches[0], true
 	}
-	return matches[0]
+	return "", !dirty
 }
 
 // appendCodexRolloutMatch appends path to matches unless its physical
@@ -842,7 +859,7 @@ func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]strin
 // midnight, and startOfLocalDay in zones whose DST transition falls AT
 // midnight (e.g. America/Santiago) can land on 23:00 of the previous day and
 // skip the final calendar day; ENOENT readdirs are free.
-func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string) {
+func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string, dirty *bool) {
 	tolStart := start.Add(-time.Hour)
 	tolEnd := end.Add(time.Hour)
 	firstDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, -1)
@@ -851,6 +868,12 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
 		entries, err := os.ReadDir(dayDir)
 		if err != nil {
+			// A missing day dir is the normal case (most days in the window hold no
+			// sessions) and stays clean; a non-ENOENT readdir fault (EMFILE/ESTALE)
+			// is a transient/dirty scan the caller must not mistake for a zero match.
+			if !os.IsNotExist(err) {
+				*dirty = true
+			}
 			continue
 		}
 		for _, e := range entries {
@@ -862,7 +885,11 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 				continue
 			}
 			path := filepath.Join(dayDir, e.Name())
-			if codexSessionCWDMatches(path, workDir) {
+			match, clean := codexSessionCWDMatchesScan(path, workDir)
+			if !clean {
+				*dirty = true
+			}
+			if match {
 				appendCodexRolloutMatch(path, seen, matches)
 				if len(*matches) > 1 {
 					return
@@ -875,6 +902,9 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 	}
 	rootEntries, err := os.ReadDir(root)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			*dirty = true
+		}
 		return
 	}
 	for _, e := range rootEntries {
@@ -887,7 +917,7 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 		}
 		// os.ReadDir follows the symlink on its own; non-directory or
 		// dangling links simply fail every ReadDir in the recursion.
-		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches)
+		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches, dirty)
 		if len(*matches) > 1 {
 			return
 		}
@@ -1268,16 +1298,27 @@ func codexSessionCWD(path string) string {
 }
 
 func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
+	candidate, ok, _ := codexSessionCandidateScan(path)
+	return candidate, ok
+}
+
+// codexSessionCandidateScan is codexSessionCandidate with a clean-scan signal.
+// clean is false ONLY when opening path failed with a non-ENOENT IO fault
+// (EMFILE/ESTALE/EACCES and similar transient/resource errors), so a caller
+// scanning many candidates can tell a transient probe failure apart from a file
+// that is genuinely not a codex rollout (empty, malformed, or non-session_meta —
+// all clean) or a file that vanished between readdir and open (ENOENT — clean).
+func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok bool, clean bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, os.IsNotExist(err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	var meta struct {
 		Type      string `json:"type"`
@@ -1288,10 +1329,10 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	if meta.Type != "session_meta" {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	info, _ := os.Stat(path)
 	var modTime time.Time
@@ -1307,7 +1348,7 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 		WorkDir:   meta.Payload.CWD,
 		StartedAt: startedAt,
 		ModTime:   modTime,
-	}, true
+	}, true, true
 }
 
 func parseCodexSessionTime(raw string) time.Time {
@@ -1325,11 +1366,24 @@ func parseCodexSessionTime(raw string) time.Time {
 }
 
 func codexSessionCWDMatches(path, workDir string) bool {
-	cwd := codexSessionCWD(path)
-	if cwd == "" || workDir == "" {
-		return false
+	match, _ := codexSessionCWDMatchesScan(path, workDir)
+	return match
+}
+
+// codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan signal:
+// clean is false only when the cwd probe's file open failed with a non-ENOENT IO
+// fault (see codexSessionCandidateScan), so a scanner can distinguish a transient
+// probe failure from a genuine cwd mismatch.
+func codexSessionCWDMatchesScan(path, workDir string) (match bool, clean bool) {
+	candidate, ok, clean := codexSessionCandidateScan(path)
+	if !ok {
+		return false, clean
 	}
-	return pathutil.SamePath(cwd, workDir)
+	cwd := candidate.WorkDir
+	if cwd == "" || workDir == "" {
+		return false, clean
+	}
+	return pathutil.SamePath(cwd, workDir), clean
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic

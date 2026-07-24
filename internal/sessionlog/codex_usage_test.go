@@ -843,3 +843,80 @@ func TestFindCodexSessionFileNear(t *testing.T) {
 		}
 	})
 }
+
+// TestFindCodexSessionFileNearScanReportsScanCleanliness pins the P3 fix: the
+// keyless-codex sweep fallback must distinguish a genuine zero/ambiguous match
+// (permanent — settle) from an empty result clouded by a transient IO fault
+// (retry). scanClean carries that distinction.
+func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
+	anchor := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
+	window := 10 * time.Minute
+	workDir := "/work/near-scan"
+
+	t.Run("clean hit reports scanClean=true", func(t *testing.T) {
+		root := t.TempDir()
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000001", workDir)
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want || !clean {
+			t.Fatalf("got (%q,%v), want (%q,true)", got, clean, want)
+		}
+	})
+
+	t.Run("clean zero-match reports scanClean=true", func(t *testing.T) {
+		root := t.TempDir() // no rollouts
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" || !clean {
+			t.Fatalf("got (%q,%v), want (\"\",true) for a clean empty scan", got, clean)
+		}
+	})
+
+	t.Run("ambiguous match reports scanClean=true (definitive refusal)", func(t *testing.T) {
+		root := t.TempDir()
+		writeCodexRolloutAt(t, root, anchor.Add(time.Minute), "019d9845-cccc-7000-8000-000000000003", workDir)
+		writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000004", workDir)
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" || !clean {
+			t.Fatalf("got (%q,%v), want (\"\",true) — ambiguity is a clean, definitive refusal", got, clean)
+		}
+	})
+
+	t.Run("dirty scan (unreadable day dir) reports scanClean=false on a miss, recovers when cleared", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable dir is not enforced for root")
+		}
+		root := t.TempDir()
+		// A rollout that WOULD match, sealed behind an unreadable day directory so the
+		// enumerating os.ReadDir fails with EACCES (a non-ENOENT IO fault).
+		path := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000005", workDir)
+		dayDir := filepath.Dir(path)
+		if err := os.Chmod(dayDir, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dayDir, 0o755) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" {
+			t.Fatalf("got %q, want empty (the matching rollout is behind an unreadable dir)", got)
+		}
+		if clean {
+			t.Fatal("a non-ENOENT readdir fault during the scan must report scanClean=false")
+		}
+
+		// Fault clears → the same scan is clean and finds the rollout.
+		if err := os.Chmod(dayDir, 0o755); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != path || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, path)
+		}
+	})
+
+	t.Run("string wrapper FindCodexSessionFileNear stays zero-semantic", func(t *testing.T) {
+		root := t.TempDir()
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000006", workDir)
+		if got := FindCodexSessionFileNear([]string{root}, workDir, anchor, window); got != want {
+			t.Fatalf("FindCodexSessionFileNear wrapper = %q, want %q", got, want)
+		}
+	})
+}

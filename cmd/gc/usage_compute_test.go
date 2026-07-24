@@ -545,6 +545,127 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	}
 }
 
+// writeKeylessCodexRolloutForSweep fabricates a codex rollout at the local-date
+// path the codex CLI would use for `at` (session_meta cwd=workDir, a turn_context
+// model, one token_count per {total, lastInput, lastOutput}). Unlike
+// writeCodexRolloutForSweep — which hardcodes 2026-06-15 and is reachable by the
+// TZ-tolerant keyed lookup — it derives the day dir and filename timestamp from
+// `at` in time.Local, so the keyless workdir+window fallback (which parses rollout
+// filenames in time.Local) resolves it on any host timezone.
+func writeKeylessCodexRolloutForSweep(t *testing.T, root string, at time.Time, workDir, sessionID string, tokenCounts [][3]int) {
+	t.Helper()
+	local := at.In(time.Local)
+	dayDir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dayDir, "rollout-"+local.Format("2006-01-02T15-04-05")+"-"+sessionID+".jsonl")
+	const ms = "2006-01-02T15:04:05.000Z07:00"
+	lines := []string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":%q,"cwd":%q}}`,
+			at.UTC().Format(ms), sessionID, workDir),
+		fmt.Sprintf(`{"timestamp":%q,"type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
+			at.Add(time.Second).UTC().Format(ms)),
+	}
+	for i, tc := range tokenCounts {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":%d},"last_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":%d}}}}`,
+			at.Add(time.Duration(i+2)*time.Second).UTC().Format(ms), tc[0], tc[1], tc[2]))
+	}
+	body := ""
+	for _, l := range lines {
+		body += l + "\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir is the maintainer-city
+// production regression for Design B: graph.v2 wisp codex sessions NEVER captured
+// a session_key (the split city's metadata table had zero session_key rows ever),
+// so the model sweep minted nothing and factory token counts stayed 0 even though
+// compute facts flowed fine. The end-of-interval sweep must recover them by
+// discovering the rollout through (work_dir, interval-window) with no session_key,
+// mint the trailing model facts, and settle the interval.
+func TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	// A keyless codex rollout in this wisp's unique worktree — no session_key keys
+	// it; only the cwd + interval window resolve it.
+	writeKeylessCodexRolloutForSweep(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-000000000009", [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex wisp session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":               "asleep",
+			"session_name":        "codex-wisp-1",
+			"awake_started_at":    start.Format(time.RFC3339),
+			"slept_at":            slept.Format(time.RFC3339),
+			"work_dir":            workDir,
+			"provider":            "mc-codex-wrap", // wrapped manifold name
+			"builtin_ancestor":    "codex",         // canonical ladder resolves to codex
+			"molecule_id":         "run-Z",
+			"gc.active_work_bead": "run-Z.step-1",
+			// NB: NO session_key — the whole point.
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+	info := session.Info{ID: b.ID, MetadataState: "asleep", AwakeStartedAt: start.Format(time.RFC3339)}
+
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1", got)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 2 {
+		t.Fatalf("model facts = %d, want 2 (keyless codex must be swept via work_dir); facts: %+v", got, facts)
+	}
+	for _, f := range facts {
+		if f.RunID != "run-Z" {
+			t.Fatalf("fact RunID = %q, want run-Z (shared across kinds): %+v", f.RunID, f)
+		}
+		if f.Kind == usage.KindModel && f.Provider != "codex" {
+			t.Fatalf("model fact Provider = %q, want codex (wrapped name resolved via builtin_ancestor)", f.Provider)
+		}
+	}
+
+	// The settled keyless sweep stamps the model-swept marker so the interval is not
+	// re-swept every subsequent tick.
+	refreshed, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshed.Metadata[usageModelSweptAtKey]; got != start.Format(time.RFC3339) {
+		t.Fatalf("usage_model_swept_at = %q, want %q (a settled keyless sweep must mark the interval)", got, start.Format(time.RFC3339))
+	}
+}
+
 func TestIsComputeTerminalState(t *testing.T) {
 	// Every non-running endpoint the open-bead scan can observe.
 	for _, s := range []string{"asleep", "drained", "archived", "suspended", "quarantined"} {

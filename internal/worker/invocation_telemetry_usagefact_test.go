@@ -478,13 +478,13 @@ func TestDiscoverSweepTranscriptCodexBoundedToInterval(t *testing.T) {
 
 	// Rollout well outside the interval window and the UUID hint: must NOT match.
 	writeCodexSessionMetaRollout(t, codexRoot, "2018", "01", "01", workDir, sessionKey)
-	if got := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != "" {
+	if got, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != "" {
 		t.Fatalf("rollout outside the interval window must not be discovered by the bounded sweep, got %q", got)
 	}
 
 	// Control: the same session's rollout inside the interval window IS discovered.
 	inside := writeCodexSessionMetaRollout(t, codexRoot, "2026", "06", "15", workDir, sessionKey)
-	if got := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != inside {
+	if got, _ := factory.discoverSweepTranscript("codex", "gc-codex-1", meta, now); got != inside {
 		t.Fatalf("rollout inside the interval window must be discovered, got %q want %q", got, inside)
 	}
 }
@@ -783,4 +783,241 @@ func writeUsageSinkScript(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// writeKeylessCodexRollout fabricates a full codex rollout (session_meta with cwd,
+// a turn_context model line, and one token_count per element of tokenCounts —
+// {total, lastInput, lastOutput}) at the local-date path the codex CLI would use
+// for ts, keyed by uuid. The keyless-codex sweep fallback keys discovery on the
+// session_meta cwd plus the filename-time window, NOT a captured session_key, so
+// the path is written in LOCAL time (via codexWorkerRolloutPathWithID) to match
+// FindCodexSessionFileNear's time.Local filename parsing on any host TZ.
+func writeKeylessCodexRollout(t *testing.T, root string, ts time.Time, cwd, uuid string, tokenCounts [][3]int) {
+	t.Helper()
+	lines := []map[string]any{
+		codexWorkerSessionMeta(cwd),
+		codexWorkerTurnContext(),
+	}
+	for i, tc := range tokenCounts {
+		lines = append(lines, codexWorkerTokenCount(
+			ts.Add(time.Duration(i+1)*time.Second).UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+			tc[0], tc[1], 0, tc[2]))
+	}
+	writeWorkerTestJSONL(t, codexWorkerRolloutPathWithID(t, root, ts, uuid), lines)
+}
+
+// TestFactorySweepSessionModelUsageKeylessCodexDiscoversByWorkdir pins Design B:
+// a codex session that NEVER captured a session_key — the maintainer-city graph.v2
+// wisp case, where the metadata table has had zero session_key rows ever — still
+// mints model facts, because the end-of-interval sweep falls back to the SAME
+// bounded (cwd, interval-window) discovery the prompt-op seam already runs for
+// keyless codex (TestMessageRecordsCodexTokensFreshWakeWithoutSessionKey). Two
+// rollouts sit in the interval window with DIFFERENT cwds; the sweep must pick the
+// one whose session_meta cwd equals the session's work_dir and mint its usage,
+// ignoring the other. Before Design B the sweep settled keyless codex permanently
+// and minted nothing, so factory token counts stayed 0.
+func TestFactorySweepSessionModelUsageKeylessCodexDiscoversByWorkdir(t *testing.T) {
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	otherDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	// This session's rollout (cwd == workDir): distinctive output=50.
+	writeKeylessCodexRollout(t, codexRoot, start, workDir,
+		"019e0000-aaaa-7000-8000-000000000001", [][3]int{{150, 100, 50}})
+	// A DIFFERENT session's rollout in the same window but a different cwd. The cwd
+	// filter must reject it (its output=999 would betray a wrong pick).
+	writeKeylessCodexRollout(t, codexRoot, start.Add(5*time.Second), otherDir,
+		"019e0000-bbbb-7000-8000-000000000002", [][3]int{{9999, 9999, 999}})
+
+	meta := map[string]string{
+		"provider":            "codex",
+		"work_dir":            workDir,
+		"awake_started_at":    start.Format(time.RFC3339),
+		"slept_at":            slept.Format(time.RFC3339),
+		"session_name":        "codex-wisp-1",
+		"molecule_id":         "run-Z",
+		"gc.active_work_bead": "run-Z.step-1",
+		// NB: NO session_key — the whole point of Design B.
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a keyless codex sweep that discovered its rollout by workdir must settle")
+	}
+	if emitted != 1 {
+		t.Fatalf("emitted = %d, want 1 (the one in-window rollout whose cwd matches work_dir)", emitted)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("want 1 model fact, got %d: %+v", len(facts), facts)
+	}
+	f := facts[0]
+	if f.Kind != usage.KindModel {
+		t.Fatalf("kind = %q, want model", f.Kind)
+	}
+	if f.OutputTokens != 50 {
+		t.Fatalf("OutputTokens = %d, want 50 (proves the cwd==work_dir rollout was chosen, not the other)", f.OutputTokens)
+	}
+	if f.Provider != "codex" {
+		t.Fatalf("Provider = %q, want codex", f.Provider)
+	}
+	if f.RunID != "run-Z" || f.StepID != "" {
+		t.Fatalf("RunID/StepID = %q/%q, want run-Z/\"\" (run-level attribution)", f.RunID, f.StepID)
+	}
+}
+
+// TestFactorySweepSessionModelUsageKeylessCodexAmbiguousWorkdirTakesNone pins the
+// correctness-over-coverage guard: when a keyless codex session's work_dir maps to
+// MORE THAN ONE in-window rollout (workdir reuse), the sweep refuses to guess — it
+// mints nothing and SETTLES the interval. The ambiguity is stable on disk, so
+// retrying every tick across the whole recently-closed window could never
+// disambiguate and would be pure waste.
+func TestFactorySweepSessionModelUsageKeylessCodexAmbiguousWorkdirTakesNone(t *testing.T) {
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	// TWO rollouts, SAME cwd, both inside the interval window → ambiguous.
+	writeKeylessCodexRollout(t, codexRoot, start, workDir,
+		"019e0000-aaaa-7000-8000-000000000001", [][3]int{{150, 100, 50}})
+	writeKeylessCodexRollout(t, codexRoot, start.Add(10*time.Second), workDir,
+		"019e0000-bbbb-7000-8000-000000000002", [][3]int{{450, 200, 100}})
+
+	meta := map[string]string{
+		"provider":         "codex",
+		"work_dir":         workDir,
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"session_name":     "codex-wisp-1",
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted = %d, want 0 (ambiguous workdir must mint nothing)", emitted)
+	}
+	if !settled {
+		t.Fatal("ambiguous keyless codex must settle (stable ambiguity — retrying cannot disambiguate)")
+	}
+}
+
+// TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries pins the P3 fix
+// at the sweep boundary: when the keyless-codex (cwd, wake-window) fallback misses
+// because a transient IO fault clouded the scan (here an unreadable day directory
+// → EACCES), the interval must NOT settle — it must stay a candidate so a later,
+// unclouded tick recovers the model facts. A clean miss settling permanently
+// (proven elsewhere) is correct; a fault-clouded miss doing so would silently drop
+// the interval's tokens forever.
+func TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-000 unreadable dir is not enforced for root")
+	}
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	writeKeylessCodexRollout(t, codexRoot, start, workDir,
+		"019e0000-dddd-7000-8000-000000000001", [][3]int{{150, 100, 50}})
+
+	// Seal the rollout's day directory so os.ReadDir(dayDir) fails with EACCES — a
+	// non-ENOENT IO fault that clouds the scan (the rollout cannot be enumerated).
+	local := start.In(time.Local)
+	dayDir := filepath.Join(codexRoot, local.Format("2006"), local.Format("01"), local.Format("02"))
+	if err := os.Chmod(dayDir, 0o000); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dayDir, 0o755) })
+
+	meta := map[string]string{
+		"provider":            "codex",
+		"work_dir":            workDir,
+		"awake_started_at":    start.Format(time.RFC3339),
+		"slept_at":            slept.Format(time.RFC3339),
+		"session_name":        "codex-wisp-1",
+		"molecule_id":         "run-Z",
+		"gc.active_work_bead": "run-Z.step-1",
+	}
+	now := slept.Add(time.Minute)
+
+	// Tick 1: dirty scan → transient miss, NOT settled.
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (dirty tick): %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("dirty-scan tick emitted = %d, want 0", emitted)
+	}
+	if settled {
+		t.Fatal("a keyless codex miss from a DIRTY scan (transient IO fault) must NOT settle — it must retry")
+	}
+
+	// The IO fault clears; the next tick scans cleanly and recovers the fact.
+	if err := os.Chmod(dayDir, 0o755); err != nil {
+		t.Fatalf("restore chmod: %v", err)
+	}
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (clean tick): %v", err)
+	}
+	if !settled2 {
+		t.Fatal("the clean retry tick must settle")
+	}
+	if emitted2 != 1 {
+		t.Fatalf("clean retry emitted = %d, want 1 (the rollout recovered once the fault cleared)", emitted2)
+	}
 }
