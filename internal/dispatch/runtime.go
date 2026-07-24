@@ -1243,6 +1243,9 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 	if outcome == beadmeta.OutcomeMissingRoot {
 		return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 	}
+	if outcome == beadmeta.OutcomePass {
+		stampWorkDirReleasedAt(store, rootID, root, opts)
+	}
 	// Generated spec sidecars are topology records rather than executable
 	// members; preserve their established successful cleanup outcome before the
 	// remaining subtree is skipped.
@@ -2201,6 +2204,22 @@ func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string) error {
 		}
 	}
 	return setOutcomeAndClose(store, rootID, outcome)
+}
+
+// stampWorkDirReleasedAt best-effort-marks a workflow root's work directory as
+// voluntarily released once its workflow finalizes with a Pass outcome. root is
+// the bead processWorkflowFinalize already loaded, so the stamp adds no read. This
+// is a non-authoritative optimization hint only — the borrow-veto reaper scan
+// remains the authoritative check before any worktree is reclaimed — so a
+// write failure here is traced and swallowed rather than propagated; it must
+// never abort finalize.
+func stampWorkDirReleasedAt(store beads.Store, rootID string, root beads.Bead, opts ProcessOptions) {
+	if strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) == "" {
+		return
+	}
+	if err := store.SetMetadata(rootID, beadmeta.WorkDirReleasedAtMetadataKey, time.Now().Format(time.RFC3339)); err != nil {
+		opts.tracef("workflow-finalize root=%s work-dir-released-at-set-err=%v", rootID, err)
+	}
 }
 
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
