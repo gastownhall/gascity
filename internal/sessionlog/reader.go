@@ -790,14 +790,19 @@ func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.
 // FindCodexSessionFileNearScan is FindCodexSessionFileNear with a clean-scan
 // signal. scanClean is false when ANY os.ReadDir or cwd-probe open during the scan
 // failed with a non-ENOENT IO fault (EMFILE/ESTALE/EACCES and similar), so a
-// caller that must decide whether an empty result is permanent can tell a genuine
+// caller that must decide whether its result is definitive can tell a genuine
 // zero/ambiguous match (scanClean true — retrying cannot change it) from a
-// transient scan fault (scanClean false — a later, unclouded scan may find the
-// rollout). A hit and an ambiguity refusal both return scanClean true regardless
-// of unrelated IO noise elsewhere in the window: each is definitive. Bad inputs
+// transient scan fault (scanClean false — a later, unclouded scan may surface a
+// rollout the fault hid). An ambiguity refusal (>1 visible match) returns
+// scanClean true regardless of unrelated IO noise: more matches cannot make it
+// less ambiguous. A single visible match returns scanClean = !dirty — a
+// concurrent fault could have hidden a second same-cwd, in-window rollout, so a
+// lone hit is definitive only when the scan was clean; the keyless sweep uses
+// this to retry rather than settle on a non-definitive singleton. Bad inputs
 // (empty workDir, zero anchor, non-positive window) return ("", true) — a clean
-// no-op, not a fault. FindCodexSessionFileNear is the string-only wrapper; its
-// callers that do not act on scan cleanliness are unaffected.
+// no-op, not a fault. FindCodexSessionFileNear is the string-only wrapper; it
+// discards scanClean and returns the same path (matches[0] for one hit, "" for
+// zero/ambiguous), so its callers are byte-identical to before.
 func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) (string, bool) {
 	if workDir == "" || anchor.IsZero() || window <= 0 {
 		return "", true
@@ -814,7 +819,11 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 		}
 	}
 	if len(matches) == 1 {
-		return matches[0], true
+		// One visible match, but a dirty scan may have hidden a second same-cwd,
+		// in-window rollout, so the lone hit is definitive only when the scan was
+		// clean. The string-only wrapper discards this bool and still returns
+		// matches[0], keeping prompt-op behavior unchanged.
+		return matches[0], !dirty
 	}
 	return "", !dirty
 }
@@ -866,40 +875,61 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 	lastDay := startOfLocalDay(end.In(time.Local)).AddDate(0, 0, 1)
 	for day := firstDay; !day.After(lastDay); day = day.AddDate(0, 0, 1) {
 		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		entries, err := os.ReadDir(dayDir)
-		if err != nil {
-			// A missing day dir is the normal case (most days in the window hold no
-			// sessions) and stays clean; a non-ENOENT readdir fault (EMFILE/ESTALE)
-			// is a transient/dirty scan the caller must not mistake for a zero match.
-			if !os.IsNotExist(err) {
-				*dirty = true
-			}
+		if scanCodexRolloutDay(dayDir, workDir, tolStart, tolEnd, seen, matches, dirty) {
+			return // ambiguity reached: further scanning cannot change the refusal
+		}
+	}
+	if followExtraRoots {
+		collectCodexRolloutsInExtraRoots(root, workDir, start, end, seen, matches, dirty)
+	}
+}
+
+// scanCodexRolloutDay appends any in-window, cwd-matching rollouts in one codex
+// day directory to matches (deduplicated by physical identity via
+// appendCodexRolloutMatch), flagging *dirty on a non-ENOENT readdir fault or a
+// cwd-probe open fault. A missing day dir is the normal case and stays clean. It
+// returns true once the ambiguity threshold (>1 match) is reached so the caller
+// stops scanning.
+func scanCodexRolloutDay(dayDir, workDir string, tolStart, tolEnd time.Time, seen map[string]bool, matches *[]string, dirty *bool) bool {
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		// A missing day dir is the normal case (most days in the window hold no
+		// sessions) and stays clean; a non-ENOENT readdir fault (EMFILE/ESTALE)
+		// is a transient/dirty scan the caller must not mistake for a zero match.
+		if !os.IsNotExist(err) {
+			*dirty = true
+		}
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
 			continue
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			ts, ok := codexRolloutFilenameTime(e.Name())
-			if !ok || ts.Before(tolStart) || ts.After(tolEnd) {
-				continue
-			}
-			path := filepath.Join(dayDir, e.Name())
-			match, clean := codexSessionCWDMatchesScan(path, workDir)
-			if !clean {
-				*dirty = true
-			}
-			if match {
-				appendCodexRolloutMatch(path, seen, matches)
-				if len(*matches) > 1 {
-					return
-				}
+		ts, ok := codexRolloutFilenameTime(e.Name())
+		if !ok || ts.Before(tolStart) || ts.After(tolEnd) {
+			continue
+		}
+		path := filepath.Join(dayDir, e.Name())
+		match, clean := codexSessionCWDMatchesScan(path, workDir)
+		if !clean {
+			*dirty = true
+		}
+		if match {
+			appendCodexRolloutMatch(path, seen, matches)
+			if len(*matches) > 1 {
+				return true
 			}
 		}
 	}
-	if !followExtraRoots {
-		return
-	}
+	return false
+}
+
+// collectCodexRolloutsInExtraRoots recurses one level into a codex root's
+// symlinked non-date entries (aimux-managed accounts), threading the shared
+// seen/matches/dirty scan state. Year-named (2000-2099) directories are skipped:
+// those are the date tree the caller already walked. A non-ENOENT readdir fault
+// on the root flags *dirty.
+func collectCodexRolloutsInExtraRoots(root, workDir string, start, end time.Time, seen map[string]bool, matches *[]string, dirty *bool) {
 	rootEntries, err := os.ReadDir(root)
 	if err != nil {
 		if !os.IsNotExist(err) {

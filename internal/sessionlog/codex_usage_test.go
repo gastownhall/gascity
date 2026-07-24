@@ -846,8 +846,11 @@ func TestFindCodexSessionFileNear(t *testing.T) {
 
 // TestFindCodexSessionFileNearScanReportsScanCleanliness pins the P3 fix: the
 // keyless-codex sweep fallback must distinguish a genuine zero/ambiguous match
-// (permanent — settle) from an empty result clouded by a transient IO fault
-// (retry). scanClean carries that distinction.
+// (permanent — settle) from a result clouded by a transient IO fault (retry).
+// scanClean carries that distinction — false not only for an empty clouded scan
+// but also for a lone visible match under a dirty scan, which a hidden second
+// same-cwd rollout could turn into an ambiguity refusal. Both dirty sources are
+// covered: a day/root ReadDir fault and a per-file cwd-probe open fault.
 func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 	anchor := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
 	window := 10 * time.Minute
@@ -909,6 +912,83 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
 		if got2 != path || !clean2 {
 			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, path)
+		}
+	})
+
+	t.Run("dirty singleton via unreadable sibling day dir reports scanClean=false, recovers when cleared", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable dir is not enforced for root")
+		}
+		root := t.TempDir()
+		// One visible in-window match in the anchor's day dir...
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000007", workDir)
+		// ...plus a SEPARATE day dir inside the scanned [firstDay-1, lastDay+1]
+		// range, sealed unreadable so its os.ReadDir faults with EACCES. That fault
+		// could be hiding a second same-cwd rollout, so the lone visible match is
+		// non-definitive: the path is returned but scanClean=false.
+		sibling := time.Date(2026, 6, 11, 0, 0, 0, 0, time.Local)
+		siblingDay := filepath.Join(root, sibling.Format("2006"), sibling.Format("01"), sibling.Format("02"))
+		if err := os.MkdirAll(siblingDay, 0o755); err != nil {
+			t.Fatalf("mkdir sibling day: %v", err)
+		}
+		if err := os.Chmod(siblingDay, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(siblingDay, 0o755) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want {
+			t.Fatalf("got %q, want the one visible match %q (the wrapper path is unchanged by dirtiness)", got, want)
+		}
+		if clean {
+			t.Fatal("a dirty scan with one visible match must report scanClean=false (a hidden second rollout would make it ambiguous)")
+		}
+
+		// Fault clears → the (now clean) singleton is definitive: (path, true).
+		if err := os.Chmod(siblingDay, 0o755); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != want || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, want)
+		}
+	})
+
+	t.Run("dirty singleton via per-file cwd-probe open fault reports scanClean=false, recovers to ambiguity", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable file is not enforced for root")
+		}
+		root := t.TempDir()
+		// One visible in-window match...
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000008", workDir)
+		// ...plus a second in-window rollout in the SAME day dir whose cwd-probe
+		// os.Open faults with EACCES (chmod 000). codexSessionCWDMatchesScan cannot
+		// confirm its cwd, so it is not counted as a match, but it clouds the scan:
+		// it could be a second same-cwd rollout, so the visible singleton is
+		// non-definitive.
+		sealed := writeCodexRolloutAt(t, root, anchor.Add(4*time.Minute), "019d9845-cccc-7000-8000-000000000009", workDir)
+		if err := os.Chmod(sealed, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sealed, 0o644) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want {
+			t.Fatalf("got %q, want the one visible match %q", got, want)
+		}
+		if clean {
+			t.Fatal("a per-file cwd-probe open fault with one visible match must report scanClean=false")
+		}
+
+		// Fault clears → the sealed file now reads as a SECOND same-cwd match, so
+		// the scan is clean but ambiguous: ("", true). This confirms the dirty
+		// singleton was correctly withheld — a real second rollout was hidden.
+		if err := os.Chmod(sealed, 0o644); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != "" || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (\"\",true) — two visible same-cwd matches are a clean ambiguity refusal", got2, clean2)
 		}
 	})
 

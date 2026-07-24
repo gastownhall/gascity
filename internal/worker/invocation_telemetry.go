@@ -486,18 +486,21 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		return 0, true, nil
 	}
 	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
+	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	if keylessCodex && !scanClean {
+		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
+		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
+		// scan whether or not a path was found: an empty result may have hidden the
+		// only rollout, and a lone hit may have hidden a second same-cwd, in-window
+		// rollout that would make it ambiguous. Either way the result is
+		// non-definitive, so record nothing and leave the interval unsettled for a
+		// later, unclouded tick; the recently-closed sweep window bounds the retries.
+		slog.Debug("model-usage sweep: keyless codex workdir scan hit a transient IO fault; will retry",
+			slog.String("session_id", id))
+		return 0, false, nil
+	}
 	if path == "" {
-		if family == "codex" && strings.TrimSpace(meta["session_key"]) == "" {
-			if !scanClean {
-				// The (cwd, wake-window) fallback hit a transient IO fault (a
-				// non-ENOENT readdir or a cwd-probe open failure — EMFILE/ESTALE), so
-				// this empty result is a clouded miss, not a true zero match. Leave the
-				// interval unsettled so a later, unclouded tick retries; the
-				// recently-closed sweep window bounds the retries.
-				slog.Debug("model-usage sweep: keyless codex workdir scan hit a transient IO fault; will retry",
-					slog.String("session_id", id))
-				return 0, false, nil
-			}
+		if keylessCodex {
 			// Clean miss: a terminal session's rollout is written at codex start and is
 			// already on disk, so a clean zero/ambiguous match is ambiguity, an
 			// out-of-window filename timestamp, or a TZ-shifted filename — none of which
@@ -609,10 +612,12 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 //
 // The returned scanClean is meaningful only for the keyless-codex fallback: it is
 // false when the (cwd, wake-window) scan hit a transient IO fault (a non-ENOENT
-// readdir or a cwd-probe open failure — EMFILE/ESTALE), so an empty path is a
-// clouded miss the caller should retry rather than settle. Every other route — a
-// hit, the keyed codex lookup, or the claude manager lookup — returns scanClean
-// true, which the caller does not consult.
+// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds BOTH an empty
+// path (a miss that may have hidden the only rollout) AND a lone hit (a fault may
+// have hidden a second same-cwd rollout, making the singleton non-definitive), so
+// the caller retries rather than recording or settling either. The keyed codex
+// lookup and the claude manager lookup return scanClean true, which the caller
+// does not consult.
 func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool) {
 	switch family {
 	case "codex":

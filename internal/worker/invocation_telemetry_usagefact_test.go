@@ -1021,3 +1021,110 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries(t *testing.T)
 		t.Fatalf("clean retry emitted = %d, want 1 (the rollout recovered once the fault cleared)", emitted2)
 	}
 }
+
+// TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries pins the P3
+// synthesis fix at the sweep boundary: a keyless-codex (cwd, wake-window) scan that
+// finds exactly ONE visible matching rollout but is clouded by a transient IO fault
+// must NOT record that singleton and must NOT settle. A concurrent fault can hide a
+// second same-cwd, in-window rollout that would make the pick ambiguous, so the
+// lone match is non-definitive until a clean scan confirms it. Before the fix the
+// visible match was recorded and the interval settled, permanently misattributing
+// the tokens on a false singleton. The dirty source here is a per-file cwd-probe
+// open fault (a sibling rollout whose os.Open faults with EACCES) — the branch the
+// reviewers found exercised by no sweep-level test; when the fault clears the
+// sibling turns out to be a different session, so the true singleton records.
+func TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-000 unreadable file is not enforced for root")
+	}
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	otherDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	// The one visible in-window match (cwd == work_dir): distinctive output=50.
+	writeKeylessCodexRollout(t, codexRoot, start, workDir,
+		"019e0000-eeee-7000-8000-000000000001", [][3]int{{150, 100, 50}})
+	// A sibling rollout in the same day dir whose cwd-probe os.Open faults with
+	// EACCES once sealed. While unreadable its cwd is unknowable, so it could be a
+	// second same-cwd rollout: it clouds the scan and makes the visible singleton
+	// non-definitive.
+	sealedTS := start.Add(20 * time.Second)
+	sealed := codexWorkerRolloutPathWithID(t, codexRoot, sealedTS, "019e0000-ffff-7000-8000-000000000002")
+	writeKeylessCodexRollout(t, codexRoot, sealedTS, otherDir,
+		"019e0000-ffff-7000-8000-000000000002", [][3]int{{450, 200, 100}})
+	if err := os.Chmod(sealed, 0o000); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0o644) })
+
+	meta := map[string]string{
+		"provider":            "codex",
+		"work_dir":            workDir,
+		"awake_started_at":    start.Format(time.RFC3339),
+		"slept_at":            slept.Format(time.RFC3339),
+		"session_name":        "codex-wisp-1",
+		"molecule_id":         "run-Z",
+		"gc.active_work_bead": "run-Z.step-1",
+	}
+	now := slept.Add(time.Minute)
+
+	// Tick 1: one visible match, but the sealed sibling clouds the scan → the
+	// singleton is non-definitive, so mint nothing and do NOT settle.
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (dirty singleton tick): %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("dirty-singleton tick emitted = %d, want 0 (a clouded lone match must not be recorded)", emitted)
+	}
+	if settled {
+		t.Fatal("a keyless codex dirty singleton must NOT settle — a hidden second same-cwd rollout could make it ambiguous")
+	}
+	if facts, _, rerr := usage.ReadFacts(sinkPath); rerr == nil && len(facts) != 0 {
+		t.Fatalf("dirty-singleton tick wrote %d facts, want 0 (record nothing until a clean scan confirms the singleton)", len(facts))
+	}
+
+	// The IO fault clears; the sibling reads as a DIFFERENT cwd, so the visible
+	// rollout is the sole clean match and its usage records.
+	if err := os.Chmod(sealed, 0o644); err != nil {
+		t.Fatalf("restore chmod: %v", err)
+	}
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (clean tick): %v", err)
+	}
+	if !settled2 {
+		t.Fatal("the clean retry tick must settle")
+	}
+	if emitted2 != 1 {
+		t.Fatalf("clean retry emitted = %d, want 1 (the true singleton records once the fault cleared)", emitted2)
+	}
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("want 1 model fact after recovery, got %d: %+v", len(facts), facts)
+	}
+	if facts[0].OutputTokens != 50 {
+		t.Fatalf("OutputTokens = %d, want 50 (proves the cwd==work_dir rollout recorded, not the sibling)", facts[0].OutputTokens)
+	}
+}
