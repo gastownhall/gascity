@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1895,6 +1896,163 @@ esac
 	demandOut := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
 	if demandOut == "0" {
 		t.Fatalf("EffectivePoolDemandQuery() = %q, want legacy ephemeral routed demand counted", demandOut)
+	}
+}
+
+func TestEffectiveWorkQuerySurfacesNoHistoryRouteWhenReadyMetadataFilterMisses(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; compatibility fallback joins ready and query output")
+	}
+	a := Agent{Name: "polecat", Dir: "rig"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready "*"--metadata-field "*)
+    # bd 1.1.0 can miss a durable no-history row when ready applies a
+    # metadata predicate, even though its unfiltered ready view sees the row.
+    printf '[]'
+    ;;
+  "ready --unassigned --exclude-type=epic --json --sort oldest --limit=0"|\
+  "ready --unassigned --exclude-type=epic --json --limit 0")
+    # Metadata is absent from this ready representation. Simulate a bd
+    # compatibility regression that also fails to apply its convoy exclusion;
+    # the join must still keep the infrastructure container unclaimable.
+    printf '[{"id":"ki-task-1","issue_type":"task","status":"open"},{"id":"ki-task-2","issue_type":"task","status":"open"},{"id":"ki-task-3","issue_type":"task","status":"open"},{"id":"ki-task-4","issue_type":"task","status":"open"},{"id":"ki-task-5","issue_type":"task","status":"open"},{"id":"ki-task-6","issue_type":"task","status":"open"},{"id":"ki-convoy","issue_type":"convoy","status":"open"}]'
+    ;;
+  "query --json status=open --limit=0")
+    # Deliberately reverse the task order: hydration must use an ID index
+    # while preserving bd ready's oldest-first candidate order.
+    printf '[{"id":"ki-convoy","issue_type":"convoy","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-6","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-5","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-4","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-3","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-2","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}},{"id":"ki-task-1","issue_type":"task","status":"open","metadata":{"gc.routed_to":"rig/polecat"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+
+	out := strings.TrimSpace(runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, bdScript))
+	var rows []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("EffectiveWorkQuery() returned invalid JSON %q: %v", out, err)
+	}
+	if len(rows) != 6 {
+		t.Fatalf("EffectiveWorkQuery() returned %d rows, want six routed tasks: %q", len(rows), out)
+	}
+	for i, row := range rows {
+		want := fmt.Sprintf("ki-task-%d", i+1)
+		if row.ID != want {
+			t.Fatalf("EffectiveWorkQuery() row %d ID = %q, want ready-order %q: %q", i, row.ID, want, out)
+		}
+	}
+	if strings.Contains(out, "ki-convoy") {
+		t.Fatalf("EffectiveWorkQuery() = %q, must preserve ready's infrastructure exclusions", out)
+	}
+
+	demandOut := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
+	if demandOut != "6" {
+		t.Fatalf("EffectivePoolDemandQuery() = %q, want six query-hydrated ready routes", demandOut)
+	}
+}
+
+func TestEffectivePoolDemandQuerySkipsHydrationWhenExistingDemandIsNonzero(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"canonical"}]'
+    ;;
+  "query --json status=open --limit=0")
+    # Hydration is a last-resort compatibility scan. Reaching it despite
+    # canonical demand would turn this otherwise healthy query into an error.
+    exit 97
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() = %q, want canonical count without hydration", strings.TrimSpace(out))
+	}
+}
+
+func TestNoHistoryRouteHydrationFailsClosed(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; compatibility fallback joins ready and query output")
+	}
+	a := Agent{Name: "polecat", Dir: "rig"}
+	tests := []struct {
+		name        string
+		readyAction string
+		queryAction string
+	}{
+		{
+			name:        "ready command failure",
+			readyAction: "exit 41",
+			queryAction: `printf '[]'`,
+		},
+		{
+			name:        "query command failure",
+			readyAction: `printf '[]'`,
+			queryAction: "exit 42",
+		},
+		{
+			name:        "invalid ready JSON",
+			readyAction: `printf '{'`,
+			queryAction: `printf '[]'`,
+		},
+		{
+			name:        "invalid query JSON",
+			readyAction: `printf '[]'`,
+			queryAction: `printf '{'`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bdScript := `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready "*"--metadata-field "*)
+    printf '[]'
+    ;;
+  "ready --unassigned --exclude-type=epic --json --sort oldest --limit=0"|\
+  "ready --unassigned --exclude-type=epic --json --limit 0")
+    ` + tc.readyAction + `
+    ;;
+  "query --json ephemeral=true AND status=open --limit=0")
+    printf '[]'
+    ;;
+  "query --json status=open --limit=0")
+    ` + tc.queryAction + `
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+			workerOut, workerErr := runShellWithFakeBdResult(t, a.EffectiveWorkQuery(), map[string]string{
+				"GC_SESSION_ORIGIN": "ephemeral",
+			}, bdScript)
+			if workerErr != nil {
+				t.Fatalf("worker query returned error instead of quiet empty result: %v", workerErr)
+			}
+			if got := strings.TrimSpace(workerOut); got != "[]" {
+				t.Fatalf("worker query = %q, want quiet fail-closed []", got)
+			}
+
+			controllerOut, controllerErr := runShellWithFakeBdResult(t, a.EffectivePoolDemandQuery(), nil, bdScript)
+			if controllerErr == nil {
+				t.Fatalf("controller query succeeded with output %q, want nonzero error", strings.TrimSpace(controllerOut))
+			}
+		})
 	}
 }
 
@@ -5648,6 +5806,16 @@ func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env
 func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bdScript string) string {
 	t.Helper()
 
+	out, err := runShellWithFakeBdResult(t, shellCmd, env, bdScript)
+	if err != nil {
+		t.Fatalf("run shell with fake bd: %v", err)
+	}
+	return out
+}
+
+func runShellWithFakeBdResult(t *testing.T, shellCmd string, env map[string]string, bdScript string) (string, error) {
+	t.Helper()
+
 	tmp := t.TempDir()
 	bdPath := filepath.Join(tmp, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
@@ -5660,10 +5828,7 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("run shell with fake bd: %v", err)
-	}
-	return string(out)
+	return string(out), err
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {

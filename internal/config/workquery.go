@@ -70,6 +70,10 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
+func bdQueryStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("status="+status) + ` --limit=0`
+}
+
 func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
 	filter := `[.[] | ` + selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
@@ -103,6 +107,52 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
 }
 
+// queryHydratedPoolDemandShell is a compatibility bridge for bd storage
+// implementations where `bd ready` can determine that a no-history row is
+// ready but its metadata predicate cannot see that row. In those versions an
+// unfiltered ready read still returns the ID, while `bd query` returns the
+// metadata needed for routing. Join the two views by ID so `bd ready` remains
+// authoritative for blockers and deferrals. An explicit convoy guard also
+// prevents older bd versions from surfacing a non-actionable container.
+//
+// The fallback intentionally runs after the native metadata-filtered and
+// legacy-ephemeral probes. It is therefore optimized for compatibility rather
+// than the common path.
+func queryHydratedPoolDemandShell(limit int, readyLimitFlag string, includeEphemeralReady, quiet bool) string {
+	readyQuery := `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) +
+		` --unassigned --exclude-type=epic --json ` + readyLimitFlag
+	statusQuery := bdQueryStatusShell("open")
+	stderr := ""
+	jqStderr := ""
+	if quiet {
+		stderr = ` 2>/dev/null`
+		jqStderr = ` 2>/dev/null`
+	}
+
+	filter := `(.[0] // [] | if type == "array" then . else error("ready output must be an array") end) as $ready | ` +
+		`(.[1] // [] | if type == "array" then . else error("query output must be an array") end` +
+		` | map(select((.id // "") != "")) | INDEX(.id)) as $open_by_id | ` +
+		`[$ready[] | (.id // "") as $id | select($id != "") | $open_by_id[$id] | select(. != null)` +
+		` | select((.assignee // "") == "")` +
+		` | select((.issue_type // .type // "") as $type | ($type != "epic" and $type != "convoy"))` +
+		` | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $target) or ((` +
+		jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` +
+		jqMeta(beadmeta.RunTargetMetadataKey) + ` == $target) and (` +
+		jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `")))]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+
+	script := `ready_candidates=$(` + readyQuery + stderr + `) || exit $?; ` +
+		`open_candidates=$(` + statusQuery + stderr + `) || exit $?; ` +
+		`printf "%s\n%s\n" "$ready_candidates" "$open_candidates" | ` +
+		`jq -s --arg target "$target" ` + shellquote.Quote(filter) + jqStderr
+	if quiet {
+		return `{ ` + script + `; } || printf "[]"`
+	}
+	return `{ ` + script + `; }`
+}
+
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
@@ -118,6 +168,8 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(` + queryHydratedPoolDemandShell(20, "--sort oldest --limit=0", includeEphemeralReady, true) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
@@ -150,7 +202,11 @@ func poolDemandCountShell(target string, includeEphemeralReady bool) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`existing_count=$(printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length") || exit $?; ` +
+		`case "$existing_count" in ""|*[!0-9]*) exit 1 ;; esac; ` +
+		`if [ "$existing_count" -gt 0 ]; then printf "%s" "$existing_count"; exit 0; fi; ` +
+		`query_hydrated_json=$(` + queryHydratedPoolDemandShell(0, "--limit 0", includeEphemeralReady, false) + `) || exit $?; ` +
+		`printf "%s\n" "$query_hydrated_json" | jq "unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
