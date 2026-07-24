@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -29,8 +33,9 @@ type reapDecision struct {
 
 // reapReport is the outcome of one reapClosedBeadWorktrees pass. Reaped holds
 // the worktrees removed (or, in dry-run, the ones that would be removed);
-// Protected holds worktrees left in place with the reason (live process,
-// active session, unsafe git state, or an indeterminate liveness scan).
+// Protected holds worktrees left in place with the reason (too young/quarantined,
+// referenced by a non-terminal bead in another molecule, live process, active
+// session, unsafe git state, or an indeterminate age/liveness/borrow-veto scan).
 type reapReport struct {
 	Reaped    []reapDecision
 	Protected []reapDecision
@@ -53,11 +58,20 @@ type reapReport struct {
 // Safety gates, in order, all fail closed toward keeping the worktree:
 //  1. Named agent-home directories are never removed.
 //  2. The bead named by the worktree must exist and be closed.
-//  3. Liveness: no live process cwd and no active-session working directory may
+//  3. Freshness quarantine: a worktree younger than
+//     cfg.Daemon.AutoReapClosedBeadWorktreesMinAge is exempt, protecting
+//     against the race between worktree creation and its owning bead's
+//     work-dir metadata being stamped by the next reconcile pass. An
+//     indeterminate age (the ".git" pointer file cannot be stat'd) protects.
+//  4. Borrow-veto scan: batched once per rig per tick, this finds any
+//     non-terminal bead — in any molecule — whose gc.work_dir/work_dir
+//     metadata still points at the worktree's path and protects it if so.
+//     A query error protects every remaining candidate in that rig's tick.
+//  5. Liveness: no live process cwd and no active-session working directory may
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  4. Git state: no uncommitted changes, no unpushed commits, no stashes.
+//  6. Git state: no uncommitted changes, no unpushed commits, no stashes.
 //
 // When dryRun is true the reaper performs all discovery and classification and
 // emits bead.worktree.reap_skipped events describing what it would reap and
@@ -117,6 +131,12 @@ func reapClosedBeadWorktrees(
 			continue
 		}
 
+		// Pass 1: discover reap-eligible candidates — closed bead, and old
+		// enough to be past the freshness quarantine (FR-5). Every other gate
+		// (borrow-veto, liveness, git safety) is deferred to pass 2 so the
+		// borrow-veto scan below can run as a single batched query per rig
+		// (FR-3) instead of once per worktree.
+		var candidates []reapCandidate
 		for _, wt := range worktrees {
 			worktreePath := wt.Path
 
@@ -152,20 +172,90 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
+			// Freshness quarantine (FR-5): a worktree younger than the
+			// configured minimum age is exempt from reaping, protecting
+			// against the race between worktree creation and its owning
+			// bead's work-dir metadata being stamped by the next reconcile
+			// pass. Age is fail-closed — an indeterminate age protects.
+			minAge := cfg.Daemon.AutoReapClosedBeadWorktreesMinAge()
+			age, ok := computeWorktreeAge(worktreePath)
+			reason := ""
+			switch {
+			case !ok:
+				reason = "worktree age indeterminate (failing closed)"
+			case minAge > 0 && age < minAge:
+				reason = fmt.Sprintf("worktree too young to reap (quarantine): age=%s min_age=%s", age.Round(time.Second), minAge)
+			}
+			if reason != "" {
+				branch, _ := git.New(worktreePath).CurrentBranch()
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
+					worktreePath, beadID, reason,
+				)
+				recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				report.Protected = append(report.Protected, reapDecision{
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason,
+				})
+				continue
+			}
+
+			candidates = append(candidates, reapCandidate{beadID: beadID, worktreePath: worktreePath})
+		}
+
+		if len(candidates) == 0 {
+			continue
+		}
+
+		// Borrow-veto scan (FR-1/FR-2/FR-3): one batched query for every
+		// surviving candidate in this rig instead of one query per candidate.
+		// A query error fails closed — every remaining candidate in this
+		// rig's tick is protected (NFR-1).
+		referencingBeads, listErr := scanBorrowVetoReferences(store, candidates)
+		if listErr != nil {
+			reason := fmt.Sprintf("borrow-veto scan failed (failing closed): %v", listErr)
+			for _, c := range candidates {
+				branch, _ := git.New(c.worktreePath).CurrentBranch()
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
+					c.worktreePath, c.beadID, reason,
+				)
+				recordReapSkipped(rec, c.beadID, c.worktreePath, rigName, reason)
+				report.Protected = append(report.Protected, reapDecision{
+					BeadID: c.beadID, Path: c.worktreePath, Rig: rigName, Branch: branch, Reason: reason,
+				})
+			}
+			continue
+		}
+
+		// Pass 2: apply the borrow-veto verdict, then the existing
+		// liveness/git-safety gates, to each surviving candidate.
+		for _, c := range candidates {
+			worktreePath := c.worktreePath
+			beadID := c.beadID
+
+			// Borrow-veto (FR-1/FR-2/FR-7): protect when any non-terminal
+			// bead — regardless of molecule — still references this path via
+			// work-dir metadata.
+			reason := ""
+			if refs := referencingBeads[worktreePath]; len(refs) > 0 {
+				reason = fmt.Sprintf("borrow-veto: referenced by non-terminal bead(s) %s", strings.Join(refs, ", "))
+			}
+
 			// Liveness gate (fail closed). Protect the tree when a live process
 			// or active session is working in it, or when liveness could not be
 			// determined at all.
-			reason := ""
-			switch {
-			case !live.scanned:
-				reason = "liveness scan unavailable (failing closed, protecting all)"
-			default:
-				if isLive, why := worktreeIsLive(worktreePath, live, liveSessionDirs); isLive {
-					reason = "live: " + why
+			if reason == "" {
+				switch {
+				case !live.scanned:
+					reason = "liveness scan unavailable (failing closed, protecting all)"
+				default:
+					if isLive, why := worktreeIsLive(worktreePath, live, liveSessionDirs); isLive {
+						reason = "live: " + why
+					}
 				}
 			}
 
-			// Git safety gates, only if not already protected by liveness.
+			// Git safety gates, only if not already protected.
 			if reason == "" {
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
@@ -233,6 +323,58 @@ func reapClosedBeadWorktrees(
 		}
 	}
 	return report
+}
+
+// reapCandidate is a worktree that survived the closed-bead check and the
+// freshness quarantine in pass 1, awaiting the batched borrow-veto scan and
+// the remaining safety gates in pass 2.
+type reapCandidate struct {
+	beadID       string
+	worktreePath string
+}
+
+// computeWorktreeAge returns how long ago worktreePath was created, using the
+// mtime of its ".git" pointer file (written once by `git worktree add` and not
+// rewritten during normal use) as a creation-time proxy. Worktree structs carry
+// no timestamp of their own. ok is false when the file cannot be stat'd, so the
+// caller can fail closed instead of treating an indeterminate age as zero.
+func computeWorktreeAge(worktreePath string) (age time.Duration, ok bool) {
+	info, err := os.Stat(filepath.Join(worktreePath, ".git"))
+	if err != nil {
+		return 0, false
+	}
+	return time.Since(info.ModTime()), true
+}
+
+// scanBorrowVetoReferences issues one batched beads.Store.List query and
+// returns, for each candidate's worktree path, the IDs of any non-terminal
+// beads — in any molecule — whose gc.work_dir or legacy work_dir metadata
+// still points at that path (FR-1/FR-2/FR-3). Terminal status is decided by
+// convoycore.IsTerminalStatus, not a bare "!= closed" check, so a tombstoned
+// reference does not veto. A query error is returned as-is; the caller must
+// fail closed and protect every candidate in the rig (NFR-1).
+func scanBorrowVetoReferences(store beads.Store, candidates []reapCandidate) (map[string][]string, error) {
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		paths[c.worktreePath] = true
+	}
+	refs := make(map[string][]string)
+	for _, b := range all {
+		if convoycore.IsTerminalStatus(b.Status) {
+			continue
+		}
+		for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if p, ok := b.Metadata[key]; ok && paths[p] {
+				refs[p] = append(refs[p], b.ID)
+				break
+			}
+		}
+	}
+	return refs, nil
 }
 
 // recordReapSkipped emits a bead.worktree.reap_skipped event carrying the
