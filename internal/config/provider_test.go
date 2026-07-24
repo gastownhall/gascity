@@ -879,9 +879,9 @@ func TestResolveSessionCreateTransportFallsBackToProviderCreateTransport(t *test
 
 func TestPathCheckBinary(t *testing.T) {
 	tests := []struct {
-		name      string
-		spec      ProviderSpec
-		want      string
+		name string
+		spec ProviderSpec
+		want string
 	}{
 		{
 			name: "PathCheck set takes precedence",
