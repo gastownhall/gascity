@@ -400,7 +400,8 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 
 	t.Run("GC_RIG env routes to rig when no flag and no bead-id args", func(t *testing.T) {
 		t.Setenv("GC_RIG", "chatehr")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false, io.Discard)
+		var stderr bytes.Buffer
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false, &stderr)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -412,6 +413,11 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+		}
+		// A GC_RIG that names a bound rig is honored silently — the warning is
+		// reserved for the unresolvable case, so routine rig agents stay quiet.
+		if warn := stderr.String(); warn != "" {
+			t.Fatalf("expected no warning for a valid GC_RIG, got %q", warn)
 		}
 	})
 
@@ -481,19 +487,6 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		}
 		if !strings.Contains(warn, "city") {
 			t.Fatalf("expected the warning to name the store answered (city), got %q", warn)
-		}
-	})
-
-	t.Run("valid GC_RIG that resolves emits no warning", func(t *testing.T) {
-		t.Setenv("GC_RIG", "chatehr")
-		var stderr bytes.Buffer
-		if _, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false, &stderr); err != nil {
-			t.Fatalf("resolveBdScopeTarget() error = %v", err)
-		}
-		// A GC_RIG that names a bound rig is honored silently — the warning is
-		// reserved for the unresolvable case, so routine rig agents stay quiet.
-		if warn := stderr.String(); warn != "" {
-			t.Fatalf("expected no warning for a valid GC_RIG, got %q", warn)
 		}
 	})
 }
