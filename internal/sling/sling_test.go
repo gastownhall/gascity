@@ -2290,6 +2290,90 @@ func TestSlingAttachFormula(t *testing.T) {
 	}
 }
 
+// TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped is the regression
+// for #3681: --on/AttachFormula never carries the target bead's own
+// description into the formula's rendered context — the wisp root's
+// description is always the formula's own boilerplate, and no formula var
+// exposes the bead's text either. A caller relying on the bead's
+// description as the actual build instructions silently gets a brainstorm
+// that never saw them. Warn instead of changing routing/materialization.
+func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	found := false
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("BeadWarnings = %#v, want a hint that the bead's description is dropped", result.BeadWarnings)
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenContextPathProvided guards the
+// #3681 hint's scope: a caller who already passes context_path (or
+// requirements_path) has explicitly carried the instructions in some
+// form, so the generic hint would be noise.
+func TestSlingAttachFormulaNoWarningWhenContextPathProvided(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{Vars: []string{"context_path=/tmp/spec"}})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			t.Errorf("BeadWarnings = %#v, want no drop hint once context_path is explicit", result.BeadWarnings)
+		}
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenBeadHasNoDescription guards against
+// noise on the common case: a bare bead with no description text has
+// nothing to lose, so no hint should fire.
+func TestSlingAttachFormulaNoWarningWhenBeadHasNoDescription(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			t.Errorf("BeadWarnings = %#v, want no drop hint for a description-less bead", result.BeadWarnings)
+		}
+	}
+}
+
 func TestSlingAttachFormulaRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}

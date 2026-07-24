@@ -1206,9 +1206,10 @@ func TestGastownCity(t *testing.T) {
 func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
 	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
 
-	// City-scope formulas/skills import is unchanged.
-	if len(c.Imports) != 1 || c.Imports["gascity"].Source != PublicGascityPackSource || c.Imports["gascity"].Version != PublicGascityPackVersion {
-		t.Errorf("Imports = %v, want gascity=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	// City-scope formulas, skills, and commands use the gc binding expected by
+	// role prompts such as `gc gc claim`.
+	if len(c.Imports) != 1 || c.Imports["gc"].Source != PublicGascityPackSource || c.Imports["gc"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gc=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
 	}
 
 	// Roles ride along as a default rig import, bound "gc" so the formula's

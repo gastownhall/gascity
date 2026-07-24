@@ -391,6 +391,18 @@ attempt_bounded_self_rebase() {
     local before_sha
     before_sha="$(git rev-parse HEAD 2>/dev/null)" || return 10
 
+    # Snapshot our local knowledge of the remote branch's tip now, before any
+    # rebase. Bare --force-with-lease resolves its expected value through the
+    # remote's configured fetch refspec; when <branch> isn't covered by that
+    # refspec (true for on-demand branches like this one — only base_ref and
+    # validator refs are configured), git can reject the push as stale even
+    # though this tracking ref is verified fresh. Passing the SHA explicitly
+    # below sidesteps that refspec-mapping lookup while keeping the same
+    # lease semantics: a genuine concurrent push still invalidates this
+    # captured value and the push is still correctly rejected.
+    local expected_remote_sha
+    expected_remote_sha="$(git rev-parse --verify -q "refs/remotes/origin/$branch" 2>/dev/null)" || expected_remote_sha=""
+
     # Already on top of base? Then criterion 6's FAIL was stale — nothing to
     # rebase, no push needed.
     if git merge-base --is-ancestor "origin/$base_ref" HEAD 2>/dev/null; then
@@ -445,8 +457,15 @@ attempt_bounded_self_rebase() {
     fi
 
     # Force-push the rebased branch. --force-with-lease (NOT --force) keeps
-    # us from clobbering a concurrent push to this same branch.
-    if ! GIT_TERMINAL_PROMPT=0 git push --force-with-lease origin "$branch" >/dev/null 2>&1; then
+    # us from clobbering a concurrent push to this same branch, using the
+    # SHA captured above as the explicit expected value (see above).
+    local lease_arg
+    if [[ -n "$expected_remote_sha" ]]; then
+        lease_arg="--force-with-lease=$branch:$expected_remote_sha"
+    else
+        lease_arg="--force-with-lease=$branch"
+    fi
+    if ! GIT_TERMINAL_PROMPT=0 git push "$lease_arg" origin "$branch" >/dev/null 2>&1; then
         return 13
     fi
 

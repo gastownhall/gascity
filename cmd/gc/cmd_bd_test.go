@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,7 +329,7 @@ func TestResolveBdScopeTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args, tt.cityExplicit)
+			got, err := resolveBdScopeTarget(cfgForTest(), cityDir, tt.rigName, tt.args, tt.cityExplicit, io.Discard)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("resolveBdScopeTarget() error = %v, want %q", err, tt.wantError)
@@ -363,7 +364,7 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -399,7 +400,8 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 
 	t.Run("GC_RIG env routes to rig when no flag and no bead-id args", func(t *testing.T) {
 		t.Setenv("GC_RIG", "chatehr")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false)
+		var stderr bytes.Buffer
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--assignee=chatehr/gastown.refinery", "--status=open"}, false, &stderr)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -412,11 +414,16 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		if got != want {
 			t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
 		}
+		// A GC_RIG that names a bound rig is honored silently — the warning is
+		// reserved for the unresolvable case, so routine rig agents stay quiet.
+		if warn := stderr.String(); warn != "" {
+			t.Fatalf("expected no warning for a valid GC_RIG, got %q", warn)
+		}
 	})
 
 	t.Run("explicit --rig flag overrides GC_RIG env", func(t *testing.T) {
 		t.Setenv("GC_RIG", "chatehr")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"}, false)
+		got, err := resolveBdScopeTarget(cfg, cityDir, "wren", []string{"list"}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -439,7 +446,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
 			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
 		}
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false)
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
@@ -454,18 +461,32 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown GC_RIG env falls through to city root", func(t *testing.T) {
+	t.Run("unknown GC_RIG env falls through to city root and warns", func(t *testing.T) {
 		t.Setenv("GC_RIG", "nonexistent-rig")
-		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
+		var stderr bytes.Buffer
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false, &stderr)
 		if err != nil {
 			t.Fatalf("resolveBdScopeTarget() error = %v", err)
 		}
-		// Must land on city root, not the (unknown) GC_RIG rig.
+		// Must land on city root, not the (unknown) GC_RIG rig — the
+		// deliberate cross-city fallthrough is preserved, NOT turned into an
+		// error like --rig.
 		if got.ScopeKind != "city" {
 			t.Fatalf("resolveBdScopeTarget() ScopeKind = %q, want %q", got.ScopeKind, "city")
 		}
 		if got.ScopeRoot != cityDir {
 			t.Fatalf("resolveBdScopeTarget() ScopeRoot = %q, want %q", got.ScopeRoot, cityDir)
+		}
+		// The discard must not be silent: warn on stderr, naming both the
+		// offending value and the store actually answered. Without this a
+		// stale/typo'd GC_RIG silently redirects the query while the identical
+		// value via --rig exits 1.
+		warn := stderr.String()
+		if !strings.Contains(warn, "GC_RIG") || !strings.Contains(warn, "nonexistent-rig") {
+			t.Fatalf("expected a warning naming the discarded GC_RIG value, got %q", warn)
+		}
+		if !strings.Contains(warn, "city") {
+			t.Fatalf("expected the warning to name the store answered (city), got %q", warn)
 		}
 	})
 }
@@ -488,7 +509,7 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "gascity"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
 	}
-	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
+	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("resolveBdScopeTarget() error = %v, want foreign redirect error", err)
 	}
@@ -1426,7 +1447,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"}, false)
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"context", "--json"}, false, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}
@@ -1459,7 +1480,7 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	}
 	setCwd(t, filepath.Join(rigDir, "nested"))
 
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"}, false)
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"}, false, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() error = %v", err)
 	}

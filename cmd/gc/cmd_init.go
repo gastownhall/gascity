@@ -2107,6 +2107,10 @@ func tomlInlineCommentSuffix(line string) string {
 }
 
 func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	cityPrefix, err := preserveBoundWorkspacePrefix(fs, cityPath, cityPrefix)
+	if err != nil {
+		return err
+	}
 	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
 		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restoring legacy workspace identity: %w", restoreErr))
@@ -2114,6 +2118,20 @@ func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg
 		return err
 	}
 	return nil
+}
+
+// preserveBoundWorkspacePrefix falls back to the prefix already bound in
+// .gc/site.toml when the city config declares none, so an undeclared prefix
+// reads as "unset" rather than "clear it".
+func preserveBoundWorkspacePrefix(fs fsys.FS, cityPath, cityPrefix string) (string, error) {
+	if strings.TrimSpace(cityPrefix) != "" {
+		return cityPrefix, nil
+	}
+	binding, err := config.LoadSiteBinding(fs, cityPath)
+	if err != nil {
+		return "", err
+	}
+	return binding.WorkspacePrefix, nil
 }
 
 func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {

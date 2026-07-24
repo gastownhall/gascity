@@ -1483,6 +1483,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			}
 		}
 	}
+	inheritedWarnings = appendUnique(inheritedWarnings, warnUnusedPackAgentDefaultsForImports(includedAgents, tc.AgentDefaults)...)
 
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
@@ -1871,6 +1872,50 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 			agents[i].InheritedAppendFragments = appendUnique(agents[i].InheritedAppendFragments, defaults.AppendFragments...)
 		}
 	}
+}
+
+// warnUnusedPackAgentDefaultsForImports returns a warning when a pack's
+// [agent_defaults] configures a field that never reaches any of its
+// [imports.*] agents. applyInheritedPackAgentDefaults deliberately skips
+// any agent with a non-empty BindingName -- imports keep binding-scoped
+// identity rather than inheriting a pack's local defaults -- but that
+// scoping was silent (gastownhall/gascity#4524): a pack author configuring
+// agent_defaults.provider expecting it to cover imported roles got no
+// error, and every imported agent quietly ran on whatever provider it
+// would have used anyway. An imported agent that already sets its own
+// value for a field is not counted -- agent_defaults not applying there is
+// expected, not a bug.
+func warnUnusedPackAgentDefaultsForImports(agents []Agent, defaults AgentDefaults) []string {
+	var skippedProvider, skippedFormula, skippedFragments int
+	for i := range agents {
+		if agents[i].BindingName == "" {
+			continue
+		}
+		if defaults.Provider != "" && agents[i].Provider == "" {
+			skippedProvider++
+		}
+		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil {
+			skippedFormula++
+		}
+		if len(defaults.AppendFragments) > 0 && len(agents[i].AppendFragments) == 0 {
+			skippedFragments++
+		}
+	}
+
+	var fields []string
+	if skippedProvider > 0 {
+		fields = append(fields, fmt.Sprintf("provider unused by %d imported agent(s)", skippedProvider))
+	}
+	if skippedFormula > 0 {
+		fields = append(fields, fmt.Sprintf("default_sling_formula unused by %d imported agent(s)", skippedFormula))
+	}
+	if skippedFragments > 0 {
+		fields = append(fields, fmt.Sprintf("append_fragments unused by %d imported agent(s)", skippedFragments))
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("agent_defaults currently does not apply to a pack's own [imports.*] agents (the loader scopes it to the pack's own agents/ and [[agent]] blocks; see pack-spec §2.7); %s", strings.Join(fields, ", "))}
 }
 
 // cachedPackField resolves topoDir to an absolute cache key, looks up its
@@ -2361,6 +2406,13 @@ func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 			}
 		}
 		if !found {
+			if p.Dir == "" {
+				for j := range agents {
+					if agents[j].BindingQualifiedName() == p.Name {
+						return fmt.Errorf("patches.agent[%d]: agent %q not found in pack (patches match local names — did you mean %q?)", i, target, agents[j].Name)
+					}
+				}
+			}
 			return fmt.Errorf("patches.agent[%d]: agent %q not found in pack", i, target)
 		}
 	}
