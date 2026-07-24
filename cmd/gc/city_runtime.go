@@ -107,6 +107,13 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// inertScanCheckpoint records, per session name, the GetLastActivity value
+	// the inert-recovery lane last inspected (ga-qox). It bounds pane peeks so an
+	// ordinary completed turn triggers at most one inspection; it is in-memory
+	// (fine to lose on restart — only detected-failure state is persisted on the
+	// session bead) and pruned to live sessions each tick.
+	inertScanCheckpoint map[string]time.Time
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
@@ -2403,12 +2410,33 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// tick (main passes its in-memory raw snapshot slice here; this tree pays a
 	// store list instead — kept unconditional for exact parity with #1129's
 	// per-tick marker-clear semantics).
-	if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
+	rawSessionBeads, err := loadSessionBeads(sessStore.Store)
+	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
 	} else {
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, rawSessionBeads, assignedWorkBeads, time.Now(), cr.stdout)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
+
+	phaseStart = time.Now()
+	if err == nil {
+		// Inert-recovery: rescue a desired session left alive but inert after a
+		// provider transport failure (ga-qox / incident ci-emg). Reuses the same
+		// session-bead snapshot; keys eligibility on the orchestrator-desired set
+		// so it is role-neutral (named control sessions and pool slots alike). tmux's
+		// relaunch/respawn heals only a DIED session; this heals a live one frozen
+		// at its prompt after a DNS/WebSocket/HTTPS/stream drop. See
+		// recoverInertSessions for the full invariant.
+		if cr.inertScanCheckpoint == nil {
+			cr.inertScanCheckpoint = make(map[string]time.Time)
+		}
+		desiredNames := make(map[string]bool, len(desiredState))
+		for sn := range desiredState {
+			desiredNames[sn] = true
+		}
+		recoverInertSessions(cr.sp, cr.cfg, sessStore, rawSessionBeads, desiredNames, cr.inertScanCheckpoint, time.Now(), cr.stdout)
+	}
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.recover_inert_sessions", phaseStart, nil)
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input

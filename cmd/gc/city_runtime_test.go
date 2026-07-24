@@ -3118,6 +3118,69 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 	}
 }
 
+// The controller tick must invoke the live-but-inert recovery lane for any
+// desired named session, even when no work bead is assigned to it. The first
+// tick observes and persists the terminal provider failure; later ticks drive
+// the bounded continuation ladder tested in inert_recovery_test.go.
+func TestCityRuntimeBeadReconcileTick_ObservesDesiredInertNamedSession(t *testing.T) {
+	const sessionName = "coordinator"
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetActivity(sessionName, time.Now().Add(-2*inertRecoveryQuietGrace))
+	sp.SetPeekOutput(sessionName, codexTransportInertPane)
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:coordinator"},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     sessionName,
+			"agent_name":   sessionName,
+			"state":        "awake",
+			"generation":   "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: sessionName, Nudge: "Resume the assigned coordination work."}}}
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	result := DesiredStateResult{State: map[string]TemplateParams{
+		sessionName: {
+			SessionName:             sessionName,
+			TemplateName:            sessionName,
+			InstanceName:            sessionName,
+			ConfiguredNamedIdentity: sessionName,
+		},
+	}}
+
+	cr.beadReconcileTick(context.Background(), result, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after tick: %v", err)
+	}
+	if fingerprint := got.Metadata[sessionpkg.InertRecoveryFingerprintKey]; fingerprint != "stream_disconnected" {
+		t.Fatalf("inert recovery was not wired into the controller tick: fingerprint=%q", fingerprint)
+	}
+}
+
 func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
 	store := beads.NewMemStore()
 	worker, err := store.Create(beads.Bead{
