@@ -2233,7 +2233,17 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// A claude session is submit-verify-eligible, so NudgeSession drives the
+	// bounded recovery ladder (submitWithRecovery). `cat -v` echoes keystrokes
+	// but never paints Claude's busy indicator and never clears its "draft", so
+	// the ladder legitimately cannot confirm the submit and returns
+	// ErrNudgeUndeliverable — the correct #4119 "no silent success" signal for a
+	// pane that never confirms, not a test failure. This test's assertion is
+	// narrower and holds regardless: the claude family must never be sent a
+	// semantic Escape. The ladder's clear rung emits C-u (^U), never Escape
+	// (^[); a regression that un-skipped Escape for claude would paint ^[ here
+	// (rung 2 finds the draft still present on `cat -v`, then rung 3 would fire).
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeUndeliverable) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
