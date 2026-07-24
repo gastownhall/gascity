@@ -7,6 +7,11 @@ debt, not precedent. In this document, an **owner** is a tracking bead with a
 current assignee. An approved waiver must also name its reason, replacement
 proof, and expiry.
 
+The
+[testing efficiency operating corpus](engdocs/contributors/testing-efficiency-workflow-corpus.md)
+is the non-normative workflow, evidence catalog, and team handoff for applying
+this policy.
+
 ### Policy versus enforcement today
 
 The rules below are normative even where automation is still being built. Do
