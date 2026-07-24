@@ -3051,6 +3051,124 @@ func TestCachingStoreCachedReadyHonorsProjectedIsBlocked(t *testing.T) {
 	}
 }
 
+func TestCachingStoreDependencyInvalidationPreservesStatusBlockedProjection(t *testing.T) {
+	t.Parallel()
+
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{
+		"id":"bd-status-blocked",
+		"title":"parked work",
+		"status":"blocked",
+		"issue_type":"task"
+	}`), &issue); err != nil {
+		t.Fatalf("unmarshal bd row: %v", err)
+	}
+	projected := issue.toBead()
+	if projected.Status != "open" || projected.IsBlocked == nil || !*projected.IsBlocked {
+		t.Fatalf("projected bead = %+v, want folded open status with blocked marker", projected)
+	}
+
+	cache := NewCachingStoreForTest(&completeEmbeddedDepsStore{
+		beads: []Bead{projected},
+	}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Dependency snapshots invalidate dependency-derived IsBlocked projections.
+	// A marker synthesized from bd's own status is independent of that graph and
+	// must survive, or CachedReady will count work that gc hook --claim rejects.
+	cache.ApplyDepEvent(projected.ID, nil)
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 0 {
+		t.Fatalf("CachedReady after dependency invalidation = %+v, want status-blocked bead excluded", ready)
+	}
+	got, err := cache.Get(projected.ID)
+	if err != nil {
+		t.Fatalf("Get after dependency invalidation: %v", err)
+	}
+	if got.IsBlocked == nil || !*got.IsBlocked {
+		t.Fatalf("IsBlocked after dependency invalidation = %v, want preserved true status marker", got.IsBlocked)
+	}
+}
+
+func TestCachingStoreFoldedStatusBlockedEventPreservesInvalidationProvenance(t *testing.T) {
+	t.Parallel()
+
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{
+		"id":"bd-status-blocked-event",
+		"title":"parked work",
+		"status":"blocked",
+		"issue_type":"task"
+	}`), &issue); err != nil {
+		t.Fatalf("unmarshal bd row: %v", err)
+	}
+	projected := issue.toBead()
+	cache := NewCachingStoreForTest(&completeEmbeddedDepsStore{
+		beads: []Bead{projected},
+	}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// CachingStore notifications serialize the public Bead shape. The folded
+	// status is "open" and blockedByStatus is deliberately off-wire, so this
+	// event must not erase provenance when IsBlocked still says true.
+	payload, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatalf("marshal projected event: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	cache.ApplyDepEvent(projected.ID, nil)
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 0 {
+		t.Fatalf("CachedReady after folded event and invalidation = %+v, want status-blocked bead excluded", ready)
+	}
+}
+
+func TestCachingStoreRawOpenEventClearsStatusBlockedProvenance(t *testing.T) {
+	t.Parallel()
+
+	var issue bdIssue
+	if err := json.Unmarshal([]byte(`{
+		"id":"bd-status-reopened",
+		"title":"resumed work",
+		"status":"blocked",
+		"issue_type":"task"
+	}`), &issue); err != nil {
+		t.Fatalf("unmarshal bd row: %v", err)
+	}
+	projected := issue.toBead()
+	cache := NewCachingStoreForTest(&completeEmbeddedDepsStore{
+		beads: []Bead{projected},
+	}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cache.ApplyEvent("bead.updated", []byte(
+		`{"id":"bd-status-reopened","status":"open"}`,
+	))
+	cache.ApplyDepEvent(projected.ID, nil)
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(ready) != 1 || ready[0].ID != projected.ID {
+		t.Fatalf("CachedReady after raw open event = %+v, want reopened bead ready", ready)
+	}
+}
+
 func TestCachingStoreApplyEventMergesProjectedIsBlocked(t *testing.T) {
 	t.Parallel()
 
@@ -3838,12 +3956,26 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 	if stats := cache.Stats(); stats.ProblemCount != 0 {
 		t.Fatalf("cache problem count = %d, want 0", stats.ProblemCount)
 	}
+	// bd's status "blocked" is itself a not-ready signal, independent of the
+	// dependency-derived is_blocked column: a worker parks work it cannot
+	// progress by setting that status, leaving the deps clean. bdIssue.blockedFlag
+	// marks the row before enrichment runs, and the enrichment must NOT clear it
+	// back to the column's dependency-only answer. Otherwise demand can count a
+	// row the claim path refuses. The unblocked and deferred rows below still pin
+	// that the projection reaches rows outside the ready set.
 	blocked, err := cache.Get("bd-blocked-status")
 	if err != nil {
 		t.Fatalf("Get(blocked status): %v", err)
 	}
-	if blocked.IsBlocked == nil || *blocked.IsBlocked {
-		t.Fatalf("blocked-status IsBlocked = %v, want false projection", blocked.IsBlocked)
+	if blocked.IsBlocked == nil || !*blocked.IsBlocked {
+		t.Fatalf("blocked-status IsBlocked = %v, want the bd status preserved as a not-ready marker", blocked.IsBlocked)
+	}
+	ready, err := cache.Get("bd-ready")
+	if err != nil {
+		t.Fatalf("Get(ready): %v", err)
+	}
+	if ready.IsBlocked == nil || *ready.IsBlocked {
+		t.Fatalf("ready IsBlocked = %v, want false projection", ready.IsBlocked)
 	}
 	deferred, err := cache.Get("bd-deferred-status")
 	if err != nil {

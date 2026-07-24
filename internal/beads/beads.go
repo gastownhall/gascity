@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -100,10 +101,28 @@ type Bead struct {
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
 	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
-	// IsBlocked carries bd's denormalized ready-work projection. Nil means the
-	// store did not provide the projection and cached ready falls back to
-	// dependency-derived readiness for backward compatibility.
+	// IsBlocked carries bd's denormalized ready-work projection: "bd says this
+	// bead is not ready", which cachedBeadReady consumes as a short-circuit over
+	// dependency-derived readiness. Nil means the store did not provide the
+	// projection and cached ready falls back to dependencies for backward
+	// compatibility.
+	//
+	// It carries BOTH of bd's not-ready dimensions, because bd populates them on
+	// different channels and Gas City must honor either: the dependency-derived
+	// is_blocked column, and the bd status value "blocked" (a worker parking work
+	// it cannot progress). mapBdStatus folds bd's status vocabulary onto Gas
+	// City's three statuses, so the second dimension would otherwise be erased at
+	// the projection boundary — see bdIssue.blockedFlag. This is the only
+	// not-claimable signal that survives every hop from bd's JSON through the
+	// cache and the HTTP/SSE wire to the controller's demand readers, which is
+	// what lets demand and `gc hook --claim` agree on one set.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// blockedByStatus records the provenance of an IsBlocked=true marker that
+	// bdIssue.toBead synthesized from bd's raw status=="blocked". Cache
+	// dependency invalidation may clear dependency-derived IsBlocked projections,
+	// but must not clear this independent status dimension. It is intentionally
+	// store-internal: IsBlocked remains the stable wire representation.
+	blockedByStatus bool
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -473,6 +492,7 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	}
 	return b.Status == "open" &&
 		!IsReadyExcludedBead(b) &&
+		!IsSelfBlockedBead(b) &&
 		!IsDeferred(b, now)
 }
 
@@ -480,6 +500,31 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 // actionable Ready work.
 func IsReadyExcludedBead(b Bead) bool {
 	return IsReadyExcludedType(b.Type) || HasReadyExcludedLabel(b)
+}
+
+// IsSelfBlockedBead reports whether a bead carries its own blocked marker,
+// independent of the dependency graph checked by the per-store blocker
+// predicates. It is the STATUS dimension of Ready exclusion, exactly parallel
+// to IsReadyExcludedBead's TYPE dimension (the convoy/epic infrastructure
+// guard): a self-blocked bead is real work that simply is not claimable now.
+//
+// This mirrors cmd/gc isSelfBlockedHookCandidate — the claim path's filter — so
+// demand and claim agree on one set instead of approximating each other. Demand
+// that counts what claim refuses to hand out IS a spawn loop: the controller
+// starts a worker, the worker's `gc hook --claim` finds nothing, it drain-acks,
+// and the unchanged demand immediately starts another one.
+//
+// bd's richer status vocabulary is folded onto Gas City's three statuses by
+// mapBdStatus, so a bd-side "blocked" arrives here as the is_blocked marker
+// preserved by bdIssue.blockedFlag rather than as a distinct Status. Both
+// spellings are accepted so native and bd-backed stores answer identically.
+// An absent marker means NOT blocked: bd's denormalized projection is not
+// always populated, and over-filtering here would strand ready work.
+func IsSelfBlockedBead(b Bead) bool {
+	if b.blockedByStatus || (b.IsBlocked != nil && *b.IsBlocked) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(b.Status), "blocked")
 }
 
 // HasReadyExcludedLabel reports whether a bead carries a label that marks it

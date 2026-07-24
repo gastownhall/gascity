@@ -852,6 +852,91 @@ func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing
 	}
 }
 
+// A worker that sets its claimed bead to bd status "blocked" without releasing
+// the route leaves a row that is routed but NOT claimable: the claim path's
+// filterUnreadyHookCandidates/isSelfBlockedHookCandidate strips it, so
+// `gc hook --claim` returns nothing and the worker drain-acks. If route
+// discovery still counts that row, the controller sees undiminished demand and
+// starts another worker immediately.
+//
+// bd's "blocked" reaches Gas City as an is_blocked marker on an "open"-projected
+// row (mapBdStatus folds bd's status vocabulary onto three statuses;
+// bdIssue.blockedFlag preserves the marker), which is the shape asserted here.
+// A routed, unassigned, genuinely open row must still count, or the fix would
+// trade a spawn loop for a starved pool.
+func TestDefaultScaleCheckCountsExcludesRoutedButUnclaimableWork(t *testing.T) {
+	const template = "example/worker"
+	store := beads.NewMemStore()
+	claimable, err := store.Create(beads.Bead{
+		Title:    "routed open task",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
+	})
+	if err != nil {
+		t.Fatalf("create routed open bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "routed task a worker marked blocked",
+		Type:   "task",
+		Status: "open",
+		// The projected shape of a bd row whose status is "blocked".
+		IsBlocked: boolPtr(true),
+		Metadata:  map[string]string{beadmeta.RoutedToMetadataKey: template},
+	}); err != nil {
+		t.Fatalf("create routed blocked bead: %v", err)
+	}
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:example",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 — a routed blocked bead is not claimable and must not create demand", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{claimable.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want only the claimable routed bead [%s]", got, claimable.ID)
+	}
+}
+
+// Demand must fail closed even when the store's Ready leaks a non-claimable row:
+// the live loop ran against a cached projection that had already folded bd's
+// "blocked" onto "open", so the demand path cannot delegate the whole check to
+// the store the way it delegates the convoy/epic type exclusion to
+// readyExcludeTypes. Both spellings of the marker are covered because the claim
+// path accepts both (is_blocked OR status=="blocked").
+func TestDefaultScaleCheckCountsExcludesUnclaimableRowsLeakedByReady(t *testing.T) {
+	const template = "example/worker"
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: template}
+	store := &readyStaticStore{
+		Store: beads.NewMemStore(),
+		ready: []beads.Bead{
+			{ID: "ki-open", Title: "routed open task", Type: "task", Status: "open", Metadata: routed},
+			{ID: "task-marker", Title: "is_blocked marker", Type: "task", Status: "open", IsBlocked: boolPtr(true), Metadata: routed},
+			{ID: "task-status", Title: "raw bd status", Type: "task", Status: "blocked", Metadata: routed},
+		},
+	}
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:example",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 — only ki-open is claimable", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{"ki-open"}) {
+		t.Fatalf("WorkBeadIDs = %v, want [ki-open]", got)
+	}
+}
+
 func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	store := beads.NewMemStore()

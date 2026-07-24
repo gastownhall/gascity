@@ -1481,6 +1481,19 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
+			// Non-claimable statuses are excluded here for the same reason
+			// readyExcludeTypes excludes convoy/epic containers: the claim path
+			// will not hand these rows out, so counting them manufactures demand
+			// no worker can consume. beads.IsSelfBlockedBead is the exact
+			// predicate cmd_hook's isSelfBlockedHookCandidate applies to the
+			// worker's work_query result, which is what makes the two sides
+			// agree rather than approximately agree. Ready() already drops these
+			// at every healthy store; the guard is restated on the demand path
+			// so a store whose projection folds "blocked" onto "open" fails
+			// closed to no demand instead of open to an unbounded respawn loop.
+			if beads.IsSelfBlockedBead(b) {
+				continue
+			}
 			template := controllerDemandRouteTarget(cfg, b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue

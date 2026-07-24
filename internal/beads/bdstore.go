@@ -789,28 +789,59 @@ func (b *bdIssue) toBead() Bead {
 		}
 	}
 	return Bead{
-		ID:           b.ID,
-		Title:        b.Title,
-		Status:       mapBdStatus(b.Status),
-		Type:         b.IssueType,
-		Priority:     cloneIntPtr(b.Priority),
-		CreatedAt:    b.CreatedAt.Truncate(time.Second),
-		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
-		Assignee:     b.Assignee,
-		From:         from,
-		ParentID:     parentID,
-		Ref:          b.Ref,
-		Needs:        b.Needs,
-		Description:  b.Description,
-		Labels:       b.Labels,
-		Metadata:     b.Metadata,
-		Dependencies: deps,
-		Ephemeral:    b.Ephemeral,
-		NoHistory:    b.NoHistory,
-		DeferUntil:   cloneTimePtr(b.DeferUntil),
-		IsBlocked:    b.IsBlocked.ptr(),
-		Revision:     b.Revision,
+		ID:              b.ID,
+		Title:           b.Title,
+		Status:          mapBdStatus(b.Status),
+		Type:            b.IssueType,
+		Priority:        cloneIntPtr(b.Priority),
+		CreatedAt:       b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:       b.UpdatedAt.Truncate(time.Second),
+		Assignee:        b.Assignee,
+		From:            from,
+		ParentID:        parentID,
+		Ref:             b.Ref,
+		Needs:           b.Needs,
+		Description:     b.Description,
+		Labels:          b.Labels,
+		Metadata:        b.Metadata,
+		Dependencies:    deps,
+		Ephemeral:       b.Ephemeral,
+		NoHistory:       b.NoHistory,
+		DeferUntil:      cloneTimePtr(b.DeferUntil),
+		IsBlocked:       b.blockedFlag(),
+		blockedByStatus: b.statusBlocked(),
+		Revision:        b.Revision,
 	}
+}
+
+// blockedFlag resolves the Bead.IsBlocked marker from bd's row. bd carries the
+// self-blocked signal on TWO channels and a given bd build may populate either:
+// the denormalized is_blocked column, and the status value "blocked" itself.
+// mapBdStatus deliberately folds bd's richer status vocabulary (blocked,
+// review, testing) onto Gas City's three-status model, so a row whose ONLY
+// self-blocked signal was status=="blocked" used to arrive here indistinguishable
+// from healthy open work — the projection erased the one field the claim path
+// keys on. Preserving it as is_blocked keeps the three-status model intact while
+// making the marker survive the projection, so demand-side readers can apply the
+// same non-claimable predicate the claim path applies (cmd/gc
+// isSelfBlockedHookCandidate, which tests is_blocked OR status=="blocked").
+//
+// The two channels are independent and combine with OR semantics, matching the
+// claim path: status "blocked" always wins, even when the dependency-derived
+// is_blocked column explicitly says false. For every other status, preserve the
+// optional is_blocked value exactly. In particular, an absent marker stays nil
+// ("bd did not say") rather than becoming a synthesized false, which would flip
+// cachedBeadReady from "consult dependencies" to "definitely ready".
+func (b *bdIssue) blockedFlag() *bool {
+	if b.statusBlocked() {
+		blocked := true
+		return &blocked
+	}
+	return b.IsBlocked.ptr()
+}
+
+func (b *bdIssue) statusBlocked() bool {
+	return strings.EqualFold(strings.TrimSpace(b.Status), "blocked")
 }
 
 func (b *bdIssue) normalizedDependencies() []Dep {
@@ -874,6 +905,10 @@ func isBdClaimConflictMessage(msg string) bool {
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
 // in_progress, blocked, review, testing, closed. Gas City uses:
 // open, in_progress, closed.
+//
+// The fold is lossy by design, so anything that must survive it has to be
+// carried on a dedicated field: bd's "blocked" is preserved as the is_blocked
+// marker by bdIssue.blockedFlag, because "open" here does NOT mean claimable.
 func mapBdStatus(s string) string {
 	switch s {
 	case "closed":
