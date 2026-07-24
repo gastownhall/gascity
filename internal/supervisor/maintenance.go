@@ -16,7 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
 const (
@@ -479,6 +481,20 @@ func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 		Ts:      run.FinishedAt,
 		Payload: raw,
 	})
+
+	// Append-time projection upkeep: persist this run's outcome into the
+	// latest-by-status sidecar so /status reads it in O(1) instead of
+	// re-scanning the archived event history. Best-effort — a
+	// failed sidecar write only means the next /status seed re-derives it
+	// from history, never a wrong value.
+	status := "success"
+	if run.Err != "" {
+		status = "failed"
+	}
+	if err := storehealth.RecordMaintenanceEvent(fsys.OSFS{}, m.cityPath, run.FinishedAt, status); err != nil {
+		fmt.Fprintf(m.stderr, "events: store-maintenance projection: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+
 	if run.Err != "" {
 		m.sendFailureAlert(run)
 	}

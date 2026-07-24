@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
@@ -47,7 +48,7 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	lastAt, lastStatus := storehealth.LastMaintenance(fsys.OSFS{}, cityPath, ep)
 	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
 }
 

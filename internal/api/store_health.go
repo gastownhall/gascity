@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
@@ -87,7 +88,11 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
+	// SeedMaintenanceProjection (not LastMaintenance) is used here because the
+	// supervisor is the single process permitted to persist the projection
+	// sidecar; the CLI fallback reads it without writing. This first-read seed
+	// keeps the supervisor's steady-state read O(1) after one bounded scan.
+	lastAt, lastStatus := storehealth.SeedMaintenanceProjection(fsys.OSFS{}, cityPath, s.state.EventProvider())
 	h := storehealth.Compute(cityPath, size, rows, lastAt, lastStatus)
 	return statusStoreHealthFromDomain(h), nil
 }

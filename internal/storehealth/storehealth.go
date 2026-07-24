@@ -101,36 +101,60 @@ func WalkSize(path string) int64 {
 }
 
 // LastMaintenance returns the timestamp and status ("success" or
-// "failed") of the most-recent store-maintenance event in provider.
-// Zero time and empty status when no events, provider is nil, or the
-// provider returns an error.
-func LastMaintenance(ep events.Provider) (time.Time, string) {
-	if ep == nil {
+// "failed") of the most-recent store-maintenance event for the city at
+// cityPath. It is READ-ONLY and safe to call from any process — including
+// the transient `gc status` CLI — because it never writes the shared
+// projection sidecar. It reads the persisted latest-by-status sidecar in
+// O(1); when the sidecar is absent (a fresh install, or a supervisor that
+// has not seeded yet) it falls back to a bounded read-only scan of ep's
+// history (rotated .gz archives included) and returns that without
+// persisting. Persisting the sidecar is the supervisor's job alone — see
+// SeedMaintenanceProjection and RecordMaintenanceEvent — so there is
+// exactly one writer process and the process-local projectionWriteMu fully
+// serializes it. Zero time and empty status when no maintenance has been
+// recorded or cityPath is empty.
+func LastMaintenance(fs fsys.FS, cityPath string, ep events.Provider) (time.Time, string) {
+	if cityPath == "" {
 		return time.Time{}, ""
 	}
-	var (
-		latestTs     time.Time
-		latestStatus string
-	)
-	for _, spec := range []struct {
-		typ    string
-		status string
-	}{
-		{events.StoreMaintenanceDone, "success"},
-		{events.StoreMaintenanceFailed, "failed"},
-	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
-		if err != nil {
-			continue
-		}
-		for _, e := range evts {
-			if e.Ts.After(latestTs) {
-				latestTs = e.Ts
-				latestStatus = spec.status
-			}
-		}
+	if p, ok, err := LoadMaintenanceProjection(fs, cityPath); err == nil && ok {
+		return p.Latest()
 	}
-	return latestTs, latestStatus
+	// Read-only fallback: derive the answer from history but do not write.
+	return scanMaintenanceProjection(ep).Latest()
+}
+
+// SeedMaintenanceProjection returns the latest maintenance timestamp/status
+// exactly like LastMaintenance, but on an absent sidecar it also PERSISTS
+// the one-time seed so subsequent reads are O(1). It is the supervisor-only
+// persisting path: the supervisor process is the single writer of the
+// projection sidecar (this first-read seed plus RecordMaintenanceEvent at
+// emit time), which is why projectionWriteMu — a process-local lock — is
+// sufficient and the CLI fallback (LastMaintenance) must stay read-only.
+//
+// The scan runs outside the lock (it can be seconds on a large archive);
+// the result is then merged under the lock against any value the emit path
+// wrote meanwhile, taking the max per field, so a concurrent same-process
+// emit is never lowered. A no-match scan still persists an (empty) sidecar,
+// so the full scan runs at most once per city rather than on every
+// no-maintenance-events read — the failure mode that made request-time
+// scanning (and its archive-blind ListTail workaround) unacceptable.
+func SeedMaintenanceProjection(fs fsys.FS, cityPath string, ep events.Provider) (time.Time, string) {
+	if cityPath == "" {
+		return time.Time{}, ""
+	}
+	if p, ok, err := LoadMaintenanceProjection(fs, cityPath); err == nil && ok {
+		return p.Latest()
+	}
+
+	scanned := scanMaintenanceProjection(ep)
+	projectionWriteMu.Lock()
+	defer projectionWriteMu.Unlock()
+	current, _, _ := LoadMaintenanceProjection(fs, cityPath)
+	current.LastDoneAt = maxTime(current.LastDoneAt, scanned.LastDoneAt)
+	current.LastFailedAt = maxTime(current.LastFailedAt, scanned.LastFailedAt)
+	_ = writeMaintenanceProjectionLocked(fs, cityPath, current) //nolint:errcheck // best-effort seed
+	return current.Latest()
 }
 
 const bytesPerMB = 1_000_000
