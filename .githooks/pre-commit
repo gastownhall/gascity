@@ -44,12 +44,20 @@ if [ -n "$staged_docs" ]; then
   make check-docs
 fi
 
-# Dashboard SPA rebuild: whenever the spec changes OR the SPA source
-# changes, regenerate the TS types, typecheck, and rebuild the compiled
-# bundle. Guarded on `npm` availability so contributors without Node
-# tooling aren't blocked; CI enforces the full regeneration.
+# Dashboard SPA rebuild: when internal/api/openapi.json changes, regenerate
+# the generated TS API client from the new spec and stage it. When the spec
+# OR the SPA source changes, typecheck and rebuild the compiled bundle.
+# Guarded on `npm` availability so contributors without Node tooling aren't
+# blocked; CI enforces the full regeneration via make dashboard-ci.
 if command -v npm >/dev/null 2>&1; then
   spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+  if [ -n "$spec_changed" ]; then
+    # Regenerate BEFORE typecheck/build below: a client that no longer
+    # matches the new spec must fail typecheck immediately instead of
+    # silently building/committing a stale client (#4627, #4607).
+    (cd internal/api/dashboardspa/web && npm ci --silent && npm run generate:client)
+    git add internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client
+  fi
   if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
     # Typecheck BEFORE build: vite's build transpiles TS to JS and
     # silently ignores type errors. The Makefile target also runs the
