@@ -291,9 +291,14 @@ export function RunRings({ runs }: { runs: readonly RunRingModel[] }) {
                   transform="rotate(-90 36 36)"
                 />
               </svg>
-              <span className="absolute inset-0 flex flex-col items-center justify-center text-label text-fg tnum">
-                {run.stage}/{run.totalStages}
-                <span className={retry ? 'text-warn' : 'text-fg-faint'}>
+              <span className="absolute inset-0 flex flex-col items-center justify-center px-3 text-center text-label text-fg tnum">
+                <span>
+                  {run.stage}/{run.totalStages}
+                </span>
+                <span
+                  className={`w-full truncate ${retry ? 'text-warn' : 'text-fg-faint'}`}
+                  title={retry ? `retry ${run.attempt}` : run.stageWord}
+                >
                   {retry ? `retry ${run.attempt}` : run.stageWord}
                 </span>
               </span>
