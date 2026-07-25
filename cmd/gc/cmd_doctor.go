@@ -215,6 +215,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewProviderParityCheck(cfg))
 		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
 		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
+		register(doctor.NewScaleCheckWorkQueryCorrespondenceCheck(cfg))
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))

@@ -132,6 +132,7 @@ func TestBuildDoctorChecks_SessionLivenessChecksRegisteredRegardlessOfController
 // the preflight is forced healthy to keep ambient bd/dolt state from masking
 // the registration.
 func TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController_GH5742(t *testing.T) {
+func TestBuildDoctorChecksRegistersScaleCheckWorkQueryCorrespondenceCheck(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -150,6 +151,48 @@ func TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController
 		if idx := doctorCheckIndex(names, "startup-health-episodes"); idx < 0 {
 			t.Errorf("ControllerRunning=%v: startup-health-episodes expected but missing; names=%v", running, names)
 		}
+	names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    false,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	}))
+
+	namedAlwaysMinConflict := doctorCheckIndex(names, "named-always-min-conflict")
+	if namedAlwaysMinConflict < 0 {
+		t.Fatalf("named-always-min-conflict check missing: %v", names)
+	}
+	got := doctorCheckIndex(names, "scale-check-work-query-correspondence")
+	if got != namedAlwaysMinConflict+1 {
+		t.Fatalf("scale-check-work-query-correspondence index = %d, want immediately after named-always-min-conflict at %d; names=%v", got, namedAlwaysMinConflict, names)
+	}
+}
+
+func TestBuildDoctorChecksSkipsScaleCheckWorkQueryCorrespondenceCheckWithoutConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+
+	tests := []struct {
+		name   string
+		cfg    *config.City
+		cfgErr error
+	}{
+		{name: "nil config", cfg: nil, cfgErr: nil},
+		{name: "config load error", cfg: &config.City{Workspace: config.Workspace{Name: "demo"}}, cfgErr: os.ErrInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := doctorCheckNames(buildDoctorChecks(cityDir, tt.cfg, tt.cfgErr, buildDoctorChecksOpts{
+				ControllerRunning:    false,
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+			}))
+			if got := doctorCheckIndex(names, "scale-check-work-query-correspondence"); got >= 0 {
+				t.Fatalf("scale-check-work-query-correspondence registered at %d, want absent; names=%v", got, names)
+			}
+		})
 	}
 }
 
