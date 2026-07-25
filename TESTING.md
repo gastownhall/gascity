@@ -1340,6 +1340,36 @@ operation completes in < 1s on an idle machine but fails under CI CPU
 saturation. The only exception is a timer that is itself the subject under
 test (e.g., testing that a function honours a 100ms deadline).
 
+### Floors, ceilings, and inputs
+
+`GoroutineRaceTimeout` and `ExecRaceTimeout` are **floors** — the minimum a
+deadline may be. They are not a target to set every wait to.
+
+Some packages additionally define a **hang budget**: the point at which the
+package gives up and declares a wait wedged. `cmd/gc` has one (`hangBudget` in
+`cmd/gc/hangbudget_test.go`), derived from `GoroutineRaceTimeout` rather than
+declared independently, so there is one source of truth. Which to reach for:
+
+- **Does any assertion depend on how long the wait took?** Keep an explicit
+  deadline and comment which bound it asserts. This is the "subject under test"
+  exception above.
+- **Is the wait purely a hang detector** — the real assertions come after it
+  returns? Use the package's hang budget (`awaitClose`/`awaitCond` in `cmd/gc`).
+  Sizing it is not a correctness knob: these helpers return the instant their
+  condition is met, so raising the budget does not slow a passing run and
+  lowering it does not make the suite stricter. It only changes how long a
+  genuinely wedged test takes to report.
+- **Otherwise**, use `GoroutineRaceTimeout` / `ExecRaceTimeout` directly.
+
+Two things are never migrated to a hang budget:
+
+- **A value the test feeds the system** — a timeout passed *into* the code under
+  test defines the scenario being exercised, not how patiently the test watches.
+  Widening one makes the test prove less.
+- **The window of a negative assertion** ("nothing arrived within X"). There the
+  window *is* the assertion; budget-governing it makes the test slower and
+  weaker.
+
 ## Decision guide
 
 | Question you're testing | Tier |
