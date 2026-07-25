@@ -38,7 +38,7 @@ func TestControllerLoopCancel(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	controllerLoop(ctx, time.Hour, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
@@ -68,7 +68,7 @@ func TestControllerLoopTick(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	controllerLoop(ctx, time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
@@ -110,7 +110,7 @@ func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T
 	}
 	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr)
 	if sp.IsRunning("alpha") {
 		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
@@ -171,7 +171,7 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -481,7 +481,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -575,7 +575,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -1201,7 +1201,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1858,7 +1858,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1935,7 +1935,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
 		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
@@ -2032,7 +2032,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		return DesiredStateResult{State: ds}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
@@ -2132,7 +2132,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
