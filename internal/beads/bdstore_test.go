@@ -3168,6 +3168,127 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 }
 
+// --- SetLocalString / GetLocalString ---
+
+func TestBdStoreSetLocalStringRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreGetLocalStringUnsetReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	got, err := s.GetLocalString("bd-1", "never_set")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString unset = %q, want empty", got)
+	}
+}
+
+// TestBdStoreLocalStringNeverInvokesCommandRunner asserts the property
+// documented on BdStore.SetLocalString: clone-local writes are persisted to
+// a sidecar JSON file and never shell out to bd, so they never touch Dolt
+// sync or bd's on_update hook. The runner fails the test immediately if
+// invoked at all.
+func TestBdStoreLocalStringNeverInvokesCommandRunner(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("SetLocalString/GetLocalString must never invoke bd, got: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k1", "v1"); err != nil {
+		t.Fatalf("SetLocalString k1: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k2", "v2"); err != nil {
+		t.Fatalf("SetLocalString k2: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k1"); err != nil {
+		t.Fatalf("GetLocalString k1: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k2"); err != nil {
+		t.Fatalf("GetLocalString k2: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k1", ""); err != nil {
+		t.Fatalf("SetLocalString clear k1: %v", err)
+	}
+}
+
+func TestBdStoreSetLocalStringPersistsAcrossNewInstanceSameDir(t *testing.T) {
+	dir := t.TempDir()
+	failRunner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+
+	first := beads.NewBdStore(dir, failRunner)
+	if err := first.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	// A fresh *BdStore at the same dir simulates a new process/session
+	// opening the same clone; clone-local data must survive that restart.
+	second := beads.NewBdStore(dir, failRunner)
+	got, err := second.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString from fresh instance: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString from fresh instance at same dir = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreDeleteRemovesLocalStrings(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k", "v"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := s.Delete("bd-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "k")
+	if err != nil {
+		t.Fatalf("GetLocalString after Delete: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString after Delete = %q, want empty (sidecar entry removed)", got)
+	}
+}
+
 func TestBdStoreSetMetadataBatchRetriesDoltSerializationFailure(t *testing.T) {
 	calls := 0
 	runner := func(_, _ string, _ ...string) ([]byte, error) {

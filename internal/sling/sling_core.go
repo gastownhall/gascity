@@ -573,7 +573,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 		req := RouteRequest{
 			BeadID:  beadID,
-			Target:  a.QualifiedName(),
+			Target:  agentutil.RoutedToIdentity(&a),
 			WorkDir: rigDir,
 			Env:     slingEnv,
 			Force:   opts.Force,

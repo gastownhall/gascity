@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // The hang-budget helpers exist to remove a class of load-sensitive flake in
@@ -87,10 +89,22 @@ func TestAwaitCondEvaluatesTheConditionBeforeSleeping(t *testing.T) {
 // change that would re-introduce the flake: someone shrinking it to "make the
 // suite faster". Shrinking it cannot make a passing suite faster — the waits
 // return on their condition — it can only convert load spikes back into red
-// builds. The floor is set well above the largest fixed deadline this migration
-// replaced (15s, cmd_stop_test.go's controller-availability poll).
+// builds.
+//
+// Two independent floors are asserted. The first is TESTING.md's "Test deadline
+// rule", which this package must not fall below. The second is this migration's
+// own evidence: the largest fixed deadline it replaced was 15s
+// (cmd_stop_test.go's controller-availability poll), and guarded regions were
+// measured at 18.0-19.8s under single-core starvation, so anything at or below
+// 2x the replaced deadline is known-insufficient rather than merely aggressive.
 func TestHangBudgetStaysAHangDetector(t *testing.T) {
 	t.Parallel()
+
+	if hangBudget < testutil.GoroutineRaceTimeout {
+		t.Fatalf("hangBudget = %s, want >= testutil.GoroutineRaceTimeout (%s); "+
+			"TESTING.md's test deadline rule is a floor this package may not go below",
+			hangBudget, testutil.GoroutineRaceTimeout)
+	}
 
 	const largestReplacedDeadline = 15 * time.Second
 	if hangBudget < 2*largestReplacedDeadline {

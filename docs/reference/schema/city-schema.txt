@@ -1366,6 +1366,11 @@
           "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
           "default": false
         },
+        "auto_reap_closed_bead_worktrees_dry_run": {
+          "type": "boolean",
+          "description": "AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the\nfull worktree-reap classification each tick — discovery, closed-bead\nmatch, liveness gate, and git-safety probes — but emit\nbead.worktree.reap_skipped events describing what it WOULD reap and\nwhat it protected, without removing anything. This is the safe\nstaged-rollout surface: an operator enables dry-run first, confirms via\n`gc events` that no live worktree appears in the would-reap set, then\nenables AutoReapClosedBeadWorktrees for real removal. Dry-run has no\neffect when AutoReapClosedBeadWorktrees is already true (real removal\nsupersedes it). Defaults to false.",
+          "default": false
+        },
         "start_ready_timeout": {
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",

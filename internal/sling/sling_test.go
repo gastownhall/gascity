@@ -412,6 +412,40 @@ func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsIdempotent(t *testing.
 	}
 }
 
+// TestCheckBeadStatePoolInstanceRoutedToCollapsedIdentityIsIdempotent guards
+// the ga-79uuwq PoolName-bypass regression: a pool-instance agent's bead is
+// stamped with the pool's collapsed identity (agentutil.RoutedToIdentity),
+// not the instance's own raw QualifiedName. The idempotency check must
+// resolve that same collapsed identity to recognize the bead as already
+// routed, or every pool-instance sling would spuriously re-route work that
+// was already correctly dispatched to the pool.
+func TestCheckBeadStatePoolInstanceRoutedToCollapsedIdentityIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	poolInstance := config.Agent{Name: "polecat-2", Dir: "myrig", PoolName: "myrig/polecat"}
+	result := CheckBeadState(store, bead.ID, poolInstance, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when pool-instance bead is routed to the collapsed pool identity, got %+v", result)
+	}
+}
+
 func TestCheckBeadStateRoutedWithClosedTrackingConvoyIsNotIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
 	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})

@@ -2552,6 +2552,17 @@ type DaemonConfig struct {
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the
+	// full worktree-reap classification each tick — discovery, closed-bead
+	// match, liveness gate, and git-safety probes — but emit
+	// bead.worktree.reap_skipped events describing what it WOULD reap and
+	// what it protected, without removing anything. This is the safe
+	// staged-rollout surface: an operator enables dry-run first, confirms via
+	// `gc events` that no live worktree appears in the would-reap set, then
+	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
+	// effect when AutoReapClosedBeadWorktrees is already true (real removal
+	// supersedes it). Defaults to false.
+	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2603,6 +2614,19 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
 		return false
 	}
 	return *d.AutoReapClosedBeadWorktrees
+}
+
+// AutoReapClosedBeadWorktreesDryRunEnabled reports whether the patrol should
+// run the worktree-reap classification and emit would-reap/protected events
+// without removing anything. Defaults to false when the field is unset (nil).
+// Real removal (AutoReapClosedBeadWorktreesEnabled) supersedes dry-run: when
+// both are set, the reaper deletes for real, so callers should treat dry-run
+// as active only when this is true AND real reaping is off.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
+	if d.AutoReapClosedBeadWorktreesDryRun == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktreesDryRun
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a

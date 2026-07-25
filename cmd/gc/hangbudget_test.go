@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // hangBudget is the single wall-clock ceiling shared by every test-side wait in
@@ -23,12 +25,24 @@ import (
 // its own short deadline — hangBudget is the wrong tool there and would add a
 // full minute of dead wait.
 //
-// Sized as a genuine hang budget rather than fitted to any observed run: the
-// slowest guarded region measured under fleet load was ~3.9s (ga-h51wa1), and
-// Go's package -timeout remains the real backstop. This exists only so a wedged
-// wait fails at the line that wedged, with a useful message, instead of taking
-// the whole package down with an unattributed timeout.
-const hangBudget = 60 * time.Second
+// RELATIONSHIP TO testutil.GoroutineRaceTimeout — these are not competing
+// constants, which is why hangBudget is derived from it rather than declared
+// alongside it. TESTING.md's "Test deadline rule" makes GoroutineRaceTimeout
+// the MINIMUM safe deadline for a timer racing a goroutine ("must be >= 10s").
+// hangBudget is the point at which this package declares a wedge, which is a
+// ceiling, not a floor. Use GoroutineRaceTimeout directly when a test needs a
+// deadline that satisfies the rule; use awaitClose/awaitCond when the wait is
+// purely a hang detector and no assertion depends on how long it took.
+//
+// Why the floor alone is not enough here: measured under single-core CPU
+// starvation, the guarded regions in this package took 18.0-19.8s to complete
+// (ga-h51wa1). A 10s deadline would have failed all eight of those runs even
+// though nothing was wedged. The multiplier gives roughly 3x headroom over the
+// worst run actually observed; Go's package -timeout remains the real backstop.
+// This constant exists only so a wedged wait fails at the line that wedged,
+// with a useful message, instead of taking the whole package down with an
+// unattributed timeout.
+const hangBudget = 6 * testutil.GoroutineRaceTimeout
 
 // hangPollInterval is how often awaitCond re-evaluates its condition. It is a
 // responsiveness knob only; it has no bearing on whether a test passes.

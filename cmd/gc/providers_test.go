@@ -1484,7 +1484,20 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 }
 
 func TestErrorReturningSessionProviderFactoriesReturnContextualErrors(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// Same ambient-discovery exposure as the sibling above: the "default" case
+	// calls newSessionProvider with no explicit city, so findCity walks up from
+	// the working directory and a checkout nested under a real city root
+	// resolves that live city — attempting a real connection to its production
+	// store from a unit test. This test passes today only because the injected
+	// stub returns an error before the auto.Provider wrap that breaks the
+	// sibling's identity assertion, so it is one behavior change away from
+	// failing the same way. Pin the ceiling here too rather than rely on that.
+	clearGCEnv(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CEILING_DIRECTORIES", wd)
 	t.Setenv("GC_SESSION", "broken")
 
 	wantErr := errors.New("injected provider failure")
