@@ -4070,10 +4070,29 @@ func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *te
 	}
 }
 
-func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+// pinRealHome points HOME at the invoking user's passwd home for the duration
+// of the test.
+//
+// A non-delegated `gc supervisor start` deliberately refuses to run when HOME
+// is overridden (platformSupervisorHomeOverrideError) because the platform
+// supervisor requires the real HOME. That guard is production behavior and must
+// not be weakened. Any test that drives a non-delegated start therefore has to
+// present the real HOME, or it trips the guard instead of exercising the
+// behavior under test — deterministically, in every harness that isolates
+// itself with a custom HOME (CI sandboxes, agent worktrees).
+//
+// Isolate supervisor state with GC_HOME, never by overriding HOME.
+func pinRealHome(t *testing.T) {
+	t.Helper()
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		return
 	}
+	t.Setenv("HOME", lu.HomeDir)
+}
+
+func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
+	pinRealHome(t) // before the already-running check
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -4094,9 +4113,7 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 }
 
 func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
-	}
+	pinRealHome(t) // before the already-running check
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
 	t.Setenv("GC_HOME", gcHome)
