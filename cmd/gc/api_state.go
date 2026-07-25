@@ -20,6 +20,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -753,6 +754,8 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	var schemaHold *contract.SchemaCompatibilityHoldError
+	disableCityStore := errors.As(err, &schemaHold)
 	cityStore := openedCityStore.Store
 	cityBeadsDiagnostic := diagnosticPtr(openedCityStore.Diagnostic)
 	var cityMailProv mail.Provider
@@ -782,13 +785,20 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
+	} else if disableCityStore {
+		oldCityStore = cs.cityBeadStore
+		cs.cityBeadStore = nil
+		cs.cityBeadsDiagnostic = nil
+		cs.cityMailProv = nil
+		cs.extmsgSvc = nil
+		cs.storeMetadataSignature = storeSignature
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
 	}
-	// Keep prior non-nil store/provider if reopen fails.
+	// Keep prior non-nil dependencies only for transient reopen failures.
 	cs.mu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
+	if oldCityStore != nil && oldCityStore != cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
 	}
 	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)

@@ -157,35 +157,30 @@ func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testi
 	}
 }
 
-func TestOpenStoreAtForCityForceFallbackSkipsPreflightAndNativeOpen(t *testing.T) {
+func TestOpenStoreAtForCityForceFallbackStillHoldsIncompatibleSchema(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "1")
+	checker := factoryPreflightChecker("/city", factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 53})
+	checker.RequiredSchemaVersion = 53
+	checker.DatabaseState = func(string) (contract.PreflightDatabaseState, error) {
+		return contract.PreflightDatabaseState{SchemaVersion: 52, ProjectID: "gc-local", HasProjectID: true}, nil
+	}
 
-	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
-		ScopeRoot:        "/missing-scope",
+	_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        "/city",
 		Provider:         "bd",
-		PreflightChecker: contract.PreflightChecker{},
+		PreflightChecker: checker,
 		OpenBdStore: func() (Store, error) {
-			return NewMemStore(), nil
+			t.Fatal("OpenBdStore called during forced-fallback schema hold")
+			return nil, nil
 		},
 		OpenNativeStore: func() (Store, error) {
-			t.Fatal("OpenNativeStore called while force fallback is enabled")
+			t.Fatal("OpenNativeStore called during forced-fallback schema hold")
 			return nil, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("OpenStoreAtForCity() error = %v", err)
-	}
-	if result.Diagnostic.Store != storeNameBdStore {
-		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameBdStore)
-	}
-	if result.Diagnostic.NativeStoreEligible {
-		t.Fatal("diagnostic native_store_eligible = true, want false")
-	}
-	if result.Diagnostic.PreflightGate != nativeForceFallbackGate {
-		t.Fatalf("diagnostic preflight_gate = %q, want %q", result.Diagnostic.PreflightGate, nativeForceFallbackGate)
-	}
-	if result.Diagnostic.PreflightReason != nativeForceFallbackEnv+"=1" {
-		t.Fatalf("diagnostic preflight_reason = %q, want force fallback reason", result.Diagnostic.PreflightReason)
+	var hold *contract.SchemaCompatibilityHoldError
+	if !errors.As(err, &hold) {
+		t.Fatalf("OpenStoreAtForCity() error = %v, want SchemaCompatibilityHoldError", err)
 	}
 }
 

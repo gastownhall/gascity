@@ -16,9 +16,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -2153,6 +2155,88 @@ func waitForCloseStoreSpy(t *testing.T, store *closeStoreSpy) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("CloseStore calls = %d, want 1", store.closeCount())
+}
+
+func TestControllerStateUpdateTransientCityOpenFailureRetainsDependencies(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, errors.New("temporary reopen failure")
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	cfg := &config.City{}
+	mailProv := newCityMailProvider(oldStore, cfg, t.TempDir(), nil)
+	extSvc := extmsg.NewServices(oldStore)
+	cs := &controllerState{
+		cfg:           cfg,
+		cityPath:      t.TempDir(),
+		cityBeadStore: oldStore,
+		cityMailProv:  mailProv,
+		extmsgSvc:     &extSvc,
+		beadStores:    map[string]beads.Store{},
+	}
+
+	cs.update(&config.City{}, runtime.NewFake())
+
+	if cs.CityBeadStore() != oldStore {
+		t.Fatal("transient reload failure replaced the prior city store")
+	}
+	if cs.MailProvider("") != mailProv {
+		t.Fatal("transient reload failure replaced the prior mail provider")
+	}
+	if cs.ExtMsgServices() != &extSvc {
+		t.Fatal("transient reload failure replaced external message services")
+	}
+	if oldStore.closeCount() != 0 {
+		t.Fatalf("old store close count = %d, want 0", oldStore.closeCount())
+	}
+}
+
+func TestControllerStateUpdateSchemaHoldDisablesCityDependenciesAndClosesOldStore(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	for _, actual := range []int{52, 54} {
+		t.Run(fmt.Sprintf("schema_%d", actual), func(t *testing.T) {
+			newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+				return beads.StoreOpenResult{}, &contract.SchemaCompatibilityHoldError{Required: 53, Actual: actual}
+			}
+			oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+			created, err := oldStore.Create(beads.Bead{Title: "must become unavailable"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cfg := &config.City{}
+			mailProv := newCityMailProvider(oldStore, cfg, t.TempDir(), nil)
+			extSvc := extmsg.NewServices(oldStore)
+			cs := &controllerState{
+				cfg:           cfg,
+				cityPath:      t.TempDir(),
+				cityBeadStore: oldStore,
+				cityMailProv:  mailProv,
+				extmsgSvc:     &extSvc,
+				beadStores:    map[string]beads.Store{},
+			}
+
+			stale := cs.CityBeadStore()
+			cs.update(&config.City{}, runtime.NewFake())
+
+			if cs.CityBeadStore() != nil {
+				t.Fatal("city bead store retained during schema hold")
+			}
+			if cs.MailProvider("") != nil {
+				t.Fatal("city mail provider retained during schema hold")
+			}
+			if cs.ExtMsgServices() != nil {
+				t.Fatal("external message services retained during schema hold")
+			}
+			waitForCloseStoreSpy(t, oldStore)
+			if _, err := stale.Get(created.ID); !errors.Is(err, beads.ErrStoreClosed) {
+				t.Fatalf("stale city store Get after hold returned %v, want ErrStoreClosed", err)
+			}
+		})
+	}
 }
 
 func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {

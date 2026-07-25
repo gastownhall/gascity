@@ -77,7 +77,8 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 // the beads factory so it carries the conditional-writes stamp and the same
 // schema hold as city and rig opens. DisableNativeSelection keeps native
 // selection impossible and preserves the raw BdStore. The explicit
-// GC_BEADS_NATIVE_FORCE_FALLBACK emergency override still bypasses preflight.
+// GC_BEADS_NATIVE_FORCE_FALLBACK emergency override disables native selection
+// but still passes through the compatibility preflight.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
 	return openControlBdStoreThroughFactoryWithChecker(scopeRoot, cityPath, provider, cfg, newBeadsPreflightChecker(cityPath, provider), openBd)
 }

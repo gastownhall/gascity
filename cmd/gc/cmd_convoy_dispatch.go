@@ -435,9 +435,9 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
-	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	provider := authoritativeBeadsProviderForScope(scopeRoot, cityPath)
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
-		return openStoreAtForCity(storePath, cityPath)
+		return openAuthoritativeStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
 		return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {

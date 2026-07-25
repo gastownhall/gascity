@@ -104,17 +104,6 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err)
 	}
 
-	if forceNativeFallback() {
-		diag := BeadsDiagnostic{
-			Store:               storeNameBdStore,
-			NativeStoreEligible: false,
-			PreflightGate:       nativeForceFallbackGate,
-			PreflightReason:     nativeForceFallbackEnv + "=1",
-		}
-		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(provider, diag)
-	}
-
 	if !contract.ProviderUsesBDContract(provider) {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
@@ -142,6 +131,14 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 	diag := diagnosticFromPreflight(result)
+	if forceNativeFallback() {
+		diag.Store = storeNameBdStore
+		diag.NativeStoreEligible = false
+		diag.PreflightGate = nativeForceFallbackGate
+		diag.PreflightReason = nativeForceFallbackEnv + "=1"
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
+	}
 	if opts.DisableNativeSelection {
 		diag.Store = storeNameBdStore
 		diag.NativeStoreEligible = false

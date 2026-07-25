@@ -32,11 +32,20 @@ type PreflightDatabaseState struct {
 type SchemaCompatibilityHoldError struct {
 	Required int
 	Actual   int
+	Cause    error
 }
 
 func (e *SchemaCompatibilityHoldError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("beads schema compatibility hold: required schema %d, authoritative schema read failed: %v", e.Required, e.Cause)
+	}
+	if e.Actual <= 0 {
+		return fmt.Sprintf("beads schema compatibility hold: required schema %d, authoritative schema version is unknown", e.Required)
+	}
 	return fmt.Sprintf("beads schema compatibility hold: required schema %d, found %d", e.Required, e.Actual)
 }
+
+func (e *SchemaCompatibilityHoldError) Unwrap() error { return e.Cause }
 
 // PreflightChecker evaluates whether a beads scope may use native storage.
 type PreflightChecker struct {
@@ -77,17 +86,16 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	bdCtx, bdCtxErr := c.readBDContext(scope)
 	dbState, dbStateErr := c.readDatabaseState(scope)
 	directSchemaKnown := dbState.SchemaVersion > 0
-	actualSchema := dbState.SchemaVersion
-	if !directSchemaKnown {
-		actualSchema = bdCtx.SchemaVersion
-	}
-	if ProviderUsesBDContract(c.Provider) &&
-		metadata.Backend == "dolt" &&
-		(directSchemaKnown || bdCtxErr == nil && bdCtx.Backend == "dolt") &&
-		c.RequiredSchemaVersion > 0 &&
-		actualSchema > 0 &&
-		actualSchema != c.RequiredSchemaVersion {
-		return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Actual: actualSchema}
+	if ProviderUsesBDContract(c.Provider) && metadata.Backend == "dolt" && c.RequiredSchemaVersion > 0 {
+		if !directSchemaKnown && dbStateErr != nil {
+			return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Cause: dbStateErr}
+		}
+		if !directSchemaKnown {
+			return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion}
+		}
+		if dbState.SchemaVersion != c.RequiredSchemaVersion {
+			return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Actual: dbState.SchemaVersion}
+		}
 	}
 	if directSchemaKnown {
 		bdCtx.SchemaVersion = dbState.SchemaVersion

@@ -17,6 +17,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -203,6 +204,15 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	// Store-opening tests use fixture bd runners and must never probe a live or
+	// externally named Dolt endpoint. Tests that exercise schema compatibility
+	// replace this seam with their exact authoritative state.
+	preflightDatabaseStateReaderFn = func(string) func(string) (contract.PreflightDatabaseState, error) {
+		return func(string) (contract.PreflightDatabaseState, error) {
+			return contract.PreflightDatabaseState{SchemaVersion: beadsV110SchemaVersion}, nil
+		}
+	}
+
 	maybeRunProductMetricsDirectChildEnvSpy()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

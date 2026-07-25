@@ -231,6 +231,37 @@ func TestNewBeadsPreflightCheckerUsesDirectSchemaState(t *testing.T) {
 	}
 }
 
+func TestNewBeadsPreflightCheckerExternalAuthoritativeReadErrorHolds(t *testing.T) {
+	oldState := preflightDatabaseStateReaderFn
+	t.Cleanup(func() { preflightDatabaseStateReaderFn = oldState })
+	readErr := errors.New("authenticated external schema query failed")
+	preflightDatabaseStateReaderFn = func(string) func(string) (contract.PreflightDatabaseState, error) {
+		return func(string) (contract.PreflightDatabaseState, error) {
+			return contract.PreflightDatabaseState{}, readErr
+		}
+	}
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"gascity","project_id":"gc-local"}`
+	if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checker := newBeadsPreflightChecker(scope, "bd")
+	checker.BDContext = func(string) (contract.PreflightBDContext, error) {
+		return contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 53}, nil
+	}
+	// External identity deferral must not defer exact schema enforcement.
+	checker.DeferIdentityToNativeOpen = func(string) bool { return true }
+
+	_, err := checker.Check(scope)
+	var hold *contract.SchemaCompatibilityHoldError
+	if !errors.As(err, &hold) || !errors.Is(err, readErr) {
+		t.Fatalf("Check() error = %v, want typed hold wrapping authoritative external read error", err)
+	}
+}
+
 func TestOpenControlBdStoreThroughFactorySchemaMismatchHoldsForCityAndRig(t *testing.T) {
 	oldState := preflightDatabaseStateReaderFn
 	t.Cleanup(func() {

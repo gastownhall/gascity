@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
@@ -4130,6 +4131,53 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 		if _, ok := store.(*beads.FileStore); !ok {
 			t.Fatalf("control store = %T, want *beads.FileStore for file provider", store)
 		}
+
+		t.Run("ambient file cannot bypass on-disk Dolt schema hold", func(t *testing.T) {
+			holdCity := t.TempDir()
+			holdRig := filepath.Join(holdCity, "rigs", "frontend")
+			for _, scope := range []string{holdCity, holdRig} {
+				if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"gascity","project_id":"gc-local"}`
+				if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			holdCfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "frontend", Path: holdRig}},
+			}
+
+			oldState := preflightDatabaseStateReaderFn
+			preflightDatabaseStateReaderFn = func(string) func(string) (contract.PreflightDatabaseState, error) {
+				return func(string) (contract.PreflightDatabaseState, error) {
+					return contract.PreflightDatabaseState{SchemaVersion: 52, ProjectID: "gc-local", HasProjectID: true}, nil
+				}
+			}
+			t.Cleanup(func() { preflightDatabaseStateReaderFn = oldState })
+
+			prevRunner := beadsExecCommandRunnerWithEnv
+			beadsExecCommandRunnerWithEnv = func(map[string]string) beads.CommandRunner {
+				return func(_ string, name string, args ...string) ([]byte, error) {
+					if name != "bd" || !slices.Equal(args, []string{"context", "--json"}) {
+						t.Fatalf("unexpected command: %s %#v", name, args)
+					}
+					return []byte(`{"backend":"dolt","dolt_mode":"server","bd_version":"1.1.0","schema_version":53}`), nil
+				}
+			}
+			t.Cleanup(func() { beadsExecCommandRunnerWithEnv = prevRunner })
+
+			for _, scope := range []string{holdCity, holdRig} {
+				t.Run(conditionalWritesStoreID(scope, holdCity), func(t *testing.T) {
+					_, err := openControlStoreAtForCity(scope, holdCity, holdCfg)
+					var hold *contract.SchemaCompatibilityHoldError
+					if !errors.As(err, &hold) {
+						t.Fatalf("openControlStoreAtForCity() error = %v, want SchemaCompatibilityHoldError", err)
+					}
+				})
+			}
+		})
 	})
 
 	t.Run("exec", func(t *testing.T) {
