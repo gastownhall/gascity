@@ -175,3 +175,49 @@ func TestBuiltinCodexModelChoicesIncludeGPT56Variants(t *testing.T) {
 		}
 	}
 }
+
+// GH#4602: Claude Code >= 2.1.170 rejects --permission-mode auto-edit / full-auto.
+// Config-facing values stay "auto-edit"/"full-auto"; CLI args must be modern modes.
+func TestClaudePermissionModeMapsToAcceptedCLIValues(t *testing.T) {
+	providers := BuiltinProviders()
+	claude, ok := providers["claude"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing claude")
+	}
+
+	if got := claude.PermissionModes["auto-edit"]; got != "--permission-mode acceptEdits" {
+		t.Errorf("PermissionModes[auto-edit] = %q, want --permission-mode acceptEdits", got)
+	}
+	if got := claude.PermissionModes["full-auto"]; got != "--permission-mode dontAsk" {
+		t.Errorf("PermissionModes[full-auto] = %q, want --permission-mode dontAsk", got)
+	}
+
+	var permOpt BuiltinProviderOption
+	for _, option := range claude.OptionsSchema {
+		if option.Key == "permission_mode" {
+			permOpt = option
+			break
+		}
+	}
+	if permOpt.Key == "" {
+		t.Fatal("claude provider missing permission_mode option")
+	}
+	byValue := make(map[string]BuiltinOptionChoice, len(permOpt.Choices))
+	for _, c := range permOpt.Choices {
+		byValue[c.Value] = c
+	}
+	autoEdit, ok := byValue["auto-edit"]
+	if !ok {
+		t.Fatal("claude permission_mode choices missing auto-edit")
+	}
+	if len(autoEdit.FlagArgs) != 2 || autoEdit.FlagArgs[0] != "--permission-mode" || autoEdit.FlagArgs[1] != "acceptEdits" {
+		t.Errorf("auto-edit FlagArgs = %v, want [--permission-mode acceptEdits]", autoEdit.FlagArgs)
+	}
+	fullAuto, ok := byValue["full-auto"]
+	if !ok {
+		t.Fatal("claude permission_mode choices missing full-auto")
+	}
+	if len(fullAuto.FlagArgs) != 2 || fullAuto.FlagArgs[0] != "--permission-mode" || fullAuto.FlagArgs[1] != "dontAsk" {
+		t.Errorf("full-auto FlagArgs = %v, want [--permission-mode dontAsk]", fullAuto.FlagArgs)
+	}
+}
