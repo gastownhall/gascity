@@ -2021,6 +2021,15 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 	if !looksLikeInlineText(cfg, beadOrFormula) {
 		return false, false, nil
 	}
+	// Multi-line inline text is never a legitimate bead title — it's almost
+	// always a caller bug (e.g. a newline-joined list of bead IDs passed as
+	// one sling argument instead of iterated one-per-call). Fail loud rather
+	// than silently fabricating a bead whose title is the whole blob; this
+	// applies to both the real and dry-run paths so a dry-run preview can't
+	// promise a bead that would never be created.
+	if lines := strings.Count(beadOrFormula, "\n") + 1; lines > 1 {
+		return false, false, fmt.Errorf("inline text argument spans %d lines; refusing to create a bead from it — pass a single bead ID, iterate over a list (one ID per gc sling), or use --stdin for multi-line bead text", lines)
+	}
 	// Store probe: covers IDs that pass the shape pre-check but fail the
 	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").
 	// A store hit means the bead exists and should be routed, not created.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { GC_EVENT_PREFIX, SCOPE_REF_RE } from 'gas-city-dashboard-shared';
 import type {
@@ -15,14 +15,13 @@ import { PageHeader } from '../components/PageHeader';
 import { RelatedEntities } from '../components/RelatedEntities';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { FormulaRunDiagram } from '../components/run/FormulaRunDiagram';
-import { FormulaRunTabs, type RunEvidenceTab } from '../components/run/FormulaRunTabs';
+import { FormulaRunTabs } from '../components/run/FormulaRunTabs';
 import { StageLadder } from '../components/run/StageLadder';
 import { useNow } from '../contexts/NowContext';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { runEventIdentity, formulaRunDetailEventMatches } from '../hooks/runEventIdentity';
 import { useRunNodeSelection } from '../hooks/useRunNodeSelection';
 import { useFormulaRunDetail } from '../hooks/useFormulaRunDetail';
-import { useRunDiff } from '../hooks/useRunDiff';
 import { useEntityLinks } from '../hooks/useEntityLinks';
 import { getCached } from '../api/cache';
 import { getActiveCity } from '../api/cityBase';
@@ -60,52 +59,24 @@ export function FormulaRunDetailPage() {
   // signal and from a generic transport failure. We surface it as its own honest
   // "detail snapshot not found" state instead of mislabeling it as v1.
   const notFound = runDetail.kind === 'not_found';
-  const runDiff = useRunDiff(
-    routeError || detail === null ? undefined : runId,
-    detail?.executionPath,
-    scope?.scopeKind,
-    scope?.scopeRef,
-  );
   const initialLoading = runDetail.kind === 'loading';
-  const refreshing =
-    (readyRun !== null && readyRun.refreshState.kind === 'refreshing') ||
-    (runDiff.kind === 'ready' && runDiff.refreshState.kind === 'refreshing');
-  const diffInitialLoading = detail !== null && runDiff.kind === 'loading';
-  const loading = initialLoading || refreshing || diffInitialLoading;
+  const refreshing = readyRun !== null && readyRun.refreshState.kind === 'refreshing';
+  const loading = initialLoading || refreshing;
   const loadError =
     runDetail.kind === 'failed'
       ? runDetail.error
       : readyRun !== null && readyRun.refreshState.kind === 'failed'
         ? readyRun.refreshState.error
         : null;
-  // The Diff tab is the default-active view; the parent owns the tab so the P5
-  // gate below can suppress the diff's git-exec read while it is hidden.
-  const [activeTab, setActiveTab] = useState<RunEvidenceTab>('diff');
-  const diffTabActive = activeTab === 'diff';
 
-  // P4: the run DETAIL streams (useFormulaRunDetail owns the per-run SSE stream,
-  // which pushes the whole DTO with zero refetch), so when the stream is live
-  // this nudge lane refreshes ONLY the run DIFF (a separate git-exec read the
-  // stream does not carry). When the stream is UNAVAILABLE — a runtime with no
-  // EventSource, where detail would otherwise be fetched once then frozen — the
-  // nudge must ALSO refresh the detail so its auto-refresh survives.
-  //
-  // P5: the diff refresh is now (a) TTL-absorbed via cheapRefresh (refresh=false,
-  // the server diff TTL coalesces bursts) instead of the bypassing manual lane,
-  // and (b) gated on the Diff tab being visible — a nudge fires ZERO /diff POSTs
-  // while the tab is hidden. The manual Refresh button (refreshRunResources)
-  // keeps the bypass. Switching TO the Diff tab refreshes it once (below) so it
-  // is never stale from the nudges it skipped.
+  // P4: the run detail streams (useFormulaRunDetail owns the per-run SSE stream,
+  // which pushes the whole DTO with zero refetch), so a bead/session nudge only
+  // needs to refresh detail when that stream is UNAVAILABLE — a runtime with no
+  // EventSource, where detail would otherwise be fetched once then frozen.
   const streamActive = runDetail.streamActive;
   useGcEventRefresh(
     routeError ? NO_EVENT_PREFIXES : RUN_DETAIL_EVENT_PREFIXES,
-    () =>
-      void runDetailNudgeRefresh(
-        streamActive,
-        diffTabActive,
-        runDetail.refresh,
-        runDiff.cheapRefresh,
-      ),
+    () => void runDetailNudgeRefresh(streamActive, runDetail.refresh),
     {
       matches: (event) => {
         const identity = runEventIdentity(event);
@@ -127,23 +98,6 @@ export function FormulaRunDetailPage() {
       },
     },
   );
-  // P5: switching TO the Diff tab refreshes the diff once so it is not stale from
-  // the nudges it skipped while hidden. The refresh lives in an effect (not the
-  // tab-change handler) so it is a pure state update — React StrictMode's updater
-  // double-invoke can't fire the git-exec read twice. The mount already loads the
-  // diff for the default-active Diff tab, so a ref-tracked "was the Diff tab last
-  // visible" flag suppresses the initial render and fires only on a genuine
-  // hidden→visible transition. cheapRefresh is captured in a ref so the effect
-  // depends only on visibility, never re-running on an unrelated re-render.
-  const diffCheapRefreshRef = useRef(runDiff.cheapRefresh);
-  diffCheapRefreshRef.current = runDiff.cheapRefresh;
-  const diffTabWasActiveRef = useRef(diffTabActive);
-  useEffect(() => {
-    const wasActive = diffTabWasActiveRef.current;
-    diffTabWasActiveRef.current = diffTabActive;
-    if (diffTabActive && !wasActive) void diffCheapRefreshRef.current();
-  }, [diffTabActive]);
-  const handleActiveTabChange = useCallback((next: RunEvidenceTab) => setActiveTab(next), []);
 
   const pageError = routeError ?? loadError;
   // F4: while the initial load polls the graced warming 503 (reason
@@ -192,7 +146,7 @@ export function FormulaRunDetailPage() {
   }, [warmRunSummary, runId]);
 
   const synopsis = detail
-    ? `${detail.progress.visibleNodeCount} nodes. ${summarizeNodeStatuses(detail.progress)}. Local changes are shown for the run execution folder.`
+    ? `${detail.progress.visibleNodeCount} nodes. ${summarizeNodeStatuses(detail.progress)}.`
     : (initialLoading && !routeError) || unsupported || notFound
       ? undefined
       : 'Formula run unavailable.';
@@ -222,7 +176,7 @@ export function FormulaRunDetailPage() {
             )}
             <Button
               size="sm"
-              onClick={() => void refreshRunResources(runDetail.refresh, runDiff.refresh)}
+              onClick={() => void runDetail.refresh()}
               disabled={loading || Boolean(routeError)}
             >
               {refreshing ? 'Refreshing' : 'Refresh'}
@@ -270,12 +224,7 @@ export function FormulaRunDetailPage() {
               selectedNodeId={selectedNodeId}
               onToggleNode={toggleNode}
             />
-            <FormulaRunTabs
-              diff={runDiff}
-              selectedNode={selectedNode}
-              activeTab={activeTab}
-              onActiveTabChange={handleActiveTabChange}
-            />
+            <FormulaRunTabs selectedNode={selectedNode} />
           </div>
           <RelatedEntities
             view={links.view}
@@ -296,36 +245,20 @@ export function FormulaRunDetailPage() {
   );
 }
 
-async function refreshRunResources(
-  refreshDetail: () => Promise<void>,
-  refreshDiff: () => Promise<void>,
-): Promise<void> {
-  await Promise.all([refreshDetail(), refreshDiff()]);
-}
-
 /**
- * The bead/session nudge callback (P4/P5). When the per-run detail stream is live
- * it carries detail on its own, so the nudge refreshes ONLY the run diff (a
- * separate git-exec read the stream does not push) — avoiding a double detail
- * refetch. When the stream is UNAVAILABLE (a runtime with no EventSource), detail
- * would freeze after first paint, so the nudge must refresh detail AND diff.
- *
- * P5: the diff refresh is gated on the Diff tab being visible (`diffTabActive`) —
- * a hidden Diff tab fires ZERO /diff POSTs — and `refreshDiff` is the TTL-absorbed
- * cheapRefresh (refresh=false), not the bypassing manual lane. Exported so the
- * branch is unit-tested directly without the coupled EventSource harness.
+ * The bead/session nudge callback (P4). When the per-run detail stream is live it
+ * carries the whole detail on its own, so a nudge does not re-GET it (avoiding a
+ * double detail refetch). When the stream is UNAVAILABLE (a runtime with no
+ * EventSource), detail would freeze after first paint, so the nudge refreshes it.
+ * Exported so the branch is unit-tested directly without the coupled EventSource
+ * harness.
  */
 export function runDetailNudgeRefresh(
   streamActive: boolean,
-  diffTabActive: boolean,
   refreshDetail: () => Promise<void>,
-  refreshDiff: () => Promise<void>,
 ): Promise<void> {
-  const diff = diffTabActive ? refreshDiff : noopRefresh;
-  return streamActive ? diff() : refreshRunResources(refreshDetail, diff);
+  return streamActive ? Promise.resolve() : refreshDetail();
 }
-
-async function noopRefresh(): Promise<void> {}
 
 function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
   return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;

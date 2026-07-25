@@ -47,6 +47,9 @@
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
 # and unverified remote heads must become ancestry-verifiable before push.
+# A database marked .no-sync (same marker the sync and pull commands honor) has
+# no remote phase at all: it is never fetched or pushed, never gets a
+# pending-push marker, and an existing one is cleared so it cannot block flatten.
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -1236,6 +1239,16 @@ oldgen_has_files() {
   [ -n "$(find "$oldgen_dir" -mindepth 1 -print -quit 2>/dev/null)" ]
 }
 
+# no_sync_database reports whether the operator excluded this database from all
+# remote sync with a .no-sync marker — the same contract the sync and pull
+# commands honor (commands/sync/run.sh, commands/pull/run.sh). Such a database
+# has no push step, so compaction treats it exactly like a database with no
+# remotes: flatten and GC locally, never fetch or push, never defer a push.
+no_sync_database() {
+  db="$1"
+  [ -f "$DOLT_DATA_DIR/$db/.no-sync" ]
+}
+
 compact_marker_path() {
   dir="$1"
   db="$2"
@@ -1882,6 +1895,11 @@ flatten_database() {
       return 0
     fi
     pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    if [ -n "$pending_remote" ] && no_sync_database "$db"; then
+      # Marker predates the .no-sync marker: retry the GC, drop the push.
+      printf 'compact: db=%s pending_gc remote=%s dropped — remote sync disabled (.no-sync)\n' "$db" "$pending_remote"
+      pending_remote=""
+    fi
     pending_expected_remote_head=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head_verified || true)
     pending_compacted_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
@@ -1945,6 +1963,18 @@ flatten_database() {
       return "$push_rc"
     fi
     return 1
+  fi
+
+  if has_compact_marker "$pending_push_dir" "$db" && no_sync_database "$db"; then
+    # The marker records a push this database must never make. Keeping it would
+    # block flatten forever: the retry branch below returns before the flatten
+    # path, and past the max-age window it hard-fails as stale on every run.
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — dry-run (would clear deferred push)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — clearing deferred push\n' "$db"
+    clear_compact_marker "$pending_push_dir" "$db"
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
@@ -2072,7 +2102,9 @@ flatten_database() {
   remote_branch="main"
   expected_remote_head=""
   expected_remote_head_verified=0
-  if probed_remote=$(select_remote "$db"); then
+  if no_sync_database "$db"; then
+    printf 'compact: db=%s remote sync disabled (.no-sync) — compacting locally only\n' "$db"
+  elif probed_remote=$(select_remote "$db"); then
     remote="$probed_remote"
   else
     printf 'compact: db=%s remote selection failed — fail\n' "$db" >&2
