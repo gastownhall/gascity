@@ -1098,16 +1098,8 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 
 func waitForControllerAvailable(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if controllerAcceptsPing(dir, 100*time.Millisecond) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for controller socket to become available")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitCond(t, func() bool { return controllerAcceptsPing(dir, 100*time.Millisecond) },
+		"controller socket accepting pings")
 }
 
 func controllerAcceptsPing(dir string, timeout time.Duration) bool {

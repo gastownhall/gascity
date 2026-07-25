@@ -511,7 +511,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	// the directory write, debounce (5ms) sets dirty, and the next tick reloads
 	// config and writes "Config reloaded" to stdout. Polling stdout directly
 	// avoids depending on reconcile count which varies with tick timing.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -522,7 +522,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -2047,7 +2047,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2153,7 +2153,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	waitForController(t, dir)
 
 	// Wait for initial tick.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2198,18 +2198,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 // are unreliable under load.
 func waitForController(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		if controllerAlive(dir) != 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return controllerAlive(dir) != 0 },
+		"controller socket becoming available")
 }
 
 // osFS is a minimal fsys.FS for test helpers that delegates to the os package.

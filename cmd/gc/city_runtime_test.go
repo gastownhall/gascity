@@ -5829,12 +5829,7 @@ func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after panic+cancel")
-	}
+	awaitClose(t, done, "run returning after startup panic + cancel")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want >= 2 (startup panic + startup-poke recovery)", buildCalls.Load())
@@ -5895,12 +5890,7 @@ func TestCityRuntimeRun_RetriesStartupAfterRecoveredPanicBeforeStarted(t *testin
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after startup retry")
-	}
+	awaitClose(t, done, "run returning after startup retry")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want startup retry after recovered panic", buildCalls.Load())
@@ -5987,12 +5977,7 @@ func TestCityRuntimeRun_ConvergenceStartupErrorDoesNotBlockStarted(t *testing.T)
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return after convergence startup list error")
-	}
+	awaitClose(t, done, "run returning after convergence startup list error")
 	if !started.Load() {
 		t.Fatal("OnStarted was not called after non-panic convergence startup error")
 	}
@@ -6044,25 +6029,13 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 		close(done)
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if scope := cr.convScope(""); scope != nil && scope.adapter.indexReady.Load() {
-			cancel()
-			break
-		}
-		select {
-		case <-deadline:
-			cancel()
-			t.Fatal("convergence active index was not populated after retry")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	awaitCond(t, func() bool {
+		scope := cr.convScope("")
+		return scope != nil && scope.adapter.indexReady.Load()
+	}, "convergence active index population")
+	cancel()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run did not stop after convergence retry test cancellation")
-	}
+	awaitClose(t, done, "run stopping after convergence retry cancellation")
 	if !store.panicked.Load() {
 		t.Fatal("test store did not inject convergence startup panic")
 	}

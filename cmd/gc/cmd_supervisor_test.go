@@ -4203,10 +4203,10 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 	var sigCh chan<- os.Signal
 	select {
 	case sigCh = <-sigChReady:
-	case <-time.After(2 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(hangBudget)
 	for time.Now().Before(deadline) && !strings.Contains(stdout.String(), "Launching city 'bright-lights'") {
 		time.Sleep(10 * time.Millisecond)
 	}
