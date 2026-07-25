@@ -51,7 +51,11 @@ fi
 # Guarded on `npm` availability so contributors without Node tooling aren't
 # blocked; CI enforces the full regeneration via make dashboard-ci.
 if command -v npm >/dev/null 2>&1; then
-  spec_changed="$staged_spec"
+  # Re-read the index rather than reusing the pre-hook snapshot: the Go
+  # block above runs `go run ./cmd/genspec` and stages the regenerated
+  # internal/api/openapi.json, so a Go-only commit that moves the API
+  # surface only shows up here (#4627, #4607).
+  spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
   if [ -n "$spec_changed" ]; then
     # Regenerate BEFORE typecheck/build below: a client that no longer
     # matches the new spec must fail typecheck immediately instead of
