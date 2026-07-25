@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -73,23 +74,27 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 }
 
 // openControlBdStoreThroughFactory routes a control-plane bd store through
-// the beads factory so it carries the conditional-writes stamp. No
-// PreflightChecker is supplied, so the factory can never select the native
-// store for the control path (the zero checker fails preflight and the
-// factory takes the bd fallback — pinned by
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd); the store comes
-// back raw, matching the control path's deliberately unwrapped handles.
+// the beads factory so it carries the conditional-writes stamp and the same
+// schema hold as city and rig opens. DisableNativeSelection keeps native
+// selection impossible and preserves the raw BdStore. The explicit
+// GC_BEADS_NATIVE_FORCE_FALLBACK emergency override still bypasses preflight.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
+	return openControlBdStoreThroughFactoryWithChecker(scopeRoot, cityPath, provider, cfg, newBeadsPreflightChecker(cityPath, provider), openBd)
+}
+
+func openControlBdStoreThroughFactoryWithChecker(scopeRoot, cityPath, provider string, cfg *config.City, checker contract.PreflightChecker, openBd func() (beads.Store, error)) (beads.Store, error) {
 	flags, resolved := resolvedConditionalWritesFlags(cfg)
 	mode := gate.ModeUnset
 	if resolved {
 		mode = flags.BeadsConditionalWrites()
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:         scopeRoot,
-		CityPath:          cityPath,
-		Provider:          provider,
-		ConditionalWrites: mode,
+		ScopeRoot:              scopeRoot,
+		CityPath:               cityPath,
+		Provider:               provider,
+		PreflightChecker:       checker,
+		DisableNativeSelection: true,
+		ConditionalWrites:      mode,
 		OnConditionalWritesDegraded: lazyConditionalWritesDegradeEmitter(
 			cityPath, conditionalWritesStoreID(scopeRoot, cityPath), flags, resolved),
 		OpenBdStore: openBd,

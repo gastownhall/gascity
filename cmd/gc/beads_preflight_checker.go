@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -12,14 +13,48 @@ import (
 
 const beadsV110SchemaVersion = 53
 
+var (
+	preflightManagedDoltOpenDatabase = managedDoltOpenDatabase
+	preflightDatabaseStateReaderFn   = preflightDatabaseStateReader
+)
+
 func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightChecker {
 	return contract.PreflightChecker{
 		FS:                        fsys.OSFS{},
 		Provider:                  provider,
 		RequiredSchemaVersion:     beadsV110SchemaVersion,
 		BDContext:                 preflightBDContextReader(cityPath),
-		DatabaseProjectID:         preflightDatabaseProjectIDReader(cityPath),
+		DatabaseState:             preflightDatabaseStateReaderFn(cityPath),
 		DeferIdentityToNativeOpen: preflightIdentityDeferredReader(cityPath),
+	}
+}
+
+func preflightDatabaseStateReader(cityPath string) func(scope string) (contract.PreflightDatabaseState, error) {
+	return func(scope string) (contract.PreflightDatabaseState, error) {
+		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		if err != nil || !ok {
+			return contract.PreflightDatabaseState{}, err
+		}
+		db, err := preflightManagedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		if err != nil {
+			return contract.PreflightDatabaseState{}, err
+		}
+		defer db.Close() //nolint:errcheck // read-only best-effort close
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var version sql.NullInt64
+		if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
+			return contract.PreflightDatabaseState{}, fmt.Errorf("read beads schema version: %w", err)
+		}
+		state := contract.PreflightDatabaseState{}
+		if version.Valid && version.Int64 > 0 {
+			state.SchemaVersion = int(version.Int64)
+		}
+		projectID, hasProjectID, err := readDatabaseProjectID(ctx, db)
+		state.ProjectID = projectID
+		state.HasProjectID = hasProjectID
+		return state, err
 	}
 }
 
@@ -60,26 +95,5 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 			return false
 		}
 		return target.External
-	}
-}
-
-func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {
-	return func(scope string) (string, bool, error) {
-		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
-		if err != nil || !ok {
-			return "", false, err
-		}
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
-		if err != nil {
-			return "", false, err
-		}
-		defer db.Close() //nolint:errcheck // read-only best-effort close
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := db.PingContext(ctx); err != nil {
-			return "", false, err
-		}
-		return readDatabaseProjectID(ctx, db)
 	}
 }

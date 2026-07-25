@@ -18,6 +18,14 @@ type PreflightBDContext struct {
 	SchemaVersion int
 }
 
+// PreflightDatabaseState is the read-only compatibility and identity state
+// read from the scope's authoritative database connection.
+type PreflightDatabaseState struct {
+	SchemaVersion int
+	ProjectID     string
+	HasProjectID  bool
+}
+
 // SchemaCompatibilityHoldError signals that a known store schema is incompatible
 // with the schema required by this gc build. Callers must hold rather than fall
 // back to a store implementation that would access the same incompatible data.
@@ -38,6 +46,8 @@ type PreflightChecker struct {
 	Provider string
 	// BDContext reads bd context state for the scope.
 	BDContext func(scope string) (PreflightBDContext, error)
+	// DatabaseState reads schema and identity through one authoritative, read-only database connection.
+	DatabaseState func(scope string) (PreflightDatabaseState, error)
 	// DatabaseProjectID reads the authoritative database _project_id for the scope.
 	DatabaseProjectID func(scope string) (string, bool, error)
 	// DeferIdentityToNativeOpen reports whether, when the direct database probe
@@ -65,6 +75,10 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	bdCtx, bdCtxErr := c.readBDContext(scope)
+	dbState, dbStateErr := c.readDatabaseState(scope)
+	if dbState.SchemaVersion > 0 {
+		bdCtx.SchemaVersion = dbState.SchemaVersion
+	}
 	if bdCtxErr == nil &&
 		ProviderUsesBDContract(c.Provider) &&
 		metadata.Backend == "dolt" &&
@@ -80,7 +94,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkMetadataBackend(metadata),
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
+		c.checkIdentityMatch(scope, metadata, dbState, dbStateErr),
 		c.checkVersionCompat(bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
@@ -110,6 +124,13 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
+}
+
+func (c PreflightChecker) readDatabaseState(scope string) (PreflightDatabaseState, error) {
+	if c.DatabaseState == nil {
+		return PreflightDatabaseState{}, nil
+	}
+	return c.DatabaseState(scope)
 }
 
 func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) {
@@ -236,15 +257,18 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	}
 }
 
-func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata) PreflightCheckResult {
+func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMetadata, state PreflightDatabaseState, stateErr error) PreflightCheckResult {
 	details := PreflightDetails{MetadataProjectID: metadata.ProjectID}
 	if metadata.ProjectID == "" {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "metadata project_id is missing", details)
 	}
-	if c.DatabaseProjectID == nil {
+	if c.DatabaseState == nil && c.DatabaseProjectID == nil {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id reader is not configured", details)
 	}
-	dbProjectID, ok, err := c.DatabaseProjectID(scope)
+	dbProjectID, ok, err := state.ProjectID, state.HasProjectID, stateErr
+	if c.DatabaseState == nil {
+		dbProjectID, ok, err = c.DatabaseProjectID(scope)
+	}
 	details.DBProjectID = strings.TrimSpace(dbProjectID)
 	if err != nil || !ok || details.DBProjectID == "" {
 		// The direct SQL probe connects as root over plaintext and cannot

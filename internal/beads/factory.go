@@ -62,6 +62,8 @@ type StoreOpenOptions struct {
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
 	OpenNativeStore  func() (Store, error)
+	// DisableNativeSelection runs preflight but always returns the bd store.
+	DisableNativeSelection bool
 
 	// ConditionalWrites is the resolved city-global beads.conditional_writes
 	// mode, stamped onto every store this open produces and latched for the
@@ -140,6 +142,11 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 	diag := diagnosticFromPreflight(result)
+	if opts.DisableNativeSelection {
+		diag.Store = storeNameBdStore
+		diag.NativeStoreEligible = false
+		return opts.openBdFallback(provider, diag)
+	}
 	if !result.NativeStoreEligible {
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)

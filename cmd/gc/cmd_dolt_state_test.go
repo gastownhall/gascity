@@ -3054,9 +3054,9 @@ func TestDoltStateInventoryCmdReportsReadOnlyInventory(t *testing.T) {
 		case strings.Contains(query, "beta") && strings.Contains(query, "dolt_remotes"):
 			return "name\n", nil
 		case strings.Contains(query, "alpha") && strings.Contains(query, "dolt_remote_branches"):
-			return "name,remote\nrelease,backup\nmain,origin\n", nil
+			return "name\nremotes/backup/release\nremotes/origin/main\nmain\nmalformed\n", nil
 		case strings.Contains(query, "beta") && strings.Contains(query, "dolt_remote_branches"):
-			return "name,remote\n", nil
+			return "name\n", nil
 		default:
 			return "", fmt.Errorf("unexpected query %q", query)
 		}

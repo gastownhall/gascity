@@ -110,25 +110,41 @@ func managedDoltInventoryDatabase(ctx context.Context, query managedDoltInventor
 		}
 		row.Remotes = strings.Join(names, ",")
 	}
-	out, err = query(ctx, "SELECT name, remote FROM "+quoted+".dolt_remote_branches ORDER BY remote, name")
+	out, err = query(ctx, "SELECT name FROM "+quoted+".dolt_remote_branches ORDER BY name")
 	if err != nil {
 		return row, err
 	}
-	branches, err := inventoryCSVRows(out, 2)
+	branches, err := inventoryCSVRows(out, 1)
 	if err != nil {
 		return row, err
 	}
 	if len(branches) > 0 {
 		names := make([]string, 0, len(branches))
 		for _, branch := range branches {
-			names = append(names, branch[1]+"/"+branch[0])
-			if branch[1] == "origin" && branch[0] == "main" {
+			remote, name, ok := parseDoltRemoteBranchName(branch[0])
+			if !ok {
+				continue
+			}
+			names = append(names, remote+"/"+name)
+			if remote == "origin" && name == "main" {
 				row.OriginMain = "present"
 			}
 		}
 		row.RemoteBranches = strings.Join(names, ",")
 	}
 	return row, nil
+}
+
+func parseDoltRemoteBranchName(full string) (remote, branch string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(full), "/")
+	if len(parts) < 3 || parts[0] != "remotes" || parts[1] == "" {
+		return "", "", false
+	}
+	branch = strings.Join(parts[2:], "/")
+	if branch == "" {
+		return "", "", false
+	}
+	return parts[1], branch, true
 }
 
 func inventoryCSVRows(out string, fields int) ([][]string, error) {

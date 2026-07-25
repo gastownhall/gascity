@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -180,5 +182,92 @@ func TestConditionalWritesEventStoreKind(t *testing.T) {
 		if got := conditionalWritesEventStoreKind(in); got != want {
 			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestNewBeadsPreflightCheckerUsesDirectSchemaState(t *testing.T) {
+	oldState := preflightDatabaseStateReaderFn
+	t.Cleanup(func() {
+		preflightDatabaseStateReaderFn = oldState
+	})
+
+	for _, tc := range []struct {
+		name       string
+		schema     int
+		wantHold   bool
+		wantNative bool
+	}{
+		{name: "schema 52 holds", schema: 52, wantHold: true},
+		{name: "schema 53 passes", schema: 53, wantNative: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			preflightDatabaseStateReaderFn = func(string) func(string) (contract.PreflightDatabaseState, error) {
+				return func(string) (contract.PreflightDatabaseState, error) {
+					return contract.PreflightDatabaseState{SchemaVersion: tc.schema, ProjectID: "gc-local", HasProjectID: true}, nil
+				}
+			}
+			scope := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"gascity","project_id":"gc-local"}`
+			if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			checker := newBeadsPreflightChecker(scope, "bd")
+			checker.BDContext = func(string) (contract.PreflightBDContext, error) {
+				return contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0"}, nil
+			}
+			checker.BeadsLibraryVersion = "1.1.0"
+			result, err := checker.Check(scope)
+			var hold *contract.SchemaCompatibilityHoldError
+			if tc.wantHold != errors.As(err, &hold) {
+				t.Fatalf("Check() error = %v, wantHold=%v", err, tc.wantHold)
+			}
+			if err == nil && result.NativeStoreEligible != tc.wantNative {
+				t.Fatalf("NativeStoreEligible = %v, want %v", result.NativeStoreEligible, tc.wantNative)
+			}
+		})
+	}
+}
+
+func TestOpenControlBdStoreThroughFactorySchemaMismatchHoldsForCityAndRig(t *testing.T) {
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+	oldState := preflightDatabaseStateReaderFn
+	t.Cleanup(func() {
+		preflightDatabaseStateReaderFn = oldState
+	})
+	preflightDatabaseStateReaderFn = func(string) func(string) (contract.PreflightDatabaseState, error) {
+		return func(string) (contract.PreflightDatabaseState, error) {
+			return contract.PreflightDatabaseState{SchemaVersion: 52, ProjectID: "gc-local", HasProjectID: true}, nil
+		}
+	}
+	city := t.TempDir()
+	for _, scope := range []string{city, filepath.Join(city, "rigs", "r1")} {
+		if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"gascity","project_id":"gc-local"}`
+		if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(conditionalWritesStoreID(scope, city), func(t *testing.T) {
+			checker := newBeadsPreflightChecker(city, "bd")
+			checker.BDContext = func(string) (contract.PreflightBDContext, error) {
+				return contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0"}, nil
+			}
+			opened := false
+			_, err := openControlBdStoreThroughFactoryWithChecker(scope, city, "bd", nil, checker, func() (beads.Store, error) {
+				opened = true
+				return beads.NewMemStore(), nil
+			})
+			var hold *contract.SchemaCompatibilityHoldError
+			if !errors.As(err, &hold) {
+				t.Fatalf("error = %v, want SchemaCompatibilityHoldError", err)
+			}
+			if opened {
+				t.Fatal("BdStore opener ran during compatibility hold")
+			}
+		})
 	}
 }
