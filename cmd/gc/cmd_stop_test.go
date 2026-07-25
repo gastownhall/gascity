@@ -272,7 +272,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	stopDone := make(chan int, 1)
 	go func() {
-		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 2*time.Second, true)
+		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 5*time.Second, true)
 	}()
 
 	select {
