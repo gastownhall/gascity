@@ -233,6 +233,30 @@ func (p *gatedStartProvider) ensureNoFurtherStart(t *testing.T, wait time.Durati
 	}
 }
 
+// TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline proves
+// waitForStarts watches for hangBudget, not a fixed deadline: a start signal
+// arriving after the old 3s literal (but well inside hangBudget) must still
+// be observed rather than reported as a timeout.
+func TestGatedStartProviderWaitForStartsSurvivesDelayPastOldFixedDeadline(t *testing.T) {
+	t.Parallel()
+
+	const oldFixedDeadline = 3 * time.Second
+	if hangBudget <= oldFixedDeadline {
+		t.Fatalf("hangBudget = %s, want > %s (the fixed deadline this helper replaced)", hangBudget, oldFixedDeadline)
+	}
+
+	p := newGatedStartProvider()
+	go func() {
+		<-time.After(oldFixedDeadline + time.Second)
+		p.startSignals <- "late-start"
+	}()
+
+	got := p.waitForStarts(t, 1)
+	if len(got) != 1 || got[0] != "late-start" {
+		t.Fatalf("waitForStarts = %v, want [late-start]", got)
+	}
+}
+
 type shutdownWaitProvider struct {
 	*gatedStartProvider
 	listCalled chan struct{}
