@@ -72,6 +72,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Session config durations.
 	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
+	check("[session]", "setup_max_timeout", cfg.Session.SetupMaxTimeout)
 	check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
 	check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
 	check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)

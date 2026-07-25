@@ -3,11 +3,13 @@ package api
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -17,12 +19,19 @@ import (
 )
 
 // cityAnchoredSessionEnv returns the provider process baseline merged with the
-// resolved provider env and the three city-anchored env vars (GC_CITY,
-// GC_CITY_PATH, GC_CITY_RUNTIME_DIR). Resolved provider env overrides process
-// passthrough values, and city anchors win on conflicts to mirror the
-// canonical create-time layering in cmd/gc/template_resolve.go where the
-// per-agent env (which carries the same anchors) is applied after the resolved
-// provider env.
+// configured workspace env, resolved provider/agent env, the three
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR), and the
+// canonical path to the running gc binary. Later layers win, matching the
+// create-time precedence in cmd/gc/template_resolve.go: workspace env is the
+// lowest config layer, provider/agent env can override it, and runtime-owned
+// city anchors plus GC_BIN are authoritative. TOML-sourced workspace and
+// provider values support the same $VAR expansion as the CLI launch path.
+//
+// As the final step — mirroring the CLI env finalization in template_resolve.go
+// — the gc binary's directory is prepended to PATH so a bare `gc` in the
+// session resolves to this binary rather than a colliding one, and
+// GC_CONTROLLER_TOKEN is scrubbed so the controller-only token never reaches a
+// managed session even when a workspace/provider env entry expands to it.
 //
 // Without these anchors, sessions spawned or restarted via the API code
 // paths cannot locate their city. Rig-scoped env remains a separate
@@ -36,23 +45,38 @@ import (
 // regress per-dispatcher trace files for control-dispatcher sessions
 // restarted through the API. Dispatcher-trace handling stays the
 // responsibility of the caller that knows the qualified agent name.
-func cityAnchoredSessionEnv(cityPath string, providerEnv map[string]string) map[string]string {
+func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
 	anchors := citylayout.CityIdentityEnvMap(cityPath)
-	if len(baseline) == 0 && len(providerEnv) == 0 && len(anchors) == 0 {
+	gcBin, _ := os.Executable()
+	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
 		return nil
 	}
-	out := make(map[string]string, len(baseline)+len(providerEnv)+len(anchors))
+	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+len(anchors)+1)
 	for k, v := range baseline {
 		out[k] = v
 	}
+	for k, v := range workspaceEnv {
+		out[k] = os.ExpandEnv(v)
+	}
 	for k, v := range providerEnv {
-		out[k] = v
+		out[k] = os.ExpandEnv(v)
 	}
 	for k, v := range anchors {
 		out[k] = v
 	}
-	return out
+	if gcBin != "" {
+		out["GC_BIN"] = gcBin
+		processenv.PrependGCBinDirToPATH(out, gcBin)
+	}
+	return convergence.ScrubTokenEnv(out)
+}
+
+func configuredWorkspaceSessionEnv(cfg *config.City) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Workspace.Env
 }
 
 var errAmbiguousLegacyACPTransport = errors.New("legacy session transport is ambiguous")
@@ -352,7 +376,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
 }
 
@@ -470,7 +494,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),

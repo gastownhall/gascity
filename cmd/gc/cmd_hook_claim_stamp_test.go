@@ -33,9 +33,8 @@ func (s *stampMetaSpy) fn(_ context.Context, _ string, _ []string, beadID, assig
 	return s.err
 }
 
-// noopRecordSessionPointers suppresses the session-bead pointer write so the
-// stamp tests exercise only the work-bead identity stamp.
-func noopRecordSessionPointers(context.Context, string, []string, string, string, string, string) error {
+// noopPublishRunMap keeps claim tests focused on work-bead identity stamping.
+func noopPublishRunMap(string, string, ...string) error {
 	return nil
 }
 
@@ -56,9 +55,9 @@ func poolClaimOps(runner string, claimedMeta map[string]string, branch string, s
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
-		ResolveWorkBranch:     func(string) string { return branch },
-		StampWorkMeta:         spy.fn,
-		RecordSessionPointers: noopRecordSessionPointers,
+		ResolveWorkBranch: func(string) string { return branch },
+		StampWorkMeta:     spy.fn,
+		PublishRunMap:     noopPublishRunMap,
 	}
 }
 
@@ -122,9 +121,9 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 			t.Error("Claim must not be called on the existing-assignment path")
 			return beads.Bead{}, false, nil
 		},
-		ResolveWorkBranch:     func(string) string { return "" }, // no worktree
-		StampWorkMeta:         spy.fn,
-		RecordSessionPointers: noopRecordSessionPointers,
+		ResolveWorkBranch: func(string) string { return "" }, // no worktree
+		StampWorkMeta:     spy.fn,
+		PublishRunMap:     noopPublishRunMap,
 	}
 
 	var stdout, stderr bytes.Buffer

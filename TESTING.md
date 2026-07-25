@@ -7,6 +7,11 @@ debt, not precedent. In this document, an **owner** is a tracking bead with a
 current assignee. An approved waiver must also name its reason, replacement
 proof, and expiry.
 
+The
+[testing efficiency operating corpus](engdocs/contributors/testing-efficiency-workflow-corpus.md)
+is the non-normative workflow, evidence catalog, and team handoff for applying
+this policy.
+
 ### Policy versus enforcement today
 
 The rules below are normative even where automation is still being built. Do
@@ -14,7 +19,7 @@ not describe a target as an existing gate.
 
 | Policy area | Mechanical status today |
 |---|---|
-| Sleep/process/listener/env/CWD growth | Checked by the source-resource ledger below |
+| Sleep/process/listener/tmux/env/CWD growth | Checked by the source-resource ledger below |
 | Runtime constructor and `runtime.Fake` conformance binding | Checked by the runtime provider ledger below; several explicit waivers remain |
 | Other provider conformance | Shared suites exist, but exact production-constructor coverage is still a manual audit with known gaps |
 | Sub-five-minute PR feedback and timing ratchets | Target; current Go timing artifacts measure test execution, not workflow queue/bootstrap/graph time (`ga-80po0c.4`) |
@@ -268,8 +273,9 @@ change as any other waiver.
 Go source through parsed syntax and import identity, while only `*_test.go`
 files contribute resource occurrences. The raw audit and source-debt rows
 freeze process, sleep, environment, CWD, slow-process, HTTP test-server, and
-package-level `net.Listen`, `net.ListenConfig.Listen`, `net.ListenUnixgram`,
-and direct `syscall.Listen` call/file totals.
+package-level `net` stream/packet listeners, `net.ListenConfig` listeners,
+direct `syscall.Listen`, explicit listener-owning helper identities, and typed
+or literal tmux dependency call/file totals.
 Exact Medium rows name a repository-relative directory, package clause,
 top-level runnable owner, and resource list. Small-debt rows apply those exact
 owners without weakening the raw anti-growth ratchets.
@@ -332,28 +338,68 @@ calls inside `TestMain`, never sibling tests.
 This bootstrap does **not** infer resources recursively through arbitrary
 helper calls or claim a complete shared-resource inventory. P0.4c currently
 covers the three `net/http/httptest` constructors that open loopback servers
-and the exact package-level `net.Listen` and `net.ListenUnixgram` constructors,
-`net.ListenConfig.Listen` on lexically identified receivers, and direct
-`syscall.Listen`. Direct `syscall.Socket`/`Bind` setup calls, typed and
-packet-specific `net` constructors, helper-backed listeners whose constructors
-live outside test source, tmux, Dolt, and other shared-host resources remain
-explicit follow-up catalogs. A Medium resource may describe a helper-backed
-runtime cost, but only syntax-owned calls in that exact runnable declaration
+and the exact package-level stream constructors `net.Listen`, `net.ListenTCP`,
+and `net.ListenUnix`; packet constructors `net.ListenPacket`, `net.ListenUDP`,
+`net.ListenIP`, `net.ListenUnixgram`, and `net.ListenMulticastUDP`;
+`net.ListenConfig.Listen` and `ListenPacket` on lexically identified receivers;
+and direct `syscall.Listen`. The tmux catalog recognizes canonical `test/tmuxtest`
+namespace/lifecycle helpers, imported `internal/runtime/tmux` production
+constructors, and literal `os/exec` tmux commands and probes. Its untagged
+source census is 6 calls in 2 files, all owned by exact Medium `TestMain`
+rows; build-tagged calls remain E1 Large inventory rather than being relabeled
+Medium. `NewSocketParentDir`, `HoldAliveSentinel`, and the PID-directory
+helpers remain part of the separate shared-host resource tail. Direct
+`syscall.Socket`/`Bind` setup calls remain outside this catalog.
+
+The listener-helper catalog is an explicit function-identity proxy, not
+recursive call-graph inference. It recognizes same-package calls to the
+`cmd/gc` package `main` helpers `runSupervisor`, `startControllerSocket`,
+`runController`, `registryBrowserLogin`,
+`managedDoltPortAvailableForHost`, and `startNudgeWakeListener`; the
+`test/dashport` package `dashport_test` helper `newHarness`; and same-package
+or import-identified calls to `internal/runtime/runtimecapability.Run` and
+`test/acceptance/helpers.WriteSupervisorConfig`. Same-package identity requires
+the exact directory, package clause, receiverless function declaration, and
+name; lexical shadows, same-named function values, wrong directories/packages,
+and foreign imports do not count. Its untagged source and Small-debt census is
+38 calls in 13 files. The 20 tagged calls in 10 files stay in E1 Large
+inventory, with no Medium exemption, for 58 calls in 23 files across all
+tracked test source.
+
+`net.FileListener`/`FilePacketConn` descriptor duplication, method-backed
+`acp.(*Provider).Start` and `subprocess.(*Provider).Start` listeners,
+conditional `cliauth.Client.Login` and `supervisor.LoadConfig` listener paths,
+Dolt, and other shared-host resources remain explicit follow-up catalogs. A
+Medium resource may describe a helper-backed runtime
+cost, but only syntax-owned calls in that exact runnable declaration
 leave Small-debt accounting. The `ListenConfig` matcher uses lexical Go types
 to follow same-file values, pointers, parameters, aliases, and typed factory
 results rooted in the imported `net.ListenConfig` type; it does not load
 cross-file package bodies or host toolchain export data.
-`ga-80po0c.2.2` owns the listener, tmux, Dolt, and shared-host catalogs. E1
+The tmux helper match is an explicit dependency/namespace proxy; it does not
+claim a recursive inventory of the helper's environment mutations. Function
+aliases and wrappers, variable or absolute command names, `sh -c`, `exec.Cmd`
+literals, `Guard` methods, and same-package bare constructors remain deliberate
+manual-review boundaries. `ga-80po0c.2.2` owns the listener, tmux, Dolt, and
+shared-host catalogs. E1
 separately owns Large journey and provider entries.
 
 The scanner recognizes direct calls to `os/exec.Command{,Context}` and
-`time.Sleep`; package-level `net.Listen` and `net.ListenUnixgram`;
-`net.ListenConfig.Listen` on identified receivers; direct `syscall.Listen`;
+`time.Sleep`; package-level `net.Listen`, `ListenTCP`, `ListenUnix`,
+`ListenPacket`, `ListenUDP`, `ListenIP`, `ListenUnixgram`, and
+`ListenMulticastUDP`; `net.ListenConfig.Listen` and `ListenPacket` on identified
+receivers; direct `syscall.Listen`;
 `net/http/httptest.NewServer`,
 `NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
 `os.Clearenv`, and `os.Chdir`; and
 `Setenv` or `Chdir` on function parameters typed exactly as `*testing.T` or
-`testing.TB`. It also recognizes the receiverless
+`testing.TB`. For tmux it recognizes `ConfigureProcessEnv`,
+`KillAllTestSessions`, `NewGuard`, `NewGuardWithSocket`, and `RequireTmux` from
+`test/tmuxtest`; `NewProvider`, `NewProviderWithConfig`,
+`NewSeamBackedWithConfig`, `NewTmux`, and `NewTmuxWithConfig` from
+`internal/runtime/tmux`; and literal `os/exec.Command("tmux", ...)`,
+`CommandContext(ctx, "tmux", ...)`, and `LookPath("tmux")` calls. It also
+recognizes the listener-helper identities listed above and the receiverless
 `skipSlowCmdGCTest(*testing.T, string)` definition and its same-package calls.
 An unresolved cross-file call counts only when that directory and package own
 the canonical helper. Import, parameter, and same-file helper matches use
@@ -363,8 +409,10 @@ Local shadows and wrong signatures do not count. Parenthesized call
 expressions retain the same ownership.
 
 Targeted dot imports of `net`, `os/exec`, `time`, `os`, `syscall`, `testing`,
-or `net/http/httptest` are rejected with file and import context because their
-resources cannot be attributed safely; blank imports remain harmless.
+`net/http/httptest`, `internal/runtime/runtimecapability`,
+`internal/runtime/tmux`, `test/acceptance/helpers`, or `test/tmuxtest` are
+rejected with file and import context because their resources cannot be
+attributed safely; blank imports remain harmless.
 Explicit constraints follow Go's leading-header
 rules: a pre-package `//go:build` line is effective, while a legacy
 `// +build` line must live in a leading `//` comment block separated from the
@@ -397,32 +445,41 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 429 calls / 158 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 529 calls / 161 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
-| Medium owner | `cmd/gc` package `main` | TestMain: environment | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner; only environment calls lexically inside TestMain leave Small debt | P0.4b | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 427 calls / 156 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-80po0c.2.2.3 | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 535 calls / 163 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
+| Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-80po0c.2.1 | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-10-01 |
+| Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-80po0c.2.2.2 | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-10-01 |
+| Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-80po0c.2.2.2 | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-10-01 |
+| Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-80po0c.2.2.1 | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-80po0c.23.1 | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 285 calls / 43 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
-| Small debt ratchet | `cmd/gc` untagged test source | environment: 4336 calls / 205 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
-| Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 69 calls / 24 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 290 calls / 113 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
-| Small debt ratchet | all untagged test source | http_test_server: 318 calls / 67 files (historical regex census: 300 / 66) | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
-| Small debt ratchet | all untagged test source | subprocess: 396 calls / 110 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment: 4317 calls / 202 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 57 calls / 24 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 288 calls / 111 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 300 / 66) | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 391 calls / 109 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
+| Small debt ratchet | all untagged test source | tmux: 0 calls / 0 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 285 calls / 43 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | environment: 4342 calls / 205 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 69 calls / 24 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 290 calls / 113 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | http_test_server: 318 calls / 67 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen: 92 calls / 34 files | ga-80po0c.2.2 | untagged net.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2 | untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen_unixgram: 3 calls / 2 files | ga-80po0c.2.2 | untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline; each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 399 calls / 112 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 4323 calls / 202 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 57 calls / 24 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 288 calls / 111 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-80po0c.2.2.3 | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen: 94 calls / 35 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 396 calls / 112 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
+| Source debt ratchet | all untagged test source | tmux: 6 calls / 2 files | ga-80po0c.2.2.1 | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
 | --- | --- | --- | --- |
@@ -495,6 +552,9 @@ make test-fast-parallel
 # Full process-backed cmd/gc suite, sharded.
 make test-cmd-gc-process-parallel
 
+# Focused product-metrics testhook profile.
+make test-productmetrics-testhook
+
 # CI integration buckets, sharded.
 make test-integration-shards-parallel
 
@@ -536,6 +596,17 @@ GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
 Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
+
+The `productmetrics_testhook` profile is a required, path-gated CI lane with
+six named owners, including the real CLI re-exec process contract. Its tagged
+process owner is intentionally absent from ordinary untagged `cmd/gc` shard
+enumeration. The serial `make test-cmd-gc-process` target runs the ordinary
+suite and then this profile; `make test-cmd-gc-process-parallel` and
+`make test-local-full-parallel` add one independent
+`productmetrics-testhook` job beside the ordinary shards.
+The existing macOS `mac-cmd-gc-process` matrix runs the same profile once on
+shard 6 so the Darwin production composition remains covered without another
+Mac runner.
 
 #### PR static-check scope
 
@@ -1268,6 +1339,36 @@ A sub-second constant for such a timer is a CI reliability defect: the
 operation completes in < 1s on an idle machine but fails under CI CPU
 saturation. The only exception is a timer that is itself the subject under
 test (e.g., testing that a function honours a 100ms deadline).
+
+### Floors, ceilings, and inputs
+
+`GoroutineRaceTimeout` and `ExecRaceTimeout` are **floors** — the minimum a
+deadline may be. They are not a target to set every wait to.
+
+Some packages additionally define a **hang budget**: the point at which the
+package gives up and declares a wait wedged. `cmd/gc` has one (`hangBudget` in
+`cmd/gc/hangbudget_test.go`), derived from `GoroutineRaceTimeout` rather than
+declared independently, so there is one source of truth. Which to reach for:
+
+- **Does any assertion depend on how long the wait took?** Keep an explicit
+  deadline and comment which bound it asserts. This is the "subject under test"
+  exception above.
+- **Is the wait purely a hang detector** — the real assertions come after it
+  returns? Use the package's hang budget (`awaitClose`/`awaitCond` in `cmd/gc`).
+  Sizing it is not a correctness knob: these helpers return the instant their
+  condition is met, so raising the budget does not slow a passing run and
+  lowering it does not make the suite stricter. It only changes how long a
+  genuinely wedged test takes to report.
+- **Otherwise**, use `GoroutineRaceTimeout` / `ExecRaceTimeout` directly.
+
+Two things are never migrated to a hang budget:
+
+- **A value the test feeds the system** — a timeout passed *into* the code under
+  test defines the scenario being exercised, not how patiently the test watches.
+  Widening one makes the test prove less.
+- **The window of a negative assertion** ("nothing arrived within X"). There the
+  window *is* the assertion; budget-governing it makes the test slower and
+  weaker.
 
 ## Decision guide
 

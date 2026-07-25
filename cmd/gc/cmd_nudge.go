@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1994,6 +1995,10 @@ func takeQueuedNudgesByID(items []queuedNudge, id string, removed []queuedNudge)
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	return enqueueQueuedNudgeWithStoreAndClock(cityPath, store, item, clock.Real{})
+}
+
+func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
 	ownStore := false
 	if store.Store == nil {
 		store = openNudgeBeadStore(cityPath)
@@ -2014,15 +2019,15 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 		item.BeadID = beadID
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		now := time.Now()
+		now := clk.Now()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
@@ -2037,7 +2042,7 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 			}
 			filtered := state.Pending[:0]
 			for i, existing := range state.Pending {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					filtered = append(filtered, state.Pending[i:]...)
 					break
 				}
@@ -2059,7 +2064,7 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 			// This causes at most one redundant delivery, not data corruption.
 			inFlight := state.InFlight[:0]
 			for i, existing := range state.InFlight {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					inFlight = append(inFlight, state.InFlight[i:]...)
 					break
 				}
@@ -2337,9 +2342,13 @@ func noMaintenanceDeadline() time.Time {
 }
 
 func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.Pending[:0]
 	for i, item := range state.Pending {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Pending[i:]...)
 			break
 		}
@@ -2362,9 +2371,13 @@ func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, n
 }
 
 func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.InFlight[:0]
 	for i, item := range state.InFlight {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.InFlight[i:]...)
 			break
 		}
@@ -2396,10 +2409,14 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Stor
 // when a durable terminal bead record exists in the store. Items without a confirmed terminal
 // bead are retained so terminal history is not lost if the bead store write failed.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
 		}

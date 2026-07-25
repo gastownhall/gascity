@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -183,7 +184,7 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+	return waitForControllerRestart(sigCtx, dops, sp, current.sessionName, "gc handoff",
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
@@ -253,12 +254,12 @@ func doHandoff(store, sessStore beads.Store, rec events.Recorder, dops drainOps,
 func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", nil, stderr)
+	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
 	}
 
-	restartable, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, pinned, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
@@ -276,9 +277,23 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
-	// Also persist the request through the worker boundary so it survives
-	// tmux session death. Non-fatal: the runtime flag above is primary.
-	if persistRestart != nil {
+	// Pinned named sessions are kill-protected by the reconciler unless an
+	// explicit controller reset (continuation_reset_pending) is persisted
+	// through the worker boundary: without it, the reconciler's collateral-skip
+	// clears the runtime flag set above and leaves the session running
+	// indefinitely. Persisting is therefore mandatory for pinned sessions; for
+	// everything else the runtime flag is primary and the bead write stays
+	// best-effort backup.
+	if pinned {
+		if persistRestart == nil {
+			fmt.Fprintf(stderr, "gc handoff: pinned session %q has no restart persistence available; not requesting restart\n", sessionName) //nolint:errcheck // best-effort stderr
+			return handoffOutcome{code: 1}
+		}
+		if err := persistRestart(); err != nil {
+			fmt.Fprintf(stderr, "gc handoff: could not persist restart marker for pinned session %q; not requesting restart: %v\n", sessionName, err) //nolint:errcheck // best-effort stderr
+			return handoffOutcome{code: 1}
+		}
+	} else if persistRestart != nil {
 		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -299,6 +314,7 @@ func doHandoffAuto(store, sessStore beads.Store, rec events.Recorder, sessionAdd
 	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
+		"priority:1",
 	}, stderr)
 	if !ok {
 		return 1
@@ -358,25 +374,33 @@ func createHandoffMail(store, sessStore beads.Store, rec events.Recorder, sender
 	return msg, true
 }
 
-func sessionRestartableByController(sessStore beads.Store, sessionName string) (bool, error) {
+// sessionRestartableByController reports whether the controller is willing to
+// restart the named session (restartable) and whether it is a pinned,
+// kill-protected named session (pinned). pinned mirrors the reconciler's own
+// pinnedConfiguredNamedSessionKillProtected predicate (isNamedSessionInfo &&
+// pin_awake == "true") so callers can predict whether the reconciler will
+// refuse a collateral kill absent an explicit controller reset. Both facts
+// come off the single bead read so callers needing both (gc handoff) do not
+// pay for a second store round-trip.
+func sessionRestartableByController(sessStore beads.Store, sessionName string) (restartable, pinned bool, err error) {
 	if sessStore == nil || sessionName == "" {
-		return true, nil
+		return true, false, nil
 	}
 	id, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return true, nil
+			return true, false, nil
 		}
-		return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		return false, false, fmt.Errorf("resolving session %q: %w", sessionName, err)
 	}
 	b, err := sessStore.Get(id)
 	if err != nil {
-		return false, fmt.Errorf("loading session %q: %w", id, err)
+		return false, false, fmt.Errorf("loading session %q: %w", id, err)
 	}
 	if !isNamedSessionBead(b) {
-		return true, nil
+		return true, false, nil
 	}
-	return namedSessionMode(b) == "always", nil
+	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", nil
 }
 
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
@@ -414,12 +438,12 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	b, ok := createHandoffMail(store, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", nil, stderr)
+	b, ok := createHandoffMail(store, sessStore, rec, sender, targetAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return 1
 	}
 
-	restartable, err := sessionRestartableByController(sessStore, sessionName)
+	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

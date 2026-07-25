@@ -55,11 +55,10 @@ func isComputeTerminalState(state string) bool {
 // commit governs the interval-accounting side effects, decoupled from the fact
 // write so the model-usage sweep can retry across ticks: when commit is true the
 // usage_compute_emitted_at marker is stamped (closing the interval to further
-// Gets) and the active_work_bead pointer is cleared; when false the fact is still
-// recorded but the interval stays open, so a caller that has not yet settled the
-// model sweep leaves the session a candidate for the next tick. Re-recording the
-// fact on a later tick is collapsed by ComputeIdempotencyKey at read time, and
-// active_work_bead is preserved so the retrying sweep still resolves the step.
+// Gets); when false the fact is still recorded but the interval stays open, so a
+// caller that has not yet settled the model sweep leaves the session a candidate
+// for the next tick. Re-recording the fact on a later tick is collapsed by
+// ComputeIdempotencyKey at read time.
 //
 // SessionID is stamped from bead.ID so compute facts carry the same session
 // bead join key as model facts.
@@ -133,8 +132,8 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	}
 	if !commit {
 		// The fact is durably recorded, but the interval is intentionally left open
-		// (marker unset, active_work_bead preserved) so the model-usage sweep retries
-		// on a later tick. The re-recorded fact is collapsed by IdempotencyKey.
+		// (marker unset) so the model-usage sweep retries on a later tick. The
+		// re-recorded fact is collapsed by IdempotencyKey.
 		return true
 	}
 	// Single-key marker → atomic on every store impl.
@@ -143,15 +142,6 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 		// IdempotencyKey collapses at read time. Still surface it.
 		if logf != nil {
 			logf("usage: marking compute fact emitted for session %s failed; may re-emit (deduped by idempotency key): %v", bead.ID, err)
-		}
-	}
-	// Clear the session's active-work-bead pointer at this terminal/sleep transition,
-	// so a model invocation made while idle (between this work and the next claim) is
-	// attributed at run level (StepID="") rather than to the step that just ended.
-	// Best-effort: a stale pointer is overwritten by the next claim regardless.
-	if err := store.SetMetadata(bead.ID, beadmeta.ActiveWorkBeadMetadataKey, ""); err != nil {
-		if logf != nil {
-			logf("usage: clearing active_work_bead for session %s failed (overwritten by next claim): %v", bead.ID, err)
 		}
 	}
 	return true
@@ -257,8 +247,8 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// Model-usage lane FIRST, symmetric to and beside the compute fact: recover the
 		// terminal interval's trailing model-token usage that the prompt-op seam never
 		// recorded (pool-routed, hook-self-driven agents self-drive after the claim
-		// nudge). It runs before the compute commit so the active_work_bead pointer the
-		// sweep reads for StepID is still intact. Best-effort — a sweep error never
+		// nudge). It runs before the compute commit so its settle result gates whether
+		// the interval closes this tick. Best-effort — a sweep error never
 		// fails the reconcile tick; overlap with the prompt-op seam is collapsed at read
 		// time by the shared usage.ModelIdempotencyKey.
 		//
@@ -280,8 +270,8 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 				}
 			}
 		}
-		// Commit the interval (stamp usage_compute_emitted_at, clear active_work_bead)
-		// only once the sweep has settled — an unsettled sweep leaves the interval a
+		// Commit the interval (stamp usage_compute_emitted_at) only once the sweep
+		// has settled — an unsettled sweep leaves the interval a
 		// candidate so both lanes retry next tick. The compute fact itself is always
 		// recorded (idempotent), so wall-time accounting is never delayed by a pending
 		// sweep.

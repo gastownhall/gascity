@@ -5,35 +5,30 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// recordRunIDSpy captures the (assignee, sessionBeadID, runID, stepID) a claim
-// records in one update, and lets a test inject a write error to prove the
-// decoration never fails the claim. assignee is captured to pin actor parity with
-// the work_branch stamp.
-type recordRunIDSpy struct {
-	calls    int
-	assignee string
-	session  string
-	runID    string
-	stepID   string
-	err      error
+type publishRunMapSpy struct {
+	calls  int
+	runID  string
+	beadID string
+	keys   []string
+	err    error
 }
 
-func (s *recordRunIDSpy) fn(_ context.Context, _ string, _ []string, assignee, sessionBeadID, runID, stepID string) error {
+func (s *publishRunMapSpy) fn(runID, beadID string, keys ...string) error {
 	s.calls++
-	s.assignee, s.session, s.runID, s.stepID = assignee, sessionBeadID, runID, stepID
+	s.runID = runID
+	s.beadID = beadID
+	s.keys = append([]string(nil), keys...)
 	return s.err
 }
 
-// claimOpsForRunID builds the minimal seam for driving a successful fresh claim:
-// a routed/open candidate, a Claim that returns it owned by us, the work-branch
-// stamp suppressed, and the RecordRunID spy wired in.
-func claimOpsForRunID(beadID string, claimedMeta map[string]string, spy *recordRunIDSpy) (hookClaimOps, hookClaimOptions) {
+func claimOpsForRunMap(beadID string, claimedMeta map[string]string, spy *publishRunMapSpy) (hookClaimOps, hookClaimOptions) {
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) {
 			return `[{"id":"` + beadID + `","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
@@ -41,48 +36,71 @@ func claimOpsForRunID(beadID string, claimedMeta map[string]string, spy *recordR
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
-		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
-		StampWorkMeta:         noopStampWorkMeta,                 // keep hermetic; identity stamp asserted elsewhere
-		RecordSessionPointers: spy.fn,
+		ResolveWorkBranch: func(string) string { return "" },
+		StampWorkMeta:     noopStampWorkMeta,
+		PublishRunMap:     spy.fn,
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
 		IdentityCandidates: []string{"worker-1"},
 		RouteTargets:       []string{"worker"},
-		Env:                []string{"GC_SESSION_ID=sess-1"},
-		JSON:               true,
+		Env: []string{
+			"GC_SESSION_NAME=worker-1",
+			"GC_SESSION_ID=session-1",
+			"BEADS_ACTOR=actor-1",
+		},
+		JSON: true,
 	}
 	return ops, opts
 }
 
-// TestDoHookClaimRecordsRunIDFromRunChain: a claimed run bead stamps the session
-// bead with the run root resolved from its metadata chain (gc.root_bead_id here).
-func TestDoHookClaimRecordsRunIDFromRunChain(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops, opts := claimOpsForRunID("hw-run", map[string]string{
+// TestDoHookClaimPublishesRunMapWithoutSessionBeadMutation pins the v1.3.5
+// safety boundary. If session-1 disappears after the claim, a fuzzy bd update
+// can otherwise resolve session-10 and corrupt it. Run-map publication retains
+// correlation without issuing any post-claim bd mutation.
+func TestDoHookClaimPublishesRunMapWithoutSessionBeadMutation(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var bdCalls int
+	collisionMetadata := map[string]string{"sentinel": "unchanged"}
+	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, args ...string) ([]byte, error) {
+			bdCalls++
+			if len(args) >= 3 && args[0] == "update" && args[2] == "session-1" {
+				collisionMetadata["gc.current_run_id"] = "root-safe"
+			}
+			return nil, nil
+		}
+	}
+
+	spy := &publishRunMapSpy{}
+	ops, opts := claimOpsForRunMap("hw-safe", map[string]string{
 		"gc.routed_to":    "worker",
-		"gc.root_bead_id": "root-R1",
+		"gc.root_bead_id": "root-safe",
 	}, spy)
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if spy.calls != 1 || spy.session != "sess-1" || spy.runID != "root-R1" {
-		t.Fatalf("record = {calls:%d session:%q runID:%q}, want {1 sess-1 root-R1}", spy.calls, spy.session, spy.runID)
+	if bdCalls != 0 {
+		t.Fatalf("post-claim bd mutation calls = %d, want 0", bdCalls)
 	}
-	if spy.assignee != "worker-1" {
-		t.Fatalf("record assignee = %q, want worker-1 (actor parity with the work_branch stamp)", spy.assignee)
+	if !reflect.DeepEqual(collisionMetadata, map[string]string{"sentinel": "unchanged"}) {
+		t.Fatalf("prefix-colliding session metadata = %v, want sentinel only", collisionMetadata)
+	}
+	if spy.calls != 1 || spy.runID != "root-safe" || spy.beadID != "hw-safe" {
+		t.Fatalf("run-map publish = %+v, want one root-safe/hw-safe publish", spy)
+	}
+	wantKeys := []string{"worker-1", "session-1", "actor-1"}
+	if !reflect.DeepEqual(spy.keys, wantKeys) {
+		t.Fatalf("run-map keys = %q, want %q", spy.keys, wantKeys)
 	}
 }
 
-// TestDoHookClaimRecordsRunIDFromOwnIDWhenNoRunChain is the no-run-id edge: a
-// worker grabbing work outside any run (no chain) resolves to the bead's OWN id
-// — a standalone unit is its own run, never misattributed to a prior run on the
-// reused session bead.
-func TestDoHookClaimRecordsRunIDFromOwnIDWhenNoRunChain(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops, opts := claimOpsForRunID("hw-standalone", map[string]string{
+func TestDoHookClaimRunMapUsesBeadIDWithoutRunChain(t *testing.T) {
+	spy := &publishRunMapSpy{}
+	ops, opts := claimOpsForRunMap("hw-standalone", map[string]string{
 		"gc.routed_to": "worker",
 	}, spy)
 
@@ -90,43 +108,35 @@ func TestDoHookClaimRecordsRunIDFromOwnIDWhenNoRunChain(t *testing.T) {
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if spy.calls != 1 || spy.session != "sess-1" || spy.runID != "hw-standalone" {
-		t.Fatalf("record = {calls:%d session:%q runID:%q}, want {1 sess-1 hw-standalone}", spy.calls, spy.session, spy.runID)
+	if spy.calls != 1 || spy.runID != "hw-standalone" {
+		t.Fatalf("run-map publish = %+v, want standalone bead ID as run ID", spy)
 	}
 }
 
-// TestDoHookClaimSkipsRunIDWhenNoSessionID: a non-session run (no GC_SESSION_ID)
-// has no session bead to stamp, so the record is skipped entirely.
-func TestDoHookClaimSkipsRunIDWhenNoSessionID(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops, opts := claimOpsForRunID("hw-nosess", map[string]string{
-		"gc.routed_to":    "worker",
-		"gc.root_bead_id": "root-R1",
-	}, spy)
-	opts.Env = []string{"GC_ALIAS=worker-1"} // GC_SESSION_ID absent
+func TestDoHookClaimSkipsRunMapWithoutSessionID(t *testing.T) {
+	spy := &publishRunMapSpy{}
+	ops, opts := claimOpsForRunMap("hw-nosess", map[string]string{"gc.routed_to": "worker"}, spy)
+	opts.Env = []string{"GC_SESSION_NAME=worker-1", "BEADS_ACTOR=actor-1"}
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if spy.calls != 0 {
-		t.Fatalf("record calls = %d, want 0 (no session bead to stamp)", spy.calls)
+		t.Fatalf("run-map calls = %d, want 0 without a session bead ID", spy.calls)
 	}
 }
 
-// TestDoHookClaimRunIDRecordFailureDoesNotFailClaim: a failing run_id write is
-// best-effort decoration — it logs to stderr but the claim still succeeds and the
-// claimed bead id is still reported on stdout.
-func TestDoHookClaimRunIDRecordFailureDoesNotFailClaim(t *testing.T) {
-	spy := &recordRunIDSpy{err: errors.New("dolt boom")}
-	ops, opts := claimOpsForRunID("hw-err", map[string]string{
+func TestDoHookClaimRunMapFailureDoesNotFailClaim(t *testing.T) {
+	spy := &publishRunMapSpy{err: errors.New("run-map unavailable")}
+	ops, opts := claimOpsForRunMap("hw-err", map[string]string{
 		"gc.routed_to":    "worker",
-		"gc.root_bead_id": "root-R1",
+		"gc.root_bead_id": "root-err",
 	}, spy)
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0 (record error must not fail the claim); stderr=%s", code, stderr.String())
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var result hookClaimJSONResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -135,145 +145,27 @@ func TestDoHookClaimRunIDRecordFailureDoesNotFailClaim(t *testing.T) {
 	if result.BeadID != "hw-err" || result.Reason != "claimed" {
 		t.Fatalf("claim result = %+v, want bead hw-err reason claimed", result)
 	}
-	if !strings.Contains(stderr.String(), "recording session pointers on session bead sess-1") {
-		t.Fatalf("stderr missing best-effort log line; got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "publishing run-map for session session-1") {
+		t.Fatalf("stderr missing best-effort run-map diagnostic: %s", stderr.String())
 	}
 }
 
-// TestDoHookClaimRecordsRunIDOnExistingAssignment pins the run-chain projection
-// for the existing-assignment path: when gc hook --claim resumes a bead already
-// in_progress and owned by this session (no fresh Claim call), the run id is still
-// resolved from the candidate's metadata chain (gc.root_bead_id), not the bead's
-// own id. This guards against a future work-query projection that thins candidate
-// metadata silently switching the recorded value.
-func TestDoHookClaimRecordsRunIDOnExistingAssignment(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops := hookClaimOps{
-		Runner: func(string, string) (string, error) {
-			return `[{"id":"hw-existing","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-R2"}}]`, nil
-		},
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
-			t.Error("Claim must not be called on the existing-assignment path")
-			return beads.Bead{}, false, nil
-		},
-		ResolveWorkBranch:     func(string) string { return "" }, // suppress work_branch stamp
-		StampWorkMeta:         noopStampWorkMeta,                 // keep hermetic; identity stamp asserted elsewhere
-		RecordSessionPointers: spy.fn,
+func TestDoHookClaimPublishesRunMapOnExistingAssignment(t *testing.T) {
+	spy := &publishRunMapSpy{}
+	ops, opts := claimOpsForRunMap("unused", nil, spy)
+	ops.Runner = func(string, string) (string, error) {
+		return `[{"id":"hw-existing","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-existing"}}]`, nil
 	}
-	opts := hookClaimOptions{
-		Assignee:           "worker-1",
-		IdentityCandidates: []string{"worker-1"},
-		RouteTargets:       []string{"worker"},
-		Env:                []string{"GC_SESSION_ID=sess-1"},
-		JSON:               true,
+	ops.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		t.Fatal("Claim must not run for an existing assignment")
+		return beads.Bead{}, false, nil
 	}
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if spy.calls != 1 || spy.session != "sess-1" || spy.runID != "root-R2" {
-		t.Fatalf("record = {calls:%d session:%q runID:%q}, want {1 sess-1 root-R2}", spy.calls, spy.session, spy.runID)
-	}
-	if spy.assignee != "worker-1" {
-		t.Fatalf("record assignee = %q, want worker-1 (actor parity with the work_branch stamp)", spy.assignee)
-	}
-}
-
-// TestDoHookClaimExistingAssignmentMissingSessionBeadStillReturnsWork pins the
-// observed gcw-2y6 symptom at the claim seam: when the live worker still owns an
-// in-progress bead but its GC_SESSION_ID bead is already gone, the best-effort
-// session-pointer write logs the missing-bead error and hook claim STILL returns
-// the same existing assignment. That behavior means the repeated work result is
-// not itself evidence that claim-time stamping is wedging the worker.
-func TestDoHookClaimExistingAssignmentMissingSessionBeadStillReturnsWork(t *testing.T) {
-	spy := &recordRunIDSpy{err: errors.New(`updating bead "sess-1": bead not found`)}
-	ops := hookClaimOps{
-		Runner: func(string, string) (string, error) {
-			return `[{"id":"hw-existing","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-R2"}}]`, nil
-		},
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
-			t.Error("Claim must not be called on the existing-assignment path")
-			return beads.Bead{}, false, nil
-		},
-		ResolveWorkBranch:     func(string) string { return "" },
-		StampWorkMeta:         noopStampWorkMeta, // keep hermetic; identity stamp asserted elsewhere
-		RecordSessionPointers: spy.fn,
-	}
-	opts := hookClaimOptions{
-		Assignee:           "worker-1",
-		IdentityCandidates: []string{"worker-1"},
-		RouteTargets:       []string{"worker"},
-		Env:                []string{"GC_SESSION_ID=sess-1"},
-		JSON:               true,
-	}
-
-	for i := 0; i < 2; i++ {
-		var stdout, stderr bytes.Buffer
-		if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
-			t.Fatalf("attempt %d: doHookClaim = %d, want 0; stderr=%s", i+1, code, stderr.String())
-		}
-		var result hookClaimJSONResult
-		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-			t.Fatalf("attempt %d: stdout is not JSON: %v\nraw: %s", i+1, err, stdout.String())
-		}
-		if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "hw-existing" {
-			t.Fatalf("attempt %d: result = %+v, want existing-assignment for hw-existing", i+1, result)
-		}
-		if !strings.Contains(stderr.String(), `recording session pointers on session bead sess-1: updating bead "sess-1": bead not found`) {
-			t.Fatalf("attempt %d: stderr = %q, want missing session bead warning", i+1, stderr.String())
-		}
-	}
-	if spy.calls != 2 {
-		t.Fatalf("record calls = %d, want 2 (one per claim attempt)", spy.calls)
-	}
-}
-
-// TestDoHookClaimRecordsActiveWorkBeadAsStepID: the active-work-bead pointer is the
-// work bead's BARE gc.step_id, NOT its namespaced bead id — the cross-plane join key
-// the events plane also uses. The fixture makes them differ (bead id
-// "mol.finalize.attempt.1" vs gc.step_id "mol.finalize") so a bead.ID regression
-// can't pass. The (run, step) tuple is recorded in one consistent call.
-func TestDoHookClaimRecordsActiveWorkBeadAsStepID(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops, opts := claimOpsForRunID("mol.finalize.attempt.1", map[string]string{
-		"gc.routed_to":    "worker",
-		"gc.root_bead_id": "root-R",
-		"gc.step_id":      "mol.finalize", // the bare logical step, != the bead id
-	}, spy)
-
-	var stdout, stderr bytes.Buffer
-	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if spy.calls != 1 {
-		t.Fatalf("record calls = %d, want 1 (run+step in ONE update)", spy.calls)
-	}
-	if spy.stepID != "mol.finalize" {
-		t.Fatalf("stepID = %q, want the bare gc.step_id mol.finalize (NOT the bead id)", spy.stepID)
-	}
-	if spy.stepID == "mol.finalize.attempt.1" {
-		t.Fatalf("stepID must NOT be the namespaced bead id — that never joins with events")
-	}
-	if spy.runID != "root-R" {
-		t.Fatalf("runID = %q, want root-R — the step must be recorded under its own run (tuple consistency)", spy.runID)
-	}
-}
-
-// TestDoHookClaimActiveWorkBeadEmptyForNonFormulaWork: a non-formula work bead has no
-// gc.step_id, so the pointer is written EMPTY — clearing any prior step on a reused
-// session so an ad-hoc unit attributes at run level, matching the events plane.
-func TestDoHookClaimActiveWorkBeadEmptyForNonFormulaWork(t *testing.T) {
-	spy := &recordRunIDSpy{}
-	ops, opts := claimOpsForRunID("hw-adhoc", map[string]string{
-		"gc.routed_to": "worker", // no gc.step_id
-	}, spy)
-
-	var stdout, stderr bytes.Buffer
-	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if spy.calls != 1 || spy.stepID != "" {
-		t.Fatalf("record = {calls:%d stepID:%q}, want {1 \"\"} (non-formula clears the step)", spy.calls, spy.stepID)
+	if spy.calls != 1 || spy.runID != "root-existing" || spy.beadID != "hw-existing" {
+		t.Fatalf("run-map publish = %+v, want existing assignment mapping", spy)
 	}
 }

@@ -191,6 +191,126 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	}
 }
 
+func TestPreCommitRegeneratesDashboardClientOnSpecChange(t *testing.T) {
+	repoRoot := repoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-commit"))
+	if err != nil {
+		t.Fatalf("read pre-commit hook: %v", err)
+	}
+	content := string(script)
+
+	npmBlockStart := strings.Index(content, "if command -v npm")
+	if npmBlockStart < 0 {
+		t.Fatal("pre-commit hook must guard dashboard regeneration on npm availability")
+	}
+	npmBlock := content[npmBlockStart:]
+
+	genClientIdx := strings.Index(npmBlock, "npm run generate:client")
+	if genClientIdx < 0 {
+		t.Fatal("pre-commit hook must run 'npm run generate:client' when internal/api/openapi.json changes — " +
+			"make dashboard-check only builds and typechecks against whatever client is already on disk, it never " +
+			"regenerates it (that's make dashboard-ci's job, which the hook never calls). A spec-only commit " +
+			"currently ships a stale generated TS client (see PR #4627, #4607)")
+	}
+
+	dashboardCheckIdx := strings.Index(npmBlock, "make dashboard-check")
+	if dashboardCheckIdx < 0 {
+		t.Fatal("pre-commit hook must still run make dashboard-check dashboard-smoke")
+	}
+	if genClientIdx > dashboardCheckIdx {
+		t.Fatal("pre-commit hook must regenerate the dashboard client BEFORE typecheck/build, so a client that " +
+			"doesn't match the new spec fails typecheck immediately instead of silently building against stale types")
+	}
+
+	clientAddNeedle := "git add internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client"
+	genClientAddIdx := strings.Index(npmBlock, clientAddNeedle)
+	if genClientAddIdx < 0 {
+		t.Fatal("pre-commit hook must stage the regenerated dashboard client so a spec-only commit includes it")
+	}
+	if genClientAddIdx < genClientIdx {
+		t.Fatal("pre-commit hook must stage the generated client after regenerating it, not before")
+	}
+
+	if strings.Contains(content, "regenerate the TS types, typecheck, and rebuild") {
+		t.Fatal("pre-commit hook's dashboard block comment must not claim it regenerates the TS types unless it " +
+			"actually calls npm run generate:client")
+	}
+
+	if !strings.Contains(content, `echo "warning: npm not on PATH`) {
+		t.Fatal("pre-commit hook must still warn and no-op cleanly when npm is not on PATH")
+	}
+}
+
+func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
+
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
+	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
+
+	runGit("init")
+	writeTestFile(t, specPath, "{}\n")
+	writeTestFile(t, clientPath, "placeholder\n")
+	writeTestFile(t, distPath, "placeholder\n")
+	runGit("add", "-A")
+	runGit("commit", "-m", "init")
+
+	// Stage ONLY a change to openapi.json -- no .go, web-src, or doc files
+	// are staged, matching the reviewer's criterion-2 repro scenario.
+	writeTestFile(t, specPath, `{"changed":true}`+"\n")
+	runGit("add", "internal/api/openapi.json")
+
+	binDir := t.TempDir()
+	npmLog := filepath.Join(binDir, "npm.log")
+	writeExecutable(t, filepath.Join(binDir, "npm"), `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "`+npmLog+`"
+exit 0
+`)
+	// Stub make: this test verifies the control-flow reaches the dashboard
+	// block at all (the reviewer's criterion-2 gap), not the real
+	// dashboard-check/dashboard-smoke targets, which need the full repo.
+	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
+exit 0
+`)
+
+	cmd := exec.Command("bash", hookPath)
+	cmd.Dir = tmpRepo
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-commit hook failed: %v\n%s", err, out)
+	}
+
+	logContent, readErr := os.ReadFile(npmLog)
+	if readErr != nil {
+		t.Fatalf("pre-commit hook exited early and never invoked npm when only internal/api/openapi.json was "+
+			"staged -- the go/web/docs early guard must not skip a spec-only commit (hook output: %s)", out)
+	}
+	if !strings.Contains(string(logContent), "generate:client") {
+		t.Fatalf("pre-commit hook must run 'npm run generate:client' when only internal/api/openapi.json is "+
+			"staged, got npm invocations:\n%s", logContent)
+	}
+}
+
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 	repoRoot := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

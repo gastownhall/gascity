@@ -92,6 +92,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
 		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
 		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
 		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),

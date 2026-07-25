@@ -211,7 +211,6 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 		if existingWorkDir == "" {
 			existingWorkDir = strings.TrimSpace(sb.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 		}
-		currentWorkBeadID := strings.TrimSpace(sb.Metadata[session.CurrentBeadIDKey])
 		rawState := session.State(sb.Metadata["state"])
 		if rawState == session.StateAwake {
 			rawState = session.StateActive
@@ -223,9 +222,7 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 			request.Tier == "resume" &&
 			request.SessionBeadID == sb.ID &&
 			rawState == session.StateActive &&
-			sb.Metadata["wake_mode"] != "fresh" &&
-			currentWorkBeadID != "" &&
-			(currentWorkBeadID == oldWorkBeadID || currentWorkBeadID == workBeadID)
+			sb.Metadata["wake_mode"] != "fresh"
 		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
 			targetWorkDir = existingWorkDir
 		}
@@ -396,17 +393,17 @@ func TestComputePoolTriggerBindingPatchPreservesLiveRetryWorkDir(t *testing.T) {
 			wantDir:   "/work/wb-old-with-title",
 		},
 		{
-			name:    "missing current-bead marker derives",
+			name:    "missing current-bead marker preserves active cwd",
 			state:   session.StateActive,
 			request: SessionRequest{Tier: "resume", SessionBeadID: "session-1", WorkBeadID: "wb-new"},
-			wantDir: "/work/wb-new-with-title",
+			wantDir: "/work/wb-old-with-title",
 		},
 		{
-			name:      "unrelated current-bead marker derives",
+			name:      "lagging unrelated current-bead marker preserves active cwd",
 			state:     session.StateActive,
 			currentID: "wb-unrelated",
 			request:   SessionRequest{Tier: "resume", SessionBeadID: "session-1", WorkBeadID: "wb-new"},
-			wantDir:   "/work/wb-new-with-title",
+			wantDir:   "/work/wb-old-with-title",
 		},
 		{
 			name:      "anonymous resume request derives",

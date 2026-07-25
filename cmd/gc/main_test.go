@@ -214,7 +214,7 @@ func TestMain(m *testing.M) {
 		testscript.Main(m, map[string]func(){
 			"gc": func() {
 				configureTestscriptEnvDefaults()
-				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 			},
 			"bd": bdTestCmd,
 		})
@@ -243,11 +243,27 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot)
+	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
+	if tmuxSocketParentRoot == "" {
+		tmuxSocketParentRoot = "/tmp"
+	}
+	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot, tmuxSocketParentRoot)
 	if err != nil {
 		panic(err)
 	}
 	tmuxSocketAliveSentinel = tmuxSentinel
+	// testscript.Main below exits via os.Exit, which skips defers, so the
+	// normal path removes the tmux socket parent through cleanupTestingM. A
+	// setup panic before testscript.Main is reached still unwinds through
+	// defers, so cover that window here or it leaks /tmp/gct-<pid>-* until a
+	// later aged sweep. cmdGCTmuxSocketRoot returns an empty cleanup root when
+	// it fell back to a dir under TMPDIR (swept separately), so only the real
+	// /tmp parent is removed here.
+	defer func() {
+		if tmuxSocketCleanupRoot != "" {
+			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+		}
+	}()
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
@@ -293,7 +309,7 @@ func TestMain(m *testing.M) {
 	testscript.Main(testRunner, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
-			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+			os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 		},
 		"bd": bdTestCmd,
 	})
@@ -2834,7 +2850,7 @@ version = "` + config.BundledPackImportVersion + `"
 [imports.core]
 source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "` + config.PublicGascityPackVersion + `"
 

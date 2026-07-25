@@ -73,10 +73,10 @@ Suggested prefixes:
 
 ## Code Style
 
-- Follow standard Go conventions
-- Keep functions focused and small
-- Add tests for behavior changes
-- Add comments only when the logic is not self-evident
+- Follow standard Go conventions.
+- Keep functions focused and small.
+- Add tests for behavior changes.
+- Add comments only when the logic is not self-evident.
 
 ## Design Philosophy
 

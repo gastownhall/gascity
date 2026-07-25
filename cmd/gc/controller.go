@@ -87,15 +87,14 @@ type sessionCircuitResetReply struct {
 }
 
 // controllerSocketPath returns the Unix socket path for controller commands.
-// It preserves the legacy .gc/controller.sock location for short city paths,
-// but falls back to a deterministic short temp-path when the legacy pathname
-// is too close to the platform Unix-socket length limit.
+// It uses the canonical .gc/controller.sock location for short city paths,
+// but falls back to a deterministic short temp-path when that pathname is too
+// close to the platform Unix-socket length limit.
 func controllerSocketPath(cityPath string) string {
 	canonicalCityPath := normalizePathForCompare(cityPath)
-	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
 	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
 	if len(canonicalLegacy) <= controllerSocketPathLimit {
-		return legacy
+		return canonicalLegacy
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))

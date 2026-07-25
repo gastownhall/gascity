@@ -6,114 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
-
-func TestHookClaimSessionStoreContextUsesCityScopeAfterRigClaim(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(cityDir, "rigs", "demo")
-	rigBeadsDir := filepath.Join(rigDir, ".beads")
-
-	dir, env, err := hookClaimSessionStoreContext(context.Background(), []string{
-		"GC_CITY_PATH=" + cityDir,
-		"GC_CITY=" + cityDir,
-		"GC_STORE_ROOT=" + rigDir,
-		"GC_STORE_SCOPE=rig",
-		"GC_RIG=demo",
-		"GC_RIG_ROOT=" + rigDir,
-		"BEADS_DIR=" + rigBeadsDir,
-		"GC_DOLT_HOST=rig-dolt.example",
-		"GC_DOLT_PORT=3307",
-	})
-	if err != nil {
-		t.Fatalf("hookClaimSessionStoreContext: %v", err)
-	}
-	if dir != cityDir {
-		t.Fatalf("dir = %q, want city dir %q", dir, cityDir)
-	}
-
-	got := envEntriesMap(env)
-	for key, want := range map[string]string{
-		"GC_CITY_PATH":   cityDir,
-		"GC_STORE_ROOT":  cityDir,
-		"GC_STORE_SCOPE": "city",
-		"BEADS_DIR":      filepath.Join(cityDir, ".beads"),
-		"GC_RIG":         "",
-		"GC_RIG_ROOT":    "",
-	} {
-		if got[key] != want {
-			t.Errorf("%s = %q, want %q", key, got[key], want)
-		}
-	}
-	if got["GC_DOLT_HOST"] == "rig-dolt.example" || got["GC_DOLT_PORT"] == "3307" {
-		t.Fatalf("rig Dolt endpoint leaked into city session store env: %#v", got)
-	}
-}
-
-func TestHookClaimSessionStoreContextRejectsMissingCityPath(t *testing.T) {
-	_, _, err := hookClaimSessionStoreContext(context.Background(), []string{
-		"GC_RIG_ROOT=/city/rigs/demo",
-		"BEADS_DIR=/city/rigs/demo/.beads",
-	})
-	if err == nil {
-		t.Fatal("hookClaimSessionStoreContext succeeded without a city path")
-	}
-}
-
-func TestHookRecordSessionPointersUsesCityStoreAfterRigClaim(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(cityDir, "rigs", "demo")
-
-	originalRunner := hookClaimCommandRunnerWithEnvContext
-	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
-	var capturedDir string
-	var capturedEnv map[string]string
-	var capturedName string
-	var capturedArgs []string
-	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
-		capturedEnv = env
-		return func(dir, name string, args ...string) ([]byte, error) {
-			capturedDir = dir
-			capturedName = name
-			capturedArgs = append([]string(nil), args...)
-			return nil, nil
-		}
-	}
-
-	err := hookRecordSessionPointersWithBdStore(
-		context.Background(),
-		rigDir,
-		[]string{
-			"GC_CITY_PATH=" + cityDir,
-			"GC_STORE_ROOT=" + rigDir,
-			"GC_STORE_SCOPE=rig",
-			"GC_RIG=demo",
-			"GC_RIG_ROOT=" + rigDir,
-			"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		},
-		"worker-1", "session-1", "run-1", "step-1",
-	)
-	if err != nil {
-		t.Fatalf("hookRecordSessionPointersWithBdStore: %v", err)
-	}
-
-	if capturedDir != cityDir {
-		t.Fatalf("bd dir = %q, want %q", capturedDir, cityDir)
-	}
-	if capturedEnv["BEADS_DIR"] != filepath.Join(cityDir, ".beads") ||
-		capturedEnv["GC_STORE_SCOPE"] != "city" || capturedEnv["GC_RIG_ROOT"] != "" {
-		t.Fatalf("bd env did not select city scope: %#v", capturedEnv)
-	}
-	if capturedName != "bd" || len(capturedArgs) < 3 ||
-		!reflect.DeepEqual(capturedArgs[:3], []string{"update", "--json", "session-1"}) {
-		t.Fatalf("bd command = %q %#v, want bd update --json session-1", capturedName, capturedArgs)
-	}
-}
 
 func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
 	originalRunner := hookClaimCommandRunnerWithEnvContext

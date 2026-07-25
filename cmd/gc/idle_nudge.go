@@ -42,13 +42,10 @@ const (
 // idle slot needs this demand-driven wake exactly as herdr does (activity
 // reporting makes the controller SEE the slot but never nudges it to claim).
 //
-// SCOPE (trigger-bead-key limitation): this keys on the slot's own
-// gc.trigger_bead_id, so it only rescues a slot the reconciler already bound to
-// a specific bead (resume / wake-known-identity tiers). A bead slung to the
-// pool AFTER the slot went idle and left UNASSIGNED (routed_to=pool, open, no
-// assignee) never stamps trigger_bead_id, so it is invisible here. Widening the
-// key to "any open+routed+unclaimed pool bead past the grace window" is the
-// documented follow-up (see engdocs/design/idle-claim-nudge-followups.md).
+// This keys on the slot's own gc.trigger_bead_id. The work snapshot includes
+// both actionable assigned work and ready, routed, unassigned work selected as
+// concrete default pool demand, so a warm slot rebound after its startup turn
+// is still visible here without widening the predicate to blocked open work.
 //
 // Churn-free by construction — it inverts every failure mode that got the #312
 // idle-session nudger reverted:
@@ -70,21 +67,35 @@ func nudgeStalledPoolClaims(
 	cfg *config.City,
 	store beads.Store,
 	sessionBeads []beads.Bead,
-	assignedWork []beads.Bead,
+	claimWork []beads.Bead,
+	claimWorkStoreRefs []string,
 	now time.Time,
 	stdout io.Writer,
 ) {
 	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	runNudgeBackstop(sp, store, sessionBeads, assignedWork, now, stdout, "idle-claim-nudge", poolClaimBackstop{cfg: cfg})
+	// beads.SessionStore embeds the Store interface, so a wrapper holding a nil
+	// store is still a non-nil beads.Store. Unwrap it so the half-built
+	// dependency guard also covers the SessionStore the reconciler passes.
+	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+		return
+	}
+	// The shared engine keys work by bead ID alone, which cannot tell two
+	// same-ID beads in different stores apart, so this predicate carries its own
+	// store-scoped snapshot and leaves the engine's ID map empty.
+	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
+		cfg:  cfg,
+		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
+	})
 }
 
 // poolClaimBackstop is the backstopPredicate for pool-managed slots: it
 // re-delivers the claim nudge to a slot whose assigned trigger bead is still
 // unclaimed. See nudgeStalledPoolClaims for the full rationale and scope.
 type poolClaimBackstop struct {
-	cfg *config.City
+	cfg  *config.City
+	work idleClaimWorkSnapshot
 }
 
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
@@ -93,14 +104,18 @@ func (p poolClaimBackstop) governs(s beads.Bead) bool {
 
 // outstandingID acts only while the trigger bead is genuinely unclaimed. A
 // claimed bead is in_progress (or closed) — either way the slot is doing its
-// job and must not be disturbed. If the bead is absent from the assigned-work
-// snapshot it's been claimed/closed/moved.
-func (p poolClaimBackstop) outstandingID(s beads.Bead, work map[string]beads.Bead, sessName string) (string, bool) {
+// job and must not be disturbed. If the bead is absent from the work snapshot
+// it's been claimed/closed/moved.
+//
+// The engine's ID-keyed map is ignored: resolution goes through the
+// store-scoped snapshot so a slot bound to a rig bead is matched against that
+// rig's copy, not a same-ID bead in another store.
+func (p poolClaimBackstop) outstandingID(s beads.Bead, _ map[string]beads.Bead, sessName string) (string, bool) {
 	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if triggerID == "" {
 		return "", false
 	}
-	w, ok := work[triggerID]
+	w, ok := p.work.lookup(triggerID, s.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
 	if !ok || !isUnclaimedTrigger(w, sessName) {
 		return "", false
 	}
@@ -132,6 +147,64 @@ func (p poolClaimBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) 
 
 func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	clearIdleClaimMarker(store, s, stdout)
+}
+
+type idleClaimWorkSnapshot struct {
+	byScope map[storeScopedBeadKey]beads.Bead
+	byID    map[string][]storeScopedBeadKey
+}
+
+func newIdleClaimWorkSnapshot(work []beads.Bead, storeRefs []string) idleClaimWorkSnapshot {
+	snapshot := idleClaimWorkSnapshot{
+		byScope: make(map[storeScopedBeadKey]beads.Bead, len(work)),
+		byID:    make(map[string][]storeScopedBeadKey, len(work)),
+	}
+	for i, bead := range work {
+		storeRef := ""
+		if i < len(storeRefs) {
+			storeRef = normalizeIdleClaimStoreRef(storeRefs[i])
+		}
+		key := storeScopedBeadKey{StoreRef: storeRef, ID: bead.ID}
+		if _, exists := snapshot.byScope[key]; !exists {
+			snapshot.byID[bead.ID] = append(snapshot.byID[bead.ID], key)
+		}
+		snapshot.byScope[key] = bead
+	}
+	return snapshot
+}
+
+func (s idleClaimWorkSnapshot) lookup(id, storeRef string) (beads.Bead, bool) {
+	id = strings.TrimSpace(id)
+	storeRef = strings.TrimSpace(storeRef)
+	if id == "" {
+		return beads.Bead{}, false
+	}
+	if storeRef != "" {
+		bead, ok := s.byScope[storeScopedBeadKey{StoreRef: normalizeIdleClaimStoreRef(storeRef), ID: id}]
+		return bead, ok
+	}
+	keys := s.byID[id]
+	if len(keys) != 1 {
+		return beads.Bead{}, false
+	}
+	bead, ok := s.byScope[keys[0]]
+	return bead, ok
+}
+
+func normalizeIdleClaimStoreRef(storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	switch {
+	case storeRef == "", storeRef == "city", strings.HasPrefix(storeRef, "city:"):
+		return "city"
+	case strings.HasPrefix(storeRef, "rig:"):
+		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+	case !strings.Contains(storeRef, ":"):
+		// AssignedWorkStoreRefs uses a bare rig name; ready-routed refs are
+		// already canonical.
+		return "rig:" + storeRef
+	default:
+		return storeRef
+	}
 }
 
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still

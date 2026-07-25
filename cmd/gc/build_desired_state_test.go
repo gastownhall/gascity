@@ -869,7 +869,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		t.Fatalf("create routed bead: %v", err)
 	}
 
-	counts, demand, _, errs := defaultScaleCheckCountsAndDemand([]defaultScaleCheckTarget{{
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
@@ -894,6 +894,91 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
+// reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
+// identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
+// bypassing gc sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+// applied in doSling). Without read-side normalization, the raw instance name never
+// matches group.templates (keyed by the base template), so the demand is silently
+// dropped and the pool never scales up.
+func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:  "directly routed to instance slot",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create instance-routed bead: %v", err)
+	}
+
+	counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if len(partialTemplates) != 0 {
+		t.Fatalf("partialTemplates = %v, want none", partialTemplates)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 for an instance-suffixed gc.routed_to matching the base template", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{work.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want [%s]", got, work.ID)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone guards
+// against over-normalization: an instance number outside the agent's configured
+// capacity, or a suffix on an agent that isn't multi-session, is not a pool
+// instance identity and must not be rewritten or counted against the base
+// template.
+func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "routed beyond configured capacity",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-99",
+		},
+	}); err != nil {
+		t.Fatalf("create out-of-range instance-routed bead: %v", err)
+	}
+
+	counts, _, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 0 for an out-of-range instance suffix", template, got)
 	}
 }
 
@@ -4077,7 +4162,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 			"agent_name":                            "worker-7",
 			"alias":                                 "worker-7",
 			"session_name":                          "worker-reusable",
-			"state":                                 "awake",
+			"state":                                 string(sessionpkg.StateAsleep),
 			"pool_slot":                             "7",
 			poolManagedMetadataKey:                  boolMetadata(true),
 			beadmeta.TriggerBeadIDMetadataKey:       "gp-old",
@@ -11511,6 +11596,47 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 	}
 	if len(refs) != 2 || refs[0] != "city:test-city" || refs[1] != "rig:city" {
 		t.Fatalf("store refs = %v, want [city:test-city rig:city]", refs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkUsesDemandStoreScope(t *testing.T) {
+	candidates := []beads.Bead{
+		{ID: "same-id", Status: "open", Title: "city copy"},
+		{ID: "same-id", Status: "open", Title: "rig copy"},
+	}
+	refs := []string{"city:test-city", "rig:fixture"}
+	demand := map[string]scaleCheckDemand{
+		"fixture/worker": {
+			WorkBeadIDs: []string{"same-id"},
+			StoreRefs:   map[string]string{"same-id": "rig:fixture"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].Title != "rig copy" {
+		t.Fatalf("selected work = %#v, want only rig copy", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "rig:fixture" {
+		t.Fatalf("selected refs = %v, want [rig:fixture]", gotRefs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkNormalizesCityRef(t *testing.T) {
+	candidates := []beads.Bead{{ID: "city-ready", Status: "open"}}
+	refs := []string{"city:test-city"}
+	demand := map[string]scaleCheckDemand{
+		"worker": {
+			WorkBeadIDs: []string{"city-ready"},
+			StoreRefs:   map[string]string{"city-ready": "city"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].ID != "city-ready" {
+		t.Fatalf("selected work = %#v, want city-ready", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "city:test-city" {
+		t.Fatalf("selected refs = %v, want [city:test-city]", gotRefs)
 	}
 }
 

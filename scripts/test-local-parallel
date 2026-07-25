@@ -84,6 +84,10 @@ add_cmd_gc_shards() {
   done
 }
 
+add_productmetrics_testhook_job() {
+  add_job "productmetrics-testhook" "make test-productmetrics-testhook"
+}
+
 add_integration_jobs() {
   local i
   for i in 1 2 3 4; do
@@ -119,6 +123,7 @@ case "$mode" in
     ;;
   cmd-gc-process)
     add_cmd_gc_shards "cmd-gc-process" "0" ""
+    add_productmetrics_testhook_job
     ;;
   integration)
     add_integration_jobs
@@ -127,6 +132,7 @@ case "$mode" in
     add_fsys_compile_job
     add_unit_core_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
+    add_productmetrics_testhook_job
     add_integration_jobs
     ;;
   *)

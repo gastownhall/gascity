@@ -140,7 +140,7 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 5*time.Second, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
@@ -153,6 +153,33 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 }
 
+// TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning covers
+// Fix 2: the reconciler's pinned-session collateral-skip clears
+// GC_RESTART_REQUESTED without stopping the session (see
+// pinnedConfiguredNamedSessionKillProtected in session_reconciler.go), so a
+// cleared flag alone must not be reported as success while the session is
+// still running.
+func TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
+	if err := dops.setRestartRequested("worker"); err != nil {
+		t.Fatalf("setRestartRequested: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	code := waitForControllerRestart(context.Background(), dops, sp, "worker", "gc handoff",
+		10*time.Millisecond, 50*time.Millisecond, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (flag cleared but session still running is not success); stderr: %s", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc handoff: controller did not act within") {
+		t.Errorf("stderr = %q, want handoff timeout diagnostic", got)
+	}
+}
+
 func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	dops := newFakeDrainOps()
 	if err := dops.setRestartRequested("worker"); err != nil {
@@ -160,7 +187,7 @@ func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -181,7 +208,7 @@ func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, "worker", "gc handoff",
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
 		10*time.Millisecond, 25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -202,7 +229,7 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- waitForControllerRestart(ctx, dops, "worker", "gc handoff",
+		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker", "gc handoff",
 			10*time.Millisecond, 30*time.Second, &stderr)
 	}()
 
@@ -562,6 +589,67 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 	if rec.Events[1].Type != events.SessionDraining {
 		t.Fatalf("event[1].Type = %q, want %q", rec.Events[1].Type, events.SessionDraining)
+	}
+}
+
+// TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart covers Fix 1: a
+// pinned named session (pin_awake == "true") is kill-protected by the
+// reconciler unless an explicit controller reset is persisted, so
+// persistRestart is mandatory rather than best-effort for pinned sessions.
+// When it is unavailable or fails, doHandoffWithOutcome must report failure
+// and must not promise a restart it cannot guarantee.
+func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			rec := events.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+
+			b, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{"gc:session"},
+			})
+			if err != nil {
+				t.Fatalf("seeding session bead: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
+				t.Fatalf("set session_name: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
+				t.Fatalf("set configured_named_session: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "configured_named_mode", "always"); err != nil {
+				t.Fatalf("set configured_named_mode: %v", err)
+			}
+			if err := store.SetMetadata(b.ID, "pin_awake", "true"); err != nil {
+				t.Fatalf("set pin_awake: %v", err)
+			}
+
+			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "mayor", "mayor",
+				[]string{"HANDOFF: context full"}, &stdout, &stderr)
+			if outcome.code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", outcome.code, stderr.String())
+			}
+			if outcome.restartRequested {
+				t.Fatal("restartRequested = true, want false when persistRestart is unavailable for a pinned session")
+			}
+			if strings.Contains(stdout.String(), "requesting restart") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", stdout.String())
+			}
+			if len(rec.Events) != 1 {
+				t.Fatalf("got %d events, want 1 (mail only, no SessionDraining); events=%v", len(rec.Events), rec.Events)
+			}
+			if rec.Events[0].Type != events.MailSent {
+				t.Fatalf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
+			}
+		})
 	}
 }
 
