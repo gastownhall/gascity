@@ -282,7 +282,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		if stopped != sess {
 			t.Fatalf("stopped = %q, want %q", stopped, sess)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for delegated force stop")
 	}
 
@@ -291,7 +291,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q controller stderr=%q", code, stdout.String(), stderr.String(), controllerStderr.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("cmdStop did not finish after delegated force stop")
 	}
 }
