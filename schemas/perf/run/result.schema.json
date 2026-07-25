@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc perf run --json result",
+  "description": "Aggregate timing report for a perf scenario run. gc perf is a hidden development-only harness that predates the schema_version/ok success-discriminator convention; this schema describes the actual perfReport wire shape as-is.",
+  "type": "object",
+  "required": [
+    "scenario",
+    "iterations",
+    "results",
+    "stats"
+  ],
+  "properties": {
+    "scenario": {
+      "type": "string"
+    },
+    "iterations": {
+      "type": "integer"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/iterResult"
+      }
+    },
+    "stats": {
+      "$ref": "#/$defs/stats"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "iterResult": {
+      "type": "object",
+      "required": [
+        "iter",
+        "wall_ms"
+      ],
+      "properties": {
+        "iter": {
+          "type": "integer"
+        },
+        "wall_ms": {
+          "type": "integer"
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "stats": {
+      "type": "object",
+      "required": [
+        "min_ms",
+        "mean_ms",
+        "p50_ms",
+        "p95_ms",
+        "max_ms"
+      ],
+      "properties": {
+        "min_ms": {
+          "type": "integer"
+        },
+        "mean_ms": {
+          "type": "integer"
+        },
+        "p50_ms": {
+          "type": "integer"
+        },
+        "p95_ms": {
+          "type": "integer"
+        },
+        "max_ms": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

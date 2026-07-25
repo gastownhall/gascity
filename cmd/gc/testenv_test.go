@@ -93,6 +93,13 @@ func clearGCEnv(t *testing.T) {
 	// a .gc/ directory left by a running city or a prior test run in /tmp
 	// (e.g. a developer box hosting a live city contaminates no-city tests).
 	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
+	// The ceiling above only bounds a walk that starts under td. City/rig
+	// discovery (resolveContextFromDir) walks up from the real process cwd,
+	// which for a test invoked from inside a gc rig worktree is already
+	// nested inside a live city — the ceiling never comes into play because
+	// that walk never enters td's ancestry at all. Chdir into td so the walk
+	// starts somewhere with no city.toml in its ancestry.
+	t.Chdir(td)
 }
 
 func clearProcessLiveEnvForTests() {

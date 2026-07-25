@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1153,12 +1152,13 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 
 // formulaVersionCheckResult holds the output for --json mode.
 type formulaVersionCheckResult struct {
-	BeadID      string `json:"bead_id"`
-	FormulaName string `json:"formula_name"`
-	BeadHash    string `json:"bead_hash"`
-	DiskHash    string `json:"disk_hash"`
-	Match       bool   `json:"match"`
-	FormulaPath string `json:"formula_path,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	BeadID        string `json:"bead_id"`
+	FormulaName   string `json:"formula_name"`
+	BeadHash      string `json:"bead_hash"`
+	DiskHash      string `json:"disk_hash"`
+	Match         bool   `json:"match"`
+	FormulaPath   string `json:"formula_path,omitempty"`
 }
 
 func newFormulaVersionCheckCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1222,19 +1222,18 @@ since it was spawned.`,
 			match := beadHash == diskHash
 
 			result := formulaVersionCheckResult{
-				BeadID:      beadID,
-				FormulaName: formulaName,
-				BeadHash:    beadHash,
-				DiskHash:    diskHash,
-				Match:       match,
-				FormulaPath: recipe.FormulaSource,
+				SchemaVersion: "1",
+				BeadID:        beadID,
+				FormulaName:   formulaName,
+				BeadHash:      beadHash,
+				DiskHash:      diskHash,
+				Match:         match,
+				FormulaPath:   recipe.FormulaSource,
 			}
 
 			switch {
 			case jsonOutput:
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(result); err != nil {
+				if err := writeCLIJSONLine(stdout, result); err != nil {
 					return err
 				}
 			case match:

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -263,9 +262,7 @@ func formatDurationSeconds(sec int64) string {
 }
 
 func writeMaintenanceJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	return writeCLIJSONLine(w, v)
 }
 
 func truncateMaintenance(s string, limit int) string {

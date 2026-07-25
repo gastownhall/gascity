@@ -83,6 +83,85 @@ func TestJSONSchemaManifestForHookClaim(t *testing.T) {
 	}
 }
 
+func TestJSONSchemasDeclaredForCommandsWithJSONOutput(t *testing.T) {
+	clearGCEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+	commands := commandsDeclaringJSONOutput(root)
+	if len(commands) == 0 {
+		t.Fatal("no commands with JSON output discovered")
+	}
+
+	for _, cmd := range commands {
+		commandPath := commandPathWords(cmd)
+		name := strings.Join(commandPath, " ")
+		t.Run(strings.ReplaceAll(name, " ", "_"), func(t *testing.T) {
+			for _, role := range []string{jsonSchemaResultRole, jsonSchemaFailureRole} {
+				schema, err := schemaForRole(cmd, commandPath, role)
+				if err != nil {
+					t.Fatalf("%s schema for %q: %v", role, name, err)
+				}
+				if !json.Valid(schema) {
+					t.Fatalf("%s schema for %q is not valid JSON: %s", role, name, schema)
+				}
+			}
+		})
+	}
+}
+
+func commandsDeclaringJSONOutput(root *cobra.Command) []*cobra.Command {
+	var commands []*cobra.Command
+	walkCommandTree(root, func(cmd *cobra.Command) {
+		if cmd == root {
+			return
+		}
+		if !commandDeclaresJSONOutput(cmd) {
+			return
+		}
+		commands = append(commands, cmd)
+	})
+	slices.SortFunc(commands, func(a, b *cobra.Command) int {
+		return strings.Compare(strings.Join(commandPathWords(a), " "), strings.Join(commandPathWords(b), " "))
+	})
+	return commands
+}
+
+func commandDeclaresJSONOutput(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if strings.TrimSpace(cmd.Annotations[jsonSchemaDirAnnotation]) != "" {
+		return true
+	}
+	return cmd.LocalFlags().Lookup("json") != nil
+}
+
+func walkCommandTree(cmd *cobra.Command, visit func(*cobra.Command)) {
+	if cmd == nil {
+		return
+	}
+	visit(cmd)
+	for _, child := range cmd.Commands() {
+		walkCommandTree(child, visit)
+	}
+}
+
+// successDiscriminatorExempt lists result schemas whose commands predate, or
+// explicitly opt out of, the schema_version/ok success-discriminator
+// convention checked by TestJSONResultSchemasRequireSuccessDiscriminator.
+var successDiscriminatorExempt = map[string]string{
+	"schemas/bd/result.schema.json":                  "gc bd is an explicit passthrough: bd owns the payload shape.",
+	"schemas/context/list/result.schema.json":        "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/context/show/result.schema.json":        "contextJSON is a raw per-record JSONL line (see writeCLIJSONLine); it has no ok/schema_version envelope by design.",
+	"schemas/extmsg/bind/result.schema.json":         "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/extmsg/handoff/result.schema.json":      "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/extmsg/unbind/result.schema.json":       "extmsg.SessionBindingRecord is a shared domain type serialized identically over the internal API; it predates the ok convention.",
+	"schemas/perf/run/result.schema.json":            "gc perf is a hidden development-only harness that predates the ok convention.",
+	"schemas/perf/session-new/result.schema.json":    "gc perf is a hidden development-only harness that predates the ok convention.",
+	"schemas/runtime/conformance/result.schema.json": "runtimecontract.Report is consumed by external runtime packs' CI as-is; it predates the ok convention.",
+}
+
 func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 	var missing []string
 	var nonObject []string
@@ -91,6 +170,12 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, "/result.schema.json") {
+			return nil
+		}
+		if _, ok := successDiscriminatorExempt[path]; ok {
+			// Exempt schemas may use a non-object, non-string "type" (e.g. an
+			// ["array", "null"] union), which the strict-string decode below
+			// cannot even parse.
 			return nil
 		}
 		data, err := gascity.BuiltinSchemas.ReadFile(path)
@@ -104,10 +189,6 @@ func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 		}
 		if err := json.Unmarshal(data, &schema); err != nil {
 			return err
-		}
-		if path == "schemas/bd/result.schema.json" {
-			// gc bd is an explicit passthrough: bd owns the payload shape.
-			return nil
 		}
 		if path == "schemas/metrics/example/result.schema.json" {
 			// metrics example --json is deliberately the byte-exact product-

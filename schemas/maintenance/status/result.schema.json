@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "status",
+    "_cache_age_s"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "_cache_age_s": {
+      "type": "number"
+    },
+    "status": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "interval_seconds",
+        "in_flight",
+        "history"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "type": "integer"
+        },
+        "in_flight": {
+          "type": "boolean"
+        },
+        "in_flight_start": {
+          "type": "string"
+        },
+        "next_scheduled": {
+          "type": "string"
+        },
+        "last_run": {
+          "$ref": "#/$defs/run"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/run"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": [
+        "started_at",
+        "finished_at",
+        "stage",
+        "before_bytes",
+        "after_bytes",
+        "duration_s"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string"
+        },
+        "finished_at": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "err": {
+          "type": "string"
+        },
+        "before_bytes": {
+          "type": "integer"
+        },
+        "after_bytes": {
+          "type": "integer"
+        },
+        "snapshot_path": {
+          "type": "string"
+        },
+        "duration_s": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

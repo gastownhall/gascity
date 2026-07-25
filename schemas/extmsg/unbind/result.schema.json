@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc extmsg unbind --json result",
+  "description": "The conversation binding records removed by gc extmsg unbind. Client.UnbindExtMsgConversation returns a nil slice (encoded as JSON null) when the server response has no Unbound field at all, distinct from an empty-but-present array when zero bindings matched; this schema accepts either.",
+  "type": ["array", "null"],
+  "items": {
+    "$ref": "#/$defs/sessionBindingRecord"
+  },
+  "$defs": {
+    "sessionBindingRecord": {
+      "type": "object",
+      "required": [
+        "ID",
+        "SchemaVersion",
+        "Conversation",
+        "SessionID",
+        "SessionName",
+        "AgentName",
+        "Status",
+        "BoundAt",
+        "ExpiresAt",
+        "BindingGeneration",
+        "Metadata"
+      ],
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "SchemaVersion": {
+          "type": "integer"
+        },
+        "Conversation": {
+          "$ref": "#/$defs/conversationRef"
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "SessionName": {
+          "type": "string"
+        },
+        "AgentName": {
+          "type": "string"
+        },
+        "Status": {
+          "type": "string",
+          "enum": ["active", "ended"]
+        },
+        "BoundAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ExpiresAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "BindingGeneration": {
+          "type": "integer"
+        },
+        "Metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "conversationRef": {
+      "type": "object",
+      "required": [
+        "scope_id",
+        "provider",
+        "account_id",
+        "conversation_id",
+        "kind"
+      ],
+      "properties": {
+        "scope_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "parent_conversation_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["dm", "room", "thread"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
