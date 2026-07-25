@@ -39,6 +39,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
+	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -81,6 +82,7 @@ type controllerState struct {
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	maintenanceDone        chan struct{}                    // closed when the scheduler goroutine exits
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
@@ -506,7 +508,15 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 	store := cs.cityBeadStore
 	cityPath := cs.cityPath
 	mailProv := cs.cityMailProv
+	eventProv := cs.eventProv
 	cs.mu.RUnlock()
+
+	// Seed while the caller owns the per-city controller lock. Request-time
+	// status reads stay read-only, so this startup path and emitRunEvent are
+	// the only projection writers in the process.
+	if _, _, err := storehealth.SeedMaintenanceProjection(fsys.OSFS{}, cityPath, eventProv); err != nil {
+		fmt.Fprintf(os.Stderr, "store-maintenance: seed projection: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 	if cfg == nil || !cfg.Maintenance.Dolt.Enabled {
 		return
 	}
@@ -530,10 +540,32 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 	// Retain the handle so the API layer can expose
 	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
 	// without a separate wiring path.
+	done := make(chan struct{})
 	cs.mu.Lock()
 	cs.maintenanceLoop = loop
+	cs.maintenanceDone = done
 	cs.mu.Unlock()
-	go loop.Run(ctx)
+	go func() {
+		defer close(done)
+		loop.Run(ctx)
+	}()
+}
+
+// stopMaintenanceLoop prevents new manual cycles and joins both scheduled and
+// API-triggered cycles. The caller must cancel ctx first and keep the per-city
+// controller lock held until this method returns.
+func (cs *controllerState) stopMaintenanceLoop() {
+	cs.mu.RLock()
+	loop := cs.maintenanceLoop
+	done := cs.maintenanceDone
+	cs.mu.RUnlock()
+	if loop == nil {
+		return
+	}
+	loop.Close()
+	if done != nil {
+		<-done
+	}
 }
 
 // maintenanceStartupLine formats the one-line banner emitted when the Dolt

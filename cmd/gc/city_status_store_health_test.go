@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -36,8 +38,24 @@ func stubSupervisorAlive(t *testing.T) {
 func stubStoreHealthEvents(t *testing.T, ep events.Provider) {
 	t.Helper()
 	old := openStoreHealthEvents
-	openStoreHealthEvents = func(string, io.Writer) events.Provider { return ep }
+	openStoreHealthEvents = func(string, io.Writer) storehealth.MaintenanceEventProvider { return ep }
 	t.Cleanup(func() { openStoreHealthEvents = old })
+}
+
+func TestDefaultOpenStoreHealthEventsDoesNotCreateEventLog(t *testing.T) {
+	city := t.TempDir()
+	t.Setenv("GC_EVENTS", "")
+	eventsPath := filepath.Join(city, ".gc", "events.jsonl")
+	provider := defaultOpenStoreHealthEvents(city, io.Discard)
+	if provider == nil {
+		t.Fatal("defaultOpenStoreHealthEvents returned nil")
+	}
+	if _, err := provider.List(events.Filter{Type: events.StoreMaintenanceDone}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, err := os.Stat(eventsPath); !os.IsNotExist(err) {
+		t.Fatalf("read-only status created event log: err=%v", err)
+	}
 }
 
 func TestCityStatusSnapshotOmitsStoreHealthWhenControllerStopped(t *testing.T) {

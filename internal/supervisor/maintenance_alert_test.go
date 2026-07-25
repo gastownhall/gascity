@@ -24,7 +24,7 @@ func TestAlert_SentOnFailureWithAlertTo(t *testing.T) {
 			Interval: "168h",
 			AlertTo:  "gascity/mayor",
 		},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: events.NewFake(),
 		Mail:     fakeMail,
 	})
@@ -78,7 +78,7 @@ func TestAlert_NotSentOnSuccess(t *testing.T) {
 			Enabled: true,
 			AlertTo: "gascity/mayor",
 		},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: events.NewFake(),
 		Mail:     fakeMail,
 	})
@@ -107,7 +107,7 @@ func TestAlert_NotSentWithEmptyAlertTo(t *testing.T) {
 			Enabled: true,
 			AlertTo: "",
 		},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: events.NewFake(),
 		Mail:     fakeMail,
 	})
@@ -138,7 +138,7 @@ func TestAlert_SendFailureDoesNotPropagate(t *testing.T) {
 			Enabled: true,
 			AlertTo: "gascity/mayor",
 		},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: fakeEvents,
 		Mail:     fakeMail,
 		Stderr:   &stderr,
@@ -174,7 +174,7 @@ func TestAlert_NilMailProviderSkips(t *testing.T) {
 			Enabled: true,
 			AlertTo: "gascity/mayor",
 		},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: events.NewFake(),
 		// Mail unset on purpose.
 	})

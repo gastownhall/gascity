@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
@@ -45,7 +44,7 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 // maintenance event via ep, returning a populated *StoreHealth.
 // liveRowCount provides the live row count; callers without a store pass
 // nil and LiveRows is reported as zero.
-func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
+func collectStoreHealth(cityPath string, store beads.Store, ep storehealth.MaintenanceEventProvider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)
 	lastAt, lastStatus := storehealth.LastMaintenance(fsys.OSFS{}, cityPath, ep)

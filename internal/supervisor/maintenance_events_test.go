@@ -3,12 +3,87 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storehealth"
 )
+
+type maintenanceRecorderFunc func(events.Event)
+
+func (f maintenanceRecorderFunc) Record(event events.Event) {
+	f(event)
+}
+
+func TestEmitRunEventInvalidatesProjectionBeforeRecording(t *testing.T) {
+	fs := fsys.NewFake()
+	city := "/city"
+	projectionPath := storehealth.MaintenanceProjectionPath(city)
+	fs.Files[projectionPath] = []byte(`{"last_done_at":"2026-07-01T04:00:00Z"}`)
+	finished := time.Date(2026, 7, 2, 4, 0, 0, 0, time.UTC)
+	recorded := false
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg:      config.DoltMaintenance{Enabled: true},
+		CityPath: city,
+		FS:       fs,
+		Recorder: maintenanceRecorderFunc(func(events.Event) {
+			recorded = true
+			if _, ok, err := storehealth.LoadMaintenanceProjection(fs, city); err != nil || ok {
+				t.Fatalf("projection present while event recorded: ok=%v err=%v", ok, err)
+			}
+		}),
+	})
+
+	loop.emitRunEvent(MaintenanceRun{
+		StartedAt:  finished.Add(-time.Second),
+		FinishedAt: finished,
+		Stage:      "done",
+	})
+
+	if !recorded {
+		t.Fatal("maintenance event was not recorded")
+	}
+	projection, ok, err := storehealth.LoadMaintenanceProjection(fs, city)
+	if err != nil || !ok {
+		t.Fatalf("load projection after event: ok=%v err=%v", ok, err)
+	}
+	if got, status := projection.Latest(); !got.Equal(finished) || status != "success" {
+		t.Fatalf("projection after event = (%v,%q), want (%v,success)", got, status, finished)
+	}
+}
+
+func TestEmitRunEventDoesNotRecordWhenInvalidationFails(t *testing.T) {
+	fs := fsys.NewFake()
+	city := "/city"
+	projectionPath := storehealth.MaintenanceProjectionPath(city)
+	fs.Files[projectionPath] = []byte(`{"last_done_at":"2026-07-01T04:00:00Z"}`)
+	fs.Errors[projectionPath] = errors.New("remove denied")
+	recorded := false
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg:      config.DoltMaintenance{Enabled: true},
+		CityPath: city,
+		FS:       fs,
+		Stderr:   io.Discard,
+		Recorder: maintenanceRecorderFunc(func(events.Event) {
+			recorded = true
+		}),
+	})
+
+	loop.emitRunEvent(MaintenanceRun{
+		StartedAt:  time.Now().Add(-time.Second),
+		FinishedAt: time.Now(),
+		Stage:      "done",
+	})
+
+	if recorded {
+		t.Fatal("event recorded after projection invalidation failed")
+	}
+}
 
 // TestRunOnce_SuccessEmitsExactlyOneDoneEvent covers the happy path:
 // a single successful runOnce must record exactly one event on the
@@ -19,9 +94,10 @@ func TestRunOnce_SuccessEmitsExactlyOneDoneEvent(t *testing.T) {
 	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h"}
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	fake := events.NewFake()
+	cityPath := t.TempDir()
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
-		CityPath: "/tmp/city",
+		CityPath: cityPath,
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
 		Recorder: fake,
@@ -39,8 +115,8 @@ func TestRunOnce_SuccessEmitsExactlyOneDoneEvent(t *testing.T) {
 	if evt.Actor != maintenanceActor {
 		t.Fatalf("event actor = %q; want %q", evt.Actor, maintenanceActor)
 	}
-	if evt.Subject != "/tmp/city" {
-		t.Fatalf("event subject = %q; want %q", evt.Subject, "/tmp/city")
+	if evt.Subject != cityPath {
+		t.Fatalf("event subject = %q; want %q", evt.Subject, cityPath)
 	}
 	var payload events.StoreMaintenanceDonePayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
@@ -61,7 +137,7 @@ func TestEmitRunEvent_FailureEmitsExactlyOneFailedEvent(t *testing.T) {
 	finished := started.Add(3 * time.Second)
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      config.DoltMaintenance{Enabled: true},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: fake,
 	})
 
@@ -110,7 +186,7 @@ func TestEmitRunEvent_SuccessPayloadFieldsMatch(t *testing.T) {
 	finished := started.Add(250 * time.Millisecond)
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      config.DoltMaintenance{Enabled: true},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Recorder: fake,
 	})
 
@@ -152,7 +228,7 @@ func TestEmitRunEvent_NilRecorderDoesNothing(t *testing.T) {
 	t.Parallel()
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      config.DoltMaintenance{Enabled: true},
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		// Recorder unset → defaults to events.Discard.
 	})
 
@@ -173,7 +249,7 @@ func TestRunOnce_LeaseContentionDoesNotEmit(t *testing.T) {
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
 		Recorder: fake,
@@ -200,7 +276,7 @@ func TestRunOnce_CanceledCtxDoesNotEmit(t *testing.T) {
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
 		Recorder: fake,

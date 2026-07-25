@@ -1,8 +1,10 @@
 package storehealth
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,8 +48,8 @@ var projectionWriteMu sync.Mutex
 // bounded history scan by SeedMaintenanceProjection when first absent; both
 // writers run only in the supervisor process (see projectionWriteMu).
 type MaintenanceProjection struct {
-	LastDoneAt   time.Time `json:"last_done_at,omitempty"`
-	LastFailedAt time.Time `json:"last_failed_at,omitempty"`
+	LastDoneAt   time.Time `json:"last_done_at"`
+	LastFailedAt time.Time `json:"last_failed_at"`
 }
 
 // MaintenanceProjectionPath returns the projection sidecar path for the
@@ -84,6 +86,27 @@ func LoadMaintenanceProjection(fs fsys.FS, cityPath string) (MaintenanceProjecti
 		}
 		return MaintenanceProjection{}, false, err
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return MaintenanceProjection{}, false, err
+	}
+	if raw == nil {
+		return MaintenanceProjection{}, false, errors.New("maintenance projection is null")
+	}
+	for _, field := range []string{"last_done_at", "last_failed_at"} {
+		value, ok := raw[field]
+		if !ok {
+			return MaintenanceProjection{}, false, fmt.Errorf("maintenance projection field %s is missing", field)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return MaintenanceProjection{}, false, fmt.Errorf("maintenance projection field %s is null", field)
+		}
+	}
+	for field := range raw {
+		if field != "last_done_at" && field != "last_failed_at" {
+			return MaintenanceProjection{}, false, fmt.Errorf("unknown maintenance projection field %s", field)
+		}
+	}
 	var p MaintenanceProjection
 	if err := json.Unmarshal(data, &p); err != nil {
 		return MaintenanceProjection{}, false, err
@@ -117,25 +140,38 @@ func writeMaintenanceProjectionLocked(fs fsys.FS, cityPath string, p Maintenance
 	return nil
 }
 
-// RecordMaintenanceEvent updates the projection sidecar for a completed
-// maintenance run: it raises the last-done or last-failed timestamp
-// (whichever status names) to ts, preserving the other field. This is the
-// append-time upkeep that keeps the projection O(1)-readable without a
-// history scan. status is "success" or "failed"; any other value, an
-// empty cityPath, or a zero ts is a no-op. A corrupt existing sidecar is
-// overwritten from the fresh event, which is authoritative-latest.
-func RecordMaintenanceEvent(fs fsys.FS, cityPath string, ts time.Time, status string) error {
+// RecordMaintenanceEvent records a completed maintenance event and updates the
+// projection with a crash-safe ordering: remove the old projection, invoke
+// record, then atomically write the new projection. Holding projectionWriteMu
+// across all three steps prevents a concurrent seed from observing the
+// deliberate gap. If removal fails, record is not called, so an event can
+// never become newer than a still-valid stale projection. If recording or the
+// final write is interrupted, the absent projection makes the next supervisor
+// status read reconstruct once from retained history.
+func RecordMaintenanceEvent(fs fsys.FS, cityPath string, ts time.Time, status string, record func()) error {
 	if cityPath == "" || ts.IsZero() {
 		return nil
 	}
 	if status != "success" && status != "failed" {
 		return nil
 	}
+
 	projectionWriteMu.Lock()
 	defer projectionWriteMu.Unlock()
+
 	p, _, err := LoadMaintenanceProjection(fs, cityPath)
 	if err != nil {
+		// A corrupt or unreadable projection is not authoritative. The current
+		// event is still safe to publish once the stale file is invalidated.
 		p = MaintenanceProjection{}
+	}
+	path := MaintenanceProjectionPath(cityPath)
+	if err := fs.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("invalidate maintenance projection: %w", err)
+	}
+
+	if record != nil {
+		record()
 	}
 	switch status {
 	case "success":
@@ -147,17 +183,26 @@ func RecordMaintenanceEvent(fs fsys.FS, cityPath string, ts time.Time, status st
 			p.LastFailedAt = ts
 		}
 	}
-	return writeMaintenanceProjectionLocked(fs, cityPath, p)
+	if err := writeMaintenanceProjectionLocked(fs, cityPath, p); err != nil {
+		return fmt.Errorf("write maintenance projection: %w", err)
+	}
+	return nil
+}
+
+// MaintenanceEventProvider is the read-only event surface required to derive
+// the maintenance projection. Full event providers and path-backed CLI readers
+// both satisfy it without giving transient status commands a write handle.
+type MaintenanceEventProvider interface {
+	List(events.Filter) ([]events.Event, error)
 }
 
 // scanMaintenanceProjection derives a projection from a full provider
-// history scan (both maintenance types, archives included). It is the
-// one-time seed path: expensive on a large archived history, run only
-// when the sidecar is first absent, never on the steady-state read path.
-func scanMaintenanceProjection(ep events.Provider) MaintenanceProjection {
+// history scan (both maintenance types, archives included). A provider error
+// aborts the scan so callers never persist an incomplete projection as truth.
+func scanMaintenanceProjection(ep MaintenanceEventProvider) (MaintenanceProjection, error) {
 	var p MaintenanceProjection
 	if ep == nil {
-		return p
+		return p, errors.New("events provider unavailable")
 	}
 	for _, spec := range []struct {
 		typ string
@@ -166,9 +211,18 @@ func scanMaintenanceProjection(ep events.Provider) MaintenanceProjection {
 		{events.StoreMaintenanceDone, &p.LastDoneAt},
 		{events.StoreMaintenanceFailed, &p.LastFailedAt},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		filter := events.Filter{Type: spec.typ}
+		var (
+			evts []events.Event
+			err  error
+		)
+		if inFlight, ok := ep.(events.InFlightProvider); ok {
+			evts, err = inFlight.ListInFlight(filter)
+		} else {
+			evts, err = ep.List(filter)
+		}
 		if err != nil {
-			continue
+			return MaintenanceProjection{}, fmt.Errorf("list %s events: %w", spec.typ, err)
 		}
 		for _, e := range evts {
 			if e.Ts.After(*spec.dst) {
@@ -176,7 +230,7 @@ func scanMaintenanceProjection(ep events.Provider) MaintenanceProjection {
 			}
 		}
 	}
-	return p
+	return p, nil
 }
 
 // maxTime returns the later of a and b.

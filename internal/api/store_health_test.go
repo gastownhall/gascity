@@ -374,6 +374,9 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 	if got.LastGCAt != "2026-04-08T00:00:00Z" {
 		t.Errorf("LastGCAt = %q, want 2026-04-08T00:00:00Z", got.LastGCAt)
 	}
+	if _, err := os.Stat(storehealth.MaintenanceProjectionPath(cityPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("status request created maintenance projection: stat error = %v", err)
+	}
 }
 
 func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {

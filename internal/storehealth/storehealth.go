@@ -9,13 +9,15 @@
 package storehealth
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -113,7 +115,7 @@ func WalkSize(path string) int64 {
 // exactly one writer process and the process-local projectionWriteMu fully
 // serializes it. Zero time and empty status when no maintenance has been
 // recorded or cityPath is empty.
-func LastMaintenance(fs fsys.FS, cityPath string, ep events.Provider) (time.Time, string) {
+func LastMaintenance(fs fsys.FS, cityPath string, ep MaintenanceEventProvider) (time.Time, string) {
 	if cityPath == "" {
 		return time.Time{}, ""
 	}
@@ -121,7 +123,11 @@ func LastMaintenance(fs fsys.FS, cityPath string, ep events.Provider) (time.Time
 		return p.Latest()
 	}
 	// Read-only fallback: derive the answer from history but do not write.
-	return scanMaintenanceProjection(ep).Latest()
+	scanned, err := scanMaintenanceProjection(ep)
+	if err != nil {
+		return time.Time{}, ""
+	}
+	return scanned.Latest()
 }
 
 // SeedMaintenanceProjection returns the latest maintenance timestamp/status
@@ -139,22 +145,53 @@ func LastMaintenance(fs fsys.FS, cityPath string, ep events.Provider) (time.Time
 // so the full scan runs at most once per city rather than on every
 // no-maintenance-events read — the failure mode that made request-time
 // scanning (and its archive-blind ListTail workaround) unacceptable.
-func SeedMaintenanceProjection(fs fsys.FS, cityPath string, ep events.Provider) (time.Time, string) {
+func SeedMaintenanceProjection(fs fsys.FS, cityPath string, ep MaintenanceEventProvider) (time.Time, string, error) {
 	if cityPath == "" {
-		return time.Time{}, ""
+		return time.Time{}, "", nil
 	}
-	if p, ok, err := LoadMaintenanceProjection(fs, cityPath); err == nil && ok {
-		return p.Latest()
+	p, ok, loadErr := LoadMaintenanceProjection(fs, cityPath)
+	if loadErr == nil && ok {
+		ts, status := p.Latest()
+		return ts, status, nil
+	}
+	if loadErr != nil {
+		// Invalidate a persistently unreadable projection before scanning. This
+		// preserves corrupt-sidecar self-healing without allowing a later,
+		// transient reconciliation read failure to overwrite a concurrent emit.
+		projectionWriteMu.Lock()
+		p, ok, err := LoadMaintenanceProjection(fs, cityPath)
+		if err == nil && ok {
+			projectionWriteMu.Unlock()
+			ts, status := p.Latest()
+			return ts, status, nil
+		}
+		if err != nil {
+			removeErr := fs.Remove(MaintenanceProjectionPath(cityPath))
+			if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				projectionWriteMu.Unlock()
+				return time.Time{}, "", fmt.Errorf("invalidate unreadable maintenance projection: %w", removeErr)
+			}
+		}
+		projectionWriteMu.Unlock()
 	}
 
-	scanned := scanMaintenanceProjection(ep)
+	scanned, err := scanMaintenanceProjection(ep)
+	if err != nil {
+		return time.Time{}, "", err
+	}
 	projectionWriteMu.Lock()
 	defer projectionWriteMu.Unlock()
-	current, _, _ := LoadMaintenanceProjection(fs, cityPath)
+	current, _, err := LoadMaintenanceProjection(fs, cityPath)
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("reconcile maintenance projection: %w", err)
+	}
 	current.LastDoneAt = maxTime(current.LastDoneAt, scanned.LastDoneAt)
 	current.LastFailedAt = maxTime(current.LastFailedAt, scanned.LastFailedAt)
-	_ = writeMaintenanceProjectionLocked(fs, cityPath, current) //nolint:errcheck // best-effort seed
-	return current.Latest()
+	if err := writeMaintenanceProjectionLocked(fs, cityPath, current); err != nil {
+		return time.Time{}, "", err
+	}
+	ts, status := current.Latest()
+	return ts, status, nil
 }
 
 const bytesPerMB = 1_000_000

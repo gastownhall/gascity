@@ -2,12 +2,16 @@ package supervisor
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
 // newTestLoop constructs a StoreMaintenanceLoop with deterministic clock
@@ -123,7 +127,7 @@ func TestRunOnce_NoOpCycleUpdatesState(t *testing.T) {
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
-		CityPath: "/tmp/city",
+		CityPath: t.TempDir(),
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
 	})
@@ -183,6 +187,60 @@ func TestRun_ShutsDownOnContextCancel(t *testing.T) {
 	case <-stopped:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Run did not exit within 500ms of context cancellation (goroutine leak)")
+	}
+}
+
+func TestCloseWaitsForProjectionWriterAndRejectsNewCycles(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg:      config.DoltMaintenance{Enabled: true, Interval: "1h"},
+		CityPath: cityPath,
+		Recorder: events.NewFake(),
+		OpenDoltBackup: func(context.Context) (DoltBackupRunner, error) {
+			close(entered)
+			<-release
+			return nil, errors.New("injected backup failure")
+		},
+	})
+
+	triggerDone := make(chan error, 1)
+	go func() {
+		_, err := loop.TriggerNow(context.Background())
+		triggerDone <- err
+	}()
+	<-entered
+
+	closeDone := make(chan struct{})
+	go func() {
+		loop.Close()
+		close(closeDone)
+	}()
+	for !loop.closed.Load() {
+		runtime.Gosched()
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while a projection-writing cycle was still in flight")
+	default:
+	}
+	if _, err := loop.TriggerNow(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("TriggerNow after Close began = %v, want context.Canceled", err)
+	}
+
+	close(release)
+	if err := <-triggerDone; err != nil {
+		t.Fatalf("in-flight TriggerNow returned %v, want recorded failed run", err)
+	}
+	<-closeDone
+	projection, ok, err := storehealth.LoadMaintenanceProjection(fsys.OSFS{}, cityPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMaintenanceProjection after Close = (%+v, %v, %v), want persisted projection", projection, ok, err)
+	}
+	if projection.LastFailedAt.IsZero() {
+		t.Fatal("Close returned before the in-flight failure was projected")
 	}
 }
 

@@ -67,10 +67,38 @@ func TestLoadMaintenanceProjectionCorrupt(t *testing.T) {
 	}
 }
 
+func TestLoadMaintenanceProjectionRejectsInvalidShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "top level", data: "null"},
+		{name: "last done", data: `{"last_done_at":null}`},
+		{name: "last failed", data: `{"last_failed_at":null}`},
+		{name: "empty object", data: `{}`},
+		{name: "missing last failed", data: `{"last_done_at":"2026-07-01T04:00:00Z"}`},
+		{name: "missing last done", data: `{"last_failed_at":"2026-07-01T04:00:00Z"}`},
+		{name: "unknown field", data: `{"last_success_at":"2026-07-01T04:00:00Z"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(MaintenanceProjectionPath(city), []byte(tc.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := LoadMaintenanceProjection(fsys.OSFS{}, city); err == nil || ok {
+				t.Fatalf("invalid sidecar: ok=%v err=%v, want ok=false err!=nil", ok, err)
+			}
+		})
+	}
+}
+
 func TestRecordMaintenanceEventCreatesAndPersists(t *testing.T) {
 	city := t.TempDir()
 	ts := time.Date(2026, 7, 1, 4, 0, 0, 0, time.UTC)
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, ts, "success"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, ts, "success", nil); err != nil {
 		t.Fatalf("RecordMaintenanceEvent: %v", err)
 	}
 	p, ok, err := LoadMaintenanceProjection(fsys.OSFS{}, city)
@@ -90,10 +118,10 @@ func TestRecordMaintenanceEventCreatesAndPersists(t *testing.T) {
 
 func TestRecordMaintenanceEventIgnoresUnknownStatusAndZero(t *testing.T) {
 	city := t.TempDir()
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, time.Now(), "bogus"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, time.Now(), "bogus", nil); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, time.Time{}, "success"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, time.Time{}, "success", nil); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if _, ok, _ := LoadMaintenanceProjection(fsys.OSFS{}, city); ok {

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -128,17 +129,32 @@ func cityStatusStorePresent(cityPath string) bool {
 // the block still reports size/row data).
 var openStoreHealthEvents = defaultOpenStoreHealthEvents
 
-func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+type readOnlyStoreHealthEvents struct {
+	path string
+}
+
+func (p readOnlyStoreHealthEvents) List(filter events.Filter) ([]events.Event, error) {
+	return events.ReadFiltered(p.path, filter)
+}
+
+func (p readOnlyStoreHealthEvents) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	return events.ReadFilteredWithInFlight(p.path, filter)
+}
+
+func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) storehealth.MaintenanceEventProvider {
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
 	providerName := os.Getenv("GC_EVENTS")
 	if providerName == "" {
 		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
 	}
-	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
-	if err != nil {
-		return nil
+	if providerName == "fake" || providerName == "fail" || strings.HasPrefix(providerName, "exec:") {
+		p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+		if err != nil {
+			return nil
+		}
+		return p
 	}
-	return p
+	return readOnlyStoreHealthEvents{path: eventsPath}
 }
 
 func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) *StoreHealth {

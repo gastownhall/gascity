@@ -2,6 +2,7 @@ package storehealth
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -223,7 +224,10 @@ func TestSeedMaintenanceProjectionAcrossTypes(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
 	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
 
-	ts, status := SeedMaintenanceProjection(fsys.OSFS{}, city, ep)
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, ep)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection: %v", err)
+	}
 	if !ts.Equal(newer) || status != "failed" {
 		t.Fatalf("SeedMaintenanceProjection = (%v,%q), want (%v,failed)", ts, status, newer)
 	}
@@ -245,7 +249,10 @@ func TestSeedMaintenanceProjectionOnlyDoneEvents(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t1, Payload: payload})
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t2, Payload: payload})
 
-	ts, status := SeedMaintenanceProjection(fsys.OSFS{}, city, ep)
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, ep)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection: %v", err)
+	}
 	if !ts.Equal(t2) || status != "success" {
 		t.Fatalf("SeedMaintenanceProjection = (%v,%q), want (%v,success)", ts, status, t2)
 	}
@@ -253,9 +260,153 @@ func TestSeedMaintenanceProjectionOnlyDoneEvents(t *testing.T) {
 
 func TestSeedMaintenanceProjectionNoEvents(t *testing.T) {
 	city := t.TempDir()
-	ts, status := SeedMaintenanceProjection(fsys.OSFS{}, city, events.NewFake())
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, events.NewFake())
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection(empty): %v", err)
+	}
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("SeedMaintenanceProjection(empty) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+}
+
+func TestSeedMaintenanceProjectionNilProviderDoesNotPersist(t *testing.T) {
+	city := t.TempDir()
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, nil)
+	if err == nil {
+		t.Fatal("SeedMaintenanceProjection(nil) error = nil, want unavailable error")
+	}
+	if !ts.IsZero() || status != "" {
+		t.Fatalf("SeedMaintenanceProjection(nil) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+	if _, ok, loadErr := LoadMaintenanceProjection(fsys.OSFS{}, city); loadErr != nil || ok {
+		t.Fatalf("nil provider persisted a projection: ok=%v err=%v", ok, loadErr)
+	}
+}
+
+func TestSeedMaintenanceProjectionListErrorDoesNotPersist(t *testing.T) {
+	city := t.TempDir()
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, events.NewFailFake())
+	if err == nil {
+		t.Fatal("SeedMaintenanceProjection error = nil, want provider error")
+	}
+	if !ts.IsZero() || status != "" {
+		t.Fatalf("SeedMaintenanceProjection(error) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+	if _, ok, loadErr := LoadMaintenanceProjection(fsys.OSFS{}, city); loadErr != nil || ok {
+		t.Fatalf("failed scan persisted a projection: ok=%v err=%v", ok, loadErr)
+	}
+}
+
+type maintenanceInFlightProvider struct {
+	*events.Fake
+	listCalls     int
+	inFlightCalls int
+}
+
+func (p *maintenanceInFlightProvider) List(events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return nil, nil
+}
+
+func (p *maintenanceInFlightProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	p.inFlightCalls++
+	return p.Fake.List(filter)
+}
+
+func TestSeedMaintenanceProjectionIncludesInFlightRotation(t *testing.T) {
+	city := t.TempDir()
+	provider := &maintenanceInFlightProvider{Fake: events.NewFake()}
+	doneAt := time.Date(2026, 6, 1, 4, 0, 0, 0, time.UTC)
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: doneAt})
+
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, provider)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection: %v", err)
+	}
+	if !ts.Equal(doneAt) || status != "success" {
+		t.Fatalf("SeedMaintenanceProjection = (%v,%q), want (%v,success)", ts, status, doneAt)
+	}
+	if provider.listCalls != 0 || provider.inFlightCalls != 2 {
+		t.Fatalf("provider calls = List:%d ListInFlight:%d, want 0 and 2", provider.listCalls, provider.inFlightCalls)
+	}
+}
+
+type failNthReadFS struct {
+	fsys.FS
+	path   string
+	failAt int
+	reads  int
+}
+
+func (f *failNthReadFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.reads++
+		if f.reads == f.failAt {
+			return nil, errors.New("transient read failure")
+		}
+	}
+	return f.FS.ReadFile(name)
+}
+
+type maintenanceListHookProvider struct {
+	*events.Fake
+	beforeFirstList func()
+}
+
+func (p *maintenanceListHookProvider) List(filter events.Filter) ([]events.Event, error) {
+	if p.beforeFirstList != nil {
+		before := p.beforeFirstList
+		p.beforeFirstList = nil
+		before()
+	}
+	return p.Fake.List(filter)
+}
+
+func TestSeedMaintenanceProjectionReconcileReadErrorPreservesConcurrentEmit(t *testing.T) {
+	city := "/city"
+	baseFS := fsys.NewFake()
+	projectionPath := MaintenanceProjectionPath(city)
+	seedFS := &failNthReadFS{FS: baseFS, path: projectionPath, failAt: 2}
+	older := time.Date(2026, 6, 1, 4, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	provider := &maintenanceListHookProvider{Fake: events.NewFake()}
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older})
+	provider.beforeFirstList = func() {
+		if err := RecordMaintenanceEvent(baseFS, city, newer, "success", nil); err != nil {
+			t.Fatalf("RecordMaintenanceEvent: %v", err)
+		}
+	}
+
+	if _, _, err := SeedMaintenanceProjection(seedFS, city, provider); err == nil {
+		t.Fatal("SeedMaintenanceProjection error = nil, want reconciliation read error")
+	}
+	projection, ok, err := LoadMaintenanceProjection(baseFS, city)
+	if err != nil || !ok {
+		t.Fatalf("load concurrent projection: ok=%v err=%v", ok, err)
+	}
+	if got, status := projection.Latest(); !got.Equal(newer) || status != "success" {
+		t.Fatalf("projection after reconciliation failure = (%v,%q), want (%v,success)", got, status, newer)
+	}
+}
+
+func TestSeedMaintenanceProjectionRepairsCorruptSidecar(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(MaintenanceProjectionPath(city)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(MaintenanceProjectionPath(city), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := events.NewFake()
+	doneAt := time.Date(2026, 6, 1, 4, 0, 0, 0, time.UTC)
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: doneAt})
+
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, provider)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection: %v", err)
+	}
+	if !ts.Equal(doneAt) || status != "success" {
+		t.Fatalf("SeedMaintenanceProjection = (%v,%q), want (%v,success)", ts, status, doneAt)
 	}
 }
 
@@ -300,7 +451,10 @@ func TestSeedMaintenanceProjectionFindsEventAfterRotation(t *testing.T) {
 		t.Fatalf("active-file tail unexpectedly found the rotated event: %+v", tail)
 	}
 
-	ts, status := SeedMaintenanceProjection(fsys.OSFS{}, city, rec)
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, rec)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection: %v", err)
+	}
 	if !ts.Equal(doneAt) || status != "success" {
 		t.Fatalf("SeedMaintenanceProjection = (%v,%q), want (%v,success) — event must survive rotation into an archive", ts, status, doneAt)
 	}
@@ -328,7 +482,10 @@ func TestSeedMaintenanceProjectionNoMatchAfterRotationSeedsOnce(t *testing.T) {
 	}
 	rec.WaitForRotations()
 
-	ts, status := SeedMaintenanceProjection(fsys.OSFS{}, city, rec)
+	ts, status, err := SeedMaintenanceProjection(fsys.OSFS{}, city, rec)
+	if err != nil {
+		t.Fatalf("SeedMaintenanceProjection(no-match): %v", err)
+	}
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("SeedMaintenanceProjection(no-match) = (%v,%q), want (zero,\"\")", ts, status)
 	}
@@ -350,7 +507,7 @@ func TestRecordMaintenanceEventUpkeep(t *testing.T) {
 	city := t.TempDir()
 
 	done := time.Date(2026, 7, 1, 4, 0, 0, 0, time.UTC)
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, done, "success"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, done, "success", nil); err != nil {
 		t.Fatalf("RecordMaintenanceEvent: %v", err)
 	}
 	ts, status := LastMaintenance(fsys.OSFS{}, city, nil)
@@ -360,10 +517,10 @@ func TestRecordMaintenanceEventUpkeep(t *testing.T) {
 
 	// A later failure supersedes; an older success does not lower it.
 	fail := done.Add(time.Hour)
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, fail, "failed"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, fail, "failed", nil); err != nil {
 		t.Fatalf("RecordMaintenanceEvent(failed): %v", err)
 	}
-	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, done.Add(-time.Hour), "success"); err != nil {
+	if err := RecordMaintenanceEvent(fsys.OSFS{}, city, done.Add(-time.Hour), "success", nil); err != nil {
 		t.Fatalf("RecordMaintenanceEvent(older success): %v", err)
 	}
 	ts, status = LastMaintenance(fsys.OSFS{}, city, nil)
