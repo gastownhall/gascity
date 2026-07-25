@@ -467,16 +467,18 @@ func TestRecoverManagedDolt_SkipsRestartWhenProbeHealthy(t *testing.T) {
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
-	oldConnCount := managedDoltConnectionCountDirectFn
+	oldConnCount := managedDoltProcessStatsDirectFn
 	t.Cleanup(func() {
 		managedDoltQueryProbeDirectFn = oldProbe
 		managedDoltReadOnlyStateDirectFn = oldReadOnly
-		managedDoltConnectionCountDirectFn = oldConnCount
+		managedDoltProcessStatsDirectFn = oldConnCount
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
+		return managedDoltProcessStats{ConnectionCount: 5, MaxConnections: 100}, nil
+	}
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
 	if err != nil {
@@ -510,18 +512,20 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnly(t *testing.T) {
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
-	oldConnCount := managedDoltConnectionCountDirectFn
+	oldConnCount := managedDoltProcessStatsDirectFn
 	oldPreflight := managedDoltPreflightCleanupFn
 	t.Cleanup(func() {
 		managedDoltQueryProbeDirectFn = oldProbe
 		managedDoltReadOnlyStateDirectFn = oldReadOnly
-		managedDoltConnectionCountDirectFn = oldConnCount
+		managedDoltProcessStatsDirectFn = oldConnCount
 		managedDoltPreflightCleanupFn = oldPreflight
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "true", nil }
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
+		return managedDoltProcessStats{ConnectionCount: 5, MaxConnections: 100}, nil
+	}
 	managedDoltPreflightCleanupFn = func(_ string) error {
 		return fmt.Errorf("stop: expected — no real dolt process")
 	}
@@ -570,12 +574,12 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnlyUnknown(t *testing.T) {
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
-	oldConnCount := managedDoltConnectionCountDirectFn
+	oldConnCount := managedDoltProcessStatsDirectFn
 	oldPreflight := managedDoltPreflightCleanupFn
 	t.Cleanup(func() {
 		managedDoltQueryProbeDirectFn = oldProbe
 		managedDoltReadOnlyStateDirectFn = oldReadOnly
-		managedDoltConnectionCountDirectFn = oldConnCount
+		managedDoltProcessStatsDirectFn = oldConnCount
 		managedDoltPreflightCleanupFn = oldPreflight
 	})
 
@@ -583,7 +587,9 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnlyUnknown(t *testing.T) {
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
 		return "unknown", errManagedDoltNoUserDatabase
 	}
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
+		return managedDoltProcessStats{ConnectionCount: 5, MaxConnections: 100}, nil
+	}
 	managedDoltPreflightCleanupFn = func(_ string) error {
 		return fmt.Errorf("stop: expected - no real dolt process")
 	}

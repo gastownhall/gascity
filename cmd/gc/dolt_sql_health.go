@@ -17,9 +17,20 @@ import (
 )
 
 type managedDoltSQLHealthReport struct {
-	QueryReady      bool
-	ReadOnly        string
-	ConnectionCount string
+	QueryReady              bool
+	ReadOnly                string
+	ConnectionCount         string
+	MaxConnections          string
+	LongRunningHandlers     string
+	GroupedJSONLongHandlers string
+	Saturated               string
+}
+
+type managedDoltProcessStats struct {
+	ConnectionCount         int
+	MaxConnections          int
+	LongRunningHandlers     int
+	GroupedJSONLongHandlers int
 }
 
 // managedDoltProbeDatabase is the legacy dedicated probe database name. The
@@ -38,12 +49,21 @@ const managedDoltProbeTable = "__gc_read_only_probe"
 var errManagedDoltNoUserDatabase = errors.New("no user database available for managed Dolt read-only probe")
 
 var (
-	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
-	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
-	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
-	managedDoltResetProbeDirectFn      = managedDoltResetProbeDirect
-	managedDoltSQLCommandTimeout       = 5 * time.Second
+	managedDoltQueryProbeDirectFn    = managedDoltQueryProbeDirect
+	managedDoltReadOnlyStateDirectFn = managedDoltReadOnlyStateDirect
+	managedDoltProcessStatsDirectFn  = managedDoltProcessStatsDirect
+	managedDoltResetProbeDirectFn    = managedDoltResetProbeDirect
+	managedDoltSQLCommandTimeout     = 5 * time.Second
 )
+
+const managedDoltLongHandlerThreshold = 5 * time.Minute
+
+var managedDoltProcessStatsQuery = fmt.Sprintf(`SELECT
+  COUNT(*) AS connection_count,
+  @@max_connections AS max_connections,
+  SUM(CASE WHEN COMMAND <> 'Sleep' AND TIME >= %d THEN 1 ELSE 0 END) AS long_running_handlers,
+  SUM(CASE WHEN COMMAND <> 'Sleep' AND TIME >= %d AND INFO LIKE '%%GROUP BY%%' AND (INFO LIKE '%%JSON_ARRAYAGG%%' OR INFO LIKE '%%JSON_OBJECT%%') THEN 1 ELSE 0 END) AS grouped_json_long_handlers
+FROM information_schema.PROCESSLIST`, int(managedDoltLongHandlerThreshold/time.Second), int(managedDoltLongHandlerThreshold/time.Second))
 
 // managedDoltSystemDatabases lists databases that the read-only probe must not
 // pick as its write target. `__gc_probe` is included so existing legacy data
@@ -202,27 +222,26 @@ func managedDoltUserDatabases(lines []string) []string {
 	return dbs
 }
 
-func managedDoltConnectionCount(host, port, user string) (string, error) {
+func managedDoltProcessStatsFor(host, port, user string) (managedDoltProcessStats, error) {
 	if managedDoltPassword() != "" {
-		return managedDoltConnectionCountDirectFn(host, port, user)
+		return managedDoltProcessStatsDirectFn(host, port, user)
 	}
-	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST")
+	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", managedDoltProcessStatsQuery)
 	if err != nil {
-		return "", err
+		return managedDoltProcessStats{}, err
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		_, parseErr := strconv.Atoi(line)
-		if parseErr == nil {
-			return line, nil
-		}
-		return "", fmt.Errorf("parse connection count %q: %w", line, parseErr)
+	records, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+	if err != nil || len(records) < 2 || len(records[len(records)-1]) != 4 {
+		return managedDoltProcessStats{}, fmt.Errorf("parse process stats from %q", strings.TrimSpace(out))
 	}
-	return "", fmt.Errorf("parse connection count from %q", strings.TrimSpace(out))
+	values := [4]int{}
+	for i, value := range records[len(records)-1] {
+		values[i], err = strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return managedDoltProcessStats{}, fmt.Errorf("parse process stat %q: %w", value, err)
+		}
+	}
+	return managedDoltProcessStats{values[0], values[1], values[2], values[3]}, nil
 }
 
 func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (managedDoltSQLHealthReport, error) {
@@ -242,8 +261,16 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 		}
 		report.ReadOnly = state
 	}
-	if count, err := managedDoltConnectionCount(host, port, user); err == nil {
-		report.ConnectionCount = count
+	if stats, err := managedDoltProcessStatsFor(host, port, user); err == nil {
+		report.ConnectionCount = strconv.Itoa(stats.ConnectionCount)
+		report.MaxConnections = strconv.Itoa(stats.MaxConnections)
+		report.LongRunningHandlers = strconv.Itoa(stats.LongRunningHandlers)
+		report.GroupedJSONLongHandlers = strconv.Itoa(stats.GroupedJSONLongHandlers)
+		// The observer is itself present in PROCESSLIST and is not a long-running
+		// handler. Saturation means all slots are occupied and all non-observer
+		// slots have been held past the threshold; a full table of age-zero
+		// probes is churn, not the long-handler wedge this check diagnoses.
+		report.Saturated = strconv.FormatBool(stats.MaxConnections > 0 && stats.ConnectionCount >= stats.MaxConnections && stats.LongRunningHandlers+1 >= stats.MaxConnections)
 	}
 	return report, nil
 }
@@ -256,6 +283,10 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 		"query_ready\ttrue",
 		"read_only\t" + report.ReadOnly,
 		"connection_count\t" + report.ConnectionCount,
+		"max_connections\t" + report.MaxConnections,
+		"long_running_handlers\t" + report.LongRunningHandlers,
+		"grouped_json_long_handlers\t" + report.GroupedJSONLongHandlers,
+		"saturated\t" + report.Saturated,
 	}
 }
 
@@ -369,23 +400,23 @@ func managedDoltSelectUserDatabasesFromConn(ctx context.Context, conn *sql.Conn)
 	return managedDoltUserDatabases(names), nil
 }
 
-func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
+func managedDoltProcessStatsDirect(host, port, user string) (managedDoltProcessStats, error) {
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
-		return "", err
+		return managedDoltProcessStats{}, err
 	}
 	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		return "", err
+		return managedDoltProcessStats{}, err
 	}
-	var count int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST").Scan(&count); err != nil {
-		return "", err
+	var stats managedDoltProcessStats
+	if err := db.QueryRowContext(ctx, managedDoltProcessStatsQuery).Scan(&stats.ConnectionCount, &stats.MaxConnections, &stats.LongRunningHandlers, &stats.GroupedJSONLongHandlers); err != nil {
+		return managedDoltProcessStats{}, err
 	}
-	return strconv.Itoa(count), nil
+	return stats, nil
 }
 
 func managedDoltResetProbe(host, port, user string) error {

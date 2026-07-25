@@ -2144,8 +2144,8 @@ case "$*" in
     echo 'database is read only' >&2
     exit 1
     ;;
-  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n812\n'
+  *"FROM information_schema.PROCESSLIST"*)
+    printf 'connection_count,max_connections,long_running_handlers,grouped_json_long_handlers\n812,1024,0,0\n'
     exit 0
     ;;
   *)
@@ -2171,6 +2171,14 @@ esac
 	}
 	if got["connection_count"] != "812" {
 		t.Fatalf("connection_count = %q, want 812", got["connection_count"])
+	}
+	for field, want := range map[string]string{
+		"max_connections": "1024", "long_running_handlers": "0",
+		"grouped_json_long_handlers": "0", "saturated": "false",
+	} {
+		if got[field] != want {
+			t.Fatalf("%s = %q, want %q", field, got[field], want)
+		}
 	}
 	invocation, err := os.ReadFile(invocationFile)
 	if err != nil {
@@ -2205,8 +2213,8 @@ case "$*" in
     printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
-  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n0\n'
+  *"FROM information_schema.PROCESSLIST"*)
+    printf 'connection_count,max_connections,long_running_handlers,grouped_json_long_handlers\n0,1024,0,0\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*)
@@ -2256,7 +2264,7 @@ case "$*" in
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
-  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
+  *"FROM information_schema.PROCESSLIST"*)
     exit 1
     ;;
   *)
@@ -2719,8 +2727,8 @@ while True:
     time.sleep(1)
 INNERPY
     ;;
-  *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n1\n'
+  *"FROM information_schema.PROCESSLIST"*)
+    printf 'connection_count,max_connections,long_running_handlers,grouped_json_long_handlers\n1,1024,0,0\n'
     ;;
   *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
@@ -2837,14 +2845,16 @@ func TestRecoverManagedDoltProcessReturnsWhenConcurrentStarterBecomesReady(t *te
 	t.Setenv("GC_DOLT_PASSWORD", "test-password")
 	oldQueryProbeDirect := managedDoltQueryProbeDirectFn
 	oldReadOnlyDirect := managedDoltReadOnlyStateDirectFn
-	oldConnectionCountDirect := managedDoltConnectionCountDirectFn
+	oldConnectionCountDirect := managedDoltProcessStatsDirectFn
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "1", nil }
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
+		return managedDoltProcessStats{ConnectionCount: 1, MaxConnections: 100}, nil
+	}
 	defer func() {
 		managedDoltQueryProbeDirectFn = oldQueryProbeDirect
 		managedDoltReadOnlyStateDirectFn = oldReadOnlyDirect
-		managedDoltConnectionCountDirectFn = oldConnectionCountDirect
+		managedDoltProcessStatsDirectFn = oldConnectionCountDirect
 	}()
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(port), "root", "warning", 3*time.Second)
@@ -2954,7 +2964,7 @@ esac
 
 	oldQueryProbeDirect := managedDoltQueryProbeDirectFn
 	oldReadOnlyDirect := managedDoltReadOnlyStateDirectFn
-	oldConnectionCountDirect := managedDoltConnectionCountDirectFn
+	oldConnectionCountDirect := managedDoltProcessStatsDirectFn
 	managedDoltQueryProbeDirectFn = func(_, port, _ string) error {
 		if port != strconv.Itoa(newPort) {
 			return fmt.Errorf("unexpected query probe port %s", port)
@@ -2967,16 +2977,16 @@ esac
 		}
 		return "false", nil
 	}
-	managedDoltConnectionCountDirectFn = func(_, port, _ string) (string, error) {
+	managedDoltProcessStatsDirectFn = func(_, port, _ string) (managedDoltProcessStats, error) {
 		if port != strconv.Itoa(newPort) {
-			return "", fmt.Errorf("unexpected connection-count probe port %s", port)
+			return managedDoltProcessStats{}, fmt.Errorf("unexpected process-stats probe port %s", port)
 		}
-		return "1", nil
+		return managedDoltProcessStats{ConnectionCount: 1, MaxConnections: 100}, nil
 	}
 	defer func() {
 		managedDoltQueryProbeDirectFn = oldQueryProbeDirect
 		managedDoltReadOnlyStateDirectFn = oldReadOnlyDirect
-		managedDoltConnectionCountDirectFn = oldConnectionCountDirect
+		managedDoltProcessStatsDirectFn = oldConnectionCountDirect
 	}()
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(oldPort), "root", "warning", 2*time.Second)

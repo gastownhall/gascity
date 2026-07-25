@@ -157,8 +157,8 @@ case "$*" in
     printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
-  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n0\n'
+  *"FROM information_schema.PROCESSLIST"*)
+    printf 'connection_count,max_connections,long_running_handlers,grouped_json_long_handlers\n0,1024,0,0\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*)
@@ -299,11 +299,11 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 
 	oldQuery := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
-	oldConnCount := managedDoltConnectionCountDirectFn
+	oldConnCount := managedDoltProcessStatsDirectFn
 	defer func() {
 		managedDoltQueryProbeDirectFn = oldQuery
 		managedDoltReadOnlyStateDirectFn = oldReadOnly
-		managedDoltConnectionCountDirectFn = oldConnCount
+		managedDoltProcessStatsDirectFn = oldConnCount
 	}()
 
 	calledQuery := false
@@ -320,9 +320,9 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 		calledReadOnly = true
 		return "false", nil
 	}
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
 		calledConnCount = true
-		return "7", nil
+		return managedDoltProcessStats{ConnectionCount: 7, MaxConnections: 100}, nil
 	}
 
 	report, err := managedDoltHealthCheck("0.0.0.0", "3311", "root", true)
@@ -345,11 +345,11 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 
 	oldQuery := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
-	oldConnCount := managedDoltConnectionCountDirectFn
+	oldConnCount := managedDoltProcessStatsDirectFn
 	defer func() {
 		managedDoltQueryProbeDirectFn = oldQuery
 		managedDoltReadOnlyStateDirectFn = oldReadOnly
-		managedDoltConnectionCountDirectFn = oldConnCount
+		managedDoltProcessStatsDirectFn = oldConnCount
 	}()
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error {
@@ -358,9 +358,9 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
 		return "unknown", errors.New("read-only probe failed")
 	}
-	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) {
-		t.Fatal("connection count should not run after read-only probe failure")
-		return "", nil
+	managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) {
+		t.Fatal("process stats should not run after read-only probe failure")
+		return managedDoltProcessStats{}, nil
 	}
 
 	_, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", true)
@@ -415,5 +415,56 @@ func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "--password\nsecret\n") {
 		t.Fatalf("dolt args missing configured password flag:\n%s", data)
+	}
+}
+
+func TestManagedDoltHealthCheckClassifiesHandlerSaturation(t *testing.T) {
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	oldQuery := managedDoltQueryProbeDirectFn
+	oldStats := managedDoltProcessStatsDirectFn
+	t.Cleanup(func() {
+		managedDoltQueryProbeDirectFn = oldQuery
+		managedDoltProcessStatsDirectFn = oldStats
+	})
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+
+	tests := []struct {
+		name  string
+		stats managedDoltProcessStats
+		want  managedDoltSQLHealthReport
+	}{
+		{
+			name:  "old grouped JSON wedge fills all slots",
+			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256, LongRunningHandlers: 256, GroupedJSONLongHandlers: 256},
+			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "256", GroupedJSONLongHandlers: "256", Saturated: "true"},
+		},
+		{
+			name:  "age-zero content hash probes are churn not saturation",
+			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256},
+			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "0", GroupedJSONLongHandlers: "0", Saturated: "false"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) { return tt.stats, nil }
+			report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", false)
+			if err != nil {
+				t.Fatalf("managedDoltHealthCheck() error = %v", err)
+			}
+			if report.ConnectionCount != tt.want.ConnectionCount || report.MaxConnections != tt.want.MaxConnections || report.LongRunningHandlers != tt.want.LongRunningHandlers || report.GroupedJSONLongHandlers != tt.want.GroupedJSONLongHandlers || report.Saturated != tt.want.Saturated {
+				t.Fatalf("managedDoltHealthCheck() = %+v, want process fields %+v", report, tt.want)
+			}
+		})
+	}
+}
+
+func TestManagedDoltProcessStatsQueryUsesBoundedAggregate(t *testing.T) {
+	for _, want := range []string{"@@max_connections", "TIME >= 300", "GROUP BY", "JSON_ARRAYAGG", "JSON_OBJECT"} {
+		if !strings.Contains(managedDoltProcessStatsQuery, want) {
+			t.Fatalf("managedDoltProcessStatsQuery missing %q: %s", want, managedDoltProcessStatsQuery)
+		}
+	}
+	if strings.Contains(managedDoltProcessStatsQuery, "JSON_ARRAYAGG(") {
+		t.Fatalf("health query must classify processlist text, not execute grouped JSON: %s", managedDoltProcessStatsQuery)
 	}
 }
