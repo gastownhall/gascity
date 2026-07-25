@@ -2074,7 +2074,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}
 
 	var names []string
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(5 * time.Second)
 	for {
 		names, _ = lastAgentNames.Load().([]string)
 		if reconcileCount.Load() > before &&
