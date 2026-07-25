@@ -94,9 +94,11 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 			sp.release(name)
 		}
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -124,20 +126,20 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 
 	sp.release(stopped[0])
 
-	select {
-	case code := <-stopDone:
-		if code != 0 {
-			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-stopDone:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("cmdStop did not finish after releasing controller shutdown")
+	}, "cmdStop to finish after releasing controller shutdown")
+	if code != 0 {
+		t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit after cmdStop")
-	}
+	awaitClose(t, done, "controller to exit after cmdStop")
 
 	if pid := controllerAlive(dir); pid != 0 {
 		t.Fatalf("controllerAlive after cmdStop = %d, want 0", pid)
@@ -198,9 +200,11 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	t.Cleanup(func() {
 		sp.release()
 		if bodyDone != nil {
+			// Reports via Errorf (not Fatal) so a stuck goroutine doesn't skip
+			// the global-state restore below; bumped to hangBudget.
 			select {
 			case <-bodyDone:
-			case <-time.After(10 * time.Second):
+			case <-time.After(hangBudget):
 				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
 			}
 		}
@@ -265,9 +269,11 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -339,9 +345,11 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		tryStopControllerWithForce(dir, io.Discard, true)
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -384,14 +392,18 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 		{name: "normal stop", ch: normalDone, out: &normalStdout, err: &normalStderr},
 		{name: "force stop", ch: forceDone, out: &forceStdout, err: &forceStderr},
 	} {
-		select {
-		case code := <-result.ch:
-			if code != 0 {
-				t.Fatalf("%s code = %d, want 0; stdout=%q stderr=%q controller stderr=%q",
-					result.name, code, result.out.String(), result.err.String(), controllerStderr.String())
+		var code int
+		awaitCond(t, func() bool {
+			select {
+			case code = <-result.ch:
+				return true
+			default:
+				return false
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s did not finish after force escalation", result.name)
+		}, fmt.Sprintf("%s to finish after force escalation", result.name))
+		if code != 0 {
+			t.Fatalf("%s code = %d, want 0; stdout=%q stderr=%q controller stderr=%q",
+				result.name, code, result.out.String(), result.err.String(), controllerStderr.String())
 		}
 	}
 }
@@ -642,13 +654,17 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	select {
-	case cmd := <-stopCommands:
-		if cmd != "stop" {
-			t.Fatalf("controller command = %q, want stop", cmd)
+	var cmd string
+	awaitCond(t, func() bool {
+		select {
+		case cmd = <-stopCommands:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatalf("controller did not receive stop command; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}, fmt.Sprintf("controller to receive stop command; stdout=%q stderr=%q", stdout.String(), stderr.String()))
+	if cmd != "stop" {
+		t.Fatalf("controller command = %q, want stop", cmd)
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
@@ -806,9 +822,11 @@ func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan
 		_ = lis.Close()
 		_ = os.Remove(sockPath)
 		_ = lock.Close()
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 	return commands
@@ -1048,9 +1066,11 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 			sp.release(name)
 		}
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -1081,20 +1101,20 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		sp.release(sess)
 	})
 
-	select {
-	case code := <-stopDone:
-		if code != 0 {
-			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-stopDone:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("cmdStop did not finish within margin budget")
+	}, "cmdStop to finish within margin budget")
+	if code != 0 {
+		t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit after cmdStop")
-	}
+	awaitClose(t, done, "controller to exit after cmdStop")
 
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
