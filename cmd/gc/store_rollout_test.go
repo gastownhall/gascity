@@ -232,7 +232,6 @@ func TestNewBeadsPreflightCheckerUsesDirectSchemaState(t *testing.T) {
 }
 
 func TestOpenControlBdStoreThroughFactorySchemaMismatchHoldsForCityAndRig(t *testing.T) {
-	t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
 	oldState := preflightDatabaseStateReaderFn
 	t.Cleanup(func() {
 		preflightDatabaseStateReaderFn = oldState
