@@ -180,6 +180,7 @@ describe('supervisor client wrapper', () => {
             recording: true,
             source: 'local_estimate',
             today: { invocations: 4, input_tokens: 100, output_tokens: 20 },
+            last_24h: { invocations: 9, input_tokens: 250, output_tokens: 60 },
             recent: { invocations: 1, input_tokens: 25, output_tokens: 5 },
             recent_window_secs: 300,
             updated_at: '2026-07-14T12:00:00Z',

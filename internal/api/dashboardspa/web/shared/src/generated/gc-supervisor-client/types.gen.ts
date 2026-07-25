@@ -8169,6 +8169,10 @@ export type UsageBody = {
      */
     available: boolean;
     /**
+     * Usage over the trailing 24 hours; a rolling window that survives the local-midnight reset of today. Omitted by servers or proxies that predate the field.
+     */
+    last_24h?: UsageTotals;
+    /**
      * RFC3339 timestamp of the oldest fact included in this bounded read.
      */
     observed_from?: string;

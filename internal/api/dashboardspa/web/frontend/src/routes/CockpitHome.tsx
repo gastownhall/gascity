@@ -16,6 +16,7 @@ import {
   Odometer,
   PipelineBar,
   RunRings,
+  StatTile,
   StatusLamps,
   type LampState,
 } from '../components/cockpit/Instruments';
@@ -91,6 +92,9 @@ export function CockpitHomePage() {
   }, [paused, usage]);
 
   const usageAvailable = usage?.available === true;
+  // last_24h is optional on the wire: a server or public-front proxy that
+  // predates the field omits it, so every read must treat it as possibly absent.
+  const last24h = usage?.last_24h;
   const usageDomainNote =
     usage === undefined
       ? undefined
@@ -100,7 +104,9 @@ export function CockpitHomePage() {
           usage.partial
             ? usage.partial_reasons?.join(' · ') || 'usage estimate is partial'
             : undefined,
-          usage.today.unpriced > 0 || usage.recent.unpriced > 0
+          usage.today.unpriced > 0 ||
+          usage.recent.unpriced > 0 ||
+          (usage.last_24h?.unpriced ?? 0) > 0
             ? 'cost excludes unpriced model calls'
             : undefined,
         ]
@@ -343,6 +349,42 @@ export function CockpitHomePage() {
           note={usageNote}
         />
       </div>
+
+      <section className="mb-8" aria-labelledby="last24h-title">
+        <h2 id="last24h-title" className="mb-2 text-label uppercase tracking-wider text-fg-faint">
+          last 24 hours
+        </h2>
+        <div
+          className="grid items-start justify-items-center gap-x-4 gap-y-4 [grid-template-columns:repeat(auto-fit,minmax(120px,1fr))]"
+          data-testid="last24h-grid"
+        >
+          <StatTile
+            label="tokens in"
+            value={
+              usageAvailable && last24h !== undefined ? formatCompact(last24h.input_tokens) : null
+            }
+          />
+          <StatTile
+            label="tokens out"
+            value={
+              usageAvailable && last24h !== undefined ? formatCompact(last24h.output_tokens) : null
+            }
+          />
+          <StatTile
+            label="model calls"
+            value={
+              usageAvailable && last24h !== undefined ? formatCount(last24h.invocations) : null
+            }
+          />
+          <StatTile
+            label="est. cost"
+            value={
+              usageAvailable && last24h !== undefined ? formatUsd(last24h.cost_usd_estimate) : null
+            }
+          />
+        </div>
+        {usageNote && <InstrumentNote>{usageNote}</InstrumentNote>}
+      </section>
 
       <section className="mb-8" aria-labelledby="run-state-title">
         <h2 id="run-state-title" className="mb-2 text-label uppercase tracking-wider text-fg-faint">

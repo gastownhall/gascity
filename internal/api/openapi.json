@@ -20946,6 +20946,10 @@
             "description": "True when this city is configured to record local usage estimates.",
             "type": "boolean"
           },
+          "last_24h": {
+            "$ref": "#/components/schemas/UsageTotals",
+            "description": "Usage over the trailing 24 hours; a rolling window that survives the local-midnight reset of today. Omitted by servers or proxies that predate the field."
+          },
           "observed_from": {
             "description": "RFC3339 timestamp of the oldest fact included in this bounded read.",
             "type": "string"
