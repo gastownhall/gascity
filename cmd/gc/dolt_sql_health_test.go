@@ -338,6 +338,37 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
 		t.Fatalf("dolt argv should not be used when GC_DOLT_PASSWORD is set: %s", string(invocation))
 	}
+
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+
+	tests := []struct {
+		name  string
+		stats managedDoltProcessStats
+		want  managedDoltSQLHealthReport
+	}{
+		{
+			name:  "old grouped JSON handlers fill every slot except the observer",
+			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256, LongRunningHandlers: 255, GroupedJSONLongHandlers: 255},
+			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "255", GroupedJSONLongHandlers: "255", Saturated: "true"},
+		},
+		{
+			name:  "age-zero content hash probes are churn not saturation",
+			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256},
+			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "0", GroupedJSONLongHandlers: "0", Saturated: "false"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) { return tt.stats, nil }
+			report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", false)
+			if err != nil {
+				t.Fatalf("managedDoltHealthCheck() error = %v", err)
+			}
+			if report.ConnectionCount != tt.want.ConnectionCount || report.MaxConnections != tt.want.MaxConnections || report.LongRunningHandlers != tt.want.LongRunningHandlers || report.GroupedJSONLongHandlers != tt.want.GroupedJSONLongHandlers || report.Saturated != tt.want.Saturated {
+				t.Fatalf("managedDoltHealthCheck() = %+v, want process fields %+v", report, tt.want)
+			}
+		})
+	}
 }
 
 func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *testing.T) {
@@ -415,46 +446,6 @@ func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "--password\nsecret\n") {
 		t.Fatalf("dolt args missing configured password flag:\n%s", data)
-	}
-}
-
-func TestManagedDoltHealthCheckClassifiesHandlerSaturation(t *testing.T) {
-	t.Setenv("GC_DOLT_PASSWORD", "secret")
-	oldQuery := managedDoltQueryProbeDirectFn
-	oldStats := managedDoltProcessStatsDirectFn
-	t.Cleanup(func() {
-		managedDoltQueryProbeDirectFn = oldQuery
-		managedDoltProcessStatsDirectFn = oldStats
-	})
-	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-
-	tests := []struct {
-		name  string
-		stats managedDoltProcessStats
-		want  managedDoltSQLHealthReport
-	}{
-		{
-			name:  "old grouped JSON handlers fill every slot except the observer",
-			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256, LongRunningHandlers: 255, GroupedJSONLongHandlers: 255},
-			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "255", GroupedJSONLongHandlers: "255", Saturated: "true"},
-		},
-		{
-			name:  "age-zero content hash probes are churn not saturation",
-			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256},
-			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "0", GroupedJSONLongHandlers: "0", Saturated: "false"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			managedDoltProcessStatsDirectFn = func(_, _, _ string) (managedDoltProcessStats, error) { return tt.stats, nil }
-			report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", false)
-			if err != nil {
-				t.Fatalf("managedDoltHealthCheck() error = %v", err)
-			}
-			if report.ConnectionCount != tt.want.ConnectionCount || report.MaxConnections != tt.want.MaxConnections || report.LongRunningHandlers != tt.want.LongRunningHandlers || report.GroupedJSONLongHandlers != tt.want.GroupedJSONLongHandlers || report.Saturated != tt.want.Saturated {
-				t.Fatalf("managedDoltHealthCheck() = %+v, want process fields %+v", report, tt.want)
-			}
-		})
 	}
 }
 

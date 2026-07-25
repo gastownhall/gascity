@@ -44,7 +44,6 @@ func stubStoreHealthEvents(t *testing.T, ep events.Provider) {
 
 func TestDefaultOpenStoreHealthEventsDoesNotCreateEventLog(t *testing.T) {
 	city := t.TempDir()
-	t.Setenv("GC_EVENTS", "")
 	eventsPath := filepath.Join(city, ".gc", "events.jsonl")
 	provider := defaultOpenStoreHealthEvents(city, io.Discard)
 	if provider == nil {
