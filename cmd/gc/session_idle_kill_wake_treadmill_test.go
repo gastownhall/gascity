@@ -1,20 +1,10 @@
-//go:build treadmillproof
-
-// Package main test: RED proof for ga-3ox7rk.
+// Package main test: fix proof for ga-3ox7rk.
 //
-// GATED BY DESIGN behind the `treadmillproof` build tag. Both tests assert the
-// POST-fix invariant, so they fail on today's code. They are excluded from
-// normal builds rather than left red because the pre-push hook runs the full Go
-// suite and a permanently-red test would block every unrelated push. An env-var
-// gate does NOT work in this package: cmd/gc's TestMain calls
-// clearProcessLiveEnvForTests(), which unsets every GC_/BEADS_/DOLT_ variable.
-//
-// Run the proof with:
-//
-//	go test -tags treadmillproof ./cmd/gc/ -run TestIdleKill
-//
-// BUILDER: delete this build tag as the first step of the fix bead and drive
-// both tests to green.
+// Both tests assert the invariant that ComputeAwakeSet's wake-reason
+// exemptions and DecideIdleTimeout's stop decision must agree: a session the
+// awake engine holds awake for assigned work, a pending reset, or a pin must
+// not be idle-killed. See ga-nllza6 for the fix (DecideIdleTimeout's
+// AssignedWork rung, internal/session/lifecycle_timers.go).
 package main
 
 import (
@@ -122,6 +112,34 @@ func TestIdleKillLadderFightsAwakeSetExemptions(t *testing.T) {
 			},
 		},
 		{
+			// Named-session variant of the same scenario (gap flagged in the
+			// bead's own notes: the cases above only exercise a plain
+			// assignee, matched via the bead.ID/bead.SessionName fast path
+			// in sessionAssigneeMatches). Here the work bead's assignee is
+			// the session's named-session identity, e.g.
+			// "ProjectWrenUnity/named-refinery" rather than the runtime
+			// session name — recognized only via sessionAssigneeMatches'
+			// bead.NamedIdentity fallback (compute_awake_set.go). Proves the
+			// same invariant holds regardless of which matching path
+			// anchored the "assigned-work" reason.
+			name:       "assigned-work/named-session-identity",
+			wantReason: "assigned-work",
+			mutate: func(in *AwakeInput) {
+				const namedIdentity = "ProjectWrenUnity/named-refinery"
+				in.SessionBeads[0].NamedIdentity = namedIdentity
+				in.NamedSessions = []AwakeNamedSession{{
+					Identity: namedIdentity,
+					Template: template,
+					Mode:     "on_demand",
+				}}
+				in.WorkBeads = []AwakeWorkBead{{
+					ID:       "ga-named-stuck1",
+					Assignee: namedIdentity,
+					Status:   "in_progress",
+				}}
+			},
+		},
+		{
 			name:       "reset-pending",
 			wantReason: "reset-pending",
 			mutate: func(in *AwakeInput) {
@@ -161,11 +179,27 @@ func TestIdleKillLadderFightsAwakeSetExemptions(t *testing.T) {
 			// Engine 2: the idle-kill ladder evaluates the same idle session.
 			// lifecycleTimerBlockerInfo yields "" here — neither HeldUntil nor
 			// QuarantinedUntil is set — and there is no pending interaction.
-			dec := sessionpkg.DecideIdleTimeout(sessionpkg.TimerFacts{
+			// AssignedWork mirrors the exact signal ComputeAwakeSet used to
+			// anchor "assigned-work" demand for this subtest: the reconciler's
+			// own gather loop (session_reconciler.go) resolves the same
+			// WorkBeads fixture into AssignedWorkHas via
+			// sessionHasAwakeAssignedWorkForReachableStore before calling
+			// DecideIdleTimeout, so setting it here reproduces that gather
+			// result instead of leaving the ladder to decide off the
+			// zero-value AssignedWorkUnknown (which can never equal
+			// TimerActionStop, making the assertion below vacuous regardless
+			// of whether the ladder's AssignedWork rung exists). reset-pending
+			// and pin are untouched: pending is on a different rung entirely,
+			// and Pinned has no TimerFacts field yet (ga-d8oqyt.2).
+			facts := sessionpkg.TimerFacts{
 				Triggered: true,
 				Blocker:   "",
 				Pending:   sessionpkg.PendingNo,
-			})
+			}
+			if tc.wantReason == "assigned-work" {
+				facts.AssignedWork = sessionpkg.AssignedWorkHas
+			}
+			dec := sessionpkg.DecideIdleTimeout(facts)
 
 			// THE INVARIANT: the two engines must agree. A session the awake
 			// engine refuses to idle-sleep must not be idle-killed, or the
