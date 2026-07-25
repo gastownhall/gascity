@@ -41,8 +41,9 @@ func newCancelAfter(n int) *countingCancelContext {
 // rotation, producing n canonical .gz archives. Archive 1 holds exactly
 // perArchive events (subjects r0-0..r0-<perArchive-1>); later archives also
 // carry the EventsRotated anchor from the prior rotation. Returns the dir.
-func seedArchives(t *testing.T, n, perArchive int) string {
+func seedArchives(t *testing.T) string {
 	t.Helper()
+	const n, perArchive = 3, 2
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
 	var stderr bytes.Buffer
@@ -69,7 +70,7 @@ func seedArchives(t *testing.T, n, perArchive int) string {
 // TestReadFilteredContextMatchesReadFilteredWhenNotCanceled is the control
 // case: a non-canceled context must not change ReadFiltered's behavior.
 func TestReadFilteredContextMatchesReadFilteredWhenNotCanceled(t *testing.T) {
-	dir := seedArchives(t, 3, 2)
+	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
 
 	want, wantErr := ReadFiltered(path, Filter{})
@@ -91,7 +92,7 @@ func TestReadFilteredContextMatchesReadFilteredWhenNotCanceled(t *testing.T) {
 // never be opened (proving the abort landed before them, not after a full
 // scan).
 func TestReadFilteredContextAbortsBetweenArchives(t *testing.T) {
-	dir := seedArchives(t, 3, 2)
+	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
 
 	// Err() call #1 fires before archive 1 is processed (not yet canceled).
@@ -117,7 +118,7 @@ func TestReadFilteredContextAbortsBetweenArchives(t *testing.T) {
 // complementary case: a context already canceled before the first archive
 // must abort with zero progress, not just fail after a full scan.
 func TestReadFilteredContextAbortsUpfrontWhenAlreadyCanceled(t *testing.T) {
-	dir := seedArchives(t, 3, 2)
+	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
 
 	ctx := newCancelAfter(1) // cancels on the very first ctx.Err() check.
@@ -132,10 +133,10 @@ func TestReadFilteredContextAbortsUpfrontWhenAlreadyCanceled(t *testing.T) {
 }
 
 // TestReadFilteredWithInFlightContextAbortsBetweenArchives is the
-// ReadFilteredWithInFlight analogue: the wrapper must propagate the same
+// ReadFilteredWithInFlight analog: the wrapper must propagate the same
 // between-archives cancellation behavior from its underlying scan.
 func TestReadFilteredWithInFlightContextAbortsBetweenArchives(t *testing.T) {
-	dir := seedArchives(t, 3, 2)
+	dir := seedArchives(t)
 	path := filepath.Join(dir, "events.jsonl")
 
 	ctx := newCancelAfter(2)
