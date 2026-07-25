@@ -598,7 +598,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	writeCityTOML(t, dir, "test", "mayor", "worker")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -609,7 +609,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -2074,7 +2074,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}
 
 	var names []string
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ = lastAgentNames.Load().([]string)
 		if reconcileCount.Load() > before &&
