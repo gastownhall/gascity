@@ -542,3 +542,43 @@ func TestPreflightCheckerRequiredSchemaVersionHold(t *testing.T) {
 		})
 	}
 }
+
+func TestPreflightCheckerDirectSchemaMismatchHoldsWhenBDContextErrors(t *testing.T) {
+	checker := testPreflightChecker(preflightMetadataJSON(`{"backend":"dolt","dolt_mode":"server","project_id":"project-1"}`), PreflightBDContext{}, "project-1")
+	checker.RequiredSchemaVersion = 53
+	checker.BDContext = func(string) (PreflightBDContext, error) {
+		return PreflightBDContext{}, errors.New("bd context unavailable")
+	}
+	checker.DatabaseState = func(string) (PreflightDatabaseState, error) {
+		return PreflightDatabaseState{SchemaVersion: 52, ProjectID: "project-1", HasProjectID: true}, nil
+	}
+
+	_, err := checker.Check("/city")
+	var hold *SchemaCompatibilityHoldError
+	if !errors.As(err, &hold) {
+		t.Fatalf("Check() error = %v, want SchemaCompatibilityHoldError", err)
+	}
+	if hold.Required != 53 || hold.Actual != 52 {
+		t.Fatalf("hold = %+v, want required=53 actual=52", hold)
+	}
+}
+
+func TestPreflightCheckerUnknownDirectSchemaPreservesBDContextErrorFallback(t *testing.T) {
+	checker := testPreflightChecker(preflightMetadataJSON(`{"backend":"dolt","dolt_mode":"server","project_id":"project-1"}`), PreflightBDContext{}, "project-1")
+	checker.RequiredSchemaVersion = 53
+	checker.BDContext = func(string) (PreflightBDContext, error) {
+		return PreflightBDContext{}, errors.New("bd context unavailable")
+	}
+	checker.DatabaseState = func(string) (PreflightDatabaseState, error) {
+		return PreflightDatabaseState{ProjectID: "project-1", HasProjectID: true}, nil
+	}
+
+	result, err := checker.Check("/city")
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	if !result.NativeEligibleViaIdentityFallback {
+		t.Fatal("NativeEligibleViaIdentityFallback = false, want context-error fallback")
+	}
+}

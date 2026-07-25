@@ -76,17 +76,21 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	}
 	bdCtx, bdCtxErr := c.readBDContext(scope)
 	dbState, dbStateErr := c.readDatabaseState(scope)
-	if dbState.SchemaVersion > 0 {
-		bdCtx.SchemaVersion = dbState.SchemaVersion
+	directSchemaKnown := dbState.SchemaVersion > 0
+	actualSchema := dbState.SchemaVersion
+	if !directSchemaKnown {
+		actualSchema = bdCtx.SchemaVersion
 	}
-	if bdCtxErr == nil &&
-		ProviderUsesBDContract(c.Provider) &&
+	if ProviderUsesBDContract(c.Provider) &&
 		metadata.Backend == "dolt" &&
-		bdCtx.Backend == "dolt" &&
+		(directSchemaKnown || bdCtxErr == nil && bdCtx.Backend == "dolt") &&
 		c.RequiredSchemaVersion > 0 &&
-		bdCtx.SchemaVersion > 0 &&
-		bdCtx.SchemaVersion != c.RequiredSchemaVersion {
-		return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Actual: bdCtx.SchemaVersion}
+		actualSchema > 0 &&
+		actualSchema != c.RequiredSchemaVersion {
+		return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Actual: actualSchema}
+	}
+	if directSchemaKnown {
+		bdCtx.SchemaVersion = dbState.SchemaVersion
 	}
 
 	checks := []PreflightCheckResult{

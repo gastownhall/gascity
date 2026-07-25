@@ -4183,6 +4183,9 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 				return nil, fmt.Errorf("unexpected command %q", name)
 			}
 			calls = append(calls, append([]string(nil), args...))
+			if slices.Equal(args, []string{"context", "--json"}) {
+				return []byte(`{"backend":"dolt","dolt_mode":"server","bd_version":"1.1.0","schema_version":53}`), nil
+			}
 			return []byte(`[]`), nil
 		}
 	}
@@ -4197,25 +4200,29 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 		t.Fatalf("stale rig control update: %v", err)
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %#v, want one update call", calls)
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %#v, want context preflight followed by update", calls)
 	}
-	if len(envs) != 1 {
-		t.Fatalf("bd envs = %#v, want one command environment", envs)
+	if len(envs) != 2 {
+		t.Fatalf("bd envs = %#v, want context and update command environments", envs)
 	}
-	if call := calls[0]; len(call) < 1 || call[0] != "update" {
-		t.Fatalf("bd call = %#v, want update ...", calls[0])
+	if !slices.Equal(calls[0], []string{"context", "--json"}) {
+		t.Fatalf("first bd call = %#v, want context --json", calls[0])
 	}
-	if slices.Contains(calls[0], "--sandbox") {
-		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[0])
+	if call := calls[1]; len(call) < 1 || call[0] != "update" {
+		t.Fatalf("second bd call = %#v, want update ...", calls[1])
 	}
-	if got := envs[0]["BD_EXPORT_AUTO"]; got != "false" {
+	if slices.Contains(calls[1], "--sandbox") {
+		t.Fatalf("bd call = %#v, write-capable control stores must not use --sandbox", calls[1])
+	}
+	updateEnv := envs[1]
+	if got := updateEnv["BD_EXPORT_AUTO"]; got != "false" {
 		t.Fatalf("BD_EXPORT_AUTO = %q, want false", got)
 	}
-	if got := envs[0]["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
+	if got := updateEnv["BEADS_DIR"]; got != filepath.Join(staleRigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want stale rig store", got)
 	}
-	if got := envs[0]["GC_RIG_ROOT"]; got != staleRigDir {
+	if got := updateEnv["GC_RIG_ROOT"]; got != staleRigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want stale rig root", got)
 	}
 }

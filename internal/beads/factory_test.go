@@ -642,6 +642,12 @@ func TestOpenStoreAtForCitySchemaMismatchHoldsWithoutOpeningStore(t *testing.T) 
 	t.Setenv(nativeForceFallbackEnv, "")
 	checker := factoryPreflightChecker("/city", factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 52})
 	checker.RequiredSchemaVersion = 53
+	checker.BDContext = func(string) (contract.PreflightBDContext, error) {
+		return contract.PreflightBDContext{}, errors.New("bd context unavailable")
+	}
+	checker.DatabaseState = func(string) (contract.PreflightDatabaseState, error) {
+		return contract.PreflightDatabaseState{SchemaVersion: 52, ProjectID: "gc-local", HasProjectID: true}, nil
+	}
 	_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        "/city",
 		Provider:         "bd",
