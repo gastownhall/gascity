@@ -5,6 +5,7 @@ import type {
   RunsCensusOutputBody,
   StatusBody,
   UsageBody,
+  UsageTotals,
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { activeCityOrThrow, getActiveCity } from '../api/cityBase';
 import { useAttentionModel } from '../attention/context';
@@ -34,6 +35,7 @@ import { SUPERVISOR_REQUEST_TIMEOUT_MS, supervisorApi } from '../supervisor/clie
 const POLL_MS = 15_000;
 const MAX_TRACE_SAMPLES = 48;
 const MAX_RINGS = 8;
+const SECONDS_PER_DAY = 86_400;
 
 export function CockpitHomePage() {
   const city = getActiveCity();
@@ -112,10 +114,22 @@ export function CockpitHomePage() {
         ]
           .filter((note): note is string => note !== undefined)
           .join(' · ') || undefined;
-  const recentTokens = usageAvailable
-    ? tokensPerMinute(usage.recent, usage.recent_window_secs)
-    : null;
-  const recentBurn = usageAvailable ? burnPerHour(usage.recent, usage.recent_window_secs) : null;
+  // Model facts mint in a burst when a session retires (the end-of-interval
+  // sweep), so the live 5-minute window is empty on a busy pipeline almost all
+  // the time. Drive the rate dials off whichever window actually has model
+  // activity: the live window when it does, else the rolling 24h average. With
+  // neither, the dials read unavailable — a structural zero would render as a
+  // real "0 / min", which it is not.
+  const rateWindow: { totals: UsageTotals; seconds: number; basis?: string } | null =
+    !usageAvailable
+      ? null
+      : usage.recent.invocations > 0
+        ? { totals: usage.recent, seconds: usage.recent_window_secs }
+        : last24h !== undefined && last24h.invocations > 0
+          ? { totals: last24h, seconds: SECONDS_PER_DAY, basis: '24 h average' }
+          : null;
+  const recentTokens = rateWindow ? tokensPerMinute(rateWindow.totals, rateWindow.seconds) : null;
+  const recentBurn = rateWindow ? burnPerHour(rateWindow.totals, rateWindow.seconds) : null;
   const activeSessionsFromStatus = status?.session_counts_detail?.active;
   const activeSessions =
     activeSessionsFromStatus ??
@@ -246,6 +260,12 @@ export function CockpitHomePage() {
   ];
 
   const usageNote = readingNote(usageReading, 'usage', usageDomainNote);
+  // Rate dials say which window they read so a 24h-average fallback never
+  // masquerades as a live-window rate.
+  const rateNote =
+    [rateWindow?.basis, usageNote]
+      .filter((note): note is string => note !== undefined)
+      .join(' · ') || undefined;
   const statusNote = readingNote(
     statusReading,
     'city status',
@@ -338,7 +358,7 @@ export function CockpitHomePage() {
           max={Math.max(1_000, (recentTokens ?? 0) * 1.25)}
           formatted={recentTokens === null ? '—' : formatCompact(recentTokens)}
           href="/activity"
-          note={usageNote}
+          note={rateNote}
         />
         <Gauge
           label="burn · $ / hr"
@@ -346,7 +366,7 @@ export function CockpitHomePage() {
           max={Math.max(10, (recentBurn ?? 0) * 1.25)}
           formatted={recentBurn === null ? '—' : formatUsd(recentBurn)}
           href="/activity"
-          note={usageNote}
+          note={rateNote}
         />
       </div>
 

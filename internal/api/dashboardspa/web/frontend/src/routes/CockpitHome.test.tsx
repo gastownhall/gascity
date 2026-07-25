@@ -42,6 +42,20 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function emptyTotals() {
+  return {
+    invocations: 0,
+    compute_facts: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    wall_seconds: 0,
+    cost_usd_estimate: 0,
+    unpriced: 0,
+  };
+}
+
 function availableRunSummary(): RunSummarySubscription {
   return {
     loading: false,
@@ -308,6 +322,69 @@ describe('<CockpitHomePage>', () => {
 
     const odometer = await screen.findByRole('status', { name: 'model calls today: 42' });
     expect(odometer.textContent).toContain('cost excludes unpriced model calls');
+  });
+
+  it('drives the rate dials off the 24h average when the live 5-minute window is empty', async () => {
+    // Facts mint in a burst at session retirement, so the 300s window is empty
+    // on a busy pipeline. Production shape: recent 0/0, last_24h 184 calls /
+    // 2.65M in / 159k out at $24 — the dials must read the 24h average, not 0.
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      recent: emptyTotals(),
+      last_24h: {
+        ...emptyTotals(),
+        invocations: 184,
+        input_tokens: 2_650_000,
+        output_tokens: 159_000,
+        cost_usd_estimate: 24.0,
+      },
+    });
+
+    render(router(<CockpitHomePage />));
+
+    // 2,809,000 tokens / 86,400 s * 60 = 1950.69/min -> "2K"; $24 / 24 h -> $1.00/hr.
+    expect(await screen.findByRole('link', { name: 'tokens / min: 2K' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: $1.00' })).toBeTruthy();
+    // Both dials honestly declare the 24h basis instead of posing as a live rate.
+    expect(screen.getAllByText('24 h average')).toHaveLength(2);
+  });
+
+  it('keeps the live 5-minute window on the dials when recent has model activity', async () => {
+    render(router(<CockpitHomePage />));
+
+    // Default mock: recent 600 tokens / 300 s * 60 = 120/min; $0.50 * 3600/300 = $6.00/hr.
+    expect(await screen.findByRole('link', { name: 'tokens / min: 120' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: $6.00' })).toBeTruthy();
+    expect(screen.queryByText('24 h average')).toBeNull();
+  });
+
+  it('marks the rate dials unavailable when neither the live nor the 24h window has activity', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      recent: emptyTotals(),
+      last_24h: emptyTotals(),
+    });
+
+    render(router(<CockpitHomePage />));
+
+    expect(await screen.findByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
+  });
+
+  it('marks the rate dials unavailable without crashing when a skewed server omits last_24h', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const { last_24h: _omitted, ...withoutLast24h } = usage;
+    mocks.cityUsage.mockResolvedValue({ ...withoutLast24h, recent: emptyTotals() });
+
+    render(router(<CockpitHomePage />));
+
+    // The cockpit still mounts...
+    expect(await screen.findByRole('status', { name: 'model calls today: 42' })).toBeTruthy();
+    // ...and the empty-live + absent-24h dials read unavailable rather than a fake 0.
+    expect(screen.getByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
   });
 
   it('publishes a response slower than the poll cadence without starting an overlapping read', async () => {
