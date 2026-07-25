@@ -61,5 +61,6 @@ gc bd close <id> --reason "done"          # Close with reason
 ## Hooks
 
 ```
+gc hook [agent]                        # Show routed work for an agent (defaults to $GC_AGENT)
 gc hook --claim                        # Atomically claim one routed work item onto this agent's hook
 ```

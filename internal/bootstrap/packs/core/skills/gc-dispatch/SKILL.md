@@ -180,7 +180,7 @@ gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
 gc convoy check                                       # MUTATING: scans ALL open convoys city-wide and auto-closes any where all children are resolved
 gc convoy stranded                                    # Find convoys with no progress
-gc convoy autoclose <id>                              # Auto-close a specific closed bead's completed convoys
+gc convoy autoclose <id>                              # Internal: invoked by bd's on_close hook to auto-close a closed bead's completed convoys
 ```
 
 Migration note:
