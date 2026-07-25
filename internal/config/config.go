@@ -1591,6 +1591,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that holds in-progress work but has stopped making
+	// progress. Because recycling a claim-holder interrupts work, set this above
+	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
+	// Duration string (e.g. "20m"). Unset/zero disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1694,6 +1700,13 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
