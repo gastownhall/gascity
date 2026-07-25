@@ -137,3 +137,57 @@ func TestArchiveOverlapsFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestArchiveOverlapsFilterSkipsArchivesOlderThanSince pins the skip-fast
+// contract for time-bounded reads: an archive whose rotation timestamp
+// predates filter.Since cannot contain a matching event, so the reader must
+// not gunzip it. Every event in an archive was appended to the live log
+// before that log was rotated, so event.Time <= info.Timestamp always holds.
+func TestArchiveOverlapsFilterSkipsArchivesOlderThanSince(t *testing.T) {
+	// Rotated 2026-05-07; the live fleet queries with ?since=5m.
+	info := archiveInfo{
+		Basename:  "events.jsonl.archive-20260507T000000Z-seq-100-200.gz",
+		Timestamp: time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC),
+		FirstSeq:  100,
+		LastSeq:   200,
+	}
+	tests := []struct {
+		name string
+		f    Filter
+		want bool
+	}{
+		{
+			name: "Since well after archive rotation is skippable",
+			f:    Filter{Since: time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)},
+			want: false,
+		},
+		{
+			name: "Since one second after archive rotation is skippable",
+			f:    Filter{Since: time.Date(2026, 5, 7, 0, 0, 1, 0, time.UTC)},
+			want: false,
+		},
+		{
+			name: "Since before archive rotation must still be read",
+			f:    Filter{Since: time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)},
+			want: true,
+		},
+		{
+			name: "Since exactly at rotation must still be read (inclusive bound)",
+			f:    Filter{Since: time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)},
+			want: true,
+		},
+		{
+			name: "zero Since is unbounded and must still be read",
+			f:    Filter{},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := archiveOverlapsFilter(info, tc.f); got != tc.want {
+				t.Errorf("archiveOverlapsFilter(Since=%v) = %v, want %v",
+					tc.f.Since, got, tc.want)
+			}
+		})
+	}
+}
