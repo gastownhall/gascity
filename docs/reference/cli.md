@@ -3293,6 +3293,12 @@ to apply a pack source that defines the rig's agent configuration;
 repeat the flag to compose multiple packs for one rig. The flag is
 compatibility sugar: gc rig add writes canonical rig imports.
 
+--include takes a pack source (local path or remote URL) or a pack name: a
+bundled pack ("gastown"), or a registry pack resolved from the cached
+registry catalogs, including a scoped community name ("owner/pack"). A "./"
+prefix or a "packs/&lt;name&gt;" token always means a directory in the city, and a
+directory that exists always wins over a pack of the same name.
+
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --default-branch to set the rig's mainline branch explicitly. By default,
@@ -3321,6 +3327,7 @@ gc rig add /path/to/project --prefix r1
 gc rig add /path/to/master-repo --default-branch master
 gc rig add ./my-project --include gastown
 gc rig add ./my-project --include packs/planner --include packs/architect
+gc rig add ./my-project --include acme/planner
 gc rig add ./my-project --include gastown --start-suspended
 gc rig add /path/to/existing --adopt
 ```
@@ -3330,7 +3337,7 @@ gc rig add /path/to/existing --adopt
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
-| `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
+| `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
