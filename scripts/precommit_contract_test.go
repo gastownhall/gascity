@@ -241,6 +241,76 @@ func TestPreCommitRegeneratesDashboardClientOnSpecChange(t *testing.T) {
 	}
 }
 
+func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
+
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
+	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
+
+	runGit("init")
+	writeTestFile(t, specPath, "{}\n")
+	writeTestFile(t, clientPath, "placeholder\n")
+	writeTestFile(t, distPath, "placeholder\n")
+	runGit("add", "-A")
+	runGit("commit", "-m", "init")
+
+	// Stage ONLY a change to openapi.json -- no .go, web-src, or doc files
+	// are staged, matching the reviewer's criterion-2 repro scenario.
+	writeTestFile(t, specPath, `{"changed":true}`+"\n")
+	runGit("add", "internal/api/openapi.json")
+
+	binDir := t.TempDir()
+	npmLog := filepath.Join(binDir, "npm.log")
+	writeExecutable(t, filepath.Join(binDir, "npm"), `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "`+npmLog+`"
+exit 0
+`)
+	// Stub make: this test verifies the control-flow reaches the dashboard
+	// block at all (the reviewer's criterion-2 gap), not the real
+	// dashboard-check/dashboard-smoke targets, which need the full repo.
+	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
+exit 0
+`)
+
+	cmd := exec.Command("bash", hookPath)
+	cmd.Dir = tmpRepo
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-commit hook failed: %v\n%s", err, out)
+	}
+
+	logContent, readErr := os.ReadFile(npmLog)
+	if readErr != nil {
+		t.Fatalf("pre-commit hook exited early and never invoked npm when only internal/api/openapi.json was "+
+			"staged -- the go/web/docs early guard must not skip a spec-only commit (hook output: %s)", out)
+	}
+	if !strings.Contains(string(logContent), "generate:client") {
+		t.Fatalf("pre-commit hook must run 'npm run generate:client' when only internal/api/openapi.json is "+
+			"staged, got npm invocations:\n%s", logContent)
+	}
+}
+
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 	repoRoot := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
