@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
@@ -338,6 +339,65 @@ func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
 		t.Errorf("expected stash-error log; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+// TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock is a real-git
+// regression test for the repo-global stash aliasing bug (ga-pyp2oh):
+// `git stash list` reads refs/stash from the shared git admin dir, so its
+// result is identical for every worktree of the same repo regardless of
+// which worktree's own state is probed. fakeGitProbe's hasStashes field is
+// set per simulated worktree, which cannot express this aliasing — this
+// test exercises the real git.New probe against a real repo instead.
+func TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	rigRoot := t.TempDir()
+	runGit(t, rigRoot, "clone", bare, ".")
+	runGit(t, rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, rigRoot, "config", "user.name", "Test")
+	runGit(t, rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, rigRoot, "push", "origin", "HEAD")
+
+	// A stash rooted at the rig root — simulating some unrelated agent
+	// session having stashed work anywhere in the shared repo.
+	if err := os.WriteFile(filepath.Join(rigRoot, "wip.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write wip file: %v", err)
+	}
+	runGit(t, rigRoot, "add", "wip.txt")
+	runGit(t, rigRoot, "stash")
+
+	cityPath := t.TempDir()
+	workerDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecat-1")
+	if err := os.MkdirAll(filepath.Dir(workerDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktree parent: %v", err)
+	}
+	runGit(t, rigRoot, "worktree", "add", "-b", "polecat-1-branch", workerDir)
+
+	// Sanity: prove the aliasing precondition. The stash created at
+	// rigRoot must be visible from workerDir too, or this test proves
+	// nothing about the bug.
+	if has, err := git.New(workerDir).HasStashesResult(); err != nil || !has {
+		t.Fatalf("test setup invalid: rig-root stash not visible from workerDir (has=%v err=%v) — aliasing precondition not met", has, err)
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+	session := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"worker_dir":   workerDir,
+			"template":     "demo/polecat",
+			"session_name": "demo/polecat-1",
+		},
+	}
+
+	var stderr bytes.Buffer
+	if !pruneAgentHomeWorktreeIfSafe(session, cityPath, cfg, &stderr) {
+		t.Fatalf("prune returned false for a clean, fully-pushed worktree merely because an unrelated stash exists elsewhere in the shared repo; stderr=%s", stderr.String())
+	}
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Errorf("workerDir %s should have been removed; stat err=%v", workerDir, err)
+	}
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {

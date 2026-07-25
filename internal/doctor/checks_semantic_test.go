@@ -821,6 +821,71 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	}
 }
 
+// TestNestedWorktreePruneCheck_UnrelatedStashDoesNotBlock is a real-git
+// regression test for the repo-global stash aliasing bug (ga-pyp2oh):
+// `git stash list` reads refs/stash from the shared git admin dir, so its
+// result is identical for every worktree of the same repo regardless of
+// which worktree's own state is probed. fakeGitWorktree's stashed map is
+// keyed per simulated path, which cannot express this aliasing — this
+// test exercises the real git.New probe against a real repo instead.
+func TestNestedWorktreePruneCheck_UnrelatedStashDoesNotBlock(t *testing.T) {
+	bare := t.TempDir()
+	runGitForRigRootBranchTest(t, bare, "init", "--bare")
+
+	rigRoot := t.TempDir()
+	runGitForRigRootBranchTest(t, rigRoot, "clone", bare, ".")
+	runGitForRigRootBranchTest(t, rigRoot, "config", "user.email", "test@test.com")
+	runGitForRigRootBranchTest(t, rigRoot, "config", "user.name", "Test")
+	runGitForRigRootBranchTest(t, rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGitForRigRootBranchTest(t, rigRoot, "push", "origin", "HEAD")
+
+	// A stash rooted at the rig root — simulating some unrelated agent
+	// session having stashed work anywhere in the shared repo.
+	if err := os.WriteFile(filepath.Join(rigRoot, "wip.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write wip file: %v", err)
+	}
+	runGitForRigRootBranchTest(t, rigRoot, "add", "wip.txt")
+	runGitForRigRootBranchTest(t, rigRoot, "stash")
+
+	cityPath := t.TempDir()
+	home := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecat-1")
+	if err := os.MkdirAll(filepath.Dir(home), 0o755); err != nil {
+		t.Fatalf("mkdir agent home parent: %v", err)
+	}
+	runGitForRigRootBranchTest(t, rigRoot, "worktree", "add", "-b", "home-branch", home)
+
+	taskClean := filepath.Join(home, "worktrees", "task-clean")
+	if err := os.MkdirAll(filepath.Dir(taskClean), 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree parent: %v", err)
+	}
+	runGitForRigRootBranchTest(t, home, "worktree", "add", "-b", "task-clean-branch", taskClean)
+
+	// Sanity: prove the aliasing precondition. The stash created at
+	// rigRoot must be visible from taskClean too, or this test proves
+	// nothing about the bug.
+	if has, err := git.New(taskClean).HasStashesResult(); err != nil || !has {
+		t.Fatalf("test setup invalid: rig-root stash not visible from taskClean (has=%v err=%v) — aliasing precondition not met", has, err)
+	}
+
+	c := NewNestedWorktreePruneCheck(config.DoctorConfig{})
+	c.Run(&CheckContext{CityPath: cityPath})
+
+	taskCleanNorm := pathutil.NormalizePathForCompare(taskClean)
+	var found *nestedWorktreeFinding
+	for i := range c.findings {
+		if c.findings[i].path == taskCleanNorm {
+			found = &c.findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no finding for taskClean %s; findings=%+v", taskCleanNorm, c.findings)
+	}
+	if !found.safeToRm {
+		t.Errorf("taskClean should be safeToRm despite an unrelated stash elsewhere in the shared repo; reason=%q", found.reason)
+	}
+}
+
 func TestNestedWorktreePruneCheck_PruneTrueEscalatesSeverity(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "polecat-1")
