@@ -42,6 +42,7 @@ duration-range
 provider-parity
 formula-requirements
 named-always-min-conflict
+scale-check-work-query-correspondence
 instructions-file
 service-secrets-perms
 skill-collision
