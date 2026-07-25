@@ -61,10 +61,20 @@ func paginationSuspect(name string) bool {
 var grandfatheredDialects = map[string][]string{
 	"GET /v0/city/{cityName}/agent/{base}/output":       {"before", "tail"},
 	"GET /v0/city/{cityName}/agent/{dir}/{base}/output": {"before", "tail"},
-	"GET /v0/city/{cityName}/events/stream":             {"after_seq"},
-	"GET /v0/events/stream":                             {"after_cursor"},
-	"GET /v0/city/{cityName}/extmsg/transcript":         {"after_sequence", "limit"},
-	"GET /v0/city/{cityName}/orders/history":            {"before", "limit"},
+	// Events list. Owner sign-off 2026-07-25 via architecture bead ga-dm3unq
+	// (gascity/architect, closed/decided): after_seq is a sequence-number
+	// LOWER-BOUND FILTER (matches events.Filter.AfterSeq, "Seq > after_seq"),
+	// not a replacement page-boundary — cursor+limit remain the actual keyset
+	// walk on this endpoint, unchanged. The bead specifies the field to
+	// mirror EventStreamInput.AfterSeq exactly, the identical dialect already
+	// grandfathered on the sibling GET .../events/stream entry below, "so the
+	// builder bead needs no further architecture judgment calls." Wired to
+	// the existing, already-tested archiveOverlapsFilter skip path.
+	"GET /v0/city/{cityName}/events":            {"after_seq", "cursor", "limit"},
+	"GET /v0/city/{cityName}/events/stream":     {"after_seq"},
+	"GET /v0/events/stream":                     {"after_cursor"},
+	"GET /v0/city/{cityName}/extmsg/transcript": {"after_sequence", "limit"},
+	"GET /v0/city/{cityName}/orders/history":    {"before", "limit"},
 	// Session structured-transcript SSE stream. Owner sign-off 2026-07-18:
 	// this is a live Server-Sent-Events reconnection endpoint, not a keyset
 	// list walk. It resumes via the Last-Event-ID header, with after_cursor as

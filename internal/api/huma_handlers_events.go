@@ -34,8 +34,9 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	}
 
 	filter := events.Filter{
-		Type:  input.Type,
-		Actor: input.Actor,
+		Type:     input.Type,
+		Actor:    input.Actor,
+		AfterSeq: input.resolveAfterSeq(),
 	}
 	if d, ok, err := parseEventSince(input.Since); err != nil {
 		return nil, err

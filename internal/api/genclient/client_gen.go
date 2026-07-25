@@ -8999,6 +8999,9 @@ type GetV0CityByCityNameEventsParams struct {
 
 	// Since Filter events since duration ago (Go duration string, e.g. 5m).
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
+
+	// AfterSeq Only return events with sequence number greater than this value. Omit to include events from the beginning (0 = no filter).
+	AfterSeq *string `form:"after_seq,omitempty" json:"after_seq,omitempty"`
 }
 
 // EmitEventParams defines parameters for EmitEvent.
@@ -24471,6 +24474,22 @@ func NewGetV0CityByCityNameEventsRequest(server string, cityName string, params 
 		if params.Since != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "since", *params.Since, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AfterSeq != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_seq", *params.AfterSeq, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
