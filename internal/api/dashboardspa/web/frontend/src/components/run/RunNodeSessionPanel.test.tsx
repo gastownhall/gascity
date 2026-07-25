@@ -49,6 +49,34 @@ describe('RunNodeSessionPanel', () => {
     expect(screen.getByText('review-bead-a2')).toBeTruthy();
     expect(screen.queryByText('review-bead-a1')).toBeNull();
   });
+
+  it('does not crash and shows graceful copy for an attached session with no link (public-shield shape)', () => {
+    // The public floor emits `session: { kind: 'attached' }` with no link — the
+    // shape that previously threw `undefined.sessionId` in the ErrorBoundary.
+    // The shared type now models this redacted shape directly, so the fixture is
+    // type-correct without casting around the contract.
+    const node = attachedNode({ kind: 'attached' });
+
+    expect(() => render(<RunNodeSessionPanel node={node} visible />)).not.toThrow();
+
+    expect(screen.getByText('Session transcript is unavailable for this node.')).toBeTruthy();
+    // A null id must never reach the transcript fetch.
+    expect(mockFetchSupervisorSessionTranscript).not.toHaveBeenCalled();
+  });
+
+  it('renders the transcript path for an attached session that carries a link', () => {
+    const node = attachedNode({
+      kind: 'attached',
+      streamable: false,
+      link: { sessionId: 'gc-session-review', sessionName: 'review-pipeline', assignee: 'codex' },
+    });
+
+    render(<RunNodeSessionPanel node={node} visible />);
+
+    expect(mockFetchSupervisorSessionTranscript).toHaveBeenCalledWith('gc-session-review');
+    expect(screen.getByText('Fetching transcript.')).toBeTruthy();
+    expect(screen.queryByText('Session transcript is unavailable for this node.')).toBeNull();
+  });
 });
 
 function attempt(value: number, status: RunNodeStatus): RunExecutionInstance {
