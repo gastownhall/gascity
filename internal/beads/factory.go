@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -125,6 +126,10 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 
 	result, err := opts.PreflightChecker.Check(opts.ScopeRoot)
 	if err != nil {
+		var schemaHold *contract.SchemaCompatibilityHoldError
+		if errors.As(err, &schemaHold) {
+			return StoreOpenResult{}, fmt.Errorf("open beads store for %s: %w", opts.ScopeRoot, schemaHold)
+		}
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,

@@ -245,6 +245,32 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(nowMS)
 
+	inventory := &cobra.Command{
+		Use:    "inventory",
+		Short:  "Inventory managed Dolt databases without modifying them",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			rows, err := managedDoltInventory(hostText, portText, userText)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state inventory: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			for _, line := range managedDoltInventoryFields(rows) {
+				if _, err := fmt.Fprintln(stdout, line); err != nil {
+					fmt.Fprintf(stderr, "gc dolt-state inventory: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
+			return nil
+		},
+	}
+	inventory.Flags().StringVar(&hostText, "host", "", "Dolt host")
+	inventory.Flags().StringVar(&portText, "port", "", "Dolt port")
+	inventory.Flags().StringVar(&userText, "user", "", "Dolt user")
+	_ = inventory.MarkFlagRequired("port")
+	cmd.AddCommand(inventory)
+
 	queryProbe := &cobra.Command{
 		Use:    "query-probe",
 		Short:  "Probe managed Dolt SQL readiness",

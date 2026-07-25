@@ -18,6 +18,18 @@ type PreflightBDContext struct {
 	SchemaVersion int
 }
 
+// SchemaCompatibilityHoldError signals that a known store schema is incompatible
+// with the schema required by this gc build. Callers must hold rather than fall
+// back to a store implementation that would access the same incompatible data.
+type SchemaCompatibilityHoldError struct {
+	Required int
+	Actual   int
+}
+
+func (e *SchemaCompatibilityHoldError) Error() string {
+	return fmt.Sprintf("beads schema compatibility hold: required schema %d, found %d", e.Required, e.Actual)
+}
+
 // PreflightChecker evaluates whether a beads scope may use native storage.
 type PreflightChecker struct {
 	// FS reads .beads/metadata.json. A nil FS uses fsys.OSFS.
@@ -38,6 +50,9 @@ type PreflightChecker struct {
 	// _project_id beadslib still verifies at open time — refusing to connect, and
 	// falling back to BdStore, on mismatch. Nil defaults to no deferral (Warn).
 	DeferIdentityToNativeOpen func(scope string) bool
+	// RequiredSchemaVersion is the exact schema supported by this build. Zero
+	// preserves legacy behavior and performs no exact-version hold.
+	RequiredSchemaVersion int
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
 	BeadsLibraryVersion string
@@ -50,6 +65,15 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	bdCtx, bdCtxErr := c.readBDContext(scope)
+	if bdCtxErr == nil &&
+		ProviderUsesBDContract(c.Provider) &&
+		metadata.Backend == "dolt" &&
+		bdCtx.Backend == "dolt" &&
+		c.RequiredSchemaVersion > 0 &&
+		bdCtx.SchemaVersion > 0 &&
+		bdCtx.SchemaVersion != c.RequiredSchemaVersion {
+		return PreflightResult{}, &SchemaCompatibilityHoldError{Required: c.RequiredSchemaVersion, Actual: bdCtx.SchemaVersion}
+	}
 
 	checks := []PreflightCheckResult{
 		c.checkProvider(),

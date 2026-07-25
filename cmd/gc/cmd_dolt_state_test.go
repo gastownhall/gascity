@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -3029,5 +3031,64 @@ func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	path := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
+	}
+}
+
+func TestDoltStateInventoryCmdReportsReadOnlyInventory(t *testing.T) {
+	original := managedDoltInventoryQueryFn
+	t.Cleanup(func() { managedDoltInventoryQueryFn = original })
+	var queries []string
+	managedDoltInventoryQueryFn = func(_ context.Context, query string) (string, error) {
+		queries = append(queries, query)
+		switch {
+		case query == "SHOW DATABASES":
+			return "Database\nalpha\nmysql\nbeta\n", nil
+		case strings.Contains(query, "information_schema.TABLES") && strings.Contains(query, "alpha"):
+			return "schema_table,content_hash\n1,1\n", nil
+		case strings.Contains(query, "information_schema.TABLES") && strings.Contains(query, "beta"):
+			return "schema_table,content_hash\n0,0\n", nil
+		case strings.Contains(query, "MAX(version)"):
+			return "schema_version\n53\n", nil
+		case strings.Contains(query, "alpha") && strings.Contains(query, "dolt_remotes"):
+			return "name\nbackup\norigin\n", nil
+		case strings.Contains(query, "beta") && strings.Contains(query, "dolt_remotes"):
+			return "name\n", nil
+		case strings.Contains(query, "alpha") && strings.Contains(query, "dolt_remote_branches"):
+			return "name,remote\nrelease,backup\nmain,origin\n", nil
+		case strings.Contains(query, "beta") && strings.Contains(query, "dolt_remote_branches"):
+			return "name,remote\n", nil
+		default:
+			return "", fmt.Errorf("unexpected query %q", query)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "inventory", "--port", "3311"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	want := "database\talpha\tschema_version\t53\tcontent_hash\tpresent\tremotes\tbackup,origin\tremote_branches\tbackup/release,origin/main\torigin_main\tpresent\n" + "database\tbeta\tschema_version\tabsent\tcontent_hash\tabsent\tremotes\tabsent\tremote_branches\tabsent\torigin_main\tabsent\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	for _, query := range queries {
+		upper := strings.ToUpper(strings.TrimSpace(query))
+		if !strings.HasPrefix(upper, "SHOW ") && !strings.HasPrefix(upper, "SELECT ") {
+			t.Fatalf("inventory used non-read-only query %q", query)
+		}
+	}
+}
+
+func TestManagedDoltInventoryHonorsOverallCancellation(t *testing.T) {
+	original := managedDoltInventoryQueryFn
+	t.Cleanup(func() { managedDoltInventoryQueryFn = original })
+	managedDoltInventoryQueryFn = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := managedDoltInventoryContext(ctx, "", "3311", "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("managedDoltInventoryContext() error = %v, want context.Canceled", err)
 	}
 }

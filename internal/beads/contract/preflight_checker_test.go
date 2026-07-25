@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -497,6 +498,46 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 			}
 			if got.State != tt.want {
 				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+func TestPreflightCheckerRequiredSchemaVersionHold(t *testing.T) {
+	tests := []struct {
+		name            string
+		provider        string
+		metadataBackend string
+		contextBackend  string
+		schema          int
+		wantHold        bool
+	}{
+		{name: "schema 52 is held", provider: "bd", metadataBackend: "dolt", contextBackend: "dolt", schema: 52, wantHold: true},
+		{name: "schema 53 is accepted", provider: "bd", metadataBackend: "dolt", contextBackend: "dolt", schema: 53},
+		{name: "unknown schema is not held", provider: "bd", metadataBackend: "dolt", contextBackend: "dolt", schema: 0},
+		{name: "file provider is not held", provider: "file", metadataBackend: "dolt", contextBackend: "dolt", schema: 52},
+		{name: "non dolt metadata is not held", provider: "bd", metadataBackend: "postgres", contextBackend: "dolt", schema: 52},
+		{name: "non dolt context is not held", provider: "bd", metadataBackend: "dolt", contextBackend: "postgres", schema: 52},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := preflightMetadataJSON(fmt.Sprintf(`{"backend":%q,"dolt_mode":"server","project_id":"project-1"}`, tt.metadataBackend))
+			checker := testPreflightChecker(metadata, PreflightBDContext{Backend: tt.contextBackend, DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: tt.schema}, "project-1")
+			checker.Provider = tt.provider
+			if tt.schema == 0 {
+				checker.BDContext = func(string) (PreflightBDContext, error) {
+					return PreflightBDContext{Backend: tt.contextBackend, DoltMode: "server", BDVersion: "1.1.0"}, nil
+				}
+			}
+			checker.RequiredSchemaVersion = 53
+			_, err := checker.Check("/city")
+			var hold *SchemaCompatibilityHoldError
+			gotHold := errors.As(err, &hold)
+			if gotHold != tt.wantHold {
+				t.Fatalf("Check() error = %v, typed hold = %t, want %t", err, gotHold, tt.wantHold)
+			}
+			if gotHold && (hold.Required != 53 || hold.Actual != 52) {
+				t.Fatalf("hold = %+v, want required=53 actual=52", hold)
 			}
 		})
 	}

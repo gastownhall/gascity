@@ -10,10 +10,13 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+const beadsV110SchemaVersion = 53
+
 func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightChecker {
 	return contract.PreflightChecker{
 		FS:                        fsys.OSFS{},
 		Provider:                  provider,
+		RequiredSchemaVersion:     beadsV110SchemaVersion,
 		BDContext:                 preflightBDContextReader(cityPath),
 		DatabaseProjectID:         preflightDatabaseProjectIDReader(cityPath),
 		DeferIdentityToNativeOpen: preflightIdentityDeferredReader(cityPath),

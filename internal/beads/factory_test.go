@@ -637,3 +637,26 @@ func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 		t.Fatalf("stamped mode = %q, want require", mode)
 	}
 }
+
+func TestOpenStoreAtForCitySchemaMismatchHoldsWithoutOpeningStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	checker := factoryPreflightChecker("/city", factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 52})
+	checker.RequiredSchemaVersion = 53
+	_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        "/city",
+		Provider:         "bd",
+		PreflightChecker: checker,
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called during schema compatibility hold")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called during schema compatibility hold")
+			return nil, nil
+		},
+	})
+	var hold *contract.SchemaCompatibilityHoldError
+	if !errors.As(err, &hold) {
+		t.Fatalf("OpenStoreAtForCity() error = %v, want SchemaCompatibilityHoldError", err)
+	}
+}
