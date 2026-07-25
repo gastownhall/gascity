@@ -212,7 +212,7 @@ func (p *gatedStartProvider) release(name string) {
 func (p *gatedStartProvider) waitForStarts(t *testing.T, n int) []string {
 	t.Helper()
 	var names []string
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(hangBudget)
 	for len(names) < n {
 		select {
 		case name := <-p.startSignals:
