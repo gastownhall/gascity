@@ -351,16 +351,23 @@ func computeWorktreeAge(worktreePath string) (age time.Duration, ok bool) {
 // beads — in any molecule — whose gc.work_dir or legacy work_dir metadata
 // still points at that path (FR-1/FR-2/FR-3). Terminal status is decided by
 // convoycore.IsTerminalStatus, not a bare "!= closed" check, so a tombstoned
-// reference does not veto. A query error is returned as-is; the caller must
-// fail closed and protect every candidate in the rig (NFR-1).
+// reference does not veto. Path matching is symlink/alias-normalized on both
+// sides via pathutil.NormalizePathForCompare, matching the liveness gate, so a
+// metadata path recorded in a different-but-equivalent form still vetoes.
+// A query error is returned as-is; the caller must fail closed and protect
+// every candidate in the rig (NFR-1).
 func scanBorrowVetoReferences(store beads.Store, candidates []reapCandidate) (map[string][]string, error) {
-	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	// The query excludes closed beads at the store level (IsTerminalStatus
+	// would discard them anyway) and skips label hydration this scan never
+	// reads. TierBoth is explicit so the reaper's safety contract does not
+	// depend on a wrapping store expanding the default tier for it.
+	all, err := store.List(beads.ListQuery{AllowScan: true, SkipLabels: true, TierMode: beads.TierBoth})
 	if err != nil {
 		return nil, err
 	}
-	paths := make(map[string]bool, len(candidates))
+	byNorm := make(map[string]string, len(candidates)) // normalized -> raw candidate path
 	for _, c := range candidates {
-		paths[c.worktreePath] = true
+		byNorm[pathutil.NormalizePathForCompare(c.worktreePath)] = c.worktreePath
 	}
 	refs := make(map[string][]string)
 	for _, b := range all {
@@ -368,8 +375,12 @@ func scanBorrowVetoReferences(store beads.Store, candidates []reapCandidate) (ma
 			continue
 		}
 		for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
-			if p, ok := b.Metadata[key]; ok && paths[p] {
-				refs[p] = append(refs[p], b.ID)
+			p := strings.TrimSpace(b.Metadata[key])
+			if p == "" {
+				continue
+			}
+			if raw, hit := byNorm[pathutil.NormalizePathForCompare(p)]; hit {
+				refs[raw] = append(refs[raw], b.ID)
 				break
 			}
 		}
