@@ -60,7 +60,7 @@ const managedDoltLongHandlerThreshold = 5 * time.Minute
 
 var managedDoltProcessStatsQuery = fmt.Sprintf(`SELECT
   COUNT(*) AS connection_count,
-  @@max_connections AS max_connections,
+  MAX(@@max_connections) AS max_connections,
   SUM(CASE WHEN COMMAND <> 'Sleep' AND TIME >= %d THEN 1 ELSE 0 END) AS long_running_handlers,
   SUM(CASE WHEN COMMAND <> 'Sleep' AND TIME >= %d AND INFO LIKE '%%GROUP BY%%' AND (INFO LIKE '%%JSON_ARRAYAGG%%' OR INFO LIKE '%%JSON_OBJECT%%') THEN 1 ELSE 0 END) AS grouped_json_long_handlers
 FROM information_schema.PROCESSLIST`, int(managedDoltLongHandlerThreshold/time.Second), int(managedDoltLongHandlerThreshold/time.Second))

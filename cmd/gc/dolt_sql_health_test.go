@@ -434,9 +434,9 @@ func TestManagedDoltHealthCheckClassifiesHandlerSaturation(t *testing.T) {
 		want  managedDoltSQLHealthReport
 	}{
 		{
-			name:  "old grouped JSON wedge fills all slots",
-			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256, LongRunningHandlers: 256, GroupedJSONLongHandlers: 256},
-			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "256", GroupedJSONLongHandlers: "256", Saturated: "true"},
+			name:  "old grouped JSON handlers fill every slot except the observer",
+			stats: managedDoltProcessStats{ConnectionCount: 256, MaxConnections: 256, LongRunningHandlers: 255, GroupedJSONLongHandlers: 255},
+			want:  managedDoltSQLHealthReport{ConnectionCount: "256", MaxConnections: "256", LongRunningHandlers: "255", GroupedJSONLongHandlers: "255", Saturated: "true"},
 		},
 		{
 			name:  "age-zero content hash probes are churn not saturation",
@@ -459,7 +459,7 @@ func TestManagedDoltHealthCheckClassifiesHandlerSaturation(t *testing.T) {
 }
 
 func TestManagedDoltProcessStatsQueryUsesBoundedAggregate(t *testing.T) {
-	for _, want := range []string{"@@max_connections", "TIME >= 300", "GROUP BY", "JSON_ARRAYAGG", "JSON_OBJECT"} {
+	for _, want := range []string{"MAX(@@max_connections) AS max_connections", "TIME >= 300", "GROUP BY", "JSON_ARRAYAGG", "JSON_OBJECT"} {
 		if !strings.Contains(managedDoltProcessStatsQuery, want) {
 			t.Fatalf("managedDoltProcessStatsQuery missing %q: %s", want, managedDoltProcessStatsQuery)
 		}
