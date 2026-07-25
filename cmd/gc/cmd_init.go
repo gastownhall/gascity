@@ -365,9 +365,16 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				out = io.Discard
 			}
 			mode := "default"
+			hostedEndpoint := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
+				Host:      doltHostFlag,
+				Port:      doltPortFlag,
+				User:      doltUserFlag,
+				Database:  doltDatabaseFlag,
+				ProjectID: doltProjectIDFlag,
+			}, os.Getenv)
 			if fromFlag != "" {
 				mode = "from"
-				code := cmdInitFromDirWithOptionsInternal(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness, noStart)
+				code := cmdInitFromDirWithOptionsInternal(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness, noStart, hostedEndpoint)
 				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
 			if fileFlag != "" {
@@ -375,14 +382,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart)
 				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
 			}
-			hosted := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
-				Host:      doltHostFlag,
-				Port:      doltPortFlag,
-				User:      doltUserFlag,
-				Database:  doltDatabaseFlag,
-				ProjectID: doltProjectIDFlag,
-			}, os.Getenv)
-			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted, skipProviderReadiness)
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hostedEndpoint, skipProviderReadiness)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
@@ -423,9 +423,11 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
+	// --dolt-* pins an external Dolt endpoint and is compatible with --from:
+	// the copied template is initialized against the supplied endpoint. Only
+	// --file (which supplies a complete city.toml verbatim) remains exclusive.
 	for _, doltFlag := range []string{"dolt-host", "dolt-port", "dolt-user", "dolt-database", "dolt-project-id"} {
 		cmd.MarkFlagsMutuallyExclusive(doltFlag, "file")
-		cmd.MarkFlagsMutuallyExclusive(doltFlag, "from")
 	}
 	_ = cmd.Flags().MarkHidden("provider")
 	return cmd
@@ -1725,7 +1727,7 @@ func resolveCityName(nameOverride, sourceName, cityPath string) string {
 	return cityinit.ResolveCityName(nameOverride, sourceName, cityPath)
 }
 
-func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
+func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -1749,7 +1751,7 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		return 1
 	}
 
-	return doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart)
+	return doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
 // doInitFromDir copies an example city directory to a new city path,
@@ -1760,10 +1762,10 @@ func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 }
 
 func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
-	return doInitFromDirWithOptionsFSInternal(fs, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, false)
+	return doInitFromDirWithOptionsFSInternal(fs, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, false, hostedDoltInitOptions{})
 }
 
-func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
+func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
@@ -1789,6 +1791,35 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 	if persistSiteIdentity {
 		if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	// Pin an external/hosted Dolt endpoint supplied via --dolt-* flags or the
+	// GC_DOLT_* environment, the same as the default/wizard init modes. Without
+	// this, --from silently ignored the endpoint and the copied template's
+	// managed-local Dolt assumption won. Precedence (explicit flag > env >
+	// template) is already resolved in hosted; when no endpoint was supplied it
+	// is disabled and the copied template is preserved unchanged.
+	if hosted.enabled() {
+		if err := hosted.validate(); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := hostedDoltBackendError(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := hosted.applyToCityConfig(cfg); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := writeCityConfigForEditFS(fs, copiedToml, cfg); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, hosted); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1847,8 +1878,8 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	return doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
 }
 
-func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
-	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart)
+func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
+	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
 func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, error) {
