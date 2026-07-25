@@ -1,39 +1,16 @@
-import { useState } from 'react';
-import type { ReactNode } from 'react';
 import type { RunDisplayNode } from 'gas-city-dashboard-shared';
-import type { RunDiffLoadState } from '../../hooks/useRunDiff';
-import { RunNodeEvidencePanel } from './RunNodeEvidencePanel';
-
-export type RunEvidenceTab = 'diff' | 'session';
+import { RunNodeSessionPanel } from './RunNodeSessionPanel';
 
 interface FormulaRunTabsProps {
-  diff: RunDiffLoadState;
   selectedNode: RunDisplayNode | null;
-  /**
-   * Controlled active tab. When paired with {@link onActiveTabChange} the parent
-   * owns the tab so it can gate work on which view is visible (P5 gates the diff
-   * refresh on the Diff tab being active). Both must be supplied together; when
-   * omitted the component keeps its own internal tab state.
-   */
-  activeTab?: RunEvidenceTab;
-  onActiveTabChange?: (tab: RunEvidenceTab) => void;
 }
 
-export function FormulaRunTabs({
-  diff,
-  selectedNode,
-  activeTab,
-  onActiveTabChange,
-}: FormulaRunTabsProps) {
-  const [internalTab, setInternalTab] = useState<RunEvidenceTab>('diff');
-  const controlled = activeTab !== undefined && onActiveTabChange !== undefined;
-  const tab = controlled ? activeTab : internalTab;
-  const setTab = (next: RunEvidenceTab) => {
-    if (controlled) onActiveTabChange(next);
-    else setInternalTab(next);
-  };
-  const activeTabId = `run-evidence-tab-${tab}`;
-
+/**
+ * The run-evidence panel hosts the selected node's session transcript. It keeps
+ * the labelled tab/tabpanel structure (a single Session tab) so the transcript
+ * reads as one view of the run, matching the surrounding run-detail chrome.
+ */
+export function FormulaRunTabs({ selectedNode }: FormulaRunTabsProps) {
   return (
     <section aria-label="Run evidence">
       <div
@@ -41,67 +18,25 @@ export function FormulaRunTabs({
         role="tablist"
         aria-label="Run evidence views"
       >
-        <TabButton
-          id="run-evidence-tab-diff"
-          controls="run-evidence-panel"
-          active={tab === 'diff'}
-          onClick={() => setTab('diff')}
-        >
-          Diff
-        </TabButton>
-        <span aria-hidden className="text-fg-faint">
-          ·
-        </span>
-        <TabButton
+        <button
           id="run-evidence-tab-session"
-          controls="run-evidence-panel"
-          active={tab === 'session'}
-          onClick={() => setTab('session')}
+          type="button"
+          role="tab"
+          aria-selected
+          aria-controls="run-evidence-panel"
+          className="focus-mark rounded-sm px-0.5 uppercase tracking-wider text-fg font-semibold underline decoration-fg underline-offset-4"
         >
           Session
-        </TabButton>
+        </button>
       </div>
-      <div id="run-evidence-panel" role="tabpanel" aria-labelledby={activeTabId} className="pt-5">
-        <RunNodeEvidencePanel tab={tab} diff={diff} selectedNode={selectedNode} />
+      <div
+        id="run-evidence-panel"
+        role="tabpanel"
+        aria-labelledby="run-evidence-tab-session"
+        className="pt-5"
+      >
+        <RunNodeSessionPanel node={selectedNode} visible />
       </div>
     </section>
-  );
-}
-
-function TabButton({
-  id,
-  controls,
-  active,
-  disabled = false,
-  onClick,
-  children,
-}: {
-  id: string;
-  controls: string;
-  active: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      id={id}
-      type="button"
-      role="tab"
-      aria-selected={active}
-      aria-controls={controls}
-      aria-disabled={disabled || undefined}
-      disabled={disabled}
-      className={`focus-mark rounded-sm px-0.5 uppercase tracking-wider ${
-        disabled
-          ? 'cursor-not-allowed text-fg-faint'
-          : active
-            ? 'text-fg font-semibold underline decoration-fg underline-offset-4'
-            : 'text-fg-muted hover:text-fg'
-      }`}
-      onClick={onClick}
-    >
-      {children}
-    </button>
   );
 }
