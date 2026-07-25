@@ -163,6 +163,12 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// WorkQueryProbe runs the target agent's own work_query and returns its
+	// raw output, mirroring the probe `gc hook` issues for that agent. Used
+	// by finalize's post-routing postcondition check to confirm a routed
+	// bead is actually visible to whatever will pick it up next. nil = skip
+	// the postcondition check.
+	WorkQueryProbe func(a config.Agent) (output string, err error)
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
