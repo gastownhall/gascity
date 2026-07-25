@@ -873,6 +873,55 @@ that invoke `go test` directly — `test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar — run
 unconfined even on slice-provisioned hosts.
 
+#### Cross-invocation concurrency bound via push-gate slots
+
+The three resource-control axes are orthogonal: (1) within-run job sizing
+(`LOCAL_TEST_JOBS`/`scripts/test-local-job-count`, above), (2) per-invocation
+resource isolation (`gascity-test.slice`, above), (3) cross-invocation
+concurrency bound — this section. Axes 1 and 2 both operate *within* a
+single `test-local-parallel` invocation; neither stops multiple invocations
+(a push, a direct `make`, and a CI job, say) from landing on the same host
+at once. Two measured incidents (2026-07-14, load 88.07 with 5 concurrent
+`test-fast-parallel` runs + 2 gates + 1 `make test`; a later run at load
+53.6-82.1 with ~20 concurrent gate processes) showed exactly that: nothing
+bounded how many heavy-suite invocations could run concurrently, producing
+false-red failures (timeouts, OOM-adjacent slowdowns) indistinguishable
+from real regressions.
+
+`scripts/test-local-parallel` — the one place all four heavy targets
+(`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
+one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
+under `<city_root>/.gc/gate-slots` (or `<repo>/.git/gate-slots` outside a
+city) before running any jobs, and holds it for the invocation's entire
+lifetime. The mechanism (`scripts/push-gate-lock-lib.sh`) is adapted from
+`packs/maintainer-pr-review/scripts/run-lock-lib.sh`'s
+`mpr_acquire_global_slot` in the gc-management meta-repo, with one
+deliberate difference: mpr's caller fails fast, but this gate's caller is
+synchronous and human/agent-facing, so on contention it polls with a
+bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
+`PUSH_GATE_POLL_SECONDS`, default 15s), printing an immediate diagnostic
+naming current slot holders the moment it starts waiting. Exhausting the
+wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
+and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
+bead-ownership staleness. The kernel releases the lock automatically when
+the holding process exits — success, failure, or crash alike — so a stale
+slot can never survive a dead holder; no PID-file liveness probing is
+involved. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
+invocation.
+
+Only `scripts/test-local-parallel` is wired to this gate — the same targets
+axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
+`test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
+`go test` invocations) are outside this bound too.
+
+This mechanism does not extend `bd` claim-lease heartbeats across the
+wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)
+assumed an existing bd-heartbeat workaround needed extending for this
+purpose; no such mechanism exists in this codebase (`bd heartbeat` leases
+are node-local and ephemeral, never committed to Dolt, so extending them
+here would be a no-op). The underlying claim-staleness concern this would
+have addressed is tracked separately under `ga-aw5356`, not here.
+
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
 Test what the USER sees. Exercise the real CLI entrypoint by re-executing the

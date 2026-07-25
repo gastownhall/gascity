@@ -24,6 +24,28 @@ cd "$repo_root"
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 
+# Cross-invocation concurrency bound (ga-owh20p): at most
+# PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
+# regardless of caller (pre-push hook, direct `make`, or CI) — this is the
+# one place all four heavy targets (fast, cmd-gc-process, integration, full)
+# funnel through, so gating here covers all of them uniformly. On
+# contention this polls with a bounded wait rather than failing instantly;
+# exhausting the wait maps to exit 75 (EX_TEMPFAIL), distinct from a real
+# test failure and from push-ownership-guard.sh's unrelated exit-1 contract.
+# Held for this invocation's entire lifetime and released automatically on
+# exit — success, failure, or crash — via the kernel-managed flock plus this
+# trap. GC_PUSH_GATE_NO_CAP=1 bypasses the cap entirely for one invocation.
+# shellcheck source=push-gate-lock-lib.sh disable=SC1091
+source "$repo_root/scripts/push-gate-lock-lib.sh"
+gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$repo_root/.git/gate-slots"
+gate_fd=""
+gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${mode}"
+if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
+  echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+  exit 75
+fi
+trap 'push_gate_release_slot "$gate_fd"' EXIT
+
 # GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
 # server. They must never reach `go test`, or every bd-forking test writes to
 # PRODUCTION Dolt and stalls bd writes city-wide (ga-w2kh1r). The per-job
