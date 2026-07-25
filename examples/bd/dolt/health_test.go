@@ -819,20 +819,22 @@ exec %q "$@"
 	}
 }
 
-func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
-	cityPath := t.TempDir()
-	fakeBin := t.TempDir()
-
+// reachableServerEnv builds a fake lsof/nc/dolt PATH plus a live TCP
+// listener so health.sh's server-detection probes all report reachable,
+// returning the environment for exec.Command. Shared by every test that
+// needs the script to see server_reachable=true without a real dolt
+// sql-server.
+func reachableServerEnv(t *testing.T, root, cityPath string) []string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("Listen: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
-exit 0
-`)
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
 probe_port="$3"
@@ -841,13 +843,9 @@ if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" 
 fi
 exit 1
 `)
-	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
-exit 0
-`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
 
-	root := repoRoot(t)
-	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=",
@@ -857,7 +855,23 @@ exit 0
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	out, err := cmd.CombinedOutput()
+}
+
+// newHealthScriptCmd builds an *exec.Cmd for invoking health.sh with the
+// given environment and args. Callers choose Output() (stdout only, for
+// JSON-mode assertions that must not see stray stderr) vs
+// CombinedOutput() (for human-mode assertions and failure messages).
+func newHealthScriptCmd(root string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command("sh", append([]string{filepath.Join(root, healthScript)}, args...)...)
+	cmd.Env = env
+	return cmd
+}
+
+func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+
+	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").CombinedOutput()
 	if err != nil {
 		t.Fatalf("health.sh failed: %v\n%s", err, out)
 	}
@@ -2043,8 +2057,7 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
 
 	root := repoRoot(t)
-	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
@@ -2054,7 +2067,7 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	out, err := cmd.Output()
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
 	if err != nil {
 		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
 	}
@@ -2101,35 +2114,7 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 	// TestHealthScriptReportsRunningWhenLsofIsInconclusive.
 	reachableEnv := func(t *testing.T, cityPath string) []string {
 		t.Helper()
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
-		t.Cleanup(func() { _ = l.Close() })
-		port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
-
-		fakeBin := t.TempDir()
-		writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
-		writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
-host="$2"
-probe_port="$3"
-if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
-  exit 0
-fi
-exit 1
-`)
-		writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
-
-		return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
-			"GC_CITY_PATH="+cityPath,
-			"GC_PACK_DIR="+root,
-			"GC_DOLT_HOST=",
-			"GC_DOLT_PORT="+port,
-			"GC_DOLT_USER=root",
-			"GC_DOLT_PASSWORD=",
-			"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
-			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		)
+		return reachableServerEnv(t, root, cityPath)
 	}
 
 	mkCity := func(t *testing.T) string {
@@ -2150,9 +2135,7 @@ exit 1
 		created := time.Now().UTC().Add(-49 * time.Hour).Format("2006-01-02T15:04:05Z")
 		writeQuarantineMarker(t, cityPath, "hq", "post-flatten table value hash changed with row-count increase", created)
 
-		cmd := exec.Command("sh", filepath.Join(root, healthScript))
-		cmd.Env = reachableEnv(t, cityPath)
-		out, err := cmd.CombinedOutput()
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
 
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
@@ -2176,9 +2159,7 @@ exit 1
 	t.Run("no marker exits 0 without section", func(t *testing.T) {
 		cityPath := mkCity(t)
 
-		cmd := exec.Command("sh", filepath.Join(root, healthScript))
-		cmd.Env = reachableEnv(t, cityPath)
-		out, err := cmd.CombinedOutput()
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
 		if err != nil {
 			t.Fatalf("health.sh exited non-zero with no quarantine: %v\n%s", err, out)
 		}
