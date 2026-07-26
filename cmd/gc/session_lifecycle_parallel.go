@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -260,12 +261,9 @@ type startExecutionOptions struct {
 	asyncTracker     *asyncStartTracker
 	asyncStopTracker *asyncStartTracker
 	maxSessionAgeTr  maxSessionAgeTracker
-	workDirResolver  taskWorkDirResolver
 }
 
 type startExecutionOption func(*startExecutionOptions)
-
-type taskWorkDirResolver func(startCandidate, *config.City) string
 
 func withAsyncStartExecution() startExecutionOption {
 	return func(opts *startExecutionOptions) {
@@ -302,12 +300,6 @@ func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOpti
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.maxSessionAgeTr = tr
-	}
-}
-
-func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption {
-	return func(opts *startExecutionOptions) {
-		opts.workDirResolver = resolver
 	}
 }
 
@@ -703,7 +695,7 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
 }
 
 func prepareStartCandidateForCity(
@@ -715,7 +707,6 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
-	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	session := candidate.session
 	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
@@ -734,7 +725,7 @@ func prepareStartCandidateForCity(
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
+	return buildPreparedStart(candidate, cfg, store)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -776,15 +767,6 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, error) {
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, nil)
-}
-
-func buildPreparedStartWithWorkDirResolver(
-	candidate startCandidate,
-	cfg *config.City,
-	store beads.Store,
-	workDirResolver taskWorkDirResolver,
-) (*preparedStart, error) {
 	session := candidate.session
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
@@ -807,7 +789,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// "effort". Apply them after core/live hash calculation because they are
 	// dispatch inputs from the current work bead, not durable session config.
 	// Explicit session template_overrides still win per key.
-	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskOptionOverrideAssignees(candidate, cfg)...)
 	if len(dispatchOptions) > 0 {
 		launchOverrides := make(map[string]string, len(dispatchOptions))
 		for k, v := range dispatchOptions {
@@ -819,9 +801,9 @@ func buildPreparedStartWithWorkDirResolver(
 		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, session.ID, launchOverrides)
 	}
 
-	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
-		agentCfg.WorkDir = wd
-	} else if wd := session.Metadata["work_dir"]; wd != "" {
+	// Process cwd belongs to the session/worker lifecycle contract. Task and
+	// molecule artifact metadata must never redirect the provider process.
+	if wd := contract.WorkerDirFromMetadata(session.Metadata); wd != "" {
 		agentCfg.WorkDir = wd
 	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
@@ -1000,21 +982,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
-func resolvePreparedTaskWorkDir(
-	candidate startCandidate,
-	cfg *config.City,
-	store beads.Store,
-	workDirResolver taskWorkDirResolver,
-) string {
-	if workDirResolver != nil {
-		if workDir := workDirResolver(candidate, cfg); workDir != "" {
-			return workDir
-		}
-	}
-	return resolveTaskWorkDir(store, taskWorkDirAssignees(candidate, cfg)...)
-}
-
-func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
+func taskOptionOverrideAssignees(candidate startCandidate, cfg *config.City) []string {
 	if candidate.session == nil {
 		return nil
 	}
@@ -2221,7 +2189,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.session, store, stderr)
 					if release != nil {

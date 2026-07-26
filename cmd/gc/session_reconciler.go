@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -957,10 +956,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if apply != nil {
 			apply(&reconcileOpts)
 		}
-	}
-	effectiveStartOptions := startOptions
-	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(assignedWorkBeads)))
 	}
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
@@ -2534,7 +2529,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
-		effectiveStartOptions...,
+		startOptions...,
 	)
 	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
 		"start_candidate_count": len(startCandidates),
@@ -3715,44 +3710,6 @@ func clearMissingIdleProbes(dt *drainTracker, beadByID map[string]*beads.Bead) {
 	}
 }
 
-// resolveTaskWorkDir checks the agent's assigned task beads for a work_dir
-// metadata field. If a task bead has work_dir set and the directory exists
-// on disk, that path is returned. This lets the reconciler start the agent
-// in the worktree that the previous session (or this session's prior run)
-// created, without any prompt-side logic.
-func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
-	if store == nil {
-		return ""
-	}
-	seen := make(map[string]bool, len(assignees))
-	for _, assignee := range assignees {
-		assignee = strings.TrimSpace(assignee)
-		if assignee == "" || seen[assignee] {
-			continue
-		}
-		seen[assignee] = true
-		assigned, err := store.List(beads.ListQuery{
-			Assignee: assignee,
-			Status:   "in_progress",
-			Live:     true,
-			TierMode: beads.TierBoth,
-			Sort:     beads.SortCreatedDesc,
-		})
-		if err != nil {
-			continue
-		}
-		for _, b := range assigned {
-			wd := strings.TrimSpace(b.Metadata["work_dir"])
-			if wd != "" {
-				if info, err := os.Stat(wd); err == nil && info.IsDir() {
-					return wd
-				}
-			}
-		}
-	}
-	return ""
-}
-
 const dispatchOptionMetadataPrefix = "opt_"
 
 func dispatchOptionMetadataKey(key string) string {
@@ -3820,47 +3777,6 @@ func workBeadOptionOverrides(b beads.Bead, rp *config.ResolvedProvider) (map[str
 		overrides[opt.Key] = value
 	}
 	return overrides, sawOptions
-}
-
-type assignedTaskWorkDir struct {
-	path      string
-	createdAt time.Time
-}
-
-// newAssignedTaskWorkDirResolver resolves work_dir values from the
-// reconciler's snapshot; misses intentionally fall back to the live lookup.
-func newAssignedTaskWorkDirResolver(assignedWorkBeads []beads.Bead) taskWorkDirResolver {
-	index := make(map[string]assignedTaskWorkDir)
-	for _, bead := range assignedWorkBeads {
-		if bead.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(bead.Assignee)
-		if assignee == "" {
-			continue
-		}
-		workDir := strings.TrimSpace(bead.Metadata["work_dir"])
-		if workDir == "" {
-			continue
-		}
-		info, err := os.Stat(workDir)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		current, ok := index[assignee]
-		if ok && !bead.CreatedAt.After(current.createdAt) {
-			continue
-		}
-		index[assignee] = assignedTaskWorkDir{path: workDir, createdAt: bead.CreatedAt}
-	}
-	return func(candidate startCandidate, cfg *config.City) string {
-		for _, assignee := range taskWorkDirAssignees(candidate, cfg) {
-			if workDir := index[strings.TrimSpace(assignee)].path; workDir != "" {
-				return workDir
-			}
-		}
-		return ""
-	}
 }
 
 // truncateHashForLog returns a short representation of a fingerprint hash

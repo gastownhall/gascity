@@ -388,22 +388,23 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 	)
 }
 
-func TestReconcileSessionBeads_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
+func TestReconcileSessionBeads_TaskMetadataCannotOverrideSessionWorkerDir(t *testing.T) {
 	env := newReconcilerTestEnv()
-	base := beads.NewMemStore()
-	store := &taskWorkDirLiveListCountingStore{Store: base}
-	env.store = store
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionCreating(&session)
+	sessionDir := t.TempDir()
+	env.setSessionMetadata(&session, map[string]string{"worker_dir": sessionDir})
 
-	workDir := t.TempDir()
+	taskArtifactDir := t.TempDir()
+	taskLegacyWorkDir := t.TempDir()
 	task, err := env.store.Create(beads.Bead{
 		Title: "assigned task",
 		Type:  "task",
 		Metadata: map[string]string{
-			"work_dir": workDir,
+			"artifact_dir": taskArtifactDir,
+			"work_dir":     taskLegacyWorkDir,
 		},
 	})
 	if err != nil {
@@ -451,141 +452,15 @@ func TestReconcileSessionBeads_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 	if startCfg == nil {
 		t.Fatal("worker was not started")
 	}
-	if startCfg.WorkDir != workDir {
-		t.Fatalf("started WorkDir = %q, want %q", startCfg.WorkDir, workDir)
+	if startCfg.WorkDir != sessionDir {
+		t.Fatalf(
+			"started WorkDir = %q, want session worker_dir %q (task artifact_dir=%q, task work_dir=%q)",
+			startCfg.WorkDir,
+			sessionDir,
+			taskArtifactDir,
+			taskLegacyWorkDir,
+		)
 	}
-	if store.liveInProgressAssigneeLists != 0 {
-		t.Fatalf("live in-progress assignee List calls = %d, want 0 with complete assigned-work snapshot", store.liveInProgressAssigneeLists)
-	}
-}
-
-func TestReconcileSessionBeads_FallsBackToLiveTaskWorkDirWithoutAssignedWorkSnapshot(t *testing.T) {
-	env, store, session, workDir := newReconcilerTaskWorkDirTest(t)
-	woken := reconcileSessionBeadsWithTaskWorkDirSnapshot(t, env, session, nil, false)
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
-	}
-	startCfg := env.sp.LastStartConfig("worker")
-	if startCfg == nil {
-		t.Fatal("worker was not started")
-	}
-	if startCfg.WorkDir != workDir {
-		t.Fatalf("started WorkDir = %q, want %q", startCfg.WorkDir, workDir)
-	}
-	if store.liveInProgressAssigneeLists == 0 {
-		t.Fatal("live in-progress assignee List calls = 0, want live fallback without assigned-work snapshot")
-	}
-}
-
-func TestReconcileSessionBeads_FallsBackToLiveTaskWorkDirWhenAssignedWorkSnapshotPartial(t *testing.T) {
-	env, store, session, workDir := newReconcilerTaskWorkDirTest(t)
-	woken := reconcileSessionBeadsWithTaskWorkDirSnapshot(t, env, session, nil, true)
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
-	}
-	startCfg := env.sp.LastStartConfig("worker")
-	if startCfg == nil {
-		t.Fatal("worker was not started")
-	}
-	if startCfg.WorkDir != workDir {
-		t.Fatalf("started WorkDir = %q, want %q", startCfg.WorkDir, workDir)
-	}
-	if store.liveInProgressAssigneeLists == 0 {
-		t.Fatal("live in-progress assignee List calls = 0, want live fallback when assigned-work snapshot is partial")
-	}
-}
-
-func TestReconcileSessionBeads_FallsBackToLiveTaskWorkDirWhenAssignedWorkSnapshotMisses(t *testing.T) {
-	env, store, session, workDir := newReconcilerTaskWorkDirTest(t)
-	unrelatedWorkDir := t.TempDir()
-	unrelatedTask := createInProgressTaskWithWorkDir(t, env.store, "other-worker", unrelatedWorkDir)
-	woken := reconcileSessionBeadsWithTaskWorkDirSnapshot(t, env, session, []beads.Bead{unrelatedTask}, false)
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
-	}
-	startCfg := env.sp.LastStartConfig("worker")
-	if startCfg == nil {
-		t.Fatal("worker was not started")
-	}
-	if startCfg.WorkDir != workDir {
-		t.Fatalf("started WorkDir = %q, want %q", startCfg.WorkDir, workDir)
-	}
-	if store.liveInProgressAssigneeLists == 0 {
-		t.Fatal("live in-progress assignee List calls = 0, want live fallback when assigned-work snapshot misses")
-	}
-}
-
-func newReconcilerTaskWorkDirTest(t *testing.T) (*reconcilerTestEnv, *taskWorkDirLiveListCountingStore, beads.Bead, string) {
-	t.Helper()
-	env := newReconcilerTestEnv()
-	base := beads.NewMemStore()
-	store := &taskWorkDirLiveListCountingStore{Store: base}
-	env.store = store
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", false)
-	session := env.createSessionBead("worker", "worker")
-	env.markSessionCreating(&session)
-	workDir := t.TempDir()
-	createInProgressTaskWithWorkDir(t, env.store, session.ID, workDir)
-	return env, store, session, workDir
-}
-
-func createInProgressTaskWithWorkDir(t *testing.T, store beads.Store, assignee, workDir string) beads.Bead {
-	t.Helper()
-	task, err := store.Create(beads.Bead{
-		Title: "assigned task",
-		Type:  "task",
-		Metadata: map[string]string{
-			"work_dir": workDir,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(task): %v", err)
-	}
-	status := "in_progress"
-	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
-		t.Fatalf("Update(task): %v", err)
-	}
-	task, err = store.Get(task.ID)
-	if err != nil {
-		t.Fatalf("Get(task): %v", err)
-	}
-	return task
-}
-
-func reconcileSessionBeadsWithTaskWorkDirSnapshot(
-	t *testing.T,
-	env *reconcilerTestEnv,
-	session beads.Bead,
-	assignedWorkBeads []beads.Bead,
-	storeQueryPartial bool,
-) int {
-	t.Helper()
-	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	return reconcileSessionBeads(
-		context.Background(),
-		[]beads.Bead{session},
-		env.desiredState,
-		cfgNames,
-		env.cfg,
-		env.sp,
-		env.store,
-		nil,
-		assignedWorkBeads,
-		nil,
-		env.dt,
-		map[string]int{"worker": 1},
-		storeQueryPartial,
-		nil,
-		"",
-		nil,
-		env.clk,
-		env.rec,
-		0,
-		0,
-		&env.stdout,
-		&env.stderr,
-	)
 }
 
 func waitForProviderStopped(t *testing.T, sp runtime.Provider, name string) {

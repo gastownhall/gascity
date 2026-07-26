@@ -511,26 +511,3 @@ func TestFirstOpenAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("first assigned work ID = %q, want %q", got.ID, wisp.ID)
 	}
 }
-
-func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
-	workDir := t.TempDir()
-	store := beads.NewMemStore()
-	wisp, err := store.Create(beads.Bead{
-		Title:     "active workflow step",
-		Type:      "task",
-		Assignee:  "worker-session",
-		Metadata:  map[string]string{"work_dir": workDir},
-		Ephemeral: true,
-	})
-	if err != nil {
-		t.Fatalf("Create wisp work: %v", err)
-	}
-	inProgress := "in_progress"
-	if err := store.Update(wisp.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
-		t.Fatalf("mark wisp in progress: %v", err)
-	}
-
-	if got := resolveTaskWorkDir(store, "worker-session"); got != workDir {
-		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
-	}
-}

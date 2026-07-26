@@ -185,7 +185,7 @@ func TestResolveTaskOptionOverrides_InvalidValueIgnoredPerKey(t *testing.T) {
 	candidate := newOptionSessionCandidate(t, store, map[string]string{"model": "definitely-not-a-choice", "effort": "high"}, nil)
 
 	want := map[string]string{"effort": "high"}
-	if got := resolveTaskOptionOverrides(store, optionSchemaProvider(), taskWorkDirAssignees(candidate, &config.City{})...); !reflect.DeepEqual(got, want) {
+	if got := resolveTaskOptionOverrides(store, optionSchemaProvider(), taskOptionOverrideAssignees(candidate, &config.City{})...); !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolveTaskOptionOverrides = %v, want %v", got, want)
 	}
 }
