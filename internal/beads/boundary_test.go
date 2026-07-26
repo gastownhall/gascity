@@ -52,9 +52,16 @@ func findBdExecViolations(root string) ([]string, error) {
 			if base == ".git" || base == "vendor" || base == ".claude" || base == ".gc" || strings.HasPrefix(base, ".beads-src") {
 				return filepath.SkipDir
 			}
-			// Skip git worktrees embedded in the repo (have a .git file, not dir).
-			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
-				return filepath.SkipDir
+			// Skip git worktrees embedded in the repo (have a .git file, not
+			// dir) — but never apply this to root itself. gc agent sessions run
+			// from inside a worktree, so root legitimately has a .git file
+			// rather than a .git directory; skipping on that condition here
+			// would SkipDir the walk's very first entry and silently visit
+			// zero files.
+			if path != root {
+				if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
 			}
 			// Skip nested Go modules: any directory other than root that owns
 			// its own go.mod is a separate module's source tree (a module-cache
