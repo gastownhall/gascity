@@ -851,20 +851,20 @@ func (localTesting) Chdir(string) {}
 func skipSlowCmdGCTest(t *testpkg.T, reason string) {}
 
 func TestResources(t *testpkg.T) {
-	((t)).Setenv("KEY", "value")
-	t.Chdir("testing-dir")
+	((t)).Setenv("KEY", "does not count")
+	t.Chdir("does-not-count")
 	((operating).Setenv)("DIRECT", "value")
 	operating.Unsetenv("DIRECT")
 	operating.Clearenv()
 	operating.Chdir("elsewhere")
 	((skipSlowCmdGCTest))(t, "process-backed")
 	func(inner *testpkg.T) {
-		inner.Setenv("INNER", "value")
-		inner.Chdir("inner-dir")
+		inner.Setenv("INNER", "does not count")
+		inner.Chdir("does-not-count")
 	}(t)
 	func(tb testpkg.TB) {
-		tb.Setenv("TB", "value")
-		tb.Chdir("tb-dir")
+		tb.Setenv("TB", "does not count")
+		tb.Chdir("does-not-count")
 	}(t)
 	func(value testpkg.T) {
 		value.Setenv("VALUE", "does not count")
@@ -901,18 +901,45 @@ func TestResources(t *testpkg.T) {
 		t.Fatalf("ScanFS: %v", err)
 	}
 
-	assertCount(t, got, ScopeAll, ResourceEnvironment, 18, 3)
-	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 12, 2)
-	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 6, 1)
-	assertCount(t, got, ScopeAll, ResourceCWD, 12, 3)
-	assertCount(t, got, ScopeUntagged, ResourceCWD, 8, 2)
-	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 4, 1)
+	assertCount(t, got, ScopeAll, ResourceEnvironment, 9, 3)
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 6, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 3, 1)
+	assertCount(t, got, ScopeAll, ResourceCWD, 3, 3)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 2, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 1, 1)
 	assertCount(t, got, ScopeAll, ResourceSlowProcessGate, 5, 3)
 	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 4, 2)
 	assertCount(t, got, ScopeCmdGCUntagged, ResourceSlowProcessGate, 2, 1)
 }
 
-func TestScanRecognizesOnlyExactTestingParameterTypes(t *testing.T) {
+func TestScanExcludesTestingReceiverSetenvChdirFromEnvironmentAndCWD(t *testing.T) {
+	t.Parallel()
+
+	source := `package sample
+
+import (
+	operating "os"
+	testpkg "testing"
+)
+
+func exercise(t *testpkg.T) {
+	t.Setenv("KEY", "value")
+	operating.Setenv("KEY", "value")
+	t.Chdir("work")
+	operating.Chdir("work")
+}
+`
+	got, err := ScanFS(fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 1, 1)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 1, 1)
+}
+
+func TestTestingParameterObjectsRecognizesOnlyExactTypes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -935,14 +962,19 @@ func exercise(t %s) {
 	t.Chdir("work")
 }
 `, tt.parameter)
-			got, err := ScanFS(fstest.MapFS{
-				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
-			})
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, "sample/resources_test.go", source, parser.SkipObjectResolution)
 			if err != nil {
-				t.Fatalf("ScanFS: %v", err)
+				t.Fatalf("ParseFile: %v", err)
 			}
-			assertCount(t, got, ScopeUntagged, ResourceEnvironment, tt.want, tt.want)
-			assertCount(t, got, ScopeUntagged, ResourceCWD, tt.want, tt.want)
+			bindings := resolveBindings(fileSet, file, newEmptyPackageImporter(), "resourcecensus.local/test")
+			objects, err := testingParameterObjects(file, bindings)
+			if err != nil {
+				t.Fatalf("testingParameterObjects: %v", err)
+			}
+			if got := len(objects); got != tt.want {
+				t.Fatalf("recognized testing parameters = %d, want %d", got, tt.want)
+			}
 		})
 	}
 }
@@ -1298,6 +1330,21 @@ func TestResource() {
 `)},
 	})
 	requireErrorContains(t, err, `resource candidate qualifier "missing" has no lexical binding`)
+}
+
+func TestCheckTestingReceiverBindingFailsClosedForUnboundReceiver(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"Setenv", "Chdir"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			receiver := ast.NewIdent("missing")
+			call := &ast.CallExpr{Fun: &ast.SelectorExpr{X: receiver, Sel: ast.NewIdent(method)}}
+			err := checkTestingReceiverBinding(call, bindingInfo{}, method)
+			requireErrorContains(t, err, `testing resource receiver "missing" has no lexical binding`)
+		})
+	}
 }
 
 func TestImportedCallFailsClosedWhenPackageBindingIsUnusable(t *testing.T) {

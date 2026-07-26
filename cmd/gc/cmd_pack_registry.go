@@ -671,6 +671,43 @@ func importCommandSuggestions(pack packregistry.CatalogPack, latest string) (str
 	return shellquote.Join(floating), shellquote.Join(exact)
 }
 
+// cachedRegistryPackSource resolves a registry pack name to its published
+// import source using only the on-disk registry caches — no fetch, no config
+// write. It backs rig.Deps.ResolveRegistryPack, which runs on every `gc rig
+// add`, so a scoped `--include owner/pack` must not turn rig add into a
+// network operation (registry-sfn).
+//
+// An unreadable registry config, a missing or invalid cache, and an unknown
+// name all report ok=false, leaving the include token to path handling. So
+// does a name published by more than one configured registry with differing
+// sources: `gc pack registry show` refuses to guess between registries, and
+// canonicalization has no channel to ask the user, so it leaves the token
+// alone rather than silently picking a winner.
+func cachedRegistryPackSource(name string) (string, bool) {
+	home := gchome.Default()
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return "", false
+	}
+	source := ""
+	for _, reg := range cfg.Registries {
+		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		if err != nil {
+			continue
+		}
+		for _, pack := range catalog.Packs {
+			if pack.Name != name || pack.Source == "" {
+				continue
+			}
+			if source != "" && source != pack.Source {
+				return "", false
+			}
+			source = pack.Source
+		}
+	}
+	return source, source != ""
+}
+
 func readPackRegistryCatalogForCommand(ctx context.Context, home string, reg packregistry.Registry, refreshMissing bool) (packregistry.Catalog, error) {
 	catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
 	if err == nil {

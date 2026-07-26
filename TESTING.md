@@ -390,10 +390,13 @@ The scanner recognizes direct calls to `os/exec.Command{,Context}` and
 `ListenMulticastUDP`; `net.ListenConfig.Listen` and `ListenPacket` on identified
 receivers; direct `syscall.Listen`;
 `net/http/httptest.NewServer`,
-`NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
-`os.Clearenv`, and `os.Chdir`; and
-`Setenv` or `Chdir` on function parameters typed exactly as `*testing.T` or
-`testing.TB`. For tmux it recognizes `ConfigureProcessEnv`,
+`NewTLSServer`, and `NewUnstartedServer`; and `os.Setenv`, `os.Unsetenv`,
+`os.Clearenv`, and `os.Chdir`. `Setenv` and `Chdir` on a `testing.T` or
+`testing.TB` receiver are deliberately excluded: they restore the prior value
+when the test ends, so they are not ambient environment or cwd debt. A receiver
+identifier for those two methods that cannot be resolved lexically still fails
+closed with a scan error rather than being silently skipped. For tmux it
+recognizes `ConfigureProcessEnv`,
 `KillAllTestSessions`, `NewGuard`, `NewGuardWithSocket`, and `RequireTmux` from
 `test/tmuxtest`; `NewProvider`, `NewProviderWithConfig`,
 `NewSeamBackedWithConfig`, `NewTmux`, and `NewTmuxWithConfig` from
@@ -434,9 +437,12 @@ go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedge
 ```
 
 The historical regex totals remain visible as point-in-time audit evidence.
-They can be higher because comments and strings matched, or lower where the old
-needle covered only `t.Setenv` or direct `os.Chdir` and the AST census now
-recognizes the full families above. Historical `cmd/gc` needles also included
+They can be higher because comments and strings matched, or because the needle
+counted testing-receiver helpers such as `t.Setenv` and `t.Chdir` that the AST
+census deliberately excludes — which is why the historical environment and cwd
+needles now sit far above the live baselines. They can also be lower where the
+old needle covered only one spelling and the AST census now recognizes the full
+`os` families above. Historical `cmd/gc` needles also included
 build-tagged files; the live `cmd/gc+untagged` ratchets do not.
 `internal/bdflags/freshness_test.go` is integration-tagged because it invokes
 the externally installed `bd` CLI; its process call remains visible in the
@@ -456,8 +462,8 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-80po0c.2.2.1 | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-80po0c.23.1 | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-01 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-80po0c.2.1 | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-01 |
-| Small debt ratchet | `cmd/gc` untagged test source | cwd: 285 calls / 43 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
-| Small debt ratchet | `cmd/gc` untagged test source | environment: 4317 calls / 202 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 284 / 43) | ga-80po0c.2.1 | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-01 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 13 files (historical regex census: 4348 / 200) | ga-80po0c.2.1 | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 57 calls / 24 files (historical regex census: 75 / 25) | ga-80po0c.2.1 | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | fixed_sleep: 288 calls / 111 files (historical regex census: 287 / 113) | ga-80po0c.2.1 | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 300 / 66) | ga-80po0c.2.2 | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
@@ -468,8 +474,8 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | subprocess: 391 calls / 109 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | tmux: 0 calls / 0 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | cwd: 285 calls / 43 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | environment: 4323 calls / 202 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 128 calls / 13 files (historical regex census: 3960 / 184) | ga-80po0c.2.3 | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 57 calls / 24 files (historical regex census: 78 / 27) | ga-80po0c.2.3 | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 288 calls / 111 files (historical regex census: 295 / 114) | ga-80po0c.2 | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | http_test_server: 317 calls / 66 files (historical regex census: 255 / 56) | ga-80po0c.2.2 | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
