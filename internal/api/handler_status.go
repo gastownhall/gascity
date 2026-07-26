@@ -480,10 +480,6 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		return snapshot
 	}
 
-	// reqCtx bounds the scoped-store read below; defer cancel() fires on
-	// every return path (including the time.After timeout), killing an
-	// in-flight bd child instead of leaking it past this function's budget
-	// (gascity ga-cdmx6x).
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
 
@@ -494,23 +490,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
-		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
-		// or (nil, nil) for non-bd backends (native/file/mem) — those read
-		// through store unchanged. Its resolution (bd env / managed-dolt
-		// connection state) is synchronous and can block on a mutex the
-		// reconcile loop holds without honoring reqCtx; kept before the select
-		// it hung the whole handler past its read budget, dragging the
-		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
-		// as the read bounds it.
-		readStore := store
-		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
-			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
-			return
-		} else if scoped != nil {
-			readStore = scoped
-		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		infos, partialErrors, err := sessionReadModelInfosContext(reqCtx, session.NewStore(beads.SessionStore{Store: store}))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -522,7 +502,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		infos = result.infos
 		partialErrors = result.partialErrors
 		err = result.err
-	case <-time.After(statusStoreReadTimeout):
+	case <-reqCtx.Done():
 		snapshot.partialErrors = []string{fmt.Sprintf("sessions: loading session snapshot timed out after %s", statusStoreReadTimeout)}
 		return snapshot
 	}
@@ -681,10 +661,7 @@ func statusStoreWorkCountsFor(
 	}
 	ready := &readyResult{}
 	if includeReady {
-		// ContextReadyReader and ScopedStoreLike both guarantee cleanup before
-		// returning after cancellation. Invoke this branch synchronously so the
-		// coordinator cannot return while scoped resolution is still cleaning up.
-		rows, err := statusReadyStoreWithTimeout(ctx, state, store)
+		rows, err := statusReadyStoreWithTimeout(ctx, store)
 		ready = &readyResult{rows: rows, err: err}
 	}
 
@@ -743,7 +720,7 @@ func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store)
 		}
 	}
 
-	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true})
+	list, err := statusListStoreWithTimeout(ctx, store, beads.ListQuery{AllowScan: true})
 	var wc workCounts
 	if err != nil && (!beads.IsPartialResult(err) || len(list) == 0) {
 		return wc, err
@@ -783,95 +760,81 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
-// statusListStoreWithTimeout lists with the per-store read timeout.
-// Store.List takes no context, so on timeout the goroutine is abandoned
-// (it keeps its connection until the scan returns) — unless state offers a
-// ctx-bound scoped clone of store (bd-CLI-backed stores do; native/file/mem
-// stores don't and are read unchanged), in which case cancellation kills
-// the in-flight backend command instead of abandoning it (gascity
-// ga-cdmx6x). Counter-capable stores avoid this path entirely.
-func statusListStoreWithTimeout(ctx context.Context, state State, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+// statusListStoreWithTimeout lists with the per-store read timeout, always
+// bounding the caller's return under a goroutine+select guard. Stores
+// implementing beads.ContextLister additionally get real cancellation: the
+// ctx passed into ListContext cancels the backing query and releases its
+// connection on timeout, so the guard goroutine returns promptly rather than
+// leaking. Stores without it — and ContextLister implementations that cannot
+// honor ctx (a nil-runnerContext BdStore falls back to plain List;
+// DoltliteReadStore.ListContext is a synchronous native scan) — still return
+// the caller at the deadline; their goroutine keeps its connection until the
+// underlying read returns. The guard around the ContextLister branch is the
+// defense in depth that keeps a ctx-ignoring implementation from blocking a
+// bounded status read for up to bdReadCommandTimeout (ga-enpau9 / PR #3918
+// review, Blocker). Counter-capable stores avoid this path entirely.
+func statusListStoreWithTimeout(ctx context.Context, store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	if err := reqCtx.Err(); err != nil {
-		return nil, err
-	}
 	type listResult struct {
 		rows []beads.Bead
 		err  error
 	}
 	done := make(chan listResult, 1)
 	go func() {
-		// Resolve the ctx-bound scoped store INSIDE the timed goroutine so a
-		// slow, ctx-blind resolution (a store mutex held by the reconcile
-		// loop) is bounded by the same request deadline as the list instead of
-		// hanging the handler synchronously (gc-08qgn).
-		readStore := store
-		if scoped, err := state.ScopedStoreLike(reqCtx, store); err != nil {
-			done <- listResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+		if lister, ok := store.(beads.ContextLister); ok {
+			rows, err := lister.ListContext(ctx, query)
+			done <- listResult{rows: rows, err: err}
 			return
-		} else if scoped != nil {
-			readStore = scoped
 		}
-		rows, err := readStore.List(query)
+		rows, err := store.List(query)
 		done <- listResult{rows: rows, err: err}
 	}()
 	select {
 	case result := <-done:
 		return result.rows, result.err
-	case <-reqCtx.Done():
-		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("list timed out: %w", reqCtx.Err())
-		}
-		return nil, reqCtx.Err()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("list timed out after %s", statusStoreReadTimeout)
 	}
 }
 
 // statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
-func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
+// as GET /beads/ready. Stores implementing beads.ContextReadyReader get a
+// real ctx-bound cancellation. Stores without it fall back to the legacy
+// abandon-goroutine pattern (bounded return, but the goroutine keeps its
+// connection until the read returns) — unchanged behavior for backends that
+// haven't adopted the capability, matching statusListStoreWithTimeout.
+func statusReadyStoreWithTimeout(ctx context.Context, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
-	if err := reqCtx.Err(); err != nil {
-		return nil, err
-	}
-	var capabilityErr error
 	if reader, ok := store.(beads.ContextReadyReader); ok {
 		rows, err := reader.ReadyContext(reqCtx)
 		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
 			return rows, statusReadyError(err)
 		}
-		capabilityErr = err
 	}
 
-	// ScopedStoreLike is part of the context-aware read contract: resolution
-	// must finish its own cleanup before returning after reqCtx cancellation.
-	// Keep it synchronous so the status deadline cannot abandon a resolver
-	// goroutine after the response has returned.
-	scoped, err := state.ScopedStoreLike(reqCtx, store)
-	if err != nil {
-		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
 	}
-	if scoped == nil {
-		if capabilityErr == nil {
-			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
-		}
-		return nil, capabilityErr
+	done := make(chan readyResult, 1)
+	go func() {
+		rows, err := beads.HandlesFor(store).Live.Ready()
+		done <- readyResult{rows: rows, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-reqCtx.Done():
+		return nil, fmt.Errorf("ready timed out after %s", statusStoreReadTimeout)
 	}
-
-	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
-	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
-	// needed to enforce the deadline.
-	rows, err := beads.HandlesFor(scoped).Live.Ready()
-	return rows, statusReadyError(err)
 }
 
 func statusReadyError(err error) error {

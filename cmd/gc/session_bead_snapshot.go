@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -106,6 +107,22 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	snap := newSessionBeadSnapshotFromReconcileRows(rows)
 	snap.fingerprint = fingerprint
 	return snap, nil
+}
+
+// loadSessionBeadSnapshotContext is loadSessionBeadSnapshot but accepts a
+// context so a caller with a deadline (gc status) can cancel the backing
+// queries — via beads.ContextLister when store supports it — instead of
+// leaking a goroutine on timeout. Used only by loadStatusSessionSnapshot;
+// other callers should keep using loadSessionBeadSnapshot.
+func loadSessionBeadSnapshotContext(ctx context.Context, store beads.Store) (*sessionBeadSnapshot, error) {
+	if store == nil {
+		return newSessionBeadSnapshotFromInfos(nil), nil
+	}
+	infos, err := sessionFrontDoor(store).ListAllContext(ctx, sessionpkg.ListAllOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return newSessionBeadSnapshotFromInfos(infos), nil
 }
 
 // newSessionBeadSnapshotFromInfos builds a snapshot from a typed session.Info feed.

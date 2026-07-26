@@ -52,17 +52,32 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	})
 }
 
+// bdCommandRunnerContextForCity is bdCommandRunnerForCity's ctx-aware
+// sibling: it powers BdStore.ListContext (via WithBdStoreRunnerContext) so
+// the 2 status read paths can actually cancel a stuck backing bd child
+// instead of gracefully degrading to the legacy abandon-goroutine pattern.
+// See bdCommandRunnerContextWithManagedRetryErr for why it deliberately
+// does not share the plain runner's managed-Dolt recovery step.
+func bdCommandRunnerContextForCity(cityPath string) beads.CommandRunnerContext {
+	return bdCommandRunnerContextWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvNoRecovery(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		return env, err
+	})
+}
+
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
 	reapStaleBdExportJSONL(dir)
+	opts := append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreRunnerContext(bdCommandRunnerContextForCity(cityPath)))
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		bdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -80,11 +95,12 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
+	opts := append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreRunnerContext(bdCommandRunnerContextForRig(cityPath, cfg, rigDir)))
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -177,11 +193,12 @@ func scopeIsGCManaged(scopeRoot string) bool {
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
+	opts := append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreRunnerContext(controlBdCommandRunnerContextForCity(cityPath)))
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -196,11 +213,12 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
+	opts := append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreRunnerContext(controlBdCommandRunnerContextForRig(cityPath, cfg, rigDir)))
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
@@ -216,6 +234,31 @@ func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+		applyControllerBdEnv(env)
+		return env, err
+	})
+}
+
+// controlBdCommandRunnerContextForCity is controlBdCommandRunnerForCity's
+// ctx-aware sibling for controller-scoped ctx-bound reads (e.g. status).
+// Same rationale as bdCommandRunnerContextForCity: recovery-free env plus a
+// ctx-bound child so a stuck read cancels instead of blocking the budget
+// (ga-enpau9 / PR #3918 review, Blocker).
+func controlBdCommandRunnerContextForCity(cityPath string) beads.CommandRunnerContext {
+	return bdCommandRunnerContextWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+		env, err := bdRuntimeEnvNoRecovery(cityPath)
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		applyControllerBdEnv(env)
+		return env, err
+	})
+}
+
+// controlBdCommandRunnerContextForRig is controlBdCommandRunnerForRig's
+// ctx-aware sibling. See bdCommandRunnerContextForRig for the nil-runner
+// trap it closes (ga-enpau9 / PR #3918 review, Blocker).
+func controlBdCommandRunnerContextForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunnerContext {
+	return bdCommandRunnerContextWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		env, err := bdRuntimeEnvForRigNoRecovery(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
 		return env, err
 	})
@@ -263,6 +306,20 @@ func readScopeIssuePrefix(scopeRoot string) string {
 func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		return bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+	})
+}
+
+// bdCommandRunnerContextForRig is bdCommandRunnerForRig's ctx-aware sibling,
+// wired into bdStoreForRig via WithBdStoreRunnerContext so a rig-scoped
+// status read can actually cancel a stuck backing bd child instead of
+// gracefully degrading to a non-cancellable List (the nil-runnerContext
+// trap: BdStore.ListContext falls back to List when no ctx runner is set,
+// so a rig store that claims ContextLister would otherwise block for up to
+// bdReadCommandTimeout). Uses the recovery-free rig env for the same reason
+// as bdCommandRunnerContextForCity (ga-enpau9 / PR #3918 review, Blocker).
+func bdCommandRunnerContextForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunnerContext {
+	return bdCommandRunnerContextWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		return bdRuntimeEnvForRigNoRecovery(cityPath, cfg, rigDir)
 	})
 }
 
@@ -773,6 +830,7 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
+	beadsExecCommandRunnerContextWithEnv      = beads.ExecCommandRunnerContext
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
 	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
 )
@@ -1148,6 +1206,70 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 	}
 }
 
+// bdCommandRunnerContextWithManagedRetryErr is
+// bdCommandRunnerWithManagedRetryErr's ctx-aware sibling, used only via
+// WithBdStoreRunnerContext for callers that need ListContext's cancellation
+// (e.g. the status endpoint's per-store read timeout). It deliberately
+// does NOT call recoverManagedBDCommand.
+//
+// recoverManagedBDCommand runs under providerOpTimeout("recover") == 120s.
+// Ctx-bound callers of this runner use short, best-effort budgets — e.g.
+// statusStoreReadTimeout == 1s. Invoking recovery inline would block a
+// bounded status read for up to 120x its own budget: precisely the
+// unbounded hang ListContext exists to prevent. So this path skips
+// recovery entirely and relies on the plain (non-ctx) runner's callers
+// and health patrol to drive managed-Dolt recovery instead.
+//
+// A single ctx-bound retry is still attempted for any transport-retryable
+// error (not just the "recoverable" subset), mirroring the plain runner's
+// at-most-2-attempts shape minus the recovery step: cheap, ctx-bound, and
+// occasionally enough on its own if the blip already cleared or another
+// caller's recovery already landed.
+func bdCommandRunnerContextWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunnerContext {
+	return func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		env, envErr := envFn(dir)
+		if envErr != nil {
+			return nil, envErr
+		}
+		if env == nil {
+			env = map[string]string{}
+		}
+		ensureProjectedDoltEnvExplicit(env)
+		ensureProjectedPostgresEnvExplicit(env)
+		runner := beadsExecCommandRunnerContextWithEnv(env)
+		out, err := runner(ctx, dir, name, args...)
+		if name != "bd" {
+			return out, err
+		}
+		// PG-backed scopes never invoke managed-Dolt recovery. A transport
+		// error gets wrapped with an operator-facing hint and surfaced; gc
+		// does not manage external PG endpoints.
+		if err != nil {
+			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
+			if classifyErr != nil {
+				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
+			}
+			if ok {
+				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
+			}
+		}
+		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
+			return out, err
+		}
+		if !bdTransportRetryableError(cityPath, dir, env, err) {
+			return out, err
+		}
+		retryEnv, retryEnvErr := envFn(dir)
+		if retryEnvErr != nil {
+			return nil, retryEnvErr
+		}
+		ensureProjectedDoltEnvExplicit(retryEnv)
+		ensureProjectedPostgresEnvExplicit(retryEnv)
+		retryRunner := beadsExecCommandRunnerContextWithEnv(retryEnv)
+		return retryRunner(ctx, dir, name, args...)
+	}
+}
+
 func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecovery bool) error {
 	return applyResolvedCityDoltEnvContext(context.Background(), env, cityPath, allowRecovery)
 }
@@ -1288,10 +1410,12 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, true)
 }
 
-// bdRuntimeEnvForRigWithErrorNoRecovery is bdRuntimeEnvForRigWithError
-// without the managed-dolt recovery side effects; see
-// bdRuntimeEnvWithErrorNoRecovery for why (gascity ga-cdmx6x).
-func bdRuntimeEnvForRigWithErrorNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+// bdRuntimeEnvForRigNoRecovery is bdRuntimeEnvForRigWithError's recovery-free
+// sibling for the ctx-bound status-read runners. It disables managed-Dolt
+// recovery for both the inherited city projection and the rig's own
+// resolution, keeping the pre-spawn env build inside the caller's short
+// budget (ga-enpau9 / PR #3918 review, Major). See bdRuntimeEnvNoRecovery.
+func bdRuntimeEnvForRigNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
 	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, false)
 }
 
@@ -1362,16 +1486,19 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
 }
 
-// bdRuntimeEnvWithErrorNoRecovery is bdRuntimeEnvWithError without the
-// managed-dolt recovery/health-check/autostart side effects: it reads
-// existing published or configured connection state only, and fails fast
-// (env still gets the non-Dolt opt-out vars set) when no managed server is
-// currently reachable. Recovering a managed dolt server is legitimate
-// work, but doing it from every concurrent, short-budget scoped-store
-// construction would multiply exactly the load a read-storm mitigation
-// exists to bound (gascity ga-cdmx6x) — those callers use this instead of
-// bdRuntimeEnvWithError.
-func bdRuntimeEnvWithErrorNoRecovery(cityPath string) (map[string]string, error) {
+// bdRuntimeEnvNoRecovery builds the city bd runtime env WITHOUT allowing
+// managed-Dolt recovery during resolution. It is the env fn behind the
+// ctx-bound status-read runners (bdCommandRunnerContextForCity and friends).
+//
+// The command-level recovery skip in bdCommandRunnerContextWithManagedRetryErr
+// only protects the post-spawn path; env resolution runs *before* the
+// subprocess spawns, and applyResolvedCityDoltEnv(..., true) can reach
+// recoverManagedBDCommand under providerOpTimeout("recover") == 120s. Invoking
+// that inside a ~1s status budget reintroduces exactly the unbounded hang
+// ListContext exists to prevent, so the ctx path resolves env with recovery
+// disabled and leaves managed-Dolt recovery to the plain runner's callers and
+// health patrol (ga-enpau9 / PR #3918 review, Major).
+func bdRuntimeEnvNoRecovery(cityPath string) (map[string]string, error) {
 	return bdRuntimeEnvWithErrorRecovery(cityPath, false)
 }
 

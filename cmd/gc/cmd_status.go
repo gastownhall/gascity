@@ -89,7 +89,7 @@ func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int 
 			store = opened
 		}
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+	statusSnapshot := loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr)
 	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr

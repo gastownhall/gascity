@@ -57,27 +57,6 @@ func doltliteBdStoreMetadataTestDir(t *testing.T, metadata string) string {
 	return dir
 }
 
-// --- Dir ---
-
-// TestBdStoreDirReturnsConstructionDir proves Dir() reports the exact root
-// a BdStore was constructed with, so callers that need to build an
-// equivalent throwaway store elsewhere (e.g. a ctx-bound clone for a
-// bounded read, gascity ga-cdmx6x) don't need a second, parallel way to
-// track it.
-func TestBdStoreDirReturnsConstructionDir(t *testing.T) {
-	store := beads.NewBdStore("/city/root", fakeRunner(nil))
-	if got := store.Dir(); got != "/city/root" {
-		t.Fatalf("Dir() = %q, want /city/root", got)
-	}
-}
-
-func TestBdStoreDirHandlesNilReceiver(t *testing.T) {
-	var store *beads.BdStore
-	if got := store.Dir(); got != "" {
-		t.Fatalf("Dir() on nil store = %q, want empty string", got)
-	}
-}
-
 // --- Create ---
 
 func TestBdStoreCreate(t *testing.T) {

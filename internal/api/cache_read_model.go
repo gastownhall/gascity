@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -59,6 +61,25 @@ func filterEnrichReadModel(mgr *session.Manager, listings []session.ListedSessio
 // Same cache-first tier and partial-result envelope.
 func sessionReadModelInfos(sessFront *session.Store) ([]session.Info, []string, error) {
 	rows, err := sessFront.ListAll(session.ListAllOptions{
+		Sort:       beads.SortCreatedDesc,
+		CacheFirst: true,
+	})
+	if err == nil {
+		return rows, nil, nil
+	}
+	if beads.IsPartialResult(err) && len(rows) > 0 {
+		return rows, []string{err.Error()}, nil
+	}
+	return nil, nil, err
+}
+
+// sessionReadModelInfosContext is sessionReadModelInfos but accepts a context so
+// a caller with a deadline (the status endpoint's session snapshot) can cancel
+// the backing queries — via beads.ContextLister when the store supports it —
+// instead of leaking a goroutine on timeout. Same cache-first tier and
+// partial-result envelope; the cache-hit path is in-memory and ctx-independent.
+func sessionReadModelInfosContext(ctx context.Context, sessFront *session.Store) ([]session.Info, []string, error) {
+	rows, err := sessFront.ListAllContext(ctx, session.ListAllOptions{
 		Sort:       beads.SortCreatedDesc,
 		CacheFirst: true,
 	})

@@ -43,6 +43,35 @@ func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreListContextUsesNativeReadNotPromotedBdStore is the
+// verifying test for ga-vgv0ue: DoltliteReadStore embeds *BdStore, and
+// without its own ListContext override, calling ListContext would resolve
+// via Go method promotion to (*BdStore).ListContext — which, with no
+// runnerContext configured, falls back to (*BdStore).List, invoking the
+// backing runner. newTestDoltliteReadStore's backing runner calls t.Fatal
+// if invoked at all, so this test fails loudly (not just slowly) if the
+// override regresses and ListContext ever falls through to the embedded
+// BdStore's subprocess path instead of staying on the native DB read.
+func TestDoltliteReadStoreListContextUsesNativeReadNotPromotedBdStore(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	rows, err := store.ListContext(context.Background(), ListQuery{
+		Label: "gc:session",
+		Sort:  SortCreatedDesc,
+	})
+	if err != nil {
+		t.Fatalf("ListContext session beads: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("session rows = %d, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.ID != "gc-session" || got.Type != "session" || got.Metadata["session_name"] != "session-1" {
+		t.Fatalf("session bead = %#v", got)
+	}
+}
+
 func TestDoltliteReadStoreSkipLabels(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

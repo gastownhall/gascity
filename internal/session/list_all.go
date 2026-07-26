@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -39,7 +40,24 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	if store == nil {
 		return nil, nil
 	}
+	return listAllSessionBeads(base, store.List)
+}
 
+// ListAllSessionBeadsContext is ListAllSessionBeads but accepts a context so
+// a caller with a deadline (the status endpoints) can cancel the backing
+// queries — via beads.ContextLister when store supports it — instead of
+// leaking a goroutine on timeout. Other callers should keep using
+// ListAllSessionBeads; this exists for the two status call sites only.
+func ListAllSessionBeadsContext(ctx context.Context, store beads.Store, base beads.ListQuery) ([]beads.Bead, error) {
+	if store == nil {
+		return nil, nil
+	}
+	return listAllSessionBeads(base, func(q beads.ListQuery) ([]beads.Bead, error) {
+		return beads.ContextListOrFallback(ctx, store, q)
+	})
+}
+
+func listAllSessionBeads(base beads.ListQuery, list func(beads.ListQuery) ([]beads.Bead, error)) ([]beads.Bead, error) {
 	// Limit is applied globally after the union (see below); passing
 	// base.Limit into each leg independently could return up to 2× the
 	// requested rows or drop the correct top-N when the union spans
@@ -48,7 +66,7 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	byTypeQuery.Type = BeadType
 	byTypeQuery.Label = ""
 	byTypeQuery.Limit = 0
-	byType, typeErr := store.List(byTypeQuery)
+	byType, typeErr := list(byTypeQuery)
 	if typeErr != nil && !beads.IsPartialResult(typeErr) {
 		return nil, fmt.Errorf("listing session beads by type: %w", typeErr)
 	}
@@ -57,7 +75,7 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	byLabelQuery.Type = ""
 	byLabelQuery.Label = LabelSession
 	byLabelQuery.Limit = 0
-	byLabel, labelErr := store.List(byLabelQuery)
+	byLabel, labelErr := list(byLabelQuery)
 	if labelErr != nil && !beads.IsPartialResult(labelErr) {
 		return nil, fmt.Errorf("listing session beads by label: %w", labelErr)
 	}
@@ -346,6 +364,42 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		}
 	}
 	return ListAllSessionBeads(s.store.Store, base)
+}
+
+// listAllBeadsContext is listAllBeads but accepts a context so a caller with a
+// deadline can cancel the backing queries via ListAllSessionBeadsContext
+// instead of leaking a goroutine on timeout.
+func (s *Store) listAllBeadsContext(ctx context.Context, opts ListAllOptions) ([]beads.Bead, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	base := beads.ListQuery{
+		IncludeClosed: opts.IncludeClosed,
+		Sort:          opts.Sort,
+		Limit:         opts.Limit,
+		Live:          opts.Live,
+	}
+	if opts.CacheFirst && !opts.Live {
+		if merged, ok := s.cachedListUnion(opts); ok {
+			return merged, nil
+		}
+	}
+	return ListAllSessionBeadsContext(ctx, s.store.Store, base)
+}
+
+// ListAllContext is ListAll but accepts a context so a caller with a deadline
+// (the status endpoints) can cancel the backing queries instead of leaking a
+// goroutine on timeout. Other callers should keep using ListAll.
+func (s *Store) ListAllContext(ctx context.Context, opts ListAllOptions) ([]Info, error) {
+	rows, err := s.listAllBeadsContext(ctx, opts)
+	if rows == nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, infoFromPersistedBead(b))
+	}
+	return out, err
 }
 
 // cachedListUnion ports the internal/api/cache_read_model.go peek-union: it asks

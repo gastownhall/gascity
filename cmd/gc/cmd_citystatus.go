@@ -184,7 +184,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		}
 		return code
 	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+	statusSnapshot := loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr)
 	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	if err != nil {
 		message := fmt.Sprintf("gc status: %v", err)
@@ -236,7 +236,7 @@ func routeCityStatus(
 			if code != 0 {
 				return code
 			}
-			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+			statusSnapshot := loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr)
 			if jsonOutput {
 				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
 			}
@@ -402,44 +402,22 @@ type statusObservationTarget struct {
 	suspended          bool
 }
 
-func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
+// loadStatusSessionSnapshot loads the session snapshot within
+// statusSessionSnapshotTimeout. Stores implementing beads.ContextLister get
+// a real ctx-bound cancellation: on timeout the backing query is canceled
+// and its connection released. Stores without it fall back to the legacy
+// abandon-goroutine pattern (bounded return, but the goroutine keeps its
+// connection until the scan returns) — unchanged behavior for backends that
+// haven't adopted the capability.
+func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshotFromInfos(nil)
 	}
 	// Callers pass the session coordination-class store (cliSessionStore) so a
 	// [beads.classes.sessions] relocation reaches this snapshot; the guard in
 	// frontdoor_di_guard_test.go pins that seam at each read-site file.
-
-	// A throwaway, ctx-bound clone of store when it's bd-CLI-backed: on
-	// timeout below, canceling reqCtx kills an in-flight bd child instead
-	// of abandoning it to run past this function's return (gascity
-	// ga-cdmx6x). scopedStoreLike answers (nil, nil) for non-bd-CLI
-	// backends, which have no subprocess to leak — those keep reading
-	// through store directly, unchanged.
-	//
-	// SPLIT CAVEAT (must fix in cmd/gc/scoped_store.go before enabling the
-	// domain/infra split): scopedStoreLike is CLASS-BLIND — it unwraps to the
-	// backing *beads.BdStore and rebuilds a scoped clone from cityPath / the
-	// backing Dir(), never re-consulting resolveClassStore. Today that is
-	// byte-identical (cliSessionStore is identity, so store's backing Dir() ==
-	// cityPath). Once [beads.classes.sessions] relocates to a bd-CLI-backed
-	// store, this clone would silently re-point the session read at the WORK
-	// store, defeating the cliSessionStore seam above (the DI guard cannot catch
-	// it — the cliSessionStore( needle is still present). scopedStoreLike must be
-	// made class-preserving (clone what it unwrapped, or refuse to unwrap a
-	// relocated store so this keeps reading through the routed store) as part of
-	// the split, where a real infra store makes the fix testable.
-	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
 	defer cancel()
-	readStore := store
-	if scoped, err := scopedStoreLike(reqCtx, cityPath, cfg, store); err != nil {
-		if stderr != nil {
-			fmt.Fprintf(stderr, "gc status: loading session snapshot: resolving store: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot: resolving store: %w", err))
-	} else if scoped != nil {
-		readStore = scoped
-	}
 
 	type snapshotResult struct {
 		snapshot *sessionBeadSnapshot
@@ -447,7 +425,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
-		snapshot, err := loadSessionBeadSnapshot(readStore)
+		snapshot, err := loadSessionBeadSnapshotContext(ctx, store)
 		done <- snapshotResult{snapshot: snapshot, err: err}
 	}()
 
@@ -463,7 +441,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
-	case <-time.After(statusSessionSnapshotTimeout):
+	case <-ctx.Done():
 		if stderr != nil {
 			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
@@ -528,7 +506,7 @@ func doCityStatus(
 	if code != 0 {
 		return code
 	}
-	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 
 func doCityStatusWithStoreAndSnapshot(
@@ -578,7 +556,7 @@ func doCityStatusJSON(
 	if code != 0 {
 		return code
 	}
-	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
+	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 
 func doCityStatusJSONWithDiagnosticAndSnapshot(

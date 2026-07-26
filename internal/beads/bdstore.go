@@ -28,6 +28,14 @@ const (
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
+// CommandRunnerContext is CommandRunner's ctx-aware sibling: ctx is a
+// per-call argument rather than fixed at construction time (as it is for a
+// CommandRunner built via ExecCommandRunnerWithEnvContext). BdStore uses this
+// to bind a caller's own deadline to a spawned bd child, so ListContext can
+// cancel the backing query and release its connection instead of leaking a
+// goroutine (mirrors Counter's rationale).
+type CommandRunnerContext func(ctx context.Context, dir, name string, args ...string) ([]byte, error)
+
 var (
 	bdCommandTimeout = 120 * time.Second
 	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
@@ -72,6 +80,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // slow or stuck bd child cannot outlast that budget.
 func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
 	return execCommandRunnerWithEnv(ctx, env)
+}
+
+// ExecCommandRunnerContext returns a CommandRunnerContext that uses os/exec,
+// binding each call's own ctx argument to the spawned command. Unlike
+// ExecCommandRunnerWithEnvContext (whose ctx is fixed at construction time),
+// this lets one runner serve many calls with different per-call deadlines —
+// the shape BdStore.ListContext needs to bind a caller's request-scoped ctx
+// without rebuilding the runner per request.
+func ExecCommandRunnerContext(env map[string]string) CommandRunnerContext {
+	return func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		return execCommandRunnerWithEnv(ctx, env)(dir, name, args...)
+	}
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
@@ -292,10 +312,11 @@ type PurgeResult struct {
 // BdStore implements Store by shelling out to the bd CLI (beads v0.55.1+).
 // It delegates all persistence to bd's embedded Dolt database.
 type BdStore struct {
-	dir         string          // city root directory (where .beads/ lives)
-	runner      CommandRunner   // injectable for testing
-	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
-	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	dir           string               // city root directory (where .beads/ lives)
+	runner        CommandRunner        // injectable for testing
+	runnerContext CommandRunnerContext // optional; set via WithBdStoreRunnerContext to enable ListContext cancellation
+	purgeRunner   PurgeRunnerFunc      // injectable for testing; nil uses exec default
+	idPrefix      string               // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
@@ -343,6 +364,16 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	}
 }
 
+// WithBdStoreRunnerContext configures a ctx-aware runner for per-call
+// cancellation via ListContext. When unset, ListContext falls back to the
+// store's plain, non-cancellable List (same graceful-degradation shape as
+// Counter's ErrCountUnsupported fallback).
+func WithBdStoreRunnerContext(runner CommandRunnerContext) BdStoreOption {
+	return func(s *BdStore) {
+		s.runnerContext = runner
+	}
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
 	return NewBdStoreWithPrefix(dir, runner, "", opts...)
@@ -379,17 +410,6 @@ func (s *BdStore) IDPrefix() string {
 		return ""
 	}
 	return s.idPrefix
-}
-
-// Dir returns the root directory this store was constructed with (where
-// .beads/ lives). Callers that need to build an equivalent throwaway store
-// bound to a different context (e.g. a per-request scoped clone) use this
-// to target the same backend without a second, parallel way to track it.
-func (s *BdStore) Dir() string {
-	if s == nil {
-		return ""
-	}
-	return s.dir
 }
 
 // ListSkipLabelsEnabled reports whether this store may ask bd list to skip
@@ -1932,12 +1952,26 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 // idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
 // stable-ID guard needed.
 func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
+	return s.runBDTransientReadWith(s.runner, args...)
+}
+
+// runBDTransientReadContext is runBDTransientRead's ctx-aware sibling: it
+// binds ctx to every attempt via the store's configured CommandRunnerContext.
+// Callers must only invoke this when s.runnerContext is non-nil.
+func (s *BdStore) runBDTransientReadContext(ctx context.Context, args ...string) ([]byte, error) {
+	runner := func(dir, name string, a ...string) ([]byte, error) {
+		return s.runnerContext(ctx, dir, name, a...)
+	}
+	return s.runBDTransientReadWith(runner, args...)
+}
+
+func (s *BdStore) runBDTransientReadWith(runner CommandRunner, args ...string) ([]byte, error) {
 	var (
 		out []byte
 		err error
 	)
 	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
-		out, err = s.runner(s.dir, "bd", args...)
+		out, err = runner(s.dir, "bd", args...)
 		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
 			return out, err
 		}
@@ -2279,20 +2313,52 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
+	return s.listWith(s.runBDTransientRead, query)
+}
+
+// Compile-time assertion that BdStore satisfies ContextLister, so a signature
+// drift becomes a build failure instead of a silent fall-through to the
+// non-cancellable List path (ga-enpau9 / PR #3918 review).
+var _ ContextLister = (*BdStore)(nil)
+
+// ListContext is like List but binds the spawned bd child to ctx when the
+// store was configured with a ctx-aware runner (WithBdStoreRunnerContext), so
+// a caller with a deadline can cancel the backing query and release its
+// connection instead of leaking a goroutine (mirrors Counter.Count). Falls
+// back to the plain, non-cancellable List when no ctx-aware runner is
+// configured.
+func (s *BdStore) ListContext(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if s.runnerContext == nil {
+		return s.List(query)
+	}
+	read := func(args ...string) ([]byte, error) {
+		return s.runBDTransientReadContext(ctx, args...)
+	}
+	return s.listWith(read, query)
+}
+
+func (s *BdStore) listWith(read bdReadFunc, query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
 	switch query.TierMode {
 	case TierWisps:
-		return s.listWispsTier(query)
+		return s.listWispsTierWith(read, query)
 	case TierBoth:
-		return s.listBothTiers(query)
+		return s.listBothTiersWith(read, query)
 	}
-	return s.listViaBDList(query)
+	return s.listViaBDListWith(read, query)
 }
 
-func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+// bdReadFunc runs a read-only bd command (args, e.g. "list", "--json", ...)
+// and returns its parsed stdout bytes. It abstracts over the plain and
+// ctx-bound transient-read paths so the tier-dispatch/query-building logic
+// below (listViaBDListWith and friends) is written once and shared by both
+// List and ListContext.
+type bdReadFunc func(args ...string) ([]byte, error)
+
+func (s *BdStore) listViaBDListWith(read bdReadFunc, query ListQuery) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -2339,7 +2405,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runBDTransientRead(args...)
+	out, err := read(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
@@ -2406,22 +2472,22 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 	}
 }
 
-func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
+func (s *BdStore) listWispsTierWith(read bdReadFunc, query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
+	listResult, listErr := s.listViaBDListWith(read, listQ)
 
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	ephemeralResult, ephemeralErr := s.listEphemeralWith(read, ephemeralQ)
 
 	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
 }
 
-// listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
-// <filters>"`. The installed bd list surface does not expose ephemeral rows, so
-// TierWisps and TierBoth must union this path with bd list results.
-func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+// listEphemeralWith reads only ephemeral rows using `bd query "ephemeral=true
+// AND <filters>"`. The installed bd list surface does not expose ephemeral
+// rows, so TierWisps and TierBoth must union this path with bd list results.
+func (s *BdStore) listEphemeralWith(read bdReadFunc, query ListQuery) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	clauses := []string{"ephemeral=true"}
 	serverFilteredOnly := !clientFilteredAssignees
@@ -2445,7 +2511,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// transient-read path (as listViaBDList already does) so BOTH subprocesses
 	// inside listWispsTier are bounded — a bare s.runner call here would be the
 	// one unretried read on the hot tier-merge path.
-	out, err := s.runBDTransientRead(args...)
+	out, err := read(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -2562,14 +2628,14 @@ func isBareBdQueryValue(value string) bool {
 	return true
 }
 
-func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
+func (s *BdStore) listBothTiersWith(read bdReadFunc, query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierBoth
-	listResult, listErr := s.listViaBDList(listQ)
+	listResult, listErr := s.listViaBDListWith(read, listQ)
 
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	ephemeralResult, ephemeralErr := s.listEphemeralWith(read, ephemeralQ)
 
 	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
 }

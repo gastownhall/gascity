@@ -56,7 +56,7 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	if snapshot.NamedSessions[0].Status != "materialized" {
 		t.Fatalf("named session status = %q, want materialized", snapshot.NamedSessions[0].Status)
 	}
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -165,7 +165,7 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	snapshot := loadStatusSessionSnapshot("/city", &config.City{}, store, &stderr)
+	snapshot := loadStatusSessionSnapshot(store, &stderr)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("loadStatusSessionSnapshot elapsed %s, want bounded timeout", elapsed)
 	}
@@ -187,14 +187,14 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	}
 }
 
-// TestLoadStatusSessionSnapshotKillsBdChildOnTimeout is the ga-cdmx6x
-// regression test for `gc status`'s session-snapshot read: a bd child
-// spawned via the store loadStatusSessionSnapshot builds internally must
-// be killed when its budget expires, instead of surviving to
-// bdCommandTimeout the way the pre-fix abandon-the-goroutine pattern let
-// it. Mirrors TestScopedBdStoreForCityKillsChildOnCtxCancel's pidfile
-// pattern, driven through loadStatusSessionSnapshot itself so the whole
-// call site — not just scopedBdStoreForCity in isolation — is covered.
+// TestLoadStatusSessionSnapshotKillsBdChildOnTimeout is the regression test
+// for `gc status`'s session-snapshot read: a bd child spawned by the store
+// loadStatusSessionSnapshot reads through must be killed when its budget
+// expires, instead of surviving to bdCommandTimeout the way the pre-fix
+// abandon-the-goroutine pattern let it. realStore is built via
+// bdStoreForCity, which wires beads.WithBdStoreRunnerContext in production
+// (ga-yxwid1), so loadStatusSessionSnapshot's ctx-bound ListContext call
+// (ga-oeeggk) actually cancels the in-flight bd child on timeout.
 func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -207,6 +207,13 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
+	// GC_BEADS=file is load-bearing (see
+	// TestBdStoreForCityListContextKillsChildOnTimeout): it makes
+	// cityUsesBdStoreContract false, so bdRuntimeEnvWithError short-circuits
+	// before managed-Dolt target resolution/health/recovery, which otherwise
+	// spends 30-40s probing with no real Dolt server and starves the bd stub
+	// below of ever actually being exec'd within this test's budget.
+	t.Setenv("GC_BEADS", "file")
 
 	binDir := t.TempDir()
 	pidFile := filepath.Join(binDir, "bd-child.pid")
@@ -220,7 +227,7 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	_ = loadStatusSessionSnapshot(cityDir, &config.City{}, realStore, &stderr)
+	_ = loadStatusSessionSnapshot(realStore, &stderr)
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("loadStatusSessionSnapshot blocked %s; want bounded by statusSessionSnapshotTimeout", elapsed)
 	}
@@ -234,6 +241,21 @@ func TestLoadStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	}
 	_ = exec.Command("kill", "-KILL", childPid).Run()
 	t.Fatalf("bd child process %s survived loadStatusSessionSnapshot's timeout", childPid)
+}
+
+func waitForNonEmptyFileContent(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return strings.TrimSpace(string(data))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to be written", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded is the
@@ -665,7 +687,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot("/home/user/city", cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

@@ -14,6 +14,26 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	return c.list(query, c.backing.List)
+}
+
+// Compile-time assertion that CachingStore satisfies ContextLister (signature
+// drift → build failure, not a silent non-cancellable fall-through; ga-enpau9
+// / PR #3918 review).
+var _ ContextLister = (*CachingStore)(nil)
+
+// ListContext is like List but accepts a context so a caller with a deadline
+// can cancel the backing query when the cache must delegate. Cache-hit paths
+// are in-memory and instant, so they ignore ctx and reuse List's logic
+// verbatim; only backing-store delegation is ctx-aware, via ContextLister
+// when the backing store supports it (mirrors Count's Counter delegation).
+func (c *CachingStore) ListContext(ctx context.Context, query ListQuery) ([]Bead, error) {
+	return c.list(query, func(q ListQuery) ([]Bead, error) {
+		return ContextListOrFallback(ctx, c.backing, q)
+	})
+}
+
+func (c *CachingStore) list(query ListQuery, backingList func(ListQuery) ([]Bead, error)) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -21,7 +41,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
 		c.mu.RUnlock()
-		items, err := c.backing.List(query)
+		items, err := backingList(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, items)
 		}
@@ -60,10 +80,10 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		// The cache never has a complete closed-only or parent-history view, so
 		// preserve the old backing-store behavior for those query shapes.
 		if query.Status == "closed" || query.ParentID != "" {
-			return c.backing.List(liveListQuery(query))
+			return backingList(liveListQuery(query))
 		}
 
-		all, err := c.backing.List(liveListQuery(query))
+		all, err := backingList(liveListQuery(query))
 		if err != nil {
 			if !IsPartialResult(err) {
 				c.recordProblem("list include closed backing failure", err)
@@ -87,7 +107,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		return finish(cached, err)
 	}
-	return c.backing.List(liveListQuery(query))
+	return backingList(liveListQuery(query))
 }
 
 func liveListQuery(query ListQuery) ListQuery {

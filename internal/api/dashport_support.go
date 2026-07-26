@@ -239,13 +239,6 @@ func (s *seededState) IsQuarantined(string) bool      { return false }
 func (s *seededState) ClearCrashHistory(string)       {}
 func (s *seededState) CityBeadStore() beads.Store     { return s.cityStore }
 
-// ScopedStoreLike returns (nil, nil): the seeded stores are in-memory, so there
-// is no bd-CLI subprocess to scope. Callers keep reading through the existing
-// store directly, matching the contract for non-bd-backed stores.
-func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store, error) {
-	return nil, nil
-}
-
 // NudgesBeadStore, SessionsBeadStore, and GraphBeadStore all collapse to the
 // city store on a seeded single-store city, exactly as they do on a default
 // (non-relocated) controller city.

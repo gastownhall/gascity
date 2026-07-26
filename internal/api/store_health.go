@@ -83,7 +83,7 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows, err := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
+	rows, err := countBeadStoreRows(ctx, s.state.CityBeadStore())
 	if err != nil {
 		return nil, err
 	}
@@ -118,11 +118,10 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // follow-up): hydrating tens of thousands of closed rows cannot finish inside
 // statusStoreReadTimeout on a long-lived city, which left store_health
 // permanently absent. The hydrating List fallback remains for stores without
-// a Counter and for shapes Count reports as unsupported; that path is the
-// store-health block's exposure to ga-cdmx6x's bd-child leak, covered by
-// statusListStoreWithTimeout's state.ScopedStoreLike wiring the same way as
-// the work-count fallback.
-func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (int, error) {
+// a Counter and for shapes Count reports as unsupported; that path gets a
+// real ctx-bound cancellation from statusListStoreWithTimeout's ContextLister
+// support the same way as the work-count fallback.
+func countBeadStoreRows(ctx context.Context, store beads.Store) (int, error) {
 	if store == nil {
 		return 0, errors.New("counting retained bead rows: store unavailable")
 	}
@@ -140,7 +139,7 @@ func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (in
 			return 0, fmt.Errorf("counting retained bead rows: %w", err)
 		}
 	}
-	list, err := statusListStoreWithTimeout(ctx, state, store, query)
+	list, err := statusListStoreWithTimeout(ctx, store, query)
 	if err != nil {
 		return 0, fmt.Errorf("counting retained bead rows: %w", err)
 	}

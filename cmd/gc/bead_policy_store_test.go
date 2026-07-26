@@ -679,3 +679,68 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
 	}
 }
+
+type contextListCaptureStore struct {
+	beads.Store
+	result   []beads.Bead
+	err      error
+	gotCtx   context.Context
+	gotQuery beads.ListQuery
+	calls    int
+}
+
+func (s *contextListCaptureStore) ListContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	s.calls++
+	s.gotCtx = ctx
+	s.gotQuery = query
+	return s.result, s.err
+}
+
+func TestBeadPolicyStoreListContextExpandsReadTierAndDelegates(t *testing.T) {
+	want := []beads.Bead{{ID: "bd-1", Title: "from inner ContextLister"}}
+	inner := &contextListCaptureStore{Store: beads.NewMemStore(), result: want}
+	store := wrapStoreWithBeadPolicies(inner, &config.City{})
+
+	lister, ok := store.(beads.ContextLister)
+	if !ok {
+		t.Fatal("policy store does not implement beads.ContextLister")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got, err := lister.ListContext(ctx, beads.ListQuery{Label: "x", TierMode: beads.TierIssues})
+	if err != nil {
+		t.Fatalf("ListContext: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-1" {
+		t.Fatalf("ListContext = %+v, want the inner ContextLister's rows", got)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner.ListContext called %d times, want 1", inner.calls)
+	}
+	if inner.gotCtx != ctx {
+		t.Fatal("inner.ListContext did not receive the caller's ctx")
+	}
+	if inner.gotQuery.TierMode != beads.TierBoth {
+		t.Fatalf("TierMode = %v, want TierBoth (policy reads span both tiers)", inner.gotQuery.TierMode)
+	}
+}
+
+func TestBeadPolicyStoreListContextFallsBackToListWithoutInnerContextLister(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "task", Type: "task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(mem, &config.City{})
+
+	lister, ok := store.(beads.ContextLister)
+	if !ok {
+		t.Fatal("policy store does not implement beads.ContextLister")
+	}
+	got, err := lister.ListContext(context.Background(), beads.ListQuery{Status: "open", AllowScan: true})
+	if err != nil {
+		t.Fatalf("ListContext: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListContext len = %d, want 1 (fell back to List)", len(got))
+	}
+}

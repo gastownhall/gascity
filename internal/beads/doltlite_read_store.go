@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -286,6 +287,22 @@ func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 	return s.queryIssues(query, "", nil, query.Limit)
+}
+
+// Compile-time assertion that DoltliteReadStore satisfies ContextLister via
+// this explicit override rather than the promoted *BdStore method (ga-enpau9
+// / PR #3918 review).
+var _ ContextLister = (*DoltliteReadStore)(nil)
+
+// ListContext is List's ContextLister sibling. Without this override,
+// ListContext would resolve via Go method promotion to the embedded
+// *BdStore's ListContext — the bd-CLI-subprocess path — even though
+// DoltliteReadStore has an optimized native-DB read available. The native
+// read is local, synchronous SQLite work with no subprocess or network call
+// to cancel, so this ignores ctx and reuses List's logic verbatim, same as
+// CachingStore's cache-hit path.
+func (s *DoltliteReadStore) ListContext(_ context.Context, query ListQuery) ([]Bead, error) {
+	return s.List(query)
 }
 
 func (s *DoltliteReadStore) ListOpen(status ...string) ([]Bead, error) {

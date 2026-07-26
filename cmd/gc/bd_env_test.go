@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func mustBdRuntimeEnv(t *testing.T, cityPath string) map[string]string {
@@ -317,67 +319,6 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
-	}
-}
-
-// TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget proves the
-// NoRecovery variant (used by ga-cdmx6x's scoped throwaway stores) still
-// resolves an explicitly configured external Dolt target identically to
-// the recovery-allowing default — only the managed-dolt
-// recovery/health-check/autostart side effect is skipped, not the
-// ordinary external-config path.
-func TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
-	t.Setenv("GC_DOLT_PORT", "3307")
-	t.Setenv("GC_DOLT_USER", "agent")
-	t.Setenv("GC_DOLT_PASSWORD", "s3cret")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	env, err := bdRuntimeEnvWithErrorNoRecovery(cityPath)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvWithErrorNoRecovery() error = %v", err)
-	}
-
-	if got := env["GC_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
-		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
-	}
-	if got := env["GC_DOLT_PORT"]; got != "3307" {
-		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
-	}
-	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
-		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
-	}
-}
-
-// TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget is
-// TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget for the
-// rig-scoped resolver.
-func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
-	t.Setenv("GC_DOLT_PORT", "3307")
-	t.Setenv("GC_DOLT_USER", "agent")
-	t.Setenv("GC_DOLT_PASSWORD", "s3cret")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	rigPath := filepath.Join(cityPath, "rigs", "repo")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo"}}}
-
-	env, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigPath)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithErrorNoRecovery() error = %v", err)
-	}
-	if got := env["GC_DOLT_HOST"]; got != "mini2.hippo-tilapia.ts.net" {
-		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
-	}
-	if got := env["GC_RIG"]; got != "repo" {
-		t.Errorf("GC_RIG = %q, want repo", got)
 	}
 }
 
@@ -929,6 +870,51 @@ dolt.auto-start: false
 	}
 	if got := currentResolvableManagedDoltPort(cityPath); got != strconv.Itoa(port) {
 		t.Fatalf("currentResolvableManagedDoltPort() = %q, want %d", got, port)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published state should remain absent when recovery is disabled, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("port mirror should remain absent when recovery is disabled, stat err = %v", err)
+	}
+}
+
+// TestBdRuntimeEnvNoRecoveryDoesNotPublishProviderState proves the recovery-free
+// city env fn behind the ctx-bound status runners resolves without triggering
+// managed-Dolt recovery: in the managed-runtime-unavailable scenario it degrades
+// gracefully (no error) and never publishes provider state or the port mirror,
+// exactly as resolvedRuntimeCityDoltTarget(..., false) does. This is what keeps
+// pre-spawn env resolution inside the ~1s status budget (ga-enpau9 / PR #3918
+// review, Major). Contrast: the recovery-enabled bdRuntimeEnvWithError would
+// reach recoverManagedBDCommand under providerOpTimeout("recover") == 120s.
+func TestBdRuntimeEnvNoRecoveryDoesNotPublishProviderState(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	t.Setenv("GC_DOLT_PORT", "")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeReachableProviderManagedDoltState(t, cityPath)
+
+	env, err := bdRuntimeEnvNoRecovery(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvNoRecovery() error = %v, want graceful degrade (nil) when managed runtime is unavailable", err)
+	}
+	if env == nil {
+		t.Fatal("bdRuntimeEnvNoRecovery() env = nil, want a usable env map")
 	}
 	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
 		t.Fatalf("published state should remain absent when recovery is disabled, stat err = %v", err)
@@ -3992,6 +3978,368 @@ dolt.auto-start: false
 	if recoverCalls != 0 {
 		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
 	}
+}
+
+func TestBdCommandRunnerContextForCityPinsCityStoreEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("BEADS_DIR", "/rig/.beads")
+	t.Setenv("GC_RIG", "demo-rig")
+	t.Setenv("GC_RIG_ROOT", "/rig")
+
+	runner := bdCommandRunnerContextForCity(cityDir)
+	out, err := runner(context.Background(), cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n' "$GC_CITY_PATH" "$BEADS_DIR" "$GC_RIG" "$GC_RIG_ROOT"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("lines = %q, want 5 lines including trailing newline", string(out))
+	}
+	lines = lines[:4]
+	if lines[0] != cityDir {
+		t.Fatalf("GC_CITY_PATH = %q, want %q", lines[0], cityDir)
+	}
+	if lines[1] != filepath.Join(cityDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", lines[1], filepath.Join(cityDir, ".beads"))
+	}
+	if lines[2] != "" {
+		t.Fatalf("GC_RIG = %q, want empty", lines[2])
+	}
+	if lines[3] != "" {
+		t.Fatalf("GC_RIG_ROOT = %q, want empty", lines[3])
+	}
+}
+
+// TestBdCommandRunnerContextWithManagedRetrySkipsRecoveryButStillRetries is the
+// design-decision test for ga-yxwid1: providerOpTimeout("recover") is 120s
+// while ctx-bound callers (e.g. statusStoreReadTimeout) use ~1s budgets, so
+// the ctx-aware runner must NEVER invoke recoverManagedBDCommand — doing so
+// would turn a bounded, best-effort read into an effectively-unbounded one.
+// A single ctx-bound retry is still attempted (mirrors the plain runner's
+// "at most 2 attempts" shape minus the incompatible recovery step), so a
+// transient blip that clears on its own within budget still gets a second
+// chance.
+func TestBdCommandRunnerContextWithManagedRetrySkipsRecoveryButStillRetries(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerContextWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerContextWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	attempts := 0
+	recoverCalls := 0
+	seenPorts := make([]string, 0, 2)
+
+	beadsExecCommandRunnerContextWithEnv = func(env map[string]string) beads.CommandRunnerContext {
+		copied := map[string]string{}
+		for key, value := range env {
+			copied[key] = value
+		}
+		return func(_ context.Context, _ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			seenPorts = append(seenPorts, copied["GC_DOLT_PORT"])
+			if attempts == 1 {
+				return nil, fmt.Errorf("server unreachable at 127.0.0.1:%s", copied["GC_DOLT_PORT"])
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
+	runner := bdCommandRunnerContextWithManagedRetryErr(t.TempDir(), func(_ string) (map[string]string, error) {
+		return map[string]string{"GC_DOLT_PORT": "3307"}, nil
+	})
+
+	out, err := runner(context.Background(), t.TempDir(), "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want %q", out, "ok")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (retry must still happen even though recovery is skipped)", attempts)
+	}
+	if recoverCalls != 0 {
+		t.Fatalf("recoverCalls = %d, want 0 (ctx-aware path must never invoke the 120s-capable recovery step)", recoverCalls)
+	}
+	if len(seenPorts) != 2 || seenPorts[0] != "3307" || seenPorts[1] != "3307" {
+		t.Fatalf("seenPorts = %v, want [3307 3307] (env rebuilt fresh but unchanged since recovery never ran)", seenPorts)
+	}
+}
+
+func TestBdCommandRunnerContextWithManagedRetryDoesNotTriggerRecoveryOnTransientDisconnect(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerContextWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerContextWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+
+	attempts := 0
+	recoverCalls := 0
+	beadsExecCommandRunnerContextWithEnv = func(_ map[string]string) beads.CommandRunnerContext {
+		return func(_ context.Context, _ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, fmt.Errorf("bad connection: use of closed network connection")
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
+	runner := bdCommandRunnerContextWithManagedRetryErr(t.TempDir(), func(_ string) (map[string]string, error) {
+		return map[string]string{"GC_DOLT_PORT": "3307"}, nil
+	})
+
+	out, err := runner(context.Background(), t.TempDir(), "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want %q", out, "ok")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if recoverCalls != 0 {
+		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
+	}
+}
+
+func TestBdCommandRunnerContextWithManagedRetryReturnsEnvErrorBeforeMutatingNilEnv(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	envErr := fmt.Errorf("env failed")
+	runner := bdCommandRunnerContextWithManagedRetryErr(t.TempDir(), func(_ string) (map[string]string, error) {
+		return nil, envErr
+	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("runner panicked before returning env error: %v", r)
+		}
+	}()
+	out, err := runner(context.Background(), t.TempDir(), "bd", "list", "--json")
+	if !errors.Is(err, envErr) {
+		t.Fatalf("runner error = %v, want env error", err)
+	}
+	if out != nil {
+		t.Fatalf("runner output = %q, want nil after env error", out)
+	}
+}
+
+// TestBdStoreForCityListContextKillsChildOnTimeout is the production-wiring
+// verifying test for ga-yxwid1 (follow-up to ga-oeeggk's
+// TestBdStoreListContextKillsChildOnTimeout): stub bd with an over-budget
+// sleep and prove that ListContext on the store returned by bdStoreForCity
+// itself — not a hand-built BdStore — degrades within budget and actually
+// kills the spawned bd child. This is what proves the production wiring
+// (bdStoreForCity now passing WithBdStoreRunnerContext) closes the gap
+// ga-oeeggk deliberately left open.
+func TestBdStoreForCityListContextKillsChildOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	if _, err := exec.LookPath("kill"); err != nil {
+		t.Skip("kill unavailable")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// GC_BEADS=file (not "bd") is load-bearing: it makes cityUsesBdStoreContract
+	// false, so bdRuntimeEnvWithError short-circuits before any managed-Dolt
+	// target resolution/health/recovery — machinery that (with no real Dolt
+	// server) otherwise spends 30-40s probing before giving up. BdStore itself
+	// always shells out to the literal "bd" executable regardless of this
+	// config value, so the stub below is still what actually gets exec'd; this
+	// setting only controls how fast env construction resolves.
+	t.Setenv("GC_BEADS", "file")
+
+	pidFile := filepath.Join(t.TempDir(), "bd.pid")
+	binDir := t.TempDir()
+	stubPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(stubPath, []byte("#!/bin/sh\necho \"$$\" > \"$BD_TEST_PIDFILE\"\nsleep 30\nprintf '[]\\n'\n"), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_TEST_PIDFILE", pidFile)
+
+	store := bdStoreForCity(cityDir, cityDir)
+
+	const budget = 300 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	_, err := store.ListContext(ctx, beads.ListQuery{AllowScan: true})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ListContext unexpectedly succeeded against a 30s-sleeping bd stub")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("ListContext blocked %s; want a degraded result bounded near the %s budget", elapsed, budget)
+	}
+
+	processgrouptest.WaitForFileSize(t, pidFile)
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if pid == "" {
+		t.Fatal("bd stub never wrote its PID")
+	}
+	for i := 0; i < 100; i++ {
+		if err := exec.Command("kill", "-0", pid).Run(); err != nil {
+			return // child is gone — success: bdStoreForCity's wiring let ctx cancellation kill it.
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = exec.Command("kill", "-KILL", pid).Run()
+	t.Fatalf("bd child process %s survived ListContext's ctx cancellation (no lingering child expected)", pid)
+}
+
+// writeBdSleepStubOnPath installs an over-budget `bd` stub on PATH that records
+// its own PID and sleeps well past any test budget, then returns the pid file.
+// Shared by the production-wiring child-kill tests so the rig and control
+// constructors are exercised with the same real-process harness as the city
+// path (ga-enpau9 / PR #3918 review, Blocker).
+func writeBdSleepStubOnPath(t *testing.T) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "bd.pid")
+	binDir := t.TempDir()
+	stubPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(stubPath, []byte("#!/bin/sh\necho \"$$\" > \"$BD_TEST_PIDFILE\"\nsleep 30\nprintf '[]\\n'\n"), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_TEST_PIDFILE", pidFile)
+	return pidFile
+}
+
+// assertListContextKillsChild drives store.ListContext against an over-budget
+// bd child (see writeBdSleepStubOnPath) and asserts the call degrades within
+// budget and the spawned child is actually gone — the proof that the store's
+// ctx runner is wired, not the nil-runnerContext fallback.
+func assertListContextKillsChild(t *testing.T, store beads.ContextLister, pidFile string) {
+	t.Helper()
+	const budget = 300 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	_, err := store.ListContext(ctx, beads.ListQuery{AllowScan: true})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ListContext unexpectedly succeeded against a 30s-sleeping bd stub")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("ListContext blocked %s; want a degraded result bounded near the %s budget", elapsed, budget)
+	}
+
+	processgrouptest.WaitForFileSize(t, pidFile)
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if pid == "" {
+		t.Fatal("bd stub never wrote its PID")
+	}
+	for i := 0; i < 100; i++ {
+		if err := exec.Command("kill", "-0", pid).Run(); err != nil {
+			return // child is gone — success: the store's wiring let ctx cancellation kill it.
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = exec.Command("kill", "-KILL", pid).Run()
+	t.Fatalf("bd child process %s survived ListContext's ctx cancellation (no lingering child expected)", pid)
+}
+
+// TestBdStoreForRigListContextKillsChildOnTimeout is the rig-shaped
+// hung-backend regression test (ga-enpau9 / PR #3918 review, Blocker + Minor):
+// it proves bdStoreForRig — the constructor behind every API status rig store
+// (api_state.go OpenBdStore) — now wires a ctx runner, so a rig-scoped status
+// read cancels a stuck backing bd child within budget instead of blocking for
+// up to bdReadCommandTimeout on the nil-runnerContext fallback. Before the fix
+// only bdStoreForCity was wired; a rig store claimed ContextLister but degraded
+// to a non-cancellable List.
+func TestBdStoreForRigListContextKillsChildOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	if _, err := exec.LookPath("kill"); err != nil {
+		t.Skip("kill unavailable")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// GC_BEADS=file keeps env resolution off the managed-Dolt probe/recovery
+	// path so construction is fast; BdStore still shells out to the literal
+	// stubbed "bd" regardless (see TestBdStoreForCityListContextKillsChildOnTimeout).
+	t.Setenv("GC_BEADS", "file")
+
+	pidFile := writeBdSleepStubOnPath(t)
+	store := bdStoreForRig(rigDir, cityDir, nil, "demo")
+	assertListContextKillsChild(t, store, pidFile)
+}
+
+// TestControlBdStoreForRigListContextKillsChildOnTimeout proves the
+// controller-scoped rig constructor (controlBdStoreForRig) is likewise wired
+// with a ctx runner, so control-plane status reads over rig stores cancel a
+// stuck child too (ga-enpau9 / PR #3918 review, Blocker).
+func TestControlBdStoreForRigListContextKillsChildOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	if _, err := exec.LookPath("kill"); err != nil {
+		t.Skip("kill unavailable")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+
+	pidFile := writeBdSleepStubOnPath(t)
+	store := controlBdStoreForRig(rigDir, cityDir, nil, "demo")
+	assertListContextKillsChild(t, store, pidFile)
 }
 
 func TestBdRuntimeEnvDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
