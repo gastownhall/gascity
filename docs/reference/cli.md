@@ -3296,8 +3296,10 @@ compatibility sugar: gc rig add writes canonical rig imports.
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached
 registry catalogs, including a scoped community name ("owner/pack"). A "./"
-prefix or a "packs/&lt;name&gt;" token always means a directory in the city, and a
-directory that exists always wins over a pack of the same name.
+prefix or a "packs/&lt;name&gt;" token is never read as a registry name (a
+bundled pack still canonicalizes, so "./gastown" resolves to the bundled
+source), and an existing directory always wins over a registry pack of the
+same name.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
