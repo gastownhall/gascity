@@ -664,6 +664,51 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 }
 
+func TestCmdStopBodyDoesNotTakeOverAfterAmbiguousControllerRequest(t *testing.T) {
+	cityDir := setupCity(t, "ambiguous-controller-stop")
+	writeRigAnywhereCityToml(t, cityDir, `
+[workspace]
+name = "ambiguous-controller-stop"
+
+[beads]
+provider = "file"
+`)
+	stopCommands := startStandaloneControllerWithReply(t, cityDir, nil)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "ambiguous-controller-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("cmdStopBody() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if calls := sp.CountCalls("Stop", "orphan"); calls != 0 {
+		t.Fatalf("direct orphan stop calls = %d, want 0 after ambiguous controller request", calls)
+	}
+	select {
+	case command := <-stopCommands:
+		if command != "stop" {
+			t.Fatalf("controller command = %q, want stop", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controller did not receive stop command")
+	}
+}
+
 func TestCmdStopInvalidConfigManagedRuntimeFailsWhenShutdownFails(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
@@ -766,6 +811,11 @@ func overrideShutdownBeadsProviderForStop(t *testing.T, fn func(string) error) {
 
 func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan string {
 	t.Helper()
+	return startStandaloneControllerWithReply(t, cityDir, []byte("ok\n"))
+}
+
+func startStandaloneControllerWithReply(t *testing.T, cityDir string, reply []byte) <-chan string {
+	t.Helper()
 
 	lock, err := acquireControllerLock(cityDir)
 	if err != nil {
@@ -797,7 +847,9 @@ func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan
 			return
 		}
 		commands <- strings.TrimSpace(string(buf[:n]))
-		_, _ = conn.Write([]byte("ok\n"))
+		if len(reply) > 0 {
+			_, _ = conn.Write(reply)
+		}
 		_ = lis.Close()
 		_ = os.Remove(sockPath)
 		_ = lock.Close()

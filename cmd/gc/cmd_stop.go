@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,15 +266,10 @@ func ceilDiv(n, d int) int {
 func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
 
-	store, _ := openCityStoreAt(cityPath)
-	// Every store consumer in this stop flow is session-class (sleep-reason marks,
-	// session-name lookups, session-runtime stop, orphan cleanup), so route the
-	// whole flow through the session coordination-class store for relocation-safety.
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	markCityStopSessionSleepReason(sessionFrontDoor(sessStore), stderr)
-
 	// If a controller is running, ask it to shut down (it stops agents).
-	if tryStopControllerWithForce(cityPath, stdout, force) {
+	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
+	switch stopResult.outcome {
+	case controllerStopAcknowledged:
 		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -286,7 +280,22 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		}
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 		return 0
+	case controllerStopDefinitePreEntryUnavailable:
+		// No stop request entered a controller, so direct cleanup may proceed.
+	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
+	default:
+		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+		return 1
 	}
+
+	store, _ := openCityStoreAt(cityPath)
+	// Every store consumer in this stop flow is session-class (sleep-reason marks,
+	// session-name lookups, session-runtime stop, orphan cleanup), so route the
+	// whole flow through the session coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	markCityStopSessionSleepReason(sessionFrontDoor(sessStore), stderr)
 
 	sp, err := sessionProviderForStopCity(cfg, cityPath)
 	if err != nil {
@@ -419,11 +428,19 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 }
 
 func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
-	if tryStopControllerWithForce(cityPath, stdout, force) {
+	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
+	switch stopResult.outcome {
+	case controllerStopAcknowledged:
 		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			return true, err
 		}
 		return true, nil
+	case controllerStopDefinitePreEntryUnavailable:
+		// No stop request entered a controller, so the lock probe may proceed.
+	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+		return true, stopResult.failClosedError()
+	default:
+		return true, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -479,29 +496,15 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 // Returns true if a controller acknowledged the shutdown. If no controller
 // is running (socket doesn't exist or connection refused), returns false.
 func tryStopController(cityPath string, stdout io.Writer) bool {
-	return tryStopControllerWithForce(cityPath, stdout, false)
+	return tryStopControllerWithForce(cityPath, stdout, false).outcome == controllerStopAcknowledged
 }
 
-func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) bool {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return false
+func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) controllerStopResult {
+	result := sendControllerStop(cityPath, force)
+	if result.outcome == controllerStopAcknowledged {
+		fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
 	}
-	defer conn.Close() //nolint:errcheck // best-effort cleanup
-	command := "stop\n"
-	if force {
-		command = "stop-force\n"
-	}
-	conn.Write([]byte(command))                            //nolint:errcheck // best-effort
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck // best-effort
-	buf := make([]byte, 64)
-	n, readErr := conn.Read(buf)
-	if readErr != nil || !strings.Contains(string(buf[:n]), "ok") {
-		return false // controller did not acknowledge — fall through to direct cleanup
-	}
-	fmt.Fprintln(stdout, "Controller stopping...") //nolint:errcheck // best-effort stdout
-	return true
+	return result
 }
 
 func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {
