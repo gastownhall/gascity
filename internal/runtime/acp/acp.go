@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -58,11 +59,12 @@ func (c *Config) outputBufferLines() int {
 
 // Provider manages agent sessions using the Agent Client Protocol.
 type Provider struct {
-	mu       sync.Mutex
-	dir      string                  // socket/meta file directory
-	conns    map[string]*sessionConn // in-process tracking
-	workDirs map[string]string       // session name → workDir (for CopyTo)
-	cfg      Config
+	mu            sync.Mutex
+	dir           string                  // socket/meta file directory
+	conns         map[string]*sessionConn // in-process tracking
+	workDirs      map[string]string       // session name → workDir (for CopyTo)
+	cfg           Config
+	activityWrite func(path string, data []byte) error // test seam
 }
 
 // Compile-time check.
@@ -256,7 +258,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
+		// Drain buffered stdout before the publisher's final flush so the last
+		// session/update cannot race publication shutdown.
+		<-sc.readDone
 		sc.drainPending()
+		sc.closeActivityPublisher()
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
@@ -295,7 +301,61 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
 
+	// Seed the sidecar synchronously at handshake completion. Start must not
+	// advertise a cross-process activity-capable session until the first
+	// durable value exists. Later updates use the non-blocking publisher.
+	seed := time.Now()
+	if err := p.publishActivity(name, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
+	}
+	publisher := newActivityPublisher(
+		activityPublishInterval,
+		time.Now(),
+		func(stamp time.Time) error { return p.publishActivity(name, stamp) },
+		func(err error) {
+			fmt.Fprintf(os.Stderr, "acp: publishing activity for %q: %v\n", name, err)
+		},
+	)
+	if err := sc.installActivityPublisher(publisher, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("starting activity publication for %q: %w", name, err)
+	}
+
+	// Commit the real connection only if the startup sentinel still owns the
+	// name. Stop may have removed it while the initial atomic write was in
+	// progress.
 	p.mu.Lock()
+	if p.conns[name] != sentinel {
+		p.mu.Unlock()
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if _, replaced := p.conns[name]; !replaced {
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("session %q was stopped during startup", name)
+	}
 	p.conns[name] = sc
 	p.mu.Unlock()
 
@@ -608,15 +668,69 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
+// lastActivityMetaKey names the sidecar holding the durable last-activity
+// stamp. Keeping it in the meta namespace means Stop's cleanupMeta already
+// removes it along with the rest of the session's sidecar state.
+const lastActivityMetaKey = "gc_last_activity"
+
+// publishActivity atomically replaces the durable last-activity stamp. Atomic
+// replacement prevents cross-process readers from observing a truncated or
+// partially-written timestamp.
+func (p *Provider) publishActivity(name string, t time.Time) error {
+	path := p.metaPath(name, lastActivityMetaKey)
+	data := []byte(t.UTC().Format(time.RFC3339Nano))
+	var err error
+	if p.activityWrite != nil {
+		err = p.activityWrite(path, data)
+	} else {
+		err = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
+	}
+	if err != nil {
+		return fmt.Errorf("writing activity sidecar: %w", err)
+	}
+	return nil
+}
+
 // GetLastActivity returns the time of the last session/update notification.
+//
+// It reads the in-process connection when this process owns it, and otherwise
+// falls back to the durable stamp on disk — the same
+// in-memory-then-cross-process shape that Stop, Interrupt and IsRunning
+// already use for the control socket.
+//
+// The connection and in-memory stamp live only in the process that ran Start.
+// The sidecar gives other processes the same last-observed protocol timestamp.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
-	if !ok {
+	if ok {
+		if t := sc.getLastActivity(); !t.IsZero() {
+			return t, nil
+		}
+	}
+	return p.persistedActivity(name)
+}
+
+// persistedActivity reads the durable last-activity stamp.
+//
+// A missing stamp is "unknown" (zero, nil) — the pre-existing contract for a
+// session this provider knows nothing about. An unreadable or malformed stamp
+// is an error rather than a silent zero.
+func (p *Provider) persistedActivity(name string) (time.Time, error) {
+	raw, err := p.GetMeta(name, lastActivityMetaKey)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading last activity for %q: %w", name, err)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return time.Time{}, nil
 	}
-	return sc.getLastActivity(), nil
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing last activity for %q: %w", name, err)
+	}
+	return t, nil
 }
 
 // ClearScrollback clears the output buffer.
@@ -852,10 +966,16 @@ func isUnavailableSocketError(err error) bool {
 		errors.Is(err, syscall.ECONNREFUSED)
 }
 
-// Capabilities reports ACP provider capabilities. The ACP provider has
-// no terminal and does not natively support attachment or activity detection.
+// Capabilities reports ACP provider capabilities. ACP sessions are headless,
+// so attachment is never reportable — but session/update notifications are a
+// real activity signal, durably stamped by GetLastActivity's sidecar so it
+// survives the process boundary.
+//
+// Declaring the capability allows activity-aware policies to use the signal.
+// Those policies remain independently configured; activity age alone does not
+// diagnose the reason updates stopped.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{CanReportActivity: true}
 }
 
 // SleepCapability reports that ACP sessions support timed-only idle sleep.
