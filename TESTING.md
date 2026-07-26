@@ -897,8 +897,10 @@ from real regressions.
 `scripts/test-local-parallel` — the one place all four heavy targets
 (`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
 one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
-under `<city_root>/.gc/gate-slots` (or `<repo>/.git/gate-slots` outside a
-city) before running any jobs, and holds it for the invocation's entire
+under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
+common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
+shared common dir for all of a repo's linked worktrees) before running any
+jobs, and holds it for the invocation's entire
 lifetime. The mechanism (`scripts/push-gate-lock-lib.sh`) is adapted from
 `packs/maintainer-pr-review/scripts/run-lock-lib.sh`'s
 `mpr_acquire_global_slot` in the gc-management meta-repo, with one

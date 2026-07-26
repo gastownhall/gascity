@@ -248,7 +248,9 @@ git -C "$LINKED_REPO" worktree add -q --detach "$LINKED_B"
 
 SLOTS_LINKED_A="$(cd "$LINKED_A" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
 SLOTS_LINKED_B="$(cd "$LINKED_B" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
-assert_eq "slots_dir.linked_worktree_uses_common_git_dir" "$SLOTS_LINKED_A" "$LINKED_REPO/.git/gate-slots"
+LINKED_COMMON="$(cd "$LINKED_REPO/.git" && pwd -P)"
+SLOTS_LINKED_A_N="$(cd "$(dirname "$SLOTS_LINKED_A")" && pwd -P)/gate-slots"
+assert_eq "slots_dir.linked_worktree_uses_common_git_dir" "$SLOTS_LINKED_A_N" "$LINKED_COMMON/gate-slots"
 assert_eq "slots_dir.linked_worktrees_share_slots" "$SLOTS_LINKED_B" "$SLOTS_LINKED_A"
 
 FD_LINKED=""
