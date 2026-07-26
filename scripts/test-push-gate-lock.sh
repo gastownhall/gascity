@@ -168,6 +168,29 @@ NOFLOCK_OUT="$(LIB="$LIB" DIR="$WORK/noflock-slots" PATH="$WORK/empty-bin" \
 assert_contains "no_flock.warns_and_names_flock" "$NOFLOCK_OUT" "flock(1) not found"
 assert_contains "no_flock.returns_zero_empty_fd" "$NOFLOCK_OUT" "rc=0 fd=[]"
 
+# ---------------- mkdir failure: degrade best-effort, never misreport as timeout ----------------
+# The original bug (ga-5enlx8): a linked worktree's .git is a FILE, so the
+# slots-dir fallback resolved under it and mkdir -p could never succeed. The
+# old code mapped that mkdir failure to the same `return 1` as a real
+# wait-bound timeout, so operators chased fleet contention that did not
+# exist. A blocked FILE (not a permission bit, so this holds even as root)
+# stands in for that unwritable-parent case.
+BLOCKED_PARENT="$WORK/blocked-parent"
+: >"$BLOCKED_PARENT"
+MKDIRFAIL_OUT="$(LIB="$LIB" DIR="$BLOCKED_PARENT/gate-slots" \
+    PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_MAX_WAIT_SECONDS=5 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; z=preset; push_gate_acquire_slot "$DIR" z holder-G; echo "rc=$? fd=[$z]"' 2>&1)"
+assert_contains "mkdir_fail.warns_cannot_create_slot_dir" "$MKDIRFAIL_OUT" "cannot create slot dir"
+assert_contains "mkdir_fail.returns_zero_empty_fd"        "$MKDIRFAIL_OUT" "rc=0 fd=[]"
+# The misreporting was the actual harm, so assert the absence of the timeout
+# message directly rather than relying on rc=0 to imply it.
+case "$MKDIRFAIL_OUT" in
+    *"timed out"*)
+        record_fail "mkdir_fail.never_reports_timeout" "found 'timed out' in output: $MKDIRFAIL_OUT" ;;
+    *)
+        record_pass "mkdir_fail.never_reports_timeout" ;;
+esac
+
 # ---------------- malformed tunables fall back to their documented defaults ----------------
 # Each bad value must be rejected by name and replaced, never fed to
 # arithmetic (`-1`, `abc`) or turned into a busy loop / zero-slot sweep (`0`).
