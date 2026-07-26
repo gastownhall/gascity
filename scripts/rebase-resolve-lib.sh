@@ -53,8 +53,19 @@
 #
 # Required external commands: git, awk, cmp, mktemp, tr.
 
+# This file is always SOURCED (never executed via its own shebang) directly
+# into the caller's ambient interactive shell — see
+# formulas/mol-deployer-gate.formula.toml and prompts/deployer.md Guardrails,
+# both of which invoke it as ". scripts/rebase-resolve-lib.sh". BASH_SOURCE is
+# a bash-only array with no zsh equivalent; under zsh it silently expands
+# empty, so `dirname "${BASH_SOURCE[0]}"` resolves to "." instead of this
+# script's real directory whenever the sourcing shell's cwd isn't literally
+# scripts/ (ga-ql4bmm). Anchor via git instead, which is correct under any
+# shell and correctly resolves to the current worktree's own scripts/ dir.
 # shellcheck source=./push-ownership-guard.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
+_rrl_repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || _rrl_repo_root="."
+. "$_rrl_repo_root/scripts/push-ownership-guard.sh"
+unset _rrl_repo_root
 
 # is_additive_keepboth_path <path>
 #
