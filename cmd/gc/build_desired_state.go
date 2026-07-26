@@ -3688,7 +3688,18 @@ func selectOrPlanPoolSessionBead(
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
-		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, *preferred, usedSlots)
+		preserveAboveCapacity := poolRequestResumesAssignedWorkInfo(
+			request,
+			bp.assignedWorkBeads,
+			*preferred,
+		)
+		slot := claimPreferredPoolSlotWithConfigInfo(
+			bp.city,
+			cfgAgent,
+			*preferred,
+			preserveAboveCapacity,
+			usedSlots,
+		)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
 		}
@@ -3919,6 +3930,32 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
 			return true
 		}
+	}
+	return false
+}
+
+// poolRequestResumesAssignedWorkInfo proves that a concrete resume request is
+// still backed by its exact actionable work bead and that the bead is assigned
+// through any current or historical identity of the preferred session.
+func poolRequestResumesAssignedWorkInfo(request SessionRequest, workBeads []beads.Bead, info session.Info) bool {
+	workBeadID := strings.TrimSpace(request.WorkBeadID)
+	if request.Tier != "resume" || request.SessionBeadID != info.ID || workBeadID == "" {
+		return false
+	}
+	for _, wb := range workBeads {
+		if wb.ID != workBeadID || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			return false
+		}
+		for _, identity := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if assignee == identity {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
