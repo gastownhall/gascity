@@ -4102,15 +4102,6 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 	}
 }
 
-// TestRealizePoolDesiredSessionsBindsDistinctWorkDirPerPoolSlot pins the fix
-// for ga-vqs6xr: when one realizePoolDesiredSessions call realizes multiple
-// fresh pool slots at once, each slot's trigger-bead work_dir metadata must
-// be resolved from that slot's own qualified instance name, not the pool's
-// shared base qualifiedName. Before the fix, bindPoolSessionTriggerBead was
-// called with the base qualifiedName -- computed once, before any per-slot
-// identity existed -- so every slot's session bead was bound to the SAME
-// work_dir, silently pooling unrelated agents into one shared worktree
-// (ga-onhj2l).
 // TestRealizePoolDesiredSessionsRebindPreservesDistinctWorkDirPerSlot pins
 // gastownhall/gascity ga-vqs6xr: realizePoolDesiredSessions resolves
 // qualifiedName := cfgAgent.QualifiedName() ONCE, outside the Phase C
