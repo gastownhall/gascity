@@ -888,8 +888,17 @@ func buildDesiredStateWithSessionBeads(
 	// NamedSessionRoutedDemand: routed (unassigned) scale-check demand on the
 	// backing template, independent of direct assignee demand above. See the
 	// field doc on DesiredStateResult.NamedSessionRoutedDemand.
+	// Canonical singleton backing pools only. This signal exists solely to
+	// compensate for alias suppression, and alias suppression applies exactly to
+	// canonical singleton identities (see canonicalSingletonAliasHeldTemplates).
+	// A multi-instance backing pool can serve routed demand with an ordinary
+	// standby, so waking the named holder there would wake it AND mint the
+	// standby — the overprovisioning this signal is meant to prevent.
 	namedRoutedDemand := make(map[string]bool, len(namedSpecs))
 	for identity, spec := range namedSpecs {
+		if !spec.Agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
 		if scaleCheckCounts[namedSessionBackingTemplate(spec)] > 0 {
 			namedRoutedDemand[identity] = true
 		}

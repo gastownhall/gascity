@@ -6272,6 +6272,74 @@ func TestBuildDesiredState_NamedBackingPoolNoCap_RoutedDemandDoesNotSpawnPhantom
 	}
 }
 
+// NamedSessionRoutedDemand exists only to compensate for alias suppression, and
+// alias suppression applies exactly to canonical singleton identities. On a
+// multi-instance backing pool nothing suppresses the standby, so emitting the
+// signal there would wake the named holder AND mint a standby for the same
+// routed work — overprovisioning. Routed demand must still reach ordinary pool
+// sizing in that case; only the named wake is withheld.
+func TestBuildDesiredState_RoutedDemandWakesOnlyCanonicalSingletonNamedSessions(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const singletonTemplate = "solo"
+	const multiTemplate = "crew"
+	for _, template := range []string{singletonTemplate, multiTemplate} {
+		if _, err := store.Create(beads.Bead{
+			Title:    template + " routed work",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": template},
+		}); err != nil {
+			t.Fatalf("create routed demand for %q: %v", template, err)
+		}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              singletonTemplate,
+				StartCommand:      "true",
+				WorkQuery:         "printf ''",
+				MaxActiveSessions: intPtr(1), // UsesCanonicalSingletonPoolIdentity() == true
+			},
+			{
+				Name:              multiTemplate,
+				StartCommand:      "true",
+				WorkQuery:         "printf ''",
+				MaxActiveSessions: intPtr(2), // multi-instance: standby is legitimate
+			},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: singletonTemplate, Mode: "on_demand"},
+			{Template: multiTemplate, Mode: "on_demand"},
+		},
+	}
+	singletonIdentity := cfg.NamedSessions[0].QualifiedName()
+	multiIdentity := cfg.NamedSessions[1].QualifiedName()
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	// Control: the singleton keeps the wake signal, so this test fails loudly if
+	// the gate is simply switched off rather than made selective.
+	if !dsResult.NamedSessionRoutedDemand[singletonIdentity] {
+		t.Fatalf("canonical singleton %q lost its routed wake signal; routed_demand=%v scale_counts=%v",
+			singletonIdentity, dsResult.NamedSessionRoutedDemand, dsResult.ScaleCheckCounts)
+	}
+	// Regression: the multi-instance pool must NOT also wake its named holder.
+	if dsResult.NamedSessionRoutedDemand[multiIdentity] {
+		t.Fatalf("multi-instance backing pool %q emitted NamedSessionRoutedDemand for %q; "+
+			"its standby already serves routed demand, so waking the named holder overprovisions "+
+			"(routed_demand=%v scale_counts=%v)",
+			multiTemplate, multiIdentity, dsResult.NamedSessionRoutedDemand, dsResult.ScaleCheckCounts)
+	}
+	// ...and routed demand still reaches ordinary pool sizing for that template.
+	if dsResult.ScaleCheckCounts[multiTemplate] <= 0 {
+		t.Fatalf("multi-instance template %q lost routed demand entirely (scale_counts=%v); "+
+			"the gate must withhold only the named wake, not the pool demand",
+			multiTemplate, dsResult.ScaleCheckCounts)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_RuntimeAssigneeDoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "fixture")
