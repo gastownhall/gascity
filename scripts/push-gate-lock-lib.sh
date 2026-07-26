@@ -22,9 +22,20 @@
 #   Adapted from packs/maintainer-pr-review/scripts/run-lock-lib.sh's
 #   mpr_acquire_global_slot in the gc-management meta-repo (numbered
 #   flock(1) slot files under a slot directory; the kernel releases the
-#   lock automatically when the holder's process — and any children that
-#   inherited the FD — exits, crash or normal exit alike, so a stale slot
-#   can never survive a dead holder; no PID-file liveness probing needed).
+#   lock when the last descriptor on the open-file-description is closed or
+#   unlocked, so a normal exit, a test failure, and a crash all free the
+#   slot alike — no PID-file liveness probing needed).
+#
+#   FD inheritance is deliberately severed at the fan-out boundary in
+#   scripts/test-local-parallel: the slot FD is closed inside the subshell
+#   that spawns the job fan-out, so no test job — and no daemon a test job
+#   leaks (a tmux server, a dolt sql-server, an escaped `gc`) — ever holds a
+#   copy of it. The consequence for operators is worth stating plainly: a
+#   slot that is still locked when its gate process is gone is NOT a stale
+#   file the kernel forgot to clean up. It means some descendant inherited
+#   the descriptor anyway and outlived the gate. push_gate_describe_slots
+#   flags exactly that case; the fix is to find and kill the leaked
+#   descendant (`lsof <slot-file>`), never to delete the slot file.
 #
 #   One deliberate deviation from mpr: mpr's caller is an automatic
 #   cooldown-retry dispatcher, so it fails fast (immediate EX_TEMPFAIL) when
@@ -50,7 +61,13 @@
 #     caller, not this library.
 #   - GC_PUSH_GATE_NO_CAP=1 disables the cap entirely for one invocation
 #     (escape hatch, FR9): acquire always succeeds immediately, nothing to
-#     release.
+#     release. A missing flock(1) degrades the same way — a warning plus an
+#     uncapped run — rather than blocking the caller for the full wait
+#     bound, matching how nice/ionice and the systemd slice are treated as
+#     optional in scripts/test-local-parallel.
+#   - Malformed tunables fall back to their documented defaults with a
+#     diagnostic naming the offending variable; they never reach arithmetic
+#     or `sleep` unvalidated.
 #   - A timed-out acquire returns 1 (shell-false). This library never calls
 #     `exit` itself — mapping a timeout to process exit code 75 is the
 #     caller's job (scripts/test-local-parallel), keeping this file a pure,
@@ -78,7 +95,8 @@
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
-#       (default 15). holder_label defaults to
+#       (default 15); each is validated and falls back to its default on a
+#       malformed value. holder_label defaults to
 #       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. Sweeps
 #       slots 0..N-1 non-blocking; acquires the first free one immediately
 #       (fd assigned to the caller's <fd_out_var>, return 0). If all slots
@@ -88,14 +106,29 @@
 #       caller should `exit 75`).
 #   push_gate_describe_slots <slot_dir> <max_concurrent>
 #       Print one "slot-<i>: <holder line>" line per currently-occupied
-#       slot, for the FR5 wait message and FR8 operator diagnostics.
+#       slot, for the FR5 wait message and FR8 operator diagnostics. A slot
+#       whose recorded PID no longer exists is flagged as a leaked
+#       descendant (see MECHANISM), since that is the one case where the
+#       holder line alone points at the wrong process.
 #   push_gate_release_slot <fd>
 #       Explicit release + close. Normally unnecessary (process exit
 #       releases the flock) — provided for tests and tight loops, mirroring
 #       mpr_release_run_lock.
 #
+# PORTABILITY
+#   This file deliberately stays bash 3.2-compatible (macOS's stock
+#   /bin/bash): no `local -n` namerefs (4.3) and no `exec {var}<>` dynamic
+#   FD allocation (4.1). Sibling scripts under the same entrypoint hold the
+#   same floor on purpose — see scripts/go-test-observable and
+#   scripts/test-integration-shard.
+#
 # Sourced by scripts/test-local-parallel and directly by
 # scripts/test-push-gate-lock.sh.
+
+# Base file-descriptor number for slot <i>; slot <i> always maps to
+# PUSH_GATE_FD_BASE + i. Fixed numbers rather than bash 4.1's `exec {var}<>`
+# keep the 3.2 floor above.
+PUSH_GATE_FD_BASE=200
 
 # Resolve the city root, validating any env var before trusting it so a
 # stray GC_CITY_PATH can't redirect the lock directory arbitrarily.
@@ -158,7 +191,7 @@ push_gate_slots_dir() {
 # Print one diagnostic line per currently-occupied slot.
 push_gate_describe_slots() {
     local _pgd_dir="$1" _pgd_max="$2"
-    local _pgd_i _pgd_slot _pgd_line
+    local _pgd_i _pgd_slot _pgd_line _pgd_pid
     for (( _pgd_i = 0; _pgd_i < _pgd_max; _pgd_i++ )); do
         _pgd_slot="$_pgd_dir/slot-${_pgd_i}.lock"
         [[ -f "$_pgd_slot" ]] || continue
@@ -170,15 +203,44 @@ push_gate_describe_slots() {
         fi
         _pgd_line=""
         IFS= read -r _pgd_line <"$_pgd_slot" 2>/dev/null || true
+        # The slot is held but the process that stamped it is gone, so the
+        # holder line names the wrong process. The lock is being kept alive
+        # by a descendant that inherited the descriptor — the one case
+        # `lsof` on the slot file answers and the holder line does not.
+        _pgd_pid="${_pgd_line%% *}"
+        if [[ "$_pgd_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$_pgd_pid" 2>/dev/null; then
+            _pgd_line="$_pgd_line (holder pid dead — likely a leaked descendant)"
+        fi
         printf '  slot-%s: %s\n' "$_pgd_i" "$_pgd_line"
     done
+}
+
+# True when file descriptor $1 is already open in this shell. Slot FDs are
+# fixed numbers, so a second acquire in the same process must not re-open a
+# number it already holds: `exec N<>file` on a live N closes the old
+# descriptor and silently drops that slot's lock.
+_push_gate_fd_in_use() {
+    ( true <&"$1" ) 2>/dev/null
+}
+
+# Print a validated numeric tunable. $1 = env var name, $2 = documented
+# default, $3 = minimum allowed value. A malformed value is reported by name
+# and replaced by the default, so it never reaches arithmetic or `sleep`.
+_push_gate_tunable() {
+    local _pgt_name="$1" _pgt_default="$2" _pgt_min="$3"
+    local _pgt_value="${!_pgt_name:-$_pgt_default}"
+    if ! [[ "$_pgt_value" =~ ^[0-9]+$ ]] || [[ "$_pgt_value" -lt "$_pgt_min" ]]; then
+        echo "push-gate: ignoring malformed ${_pgt_name}='${_pgt_value}' — using default ${_pgt_default}" >&2
+        _pgt_value="$_pgt_default"
+    fi
+    printf '%s\n' "$_pgt_value"
 }
 
 # Acquire one of PUSH_GATE_MAX_CONCURRENT slots, polling with a bounded wait
 # on contention. See header for the full contract.
 push_gate_acquire_slot() {
     local _pgl_slot_dir="$1"
-    local -n _pgl_fd_out="$2"
+    local _pgl_fd_var="$2"
     local _pgl_label="${3:-}"
 
     if [[ -z "$_pgl_label" ]]; then
@@ -186,13 +248,23 @@ push_gate_acquire_slot() {
     fi
 
     if [[ "${GC_PUSH_GATE_NO_CAP:-}" == "1" ]]; then
-        _pgl_fd_out=""
+        eval "$_pgl_fd_var="
         return 0
     fi
 
-    local _pgl_max="${PUSH_GATE_MAX_CONCURRENT:-2}"
-    local _pgl_max_wait="${PUSH_GATE_MAX_WAIT_SECONDS:-600}"
-    local _pgl_poll="${PUSH_GATE_POLL_SECONDS:-15}"
+    # flock(1) is the entire mechanism. Without it every slot probe fails and
+    # the caller would burn the whole wait bound before reporting a confusing
+    # timeout, so degrade best-effort with a diagnostic instead.
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "push-gate: flock(1) not found — running without a cross-invocation cap (brew install flock)" >&2
+        eval "$_pgl_fd_var="
+        return 0
+    fi
+
+    local _pgl_max _pgl_max_wait _pgl_poll
+    _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
+    _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
+    _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 
@@ -203,16 +275,20 @@ push_gate_acquire_slot() {
     while :; do
         for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
             _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
-            exec {_pgl_fd}<>"$_pgl_slot" || continue
+            _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
+            if _push_gate_fd_in_use "$_pgl_fd"; then
+                continue
+            fi
+            eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
             if flock -n "$_pgl_fd"; then
                 printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
-                _pgl_fd_out="$_pgl_fd"
+                eval "$_pgl_fd_var=\$_pgl_fd"
                 if [[ "$_pgl_announced" -eq 1 ]]; then
                     echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
                 fi
                 return 0
             fi
-            exec {_pgl_fd}>&- || true
+            eval "exec ${_pgl_fd}>&-" || true
         done
 
         if [[ "$_pgl_announced" -eq 0 ]]; then
@@ -235,7 +311,10 @@ push_gate_acquire_slot() {
 # Explicitly release + close the slot FD. Normally unnecessary.
 push_gate_release_slot() {
     local _pgl_fd="$1"
-    [[ -n "$_pgl_fd" ]] || return 0
+    [[ "$_pgl_fd" =~ ^[0-9]+$ ]] || return 0
+    # Unlock before closing: the flock -u releases the open-file-description
+    # itself, so any descendant that inherited a copy of this FD stops
+    # holding the slot too.
     flock -u "$_pgl_fd" 2>/dev/null || true
-    exec {_pgl_fd}>&- 2>/dev/null || true
+    eval "exec ${_pgl_fd}>&-" 2>/dev/null || true
 }

@@ -909,11 +909,21 @@ bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
 naming current slot holders the moment it starts waiting. Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
-bead-ownership staleness. The kernel releases the lock automatically when
-the holding process exits — success, failure, or crash alike — so a stale
-slot can never survive a dead holder; no PID-file liveness probing is
-involved. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
-invocation.
+bead-ownership staleness. That 75 is only visible to callers that invoke
+`scripts/test-local-parallel` directly: the four Makefile targets and
+`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
+Through those paths the distinguishing signal is the stderr text, not the
+process exit code. The kernel releases the lock automatically when the
+holding process exits — success, failure, or crash alike — so a stale slot
+can never survive a dead holder; no PID-file liveness probing is involved.
+FD inheritance into test jobs is severed at the fan-out boundary, so a slot
+that stays locked past its gate means a leaked descendant is still holding
+the descriptor (`lsof` on the slot file names it), not a stale file to
+delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
+already lists as required; if it is absent the run proceeds uncapped with a
+warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
+entirely for one invocation.
 
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`

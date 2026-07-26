@@ -212,7 +212,18 @@ export TEST_LOCAL_NICE="$nice_prefix"
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs}"
 
 set +e
-printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
+# Sever gate-FD inheritance at the fan-out boundary (ga-owh20p): the slot FD
+# is closed inside this subshell before any job starts, so no job — and no
+# daemon a job leaks (tmux server, dolt sql-server, an escaped `gc`) — ever
+# holds a copy of it and pins the slot after this invocation dies. The parent
+# keeps the FD for the whole run, so nothing is lost. The -n guard is
+# load-bearing: GC_PUSH_GATE_NO_CAP=1 and the missing-flock degrade path both
+# leave gate_fd empty, and `exec >&-` with an empty FD would close stdout.
+(
+  if [[ -n "$gate_fd" ]]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   set -euo pipefail
   spec="$1"
   label="${spec%%::*}"
@@ -261,6 +272,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     exit "$status"
   fi
 ' _
+)
 status=$?
 set -e
 
