@@ -2563,6 +2563,18 @@ type DaemonConfig struct {
 	// effect when AutoReapClosedBeadWorktrees is already true (real removal
 	// supersedes it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
+	// in minutes, before a closed-bead worktree becomes eligible for reap
+	// classification at all (borrow-veto scan and beyond). This quarantines
+	// a worktree against the race between its creation and its owning
+	// bead's gc.work_dir/work_dir metadata being stamped by the next
+	// reconcile pass — without it, a just-created worktree could look
+	// unclaimed to the borrow-veto scan before the metadata that would
+	// protect it has been written. Nil (unset) defaults to
+	// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the
+	// quarantine entirely (every closed-bead worktree is immediately
+	// eligible for the rest of the gate chain, regardless of age).
+	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2627,6 +2639,21 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
 		return false
 	}
 	return *d.AutoReapClosedBeadWorktreesDryRun
+}
+
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes is the quarantine window
+// applied when AutoReapClosedBeadWorktreesMinAgeMinutes is unset.
+const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
+
+// AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
+// closed-bead worktree is eligible for reap classification. Defaults to
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
+// zero disables the quarantine.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
+	if d.AutoReapClosedBeadWorktreesMinAgeMinutes == nil {
+		return time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	}
+	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a

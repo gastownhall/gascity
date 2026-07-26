@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -45,15 +46,44 @@ func initReapRig(t *testing.T) (cityPath, rigRoot string) {
 // addClosedWorktree adds a per-bead worktree nested under an agent-home
 // directory (depth-2: .gc/worktrees/<rig>/<agentHome>/<beadID>), matching the
 // real do-work layout the reaper must now discover. It branches from HEAD (on
-// origin/main), so the tree is clean with no unpushed commits.
+// origin/main), so the tree is clean with no unpushed commits. The worktree's
+// creation time is backdated well past the freshness-quarantine default (FR-5)
+// so existing callers exercise the liveness/git-safety/borrow-veto gates
+// without incidentally tripping quarantine; tests of the quarantine gate
+// itself use addClosedWorktreeWithAge directly.
 func addClosedWorktree(t *testing.T, rigRoot, cityPath, agentHome, beadID string) string {
+	t.Helper()
+	return addClosedWorktreeWithAge(t, rigRoot, cityPath, agentHome, beadID, 24*time.Hour)
+}
+
+// addClosedWorktreeWithAge is addClosedWorktree with an explicit backdated
+// age for the worktree's on-disk creation signal, letting freshness-gate
+// tests place a worktree on either side of the quarantine boundary. age == 0
+// leaves the real (just-created) mtime in place.
+func addClosedWorktreeWithAge(t *testing.T, rigRoot, cityPath, agentHome, beadID string, age time.Duration) string {
 	t.Helper()
 	wtPath := filepath.Join(cityPath, ".gc", "worktrees", reapTestRigName, agentHome, beadID)
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		t.Fatalf("mkdir worktree parent: %v", err)
 	}
 	mustGit(t, rigRoot, "worktree", "add", "-b", "wt-"+beadID, wtPath)
+	if age > 0 {
+		backdateWorktreeGitFile(t, wtPath, age)
+	}
 	return wtPath
+}
+
+// backdateWorktreeGitFile sets the mtime of a worktree's .git pointer file
+// (written once by `git worktree add` and not rewritten during normal use)
+// back by age, so the reaper's age-computation helper — which uses that
+// file's mtime as a creation-time proxy — sees a worktree older than age.
+func backdateWorktreeGitFile(t *testing.T, worktreePath string, age time.Duration) {
+	t.Helper()
+	gitFile := filepath.Join(worktreePath, ".git")
+	backdated := time.Now().Add(-age)
+	if err := os.Chtimes(gitFile, backdated, backdated); err != nil {
+		t.Fatalf("backdate %s: %v", gitFile, err)
+	}
 }
 
 func reapTestConfig(rigRoot string) *config.City {
