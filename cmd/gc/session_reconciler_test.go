@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -183,6 +184,21 @@ type failRateLimitHoldStore struct {
 	*beads.MemStore
 	failRateLimitHold  bool
 	rateLimitHoldCalls int
+}
+
+type failSessionHealStore struct {
+	beads.Store
+	sessionID string
+	err       error
+	attempts  int
+}
+
+func (s *failSessionHealStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.sessionID && kvs["state"] == string(sessionpkg.StateAsleep) {
+		s.attempts++
+		return s.err
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 func (s *failRateLimitHoldStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -437,6 +453,56 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 		e.startOptions...,
 	)
+}
+
+func TestReconcileSessionBeadsHealFailureStopsSamePassEffects(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                     string(sessionpkg.StateCreating),
+		"pending_create_started_at": env.clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+		"session_key":               "conversation-1",
+		"started_config_hash":       "config-1",
+	})
+	before, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session before reconcile: %v", err)
+	}
+	writeErr := errors.New("ambiguous heal write")
+	failing := &failSessionHealStore{
+		Store:     env.store,
+		sessionID: session.ID,
+		err:       writeErr,
+	}
+	env.store = failing
+
+	if woken := env.reconcile([]beads.Bead{before}); woken != 0 {
+		t.Fatalf("wake attempts after failed heal = %d, want 0", woken)
+	}
+	if failing.attempts != 1 {
+		t.Fatalf("heal write attempts = %d, want 1", failing.attempts)
+	}
+	after, err := failing.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get session after reconcile: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("failed heal changed persisted session:\n got: %#v\nwant: %#v", after, before)
+	}
+	if drain := env.dt.get(session.ID); drain != nil {
+		t.Fatalf("failed heal started a drain: %#v", drain)
+	}
+	for _, call := range env.sp.SnapshotCalls() {
+		switch call.Method {
+		case "Start", "Stop", "Nudge", "SendKeys", "Interrupt", "Relaunch":
+			t.Fatalf("failed heal reached runtime effect: %#v", call)
+		}
+	}
+	if got := strings.Count(env.stderr.String(), writeErr.Error()); got != 1 {
+		t.Fatalf("heal error diagnostic count = %d, want 1; stderr=%q", got, env.stderr.String())
+	}
 }
 
 func TestReconcileSessionBeads_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {

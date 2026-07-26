@@ -424,6 +424,13 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		return nil
 	}
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
+		// The backing may have rejected, partially committed, or fully committed
+		// the batch before returning an error. Fence the cached pre-write row
+		// until an ordinary read installs backing truth.
+		c.mu.Lock()
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+		c.mu.Unlock()
 		return err
 	}
 

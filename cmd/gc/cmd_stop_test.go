@@ -209,15 +209,23 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	})
 
 	var stdout, stderr lockedBuffer
+	const testWallClockCap = 100 * time.Millisecond
 	started := time.Now()
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, testWallClockCap, false)
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("cmdStop returned after %s, want wall-clock cap near 100ms", elapsed)
+	// This is the "subject under test" exception in TESTING.md's Test deadline
+	// rule, not a hang budget: it asserts cmdStop actually honors
+	// testWallClockCap instead of blocking indefinitely on the still-hung
+	// provider, so it must stay well below hangBudget. The multiplier is
+	// evidence-based rather than arbitrary -- the previous 10x bound (1s) was
+	// still too tight under real make test-fast-parallel shard contention
+	// (observed 1.230021478s).
+	if elapsed := time.Since(started); elapsed > 50*testWallClockCap {
+		t.Fatalf("cmdStop returned after %s, want wall-clock cap near %s", elapsed, testWallClockCap)
 	}
-	if !strings.Contains(stderr.String(), "timed out after 100ms") {
+	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
 		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
 	}
 }

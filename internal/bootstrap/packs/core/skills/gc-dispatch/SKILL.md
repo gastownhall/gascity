@@ -113,6 +113,21 @@ the common steps (load context, preflight, implement, self-review) that
 variant formulas extend. Not typically used directly — use a variant
 like mol-polecat-commit, mol-polecat-report, or mol-polecat-work instead.
 
+**mol-prompt-synth** — Formula side of `gc prompt synth --writer-agent <name>`.
+Reads a pre-rendered meta-prompt from disk, generates an agent prompt
+template, and writes it to a destination path.
+
+**mol-review-quorum** — Graph-first review quorum scaffold. Fans out two
+read-only reviewer lanes (lane IDs, providers, models, and dispatch
+targets supplied by formula variables), then routes a synthesis agent to
+combine their durable structured outputs.
+
+**mol-scoped-work** — Graph-first worktree lifecycle; the built-in v2
+workflow prototype. Models work as an explicit DAG with a durable `body`
+scope bead, explicit worktree setup/teardown, independently routable step
+beads, and continuation metadata for same-session execution. Opt-in
+replacement for hierarchy-first single-session formulas.
+
 ### Gastown pack formulas (work variants)
 
 These require the gastown pack. They extend the built-in
@@ -163,9 +178,9 @@ gc convoy list                                        # List active convoys
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
-gc convoy check <id>                                  # Check if all beads done
+gc convoy check                                       # MUTATING: scans ALL open convoys city-wide and auto-closes any where all children are resolved
 gc convoy stranded                                    # Find convoys with no progress
-gc convoy autoclose                                   # Close convoys where all beads done
+gc convoy autoclose <id>                              # Internal: invoked by bd's on_close hook to auto-close a closed bead's completed convoys
 ```
 
 Migration note:
@@ -177,6 +192,6 @@ Migration note:
 gc order list                     # List order rules
 gc order show <name>              # Show order definition
 gc order run <name>               # Manually trigger an order
-gc order check <name>             # Check if trigger conditions are met
+gc order check                    # Evaluate all orders' trigger conditions and show which are due
 gc order history <name>           # Show order run history
 ```
