@@ -527,6 +527,29 @@ func TestAwakeSetToWakeEvalsPreservesDecisionReason(t *testing.T) {
 	}
 }
 
+func TestAwakeSetToWakeEvalsMapsRoutedDemandToWakeWork(t *testing.T) {
+	evals := awakeSetToWakeEvals(
+		map[string]AwakeDecision{
+			"s-worker": {ShouldWake: true, Reason: "routed-demand"},
+		},
+		[]AwakeSessionBead{{
+			ID:          "mc-session-1",
+			SessionName: "s-worker",
+		}},
+	)
+
+	got := evals["mc-session-1"]
+	if got.Reason != "routed-demand" {
+		t.Fatalf("Reason = %q, want routed-demand", got.Reason)
+	}
+	if !containsWakeReason(got.Reasons, WakeWork) {
+		t.Fatalf("Reasons = %v, want WakeWork (routed demand is work, not config)", got.Reasons)
+	}
+	if containsWakeReason(got.Reasons, WakeConfig) {
+		t.Fatalf("Reasons = %v, must not fall through to WakeConfig", got.Reasons)
+	}
+}
+
 func TestAwakeSetToWakeEvalsMapsMinActiveToWakeConfig(t *testing.T) {
 	evals := awakeSetToWakeEvals(
 		map[string]AwakeDecision{

@@ -1095,7 +1095,12 @@ func wakeDemandOverridesSleepSuppression(
 	if eval.HasAssignedWork {
 		return true
 	}
-	hasDemand := poolDesired[template] > 0
+	// Routed demand wakes the canonical alias holder. Alias suppression
+	// deliberately drops the standby's poolDesired to zero, so the pool count
+	// alone cannot carry the signal here — without this the holder stays
+	// asleep under a configured non-interactive sleep policy and the routed
+	// work never gets picked up.
+	hasDemand := poolDesired[template] > 0 || decision.Reason == "routed-demand"
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
