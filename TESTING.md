@@ -909,6 +909,15 @@ slot can never survive a dead holder; no PID-file liveness probing is
 involved. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
 invocation.
 
+The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
+directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
+itself (`fast` and `full` modes) rather than through a `go test` trampoline.
+A trampoline's `exec.Command` call would itself add a tracked subprocess
+occurrence to `internal/testpolicy/resourcecensus`'s baselines — including
+the `scope=all` audit row, which fails on any change, growth or shrinkage
+alike, with no per-file exemption available — so driving the script as a
+plain shell job avoids that ratchet entirely instead of bumping it.
+
 Only `scripts/test-local-parallel` is wired to this gate — the same targets
 axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct

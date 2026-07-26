@@ -91,6 +91,17 @@ add_unit_core_job() {
     'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
 }
 
+# Runs as a direct shell job rather than through a `go test` wrapper because a
+# Go _test.go file invoking exec.Command to run this script would itself add
+# one os/exec call to the resourcecensus subprocess census (both the untagged
+# scope and the never-shrinks scope=all audit total), and that ratchet forbids
+# raising any baseline to accommodate growth — see TESTING.md's push-gate
+# slots section. Driving the script directly keeps it out of the Go AST scan
+# entirely, so it needs no baseline change and no owner exemption.
+add_push_gate_lock_selftest_job() {
+  add_job "push-gate-lock-selftest" "bash scripts/test-push-gate-lock.sh"
+}
+
 add_cmd_gc_shards() {
   local label_prefix="$1"
   local gc_fast_unit="$2"
@@ -141,6 +152,7 @@ case "$mode" in
   fast)
     add_fsys_compile_job
     add_unit_core_job
+    add_push_gate_lock_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -153,6 +165,7 @@ case "$mode" in
   full)
     add_fsys_compile_job
     add_unit_core_job
+    add_push_gate_lock_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs
