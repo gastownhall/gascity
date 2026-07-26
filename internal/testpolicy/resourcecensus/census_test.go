@@ -1332,6 +1332,21 @@ func TestResource() {
 	requireErrorContains(t, err, `resource candidate qualifier "missing" has no lexical binding`)
 }
 
+func TestCheckTestingReceiverBindingFailsClosedForUnboundReceiver(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"Setenv", "Chdir"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			receiver := ast.NewIdent("missing")
+			call := &ast.CallExpr{Fun: &ast.SelectorExpr{X: receiver, Sel: ast.NewIdent(method)}}
+			err := checkTestingReceiverBinding(call, bindingInfo{}, method)
+			requireErrorContains(t, err, `testing resource receiver "missing" has no lexical binding`)
+		})
+	}
+}
+
 func TestImportedCallFailsClosedWhenPackageBindingIsUnusable(t *testing.T) {
 	t.Parallel()
 

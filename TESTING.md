@@ -390,10 +390,13 @@ The scanner recognizes direct calls to `os/exec.Command{,Context}` and
 `ListenMulticastUDP`; `net.ListenConfig.Listen` and `ListenPacket` on identified
 receivers; direct `syscall.Listen`;
 `net/http/httptest.NewServer`,
-`NewTLSServer`, and `NewUnstartedServer`; `os.Setenv`, `os.Unsetenv`,
-`os.Clearenv`, and `os.Chdir`; and
-`Setenv` or `Chdir` on function parameters typed exactly as `*testing.T` or
-`testing.TB`. For tmux it recognizes `ConfigureProcessEnv`,
+`NewTLSServer`, and `NewUnstartedServer`; and `os.Setenv`, `os.Unsetenv`,
+`os.Clearenv`, and `os.Chdir`. `Setenv` and `Chdir` on a `testing.T` or
+`testing.TB` receiver are deliberately excluded: they restore the prior value
+when the test ends, so they are not ambient environment or cwd debt. A receiver
+identifier for those two methods that cannot be resolved lexically still fails
+closed with a scan error rather than being silently skipped. For tmux it
+recognizes `ConfigureProcessEnv`,
 `KillAllTestSessions`, `NewGuard`, `NewGuardWithSocket`, and `RequireTmux` from
 `test/tmuxtest`; `NewProvider`, `NewProviderWithConfig`,
 `NewSeamBackedWithConfig`, `NewTmux`, and `NewTmuxWithConfig` from
@@ -434,9 +437,12 @@ go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedge
 ```
 
 The historical regex totals remain visible as point-in-time audit evidence.
-They can be higher because comments and strings matched, or lower where the old
-needle covered only `t.Setenv` or direct `os.Chdir` and the AST census now
-recognizes the full families above. Historical `cmd/gc` needles also included
+They can be higher because comments and strings matched, or because the needle
+counted testing-receiver helpers such as `t.Setenv` and `t.Chdir` that the AST
+census deliberately excludes — which is why the historical environment and cwd
+needles now sit far above the live baselines. They can also be lower where the
+old needle covered only one spelling and the AST census now recognizes the full
+`os` families above. Historical `cmd/gc` needles also included
 build-tagged files; the live `cmd/gc+untagged` ratchets do not.
 `internal/bdflags/freshness_test.go` is integration-tagged because it invokes
 the externally installed `bd` CLI; its process call remains visible in the

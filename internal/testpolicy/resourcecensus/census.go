@@ -1444,6 +1444,10 @@ func hasSlowHelperDeclarationCandidate(file *ast.File) bool {
 	return false
 }
 
+// testingParameterObjects is retained for its fail-closed error: both call
+// sites discard the returned set and keep the call only so an unresolvable
+// `*testing.T`/`testing.TB` parameter aborts the scan. Do not delete it as an
+// unused value.
 func testingParameterObjects(file *ast.File, bindings bindingInfo) (map[types.Object]bool, error) {
 	objects := make(map[types.Object]bool)
 	var inspectErr error
