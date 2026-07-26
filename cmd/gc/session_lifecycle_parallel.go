@@ -2122,9 +2122,15 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
-	if result.prepared.candidate.tp.IsACP ||
-		info.MCPIdentity != "" ||
-		info.MCPServersSnapshot != "" {
+	// mcp_identity is an ACP artifact. The stored value used to be enough on
+	// its own to keep re-stamping itself here, so once a session had one it
+	// carried it forever — including after its agent moved to a non-ACP
+	// provider, where every ACP classifier then read it as proof of ACP
+	// transport. Gate on the transport the session was actually prepared with
+	// and clear it otherwise, matching the snapshot above (which already
+	// clears, because a non-ACP prepare carries no MCP servers).
+	switch {
+	case result.prepared.candidate.tp.IsACP:
 		storedMCPIdentity := firstNonEmptyGCString(
 			info.MCPIdentity,
 			info.ConfiguredNamedIdentity,
@@ -2133,6 +2139,8 @@ func commitStartResultTraced(
 		if storedMCPIdentity != "" || info.MCPIdentity != "" {
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
+	case info.MCPIdentity != "":
+		metadata[sessionpkg.MCPIdentityMetadataKey] = ""
 	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)

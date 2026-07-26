@@ -250,6 +250,18 @@ func queueChangedResolvedProviderSessionMetadata(existing map[string]string, que
 	}
 }
 
+// desiredSessionTransport returns the explicit transport represented by the
+// desired state. ACP can be selected by the resolved agent provider even when
+// the city runtime is not ACP, so that per-session result wins. Otherwise the
+// already-resolved effective runtime supplies its bundled transport (including
+// T3) through the canonical runtime-axis mapping.
+func desiredSessionTransport(tp TemplateParams) string {
+	if tp.IsACP {
+		return config.SessionTransportACP
+	}
+	return session.ResolveEffectiveTransport(tp.EffectiveSessionProvider, "")
+}
+
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
 	if identity == "" || isNamedSessionBead(b) {
 		return false
@@ -1661,6 +1673,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				qualifiedTemplate = tp.RigName + "/" + tp.TemplateName
 			}
 			meta["template"] = qualifiedTemplate
+			// Stamp the effective transport explicitly. The desired state has
+			// already resolved the runtime selection and ACP override, so the
+			// bead can remain self-describing across later config changes.
+			meta[session.TransportMetadataKey] = desiredSessionTransport(tp)
 			if poolSlot > 0 {
 				// pool_slot is emitted by desiredSessionIdentity above (PoolSlot
 				// passed in); only the pending pool session_name is hand-stamped.
@@ -1941,6 +1957,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
 				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+			}
+			// Transport rides the same diff-gated projection as command and
+			// provider. Without it a bead froze at its creation-time transport
+			// while provider/builtin_ancestor/command followed the config
+			// switch.
+			for key, value := range session.ReconcileTransportMetadataPatch(b.Metadata, desiredSessionTransport(tp)) {
+				queueMeta(key, value)
 			}
 		}
 

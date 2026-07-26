@@ -40,9 +40,15 @@ func configuredSessionTransportResolution(cfg *config.City, template, provider s
 			func(name string) (string, error) { return name, nil },
 		)
 		if err != nil {
-			return strings.TrimSpace(agentCfg.Session), false
+			return session.ResolveEffectiveTransport(
+				effectiveSessionRuntimeName(agentCfg.Session, cfg.Session.Provider),
+				agentCfg.Session,
+			), false
 		}
-		return config.ResolveSessionCreateTransport(agentCfg.Session, resolved), false
+		return session.ResolveEffectiveTransport(
+			effectiveSessionRuntimeName(agentCfg.Session, cfg.Session.Provider),
+			config.ResolveSessionCreateTransport(agentCfg.Session, resolved),
+		), false
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -58,7 +64,17 @@ func configuredSessionTransportResolution(cfg *config.City, template, provider s
 		func(name string) (string, error) { return name, nil },
 	)
 	if err != nil {
-		return "", false
+		return session.ResolveEffectiveTransport(cfg.Session.Provider, ""), false
 	}
-	return strings.TrimSpace(resolved.ProviderSessionCreateTransport()), false
+	return session.ResolveEffectiveTransport(
+		cfg.Session.Provider,
+		resolved.ProviderSessionCreateTransport(),
+	), false
+}
+
+func effectiveSessionRuntimeName(sessionOverride, cityRuntime string) string {
+	if override := strings.TrimSpace(sessionOverride); override != "" {
+		return override
+	}
+	return strings.TrimSpace(cityRuntime)
 }

@@ -614,11 +614,27 @@ func (m *Manager) resolveConfiguredTransport(template, provider string) string {
 	return normalizeTransport(provider, resolution.transport)
 }
 
+func (m *Manager) transportToPersist(template, provider, transport string) string {
+	if strings.TrimSpace(transport) == "" {
+		transport = m.resolveConfiguredTransport(template, provider)
+	}
+	return persistedTransport(provider, transport)
+}
+
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
 	transport := transportFromMetadata(b)
 	if transport != "" {
 		return transport, false
 	}
+	// Legacy-bead fallback ONLY. New sessions stamp "transport" explicitly, so
+	// this branch is reached only by beads created before that — which carry no
+	// "transport" key at all.
+	//
+	// It must stay BELOW the persisted-transport check. Neither key is ever
+	// cleared by the ACP create path, so on a bead whose provider has since
+	// moved to a non-ACP one they are stale, and the authoritative transport
+	// has to win. The reconciler clears both when it projects a non-ACP
+	// transport (cmd/gc/session_beads.go) so those beads stop tripping it.
 	if strings.TrimSpace(b.Metadata[MCPIdentityMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[MCPServersSnapshotMetadataKey]) != "" {
 		return "acp", false
@@ -648,11 +664,15 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 // reads an Info field that mirrors the exact bead metadata transportForBead
 // cracked (Provider/TransportMetadata, MCPIdentity/MCPServersSnapshot,
 // PendingCreateClaim, Template, SessionName), so the two are byte-identical.
+//
+//nolint:unparam // verified mirrors transportForBead, where the result gates persistence.
 func (m *Manager) transportForInfo(info Info) (string, bool) {
 	transport := normalizeTransport(info.Provider, info.TransportMetadata)
 	if transport != "" {
 		return transport, false
 	}
+	// Legacy-bead fallback only; see transportForBead for why it must stay
+	// below the persisted-transport check.
 	if strings.TrimSpace(info.MCPIdentity) != "" ||
 		strings.TrimSpace(info.MCPServersSnapshot) != "" {
 		return "acp", false
@@ -676,12 +696,12 @@ func (m *Manager) transportForInfo(info Info) (string, bool) {
 	return "", false
 }
 
-func (m *Manager) persistTransport(id, provider, transport string) {
-	transport = normalizeTransport(provider, transport)
-	if transport == "" {
-		return
-	}
-	_ = m.store.SetMetadata(id, "transport", transport)
+// persistTransport records the session's transport. Callers gate on the
+// transport key being absent, so this only fills the gap on a legacy bead and
+// never overwrites a stamp. transportToPersist consults the configured
+// effective transport before applying the tmux default.
+func (m *Manager) persistTransport(id, template, provider, transport string) {
+	_ = m.store.SetMetadata(id, TransportMetadataKey, m.transportToPersist(template, provider, transport))
 }
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
@@ -880,9 +900,10 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if alias != "" {
 			meta["alias"] = alias
 		}
-		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
-			meta["transport"] = normalizedTransport
-		}
+		// Stamp the resolved effective transport. When the caller supplies only
+		// a default-path transport, transportToPersist consults the configured
+		// runtime mapping before falling back to tmux.
+		meta[TransportMetadataKey] = m.transportToPersist(template, provider, transport)
 		if sessionKey != "" {
 			meta["session_key"] = sessionKey
 		}
@@ -1121,9 +1142,10 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		if alias != "" {
 			meta["alias"] = alias
 		}
-		if normalizedTransport := normalizeTransport(provider, transport); normalizedTransport != "" {
-			meta["transport"] = normalizedTransport
-		}
+		// Stamp the resolved effective transport. When the caller supplies only
+		// a default-path transport, transportToPersist consults the configured
+		// runtime mapping before falling back to tmux.
+		meta[TransportMetadataKey] = m.transportToPersist(template, provider, transport)
 		if sessionKey != "" {
 			meta["session_key"] = sessionKey
 		}

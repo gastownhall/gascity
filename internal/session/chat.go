@@ -337,7 +337,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
 		if b.Metadata["transport"] == "" && transportVerified {
-			m.persistTransport(id, b.Metadata["provider"], transport)
+			m.persistTransport(id, b.Metadata["template"], b.Metadata["provider"], transport)
 		}
 		if err := m.confirmLiveSessionState(id, &b); err != nil {
 			return err
@@ -443,7 +443,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
-		m.persistTransport(id, b.Metadata["provider"], transport)
+		m.persistTransport(id, b.Metadata["template"], b.Metadata["provider"], transport)
 	}
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)

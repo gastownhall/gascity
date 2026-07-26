@@ -51,9 +51,15 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 					func(name string) (string, error) { return name, nil },
 				)
 				if err != nil {
-					return agentCfg.Session
+					return session.ResolveEffectiveTransport(
+						effectiveSessionProvider(agentCfg.Session, cfg.Session.Provider),
+						agentCfg.Session,
+					)
 				}
-				return config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
+				return session.ResolveEffectiveTransport(
+					effectiveSessionProvider(agentCfg.Session, cfg.Session.Provider),
+					config.ResolveSessionCreateTransport(agentCfg.Session, resolved),
+				)
 			}
 			provider = strings.TrimSpace(provider)
 			if provider == "" {
@@ -69,9 +75,12 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 				func(name string) (string, error) { return name, nil },
 			)
 			if err != nil {
-				return ""
+				return session.ResolveEffectiveTransport(cfg.Session.Provider, "")
 			}
-			return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+			return session.ResolveEffectiveTransport(
+				cfg.Session.Provider,
+				resolved.ProviderSessionCreateTransport(),
+			)
 		}
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
