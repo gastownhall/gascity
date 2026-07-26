@@ -72,6 +72,18 @@ func TestPackReleaseStampCreatesAndValidatesRegistryRelease(t *testing.T) {
 	if !strings.Contains(stdout.String(), "stamped demo 0.1.0") {
 		t.Fatalf("stamp stdout = %q", stdout.String())
 	}
+	emitted, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatalf("ReadFile(registry): %v", err)
+	}
+	for _, want := range []string{
+		`tier = "community"`,
+		`publisher = "Unknown publisher"`,
+	} {
+		if !strings.Contains(string(emitted), want) {
+			t.Errorf("stamped registry missing safe attribution %q:\n%s", want, emitted)
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()

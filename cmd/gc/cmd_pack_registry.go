@@ -228,6 +228,8 @@ type packRegistryShowJSONResult struct {
 	SchemaVersion string                    `json:"schema_version"`
 	Registry      string                    `json:"registry"`
 	Name          string                    `json:"name"`
+	Tier          string                    `json:"tier"`
+	Publisher     string                    `json:"publisher"`
 	Description   string                    `json:"description"`
 	Source        string                    `json:"source"`
 	SourceKind    string                    `json:"source_kind"`
@@ -238,6 +240,8 @@ type packRegistryShowJSONResult struct {
 type packRegistryPackJSON struct {
 	Registry    string `json:"registry"`
 	Name        string `json:"name"`
+	Tier        string `json:"tier"`
+	Publisher   string `json:"publisher"`
 	Description string `json:"description"`
 	Source      string `json:"source"`
 	SourceKind  string `json:"source_kind"`
@@ -519,6 +523,8 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 			jsonResults = append(jsonResults, packRegistryPackJSON{
 				Registry:    result.registry,
 				Name:        result.pack.Name,
+				Tier:        result.pack.Tier,
+				Publisher:   result.pack.Publisher,
 				Description: result.pack.Description,
 				Source:      result.pack.Source,
 				SourceKind:  result.pack.SourceKind,
@@ -548,9 +554,9 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 		fmt.Fprintln(stdout, "No registry packs found.") //nolint:errcheck
 		return 0
 	}
-	fmt.Fprintln(stdout, "Registry  Name                  Latest        Description") //nolint:errcheck
+	fmt.Fprintln(stdout, "Registry  Name                  Latest        Tier       Publisher             Description") //nolint:errcheck
 	for _, result := range results {
-		fmt.Fprintf(stdout, "%-9s %-21s %-13s %s\n", result.registry, result.pack.Name, latestVersion(result.pack), result.pack.Description) //nolint:errcheck
+		fmt.Fprintf(stdout, "%-9s %-21s %-13s %-10s %-21s %s\n", result.registry, result.pack.Name, latestVersion(result.pack), result.pack.Tier, result.pack.Publisher, result.pack.Description) //nolint:errcheck
 	}
 	if truncated {
 		fmt.Fprintf(stderr, "warning: results truncated to %d; use --all to show all\n", limit) //nolint:errcheck
@@ -628,6 +634,8 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 			SchemaVersion: "1",
 			Registry:      match.registry,
 			Name:          match.pack.Name,
+			Tier:          match.pack.Tier,
+			Publisher:     match.pack.Publisher,
 			Description:   match.pack.Description,
 			Source:        match.pack.Source,
 			SourceKind:    match.pack.SourceKind,
@@ -640,6 +648,8 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		return 0
 	}
 	fmt.Fprintf(stdout, "Pack:        %s:%s\n", match.registry, match.pack.Name) //nolint:errcheck
+	fmt.Fprintf(stdout, "Tier:        %s\n", match.pack.Tier)                    //nolint:errcheck
+	fmt.Fprintf(stdout, "Publisher:   %s\n", match.pack.Publisher)               //nolint:errcheck
 	fmt.Fprintf(stdout, "Description: %s\n", match.pack.Description)             //nolint:errcheck
 	fmt.Fprintf(stdout, "Source:      %s\n", match.pack.Source)                  //nolint:errcheck
 	fmt.Fprintf(stdout, "Source kind: %s\n", match.pack.SourceKind)              //nolint:errcheck
