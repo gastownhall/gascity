@@ -22,6 +22,7 @@ type sessionConn struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	done     chan struct{}      // closed when process exits
+	readDone chan struct{}      // closed after buffered stdout is dispatched
 	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
 	listener net.Listener       // control socket for cross-process ops
 
@@ -31,6 +32,12 @@ type sessionConn struct {
 	outputBuf      []string
 	outputBufMax   int
 	lastActivity   time.Time
+
+	// activityPublisher moves sidecar I/O off the JSON-RPC read loop. It is
+	// installed after the handshake seed is durably committed and detached
+	// before session metadata is removed.
+	activityPublisher       *activityPublisher
+	activityPublisherClosed bool
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -58,6 +65,7 @@ func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSi
 		cmd:          cmd,
 		stdin:        stdin,
 		done:         done,
+		readDone:     make(chan struct{}),
 		listener:     lis,
 		outputBufMax: bufSize,
 		pending:      make(map[int64]chan JSONRPCMessage),
@@ -70,6 +78,8 @@ func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSi
 // readLoop reads JSON-RPC messages from the agent's stdout and dispatches them.
 // It runs until the reader returns EOF or an error.
 func (sc *sessionConn) readLoop(r io.Reader) {
+	defer close(sc.readDone)
+
 	scanner := bufio.NewScanner(r)
 	// ACP messages can be large (e.g., file contents in updates).
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -132,9 +142,10 @@ func (sc *sessionConn) handleUpdate(msg JSONRPCMessage) {
 		return
 	}
 
+	sc.markActivity(time.Now())
+
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	sc.lastActivity = time.Now()
 
 	switch params.Update.Type {
 	case "agent_message_chunk", "user_message_chunk", "agent_thought_chunk":
@@ -361,6 +372,56 @@ func (sc *sessionConn) getLastActivity() time.Time {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	return sc.lastActivity
+}
+
+// markActivity records that the agent produced output at t and offers the
+// newest stamp to the asynchronous publisher. It performs no filesystem I/O.
+func (sc *sessionConn) markActivity(t time.Time) {
+	sc.mu.Lock()
+	if t.After(sc.lastActivity) {
+		sc.lastActivity = t
+	}
+	stamp := sc.lastActivity
+	publisher := sc.activityPublisher
+	sc.mu.Unlock()
+
+	if publisher != nil {
+		publisher.offer(stamp)
+	}
+}
+
+// installActivityPublisher attaches a worker after seed has been written.
+// Updates observed during the handshake are coalesced behind the seed.
+func (sc *sessionConn) installActivityPublisher(publisher *activityPublisher, seed time.Time) error {
+	sc.mu.Lock()
+	if sc.activityPublisherClosed {
+		sc.mu.Unlock()
+		publisher.close()
+		return fmt.Errorf("ACP connection closed before activity publication started")
+	}
+	if seed.After(sc.lastActivity) {
+		sc.lastActivity = seed
+	}
+	latest := sc.lastActivity
+	sc.activityPublisher = publisher
+	sc.mu.Unlock()
+
+	if latest.After(seed) {
+		publisher.offer(latest)
+	}
+	return nil
+}
+
+// closeActivityPublisher waits for any in-flight atomic write to finish.
+func (sc *sessionConn) closeActivityPublisher() {
+	sc.mu.Lock()
+	sc.activityPublisherClosed = true
+	publisher := sc.activityPublisher
+	sc.activityPublisher = nil
+	sc.mu.Unlock()
+	if publisher != nil {
+		publisher.close()
+	}
 }
 
 // alive reports whether the process is still running.
