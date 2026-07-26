@@ -60,6 +60,9 @@ func buildRuntimeRegistry() *registry.Registry {
 			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
 			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
 			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
+			SetupTimeout:      sc.SetupTimeoutDuration(),
+			SetupMaxTimeout:   sc.SetupMaxTimeoutDuration(),
+			CityRoot:          cityPath,
 		}
 		if cityPath != "" {
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil

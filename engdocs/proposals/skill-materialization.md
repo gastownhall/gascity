@@ -16,6 +16,10 @@ MCP's first slice stayed list-only for similar reasons, but MCP's delivery to
 agents is provider-config JSON projection — a different mechanic. MCP
 activation is **out of scope for v0.15.1** and lands on main afterwards.
 
+The original v0.15.1 slice excluded ACP. The current implementation extends
+the same host-side contract to ACP: its process and WorkDir are local, and the
+ACP provider now executes PreStart after staging and before agent launch.
+
 ### What exists today
 
 - `Agent.SkillsDir`, `Agent.MCPDir`, `City.PackSkillsDir`, `City.PackMCPDir`
@@ -86,9 +90,11 @@ activation is **out of scope for v0.15.1** and lands on main afterwards.
 - **Fold-in of `maintenance` and `dolt` into `core`.** v0.15.1 ships the
   `core` bootstrap pack initially containing only the gc-topic stubs. Folding
   the other builtin packs into `core` lands on main after v0.15.1.
-- **K8s / ACP runtime skill delivery.** Stage-2 is gated by runtime provider
-  (see "Stage 2 runtime gate" below). K8s and ACP runtimes receive no skill
-  materialization in v0.15.1 and log an informational line per session.
+- **K8s runtime skill delivery.** Stage-2 is gated by runtime provider (see
+  "Stage 2 runtime gate" below). K8s sessions do not receive host-side skill
+  materialization. An ACP transport selected within a k8s city is different:
+  the auto-router sends that session to the local ACP provider, so ACP's
+  host-side materialization contract applies.
 - **`copilot`, `cursor`, `pi`, `omp` providers.** These four providers are
   recognized by `internal/hooks/hooks.go:89-96` but receive no skill
   materialization in v0.15.1 — their skill-discovery conventions are not yet
@@ -180,19 +186,22 @@ Stage 2 PreStart injection runs only for runtimes that execute PreStart on
 the host filesystem with access to the host's `gc` binary and the host's
 skill source tree. The current runtimes and their gating:
 
-| Runtime      | Stage 2 eligible? | Reason                                           |
-|--------------|-------------------|--------------------------------------------------|
-| `subprocess` | yes               | PreStart runs locally before the subprocess spawn |
-| `tmux`       | yes               | PreStart runs on the host                        |
-| `acp`        | no                | Out of scope for v0.15.1                         |
-| `k8s`        | no                | PreStart runs inside the pod; `gc` binary and host skill paths are not available there |
+| Runtime      | Stage 2 eligible? | Reason |
+|--------------|-------------------|--------|
+| `subprocess` | no                | The provider stages files but does not execute `PreStart` |
+| `tmux`       | yes               | `PreStart` runs on the host |
+| `herdr`      | yes               | `PreStart` runs on the host before agent creation |
+| `acp`        | yes               | The local ACP provider runs `PreStart` after staging and before process launch |
+| `k8s`        | no                | `PreStart` runs inside the pod; the host `gc` binary and skill sources are unavailable there |
+| `hybrid`     | no, unless ACP    | Non-ACP sessions have per-session local/remote topology that the host gate cannot safely predict; resolved ACP sessions auto-route to the local ACP provider |
 
-`BuildDesiredState` checks the agent's resolved runtime provider and skips
-the PreStart injection when the runtime is ineligible. When skipped, the
-agent logs one informational line per session spawn indicating stage 2 was
-omitted. Remote-runtime skill delivery (k8s/ACP) is tracked as a follow-up
-and will likely use a different mechanism (content-copy into the pod's
-workdir, or a sidecar init step).
+The gate combines the city runtime with the resolved session transport.
+Explicit or provider-default ACP wins because the auto-router selects the local
+ACP provider, including under k8s, subprocess, or hybrid city defaults.
+Non-ACP transports retain the city topology: an explicit `session = "tmux"`
+does not make a k8s session host-local. Ineligible runtimes skip injection.
+Remote k8s delivery remains a follow-up and likely needs content-copy into the
+pod workdir or a sidecar init step.
 
 ### Vendor mapping
 
@@ -315,12 +324,13 @@ contribute to the fingerprint but delivery happens out-of-band."
 populate skill fingerprint entries for an agent if and only if skill
 materialization actually reaches that agent. Concretely:
 
-- Agent whose runtime is stage-2 eligible (`subprocess`, `tmux`) AND
+- Agent whose runtime is stage-2 eligible (`tmux`, `herdr`, local `acp`) AND
   whose resolved `WorkDir` equals the scope root → stage 1 delivers,
   populate.
 - Agent whose runtime is stage-2 eligible AND whose `WorkDir` differs
   from the scope root (pooled worktree) → stage 2 delivers, populate.
-- Agent whose runtime is stage-2 **ineligible** (`k8s`, `acp`) →
+- Agent whose runtime is stage-2 **ineligible** (`subprocess`, `k8s`, or
+  non-ACP `hybrid`) →
   materialization does not run, so no skill content reaches the agent,
   so skill-catalog edits should not drain the agent. **Do not
   populate** any `skills:*` entries for these agents.
@@ -490,7 +500,8 @@ The corrected per-tick order:
      - cleanup orphans (ownership-by-target-prefix)
      - atomic symlink create/replace
 5. BuildDesiredState per agent              (existing, with new additions)
-     - append PreStart entry for stage-2 eligible runtimes (skip k8s/ACP)
+     - append PreStart entry for stage-2 eligible runtimes
+       (skip subprocess, k8s, and non-ACP hybrid)
      - populate FingerprintExtra["skills:<name>"] entries
 6. Compute fingerprints                     (existing)
 7. Drain on drift                           (existing)
@@ -688,9 +699,8 @@ That is not part of this release.
    implementation. Swap entries as needed.
 2. **Support for `copilot`, `cursor`, `pi`, `omp`.** Deferred pending
    vendor-path verification.
-3. **Remote-runtime (k8s, ACP) skill delivery.** Deferred. Likely shape is
-   a content-copy into the pod's workdir via a new runtime hook, not
-   symlinks.
+3. **Remote-runtime k8s skill delivery.** Deferred. Likely shape is a
+   content-copy into the pod's workdir via a new runtime hook, not symlinks.
 4. **MCP activation.** Lands on main post-v0.15.1.
 5. **Skill promotion (`gc skill promote`).** Not in this hotfix. Tracked
    in `engdocs/design/packv2/doc-agent-v2.md:207`.

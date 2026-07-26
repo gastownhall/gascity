@@ -102,13 +102,6 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 	return false
 }
 
-func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {
-	if strings.TrimSpace(sessionOverride) != "" {
-		return strings.TrimSpace(sessionOverride)
-	}
-	return strings.TrimSpace(citySessionProvider)
-}
-
 func t3BridgeStartupEnvelopeModel(provider string, tp TemplateParams) string {
 	if strings.Contains(tp.Command, "--model ") {
 		parts := strings.Fields(tp.Command)

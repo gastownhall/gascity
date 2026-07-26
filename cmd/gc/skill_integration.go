@@ -15,11 +15,40 @@ import (
 
 const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 
+// materializationRuntimeProvider returns the runtime that determines whether
+// host-side materialization can reach an agent. ACP is special: an explicit or
+// provider-default ACP transport is routed to the local ACP provider even when
+// the city runtime is k8s, subprocess, or hybrid. Every non-ACP transport stays
+// on the city runtime; in particular, an explicit tmux transport must not make
+// a k8s-backed session look host-local.
+func materializationRuntimeProvider(cityRuntime, resolvedSessionTransport string) string {
+	switch transport := strings.TrimSpace(resolvedSessionTransport); transport {
+	case config.SessionTransportACP:
+		return config.SessionTransportACP
+	case "", config.SessionTransportTmux:
+		return strings.TrimSpace(cityRuntime)
+	default:
+		// Unknown transports fail closed. Template validation will surface the
+		// configuration error; supervisors must not materialize optimistically.
+		return transport
+	}
+}
+
+// agentMaterializationRuntimeProvider resolves the transport decision for an
+// agent and combines it with the city runtime topology.
+func agentMaterializationRuntimeProvider(cfg *config.City, agent *config.Agent) string {
+	if cfg == nil || agent == nil {
+		return ""
+	}
+	transport := agentSessionCreateTransport(cfg, *agent)
+	return materializationRuntimeProvider(cfg.Session.Provider, transport)
+}
+
 // canStage1Materialize reports whether stage-1 skill materialization
-// (supervisor-tick-level writes into the agent's scope root) should
-// run for this agent. Stage 1 happens in the gc controller process on
-// the host filesystem, so it requires only that the agent's runtime
-// be able to SEE that filesystem path — not that it execute
+// (supervisor-tick-level writes into the agent's scope root) should run for an
+// already-resolved materialization runtime. Stage 1 happens in the gc
+// controller process on the host filesystem, so it requires only that the
+// agent's runtime be able to SEE that filesystem path — not that it execute
 // PreStart.
 //
 //	tmux, subprocess → eligible. Scope root on the host; agent reads
@@ -28,28 +57,22 @@ const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 //	herdr            → eligible. Agents run on the host with the same
 //	                   filesystem view as tmux, so scope-root files are
 //	                   exactly what they read.
-//	acp              → ineligible. In-process agent; scope-root files
-//	                   aren't what it reads from.
+//	acp              → eligible. The ACP agent process runs locally
+//	                   with its WorkDir on the host filesystem.
 //	k8s              → ineligible. Agent runs in a pod that doesn't
 //	                   share the host scope root.
-//	hybrid           → ineligible in v0.15.1 (per-session routing
-//	                   decides at spawn time whether the session
-//	                   goes local-tmux or remote-k8s; can't predict
-//	                   at supervisor tick without the session name).
+//	hybrid           → non-ACP sessions are ineligible because routing
+//	                   decides at spawn time whether they go local-tmux
+//	                   or remote-k8s. Resolved ACP sessions take the
+//	                   separate local ACP route and are eligible.
 //
 // Separate from isStage2EligibleSession (which gates PreStart
 // injection and has a stricter "runtime actually executes PreStart"
 // requirement). A PR to add PreStart support to the subprocess
 // runtime will collapse the two predicates in a future release.
-func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool {
-	if agent == nil {
-		return false
-	}
-	if agent.Session == "acp" {
-		return false
-	}
-	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "subprocess", "herdr":
+func canStage1Materialize(runtimeProvider string) bool {
+	switch strings.TrimSpace(runtimeProvider) {
+	case "", "tmux", "subprocess", "herdr", "acp":
 		return true
 	default:
 		return false
@@ -69,7 +92,8 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 //	        (internal/runtime/herdr/provider.go), mirroring tmux.
 //	        herdr agents run on the host with the same filesystem
 //	        view, so host-materialized skills/MCP are what they read.
-//	acp   → ineligible. Session runs in-process; out of scope v0.15.1.
+//	acp   → eligible. PreStart runs on the host after workdir staging
+//	        and before the local ACP agent process is launched.
 //	k8s   → ineligible. PreStart runs inside the pod; gc binary and
 //	        host skill paths aren't available there.
 //
@@ -82,28 +106,23 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 // until the subprocess runtime gains PreStart support (tracked as a
 // follow-up for Phase 4 / post-v0.15.1).
 //
-// Hybrid is also ineligible. A default-config hybrid city routes every
-// session to local tmux and would work, but once the user configures
-// RemoteMatch (or GC_HYBRID_REMOTE_MATCH), some sessions route to
-// k8s — and a host-side PreStart would execute on the controller box
-// instead of the pod, materializing into the wrong workdir.
-// Per-session routing-aware eligibility is Phase 4A work.
+// Non-ACP hybrid is also ineligible. A default-config hybrid city routes
+// every session to local tmux and would work, but once the user configures
+// RemoteMatch (or GC_HYBRID_REMOTE_MATCH), some sessions route to k8s — and
+// a host-side PreStart would execute on the controller box instead of the
+// pod, materializing into the wrong workdir. Resolved ACP sessions bypass
+// that ambiguity through the local ACP auto-route.
 //
-// Agent.Session == "acp" overrides the city-level session selector at
-// the per-agent level — even in a tmux city, an ACP agent is
-// ineligible because the session runs in-process.
-func isStage2EligibleSession(citySessionProvider string, agent *config.Agent) bool {
-	if agent == nil {
-		return false
-	}
-	if agent.Session == "acp" {
-		return false
-	}
-	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "herdr":
+// The caller must pass the materialization runtime returned by
+// materializationRuntimeProvider or agentMaterializationRuntimeProvider, not
+// the raw session transport. This preserves the city substrate for non-ACP
+// transports while recognizing ACP's local auto-route.
+func isStage2EligibleSession(runtimeProvider string) bool {
+	switch strings.TrimSpace(runtimeProvider) {
+	case "", "tmux", "herdr", "acp":
 		return true
 	default:
-		// subprocess, k8s, acp, fake, fail, hybrid, exec:<script>, ...
+		// subprocess, k8s, fake, fail, hybrid, exec:<script>, ...
 		// — all conservatively ineligible until individually verified.
 		return false
 	}

@@ -429,6 +429,8 @@ MCP v1 hard-errors when effective MCP cannot be delivered.
 Supported:
 
 - `tmux`
+- `herdr`
+- `acp` (local host process; `PreStart` runs after staging and before launch)
 - `subprocess` only when the provider runs in the scope root and no stage-2
   delivery is required
 
@@ -436,14 +438,19 @@ Unsupported with non-empty effective MCP:
 
 - `subprocess` sessions whose real workdir differs from scope root
 - `k8s`
-- `acp`
-- `hybrid`
+- non-ACP `hybrid` sessions
 - any unresolved runtime topology that cannot receive the provider-native file
 
 This `subprocess` limitation is an implementation reality, not a conceptual MCP
 constraint: current subprocess runtime paths do not offer the same host-side
 stage-2 delivery hook as tmux. Extending subprocess stage-2 support is valid
 follow-up work, but v1 does not pretend it exists.
+
+The delivery gate combines the city runtime with the resolved session
+transport. Explicit or provider-default ACP sessions auto-route to the local
+ACP provider and are supported even under k8s, subprocess, or hybrid city
+defaults. A non-ACP override does not erase the city topology: for example,
+`session = "tmux"` under a k8s city remains ineligible for host projection.
 
 ## Shared Target Validation
 

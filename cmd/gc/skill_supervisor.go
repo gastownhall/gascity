@@ -20,10 +20,10 @@ import (
 // Stage-1 runs in the gc controller process on the host filesystem,
 // so eligibility is "can the agent read from this host scope root?"
 // — broader than the stage-2 "runtime executes host-side PreStart"
-// gate. tmux and subprocess are both eligible (both read files from
-// the host). k8s and acp are not (k8s pods don't share the scope
-// root; acp runs in-process and doesn't read from it). Hybrid is
-// per-session-routed; conservatively ineligible until v0.15.2.
+// gate. tmux, subprocess, herdr, and acp are eligible (all read files
+// from the host). k8s pods don't share the scope root. Non-ACP hybrid
+// sessions are conservatively ineligible; a resolved ACP session routes
+// to the local ACP provider and is eligible.
 //
 // Catalog load happens once per scope per call and feeds every
 // agent's materialization in this tick. Per-agent errors
@@ -64,7 +64,7 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
-		if !canStage1Materialize(cfg.Session.Provider, agent) {
+		if !canStage1Materialize(agentMaterializationRuntimeProvider(cfg, agent)) {
 			continue
 		}
 		provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)
