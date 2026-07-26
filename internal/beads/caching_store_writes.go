@@ -67,7 +67,45 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 
-	// Re-fetch from backing to get the authoritative state.
+	// Cache-hit fast path: in the steady-state post-Prime case, apply opts to
+	// the cached bead in-memory under c.mu — symmetric with SetMetadata. This
+	// skips the post-write backing Get, which for BdStore is a `bd` subprocess
+	// per Update. It mirrors the cache-miss success path's side effects
+	// exactly, including clearing dependent ready-projections on a status
+	// change.
+	//
+	// Revision is advanced locally rather than adopted from a backing read, so
+	// the store still satisfies the conditional-writer contract that every
+	// mutation bumps the revision (beadstest
+	// RunConditionalWriterConformance/every_mutation_bumps_revision). The local
+	// counter can under-report if the backing advanced by more than one — for
+	// example if another writer also mutated the bead. That is self-healing: a
+	// write fenced on a lagged revision precondition-fails, which evicts the
+	// entry and forces a re-read (applyConditionalWriteFailure →
+	// evictForConditionalWrite).
+	c.mu.Lock()
+	if cached, ok := c.beads[id]; ok {
+		fresh := applyUpdateOptsToBead(cloneBead(cached), opts)
+		fresh.Revision = cached.Revision + 1
+		c.noteLocalMutationLocked(id)
+		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			depsMode:   depsFromFields,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
+		if opts.Status != nil {
+			c.clearDependentReadyProjectionsLocked(id)
+		}
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		c.notifyChange("bead.updated", fresh)
+		return nil
+	}
+	c.mu.Unlock()
+
+	// Cache miss (rare, only pre-Prime): re-fetch from backing to get the
+	// authoritative state so the bead can be admitted to the cache.
 	fresh, err := c.backing.Get(id)
 	if err != nil {
 		c.mu.Lock()
@@ -195,6 +233,33 @@ func (c *CachingStore) Close(id string) error {
 		return err
 	}
 
+	// Cache-hit fast path: flip Status to "closed" on the cached bead in-memory
+	// and advance its revision locally, instead of re-reading the bead this
+	// call just closed. Mirrors the unrefreshed branch below, including
+	// dependent ready-projection clearing. See the Update fast path for why a
+	// locally advanced revision still satisfies the conditional-writer
+	// contract. On a cache miss, fall through so the backing read admits the
+	// closed bead to the cache.
+	c.mu.Lock()
+	if b, ok := c.beads[id]; ok {
+		b.Status = "closed"
+		b.Revision++
+		c.noteLocalMutationLocked(id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
+		hit := cloneBead(b)
+		c.clearDependentReadyProjectionsLocked(id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		c.notifyChange("bead.closed", hit)
+		return nil
+	}
+	c.mu.Unlock()
+
 	// Adopt the successful refresh read: it carries the post-close revision,
 	// which Get→conditional-write consumers fence against — patching only the
 	// cached entry's status would keep serving the pre-close revision forever.
@@ -251,6 +316,28 @@ func (c *CachingStore) Reopen(id string) error {
 	if err := c.backing.Reopen(id); err != nil {
 		return err
 	}
+
+	// Cache-hit fast path: flip Status to "open" on the cached bead in-memory
+	// and advance its revision locally — same reasoning as the Close fast path.
+	c.mu.Lock()
+	if b, ok := c.beads[id]; ok {
+		b.Status = "open"
+		b.Revision++
+		c.noteLocalMutationLocked(id)
+		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
+		hit := cloneBead(b)
+		c.clearDependentReadyProjectionsLocked(id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		c.notifyChange("bead.updated", hit)
+		return nil
+	}
+	c.mu.Unlock()
 
 	// Adopt the successful refresh read with the status written through —
 	// same reasoning as Close.
