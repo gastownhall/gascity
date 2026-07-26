@@ -420,7 +420,7 @@ LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
+	$(TEST_ENV) GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.

@@ -65,7 +65,12 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMORY_KIB=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMINFO=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_PROC_CGROUP=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") {
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") ||
+			strings.HasPrefix(entry, "GC_PUSH_GATE_NO_CAP=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_CONCURRENT=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
+			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") {
 			continue
 		}
 		baseEnv = append(baseEnv, entry)
@@ -98,7 +103,14 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			args = append(args, "test-fast-parallel")
 			cmd := exec.Command("make", args...)
 			cmd.Dir = repoRoot
-			cmd.Env = append(append([]string(nil), baseEnv...), "GC_TEST_LOCAL_CPUS="+tt.cpus)
+			cmd.Env = append(append([]string(nil), baseEnv...),
+				"GC_TEST_LOCAL_CPUS="+tt.cpus,
+				"GC_PUSH_GATE_NO_CAP=1",
+				"PUSH_GATE_MAX_CONCURRENT=7",
+				"PUSH_GATE_MAX_WAIT_SECONDS=13",
+				"PUSH_GATE_POLL_SECONDS=2",
+				"PUSH_GATE_UNRELATED_SENTINEL=must-not-leak",
+			)
 			if tt.memoryKiB != "" {
 				cmd.Env = append(cmd.Env, "GC_TEST_LOCAL_MEMORY_KIB="+tt.memoryKiB)
 			}
@@ -119,6 +131,20 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			wantJobAssignment := " LOCAL_TEST_JOBS=" + tt.wantJobs + " CMD_GC_PROCESS_TOTAL="
 			if !strings.Contains(command, wantJobAssignment) {
 				t.Fatalf("test-fast-parallel job count should be %s:\n%s", tt.wantJobs, command)
+			}
+			for _, key := range []string{
+				"GC_PUSH_GATE_NO_CAP",
+				"PUSH_GATE_MAX_CONCURRENT",
+				"PUSH_GATE_MAX_WAIT_SECONDS",
+				"PUSH_GATE_POLL_SECONDS",
+			} {
+				wantForwarding := key + `="${` + key + `-}"`
+				if !strings.Contains(command, wantForwarding) {
+					t.Fatalf("test-fast-parallel should forward %s through TEST_ENV:\n%s", key, command)
+				}
+			}
+			if strings.Contains(command, "PUSH_GATE_UNRELATED_SENTINEL") {
+				t.Fatalf("test-fast-parallel must keep unrelated ambient variables out of TEST_ENV:\n%s", command)
 			}
 		})
 	}
