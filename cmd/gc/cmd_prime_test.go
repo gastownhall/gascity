@@ -754,6 +754,98 @@ provider = "exec:/not-used-by-auto-handoff"
 	}
 }
 
+// TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff pins the preview
+// contract of `gc prime --hook --json`: it renders exactly what the hook would
+// emit, including durable auto-handoff mail, but must not consume it. The
+// --json path buffers into a strings.Builder whose writes never fail, so a
+// consuming run would archive the handoff before the real stdout write — and
+// even on success would eat the continuation the next SessionStart must deliver.
+func TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("launch-only startup prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+		[]string{"context cycle", "continue the durable task"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newPrimeCmd(&stdout, &stderr)
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--hook", "--hook-format", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc prime --json --hook = %v; stderr=%q", err, stderr.String())
+	}
+
+	var got primeJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	// The preview must be faithful: the handoff the hook would emit is present.
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(got.Content, want) {
+			t.Fatalf("content = %q, want auto-handoff substring %q", got.Content, want)
+		}
+	}
+	// ...but previewing must not consume it.
+	if _, err := store.Get(auto.ID); err != nil {
+		t.Fatalf("--json preview must leave auto-handoff durable, got err=%v", err)
+	}
+
+	// The real hook invocation still consumes it, so the preview did not
+	// merely mark the mail read in a way that suppresses later delivery.
+	var hookStdout bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &hookStdout, &stderr, true, "codex", false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(hookStdout.String(), auto.ID) {
+		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
+	}
+}
+
 func TestDoPrimeWithHookFormat_GatesDefaultFallbackWithoutManagedSession(t *testing.T) {
 	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
 	t.Setenv("GC_ALIAS", "")

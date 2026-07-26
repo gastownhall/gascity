@@ -17,7 +17,11 @@ type primeHookContextInjection struct {
 // primeHookContextSuffix builds the single provider-hook context owned by gc
 // prime. A managed SessionStart receives durable auto-handoff mail here because
 // a recycled successor can otherwise idle before any UserPromptSubmit hook.
-func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer) primeHookContextInjection {
+//
+// consumeHandoff gates only the destructive archive: preview callers (--json)
+// still render the exact text the hook would emit, but must not consume the
+// durable mail out from under the real SessionStart invocation.
+func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
@@ -25,7 +29,9 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 	if primeHookSessionStart(hookContext) {
 		autoHandoff := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text
-		injection.afterDelivery = autoHandoff.afterDelivery
+		if consumeHandoff {
+			injection.afterDelivery = autoHandoff.afterDelivery
+		}
 	}
 	return injection
 }
