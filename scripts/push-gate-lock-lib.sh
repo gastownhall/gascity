@@ -172,7 +172,7 @@ push_gate_city_root() {
     return 1
 }
 
-# Print the slot directory to use (city-rooted, or repo-relative fallback).
+# Print the slot directory to use (city-rooted, or common-Git-dir fallback).
 # Does not create it.
 push_gate_slots_dir() {
     local _pgs_city_root
@@ -180,9 +180,9 @@ push_gate_slots_dir() {
         printf '%s/.gc/gate-slots\n' "$_pgs_city_root"
         return 0
     fi
-    local _pgs_repo_root
-    if _pgs_repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-        printf '%s/.git/gate-slots\n' "$_pgs_repo_root"
+    local _pgs_git_common
+    if _pgs_git_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+        printf '%s/gate-slots\n' "$_pgs_git_common"
         return 0
     fi
     return 1

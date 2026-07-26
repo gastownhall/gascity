@@ -233,6 +233,32 @@ mkdir -p "$NOCITY"
 SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
 assert_eq "slots_dir.falls_back_to_repo_relative" "$SLOTS_FALLBACK" "$NOCITY/.git/gate-slots"
 
+LINKED_REPO="$WORK/linked-repo"
+LINKED_A="$WORK/linked-a"
+LINKED_B="$WORK/linked-b"
+mkdir -p "$LINKED_REPO"
+git -C "$LINKED_REPO" init -q
+git -C "$LINKED_REPO" config user.name "Push Gate Test"
+git -C "$LINKED_REPO" config user.email "push-gate-test@example.invalid"
+: >"$LINKED_REPO/tracked"
+git -C "$LINKED_REPO" add tracked
+git -C "$LINKED_REPO" commit -qm "seed linked worktree fixture"
+git -C "$LINKED_REPO" worktree add -q --detach "$LINKED_A"
+git -C "$LINKED_REPO" worktree add -q --detach "$LINKED_B"
+
+SLOTS_LINKED_A="$(cd "$LINKED_A" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
+SLOTS_LINKED_B="$(cd "$LINKED_B" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
+assert_eq "slots_dir.linked_worktree_uses_common_git_dir" "$SLOTS_LINKED_A" "$LINKED_REPO/.git/gate-slots"
+assert_eq "slots_dir.linked_worktrees_share_slots" "$SLOTS_LINKED_B" "$SLOTS_LINKED_A"
+
+FD_LINKED=""
+if push_gate_acquire_slot "$SLOTS_LINKED_A" FD_LINKED "linked-holder"; then
+    record_pass "slots_dir.linked_worktree_can_acquire"
+    push_gate_release_slot "$FD_LINKED"
+else
+    record_fail "slots_dir.linked_worktree_can_acquire" "resolved slot directory is not usable: $SLOTS_LINKED_A"
+fi
+
 # ---------------- static wiring assertions against test-local-parallel ----------------
 assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARALLEL"
 assert_true "wiring.calls_acquire" grep -q 'push_gate_acquire_slot' "$LOCAL_PARALLEL"
