@@ -1338,7 +1338,9 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service.deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+			// Peer setup under the barrier can stretch under make test -p=N CPU
+			// contention; keep the quiescence budget above GoroutineRaceTimeout.
+			service.deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			call := startDisableAndPurge(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
@@ -1655,12 +1657,14 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 				return nil
 			}
 			deps.storageHooks.beforeStep = func(step storageStep) error {
+				// directorySync also runs during beginDisable; only inject once armed
+				// after the peer successor is written (do not wait — would deadlock).
 				if armed.Load() && test.failSync && step == storageStepDirectorySync {
 					return injected
 				}
 				return nil
 			}
-			deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
 			call := startDisableAndPurge(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
@@ -1715,9 +1719,19 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 	replacementTemp := filepath.Join(home.Root(), ".peer-successor-replacement")
 	configPath := filepath.Join(home.Root(), configFileName)
 	deps := defaultTestServiceDependencies(home, 2)
-	deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+	// Peer encoding + barrier hold can stretch under make test -p=N load.
+	deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 	deps.storageHooks.beforeStep = func(step storageStep) error {
-		if step != storageStepEnumerate || !armed.Load() || !replaced.CompareAndSwap(false, true) {
+		if step != storageStepEnumerate {
+			return nil
+		}
+		// beginDisable does not enumerate; the first enumerate is the clean-tree
+		// proof after the uploader lock. Wait for the test to arm so we never
+		// race past the injection point before replacementData is ready (#4653).
+		if !waitForTestArm(&armed) {
+			return nil
+		}
+		if !replaced.CompareAndSwap(false, true) {
 			return nil
 		}
 		if err := os.WriteFile(replacementTemp, replacementData, 0o600); err != nil {
@@ -2183,6 +2197,19 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 		result <- purgeCallResult{result: purge, err: err}
 	}()
 	return result
+}
+
+// waitForTestArm blocks until armed is true, or until GoroutineRaceTimeout, so a
+// storage hook cannot inject before the test arms it under -p=N CPU starvation.
+func waitForTestArm(armed *atomic.Bool) bool {
+	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
+	for !armed.Load() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
 }
 
 func receivePurgeCall(t *testing.T, call <-chan purgeCallResult) purgeCallResult {
