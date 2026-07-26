@@ -658,6 +658,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	}
 	applyBdCLIRemoteSyncOptOut(env)
 	applyBdAutoBackupOptOut(env)
+	applyBdContributorRoutingOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)

@@ -135,6 +135,23 @@ func TestSetExecProjectedBackendEnvEmptyDisablesAutoBackup(t *testing.T) {
 	}
 }
 
+func TestSetExecProjectedBackendEnvEmptyDisablesContributorRouting(t *testing.T) {
+	// The exec-store projection must also force bd's fork/contributor
+	// auto-routing off, mirroring the other bd env-projection sites, so a
+	// gcy-style store cannot siphon create/list/update to ~/.beads-planning.
+	env := map[string]string{
+		"BD_ROUTING_MODE":    "auto",
+		"BEADS_ROUTING_MODE": "auto",
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if got := env["BD_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BD_ROUTING_MODE = %q, want off", got)
+	}
+	if got := env["BEADS_ROUTING_MODE"]; got != "off" {
+		t.Fatalf("BEADS_ROUTING_MODE = %q, want off", got)
+	}
+}
+
 func TestProviderUsesBdStoreContract(t *testing.T) {
 	tests := []struct {
 		provider string
