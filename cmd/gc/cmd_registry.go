@@ -917,6 +917,7 @@ func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result regi
 	} else if result.ValidationError != "" {
 		fmt.Fprintf(stdout, "Message: %s\n", result.ValidationError) //nolint:errcheck
 	}
+	fmt.Fprintf(stdout, "Next: gc pack registry requests %s\n", result.ID) //nolint:errcheck
 }
 
 // registryPublishValidationRejectedStatuses lists publish-request statuses that

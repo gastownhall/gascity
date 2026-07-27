@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Registry API response emitted by gc pack registry requests --json.",
+  "x-gc-raw-json": true,
+  "oneOf": [{"$ref": "#/$defs/listResponse"}, {"$ref": "#/$defs/detailResponse"}],
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "description": "Registry-owned submitter publish-request summary.",
+      "required": ["id", "status", "nextStep", "requestedName", "requestedVersion", "unread"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": ["pending_validation", "validation_failed", "pending_review", "approved", "rejected", "withdrawn"]},
+        "nextStep": {"type": "string", "minLength": 1},
+        "requestedName": {"type": "string"},
+        "requestedVersion": {"type": "string"},
+        "unread": {"type": "boolean"},
+        "actionRequiredBy": {"type": "string"},
+        "submitterUnreadAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": true
+    },
+    "comment": {
+      "type": "object",
+      "description": "Registry feedback comment.",
+      "required": ["id", "authorHandle", "authorRole", "body", "createdAt"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "authorHandle": {"type": "string"},
+        "authorRole": {"type": "string"},
+        "body": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": true
+    },
+    "listResponse": {
+      "type": "object",
+      "description": "Recent publish requests owned by the authenticated submitter.",
+      "required": ["publishRequests", "unreadCount"],
+      "properties": {
+        "publishRequests": {"type": "array", "items": {"$ref": "#/$defs/summary"}},
+        "unreadCount": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "detailResponse": {
+      "type": "object",
+      "description": "One owned publish request and its Registry feedback comments.",
+      "required": ["publishRequest"],
+      "properties": {
+        "publishRequest": {
+          "allOf": [
+            {"$ref": "#/$defs/summary"},
+            {
+              "type": "object",
+              "required": ["comments"],
+              "properties": {"comments": {"type": "array", "items": {"$ref": "#/$defs/comment"}}},
+              "additionalProperties": true
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

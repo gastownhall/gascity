@@ -2818,6 +2818,7 @@ gc pack registry
 | [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry requests](#gc-pack-registry-requests) | Show your Registry publish request status |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
 | [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
@@ -2924,6 +2925,22 @@ gc pack registry remove <registry-name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc pack registry requests
+
+Show recent publish requests you submitted to Registry, or one request with its feedback comments.
+
+This command is read-only. Use a personal Registry token; run \"gc pack registry login\" if you have not logged in yet.
+
+```
+gc pack registry requests [request-id] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSON response object |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | personal registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc pack registry search
 
