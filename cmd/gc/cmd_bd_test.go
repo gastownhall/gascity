@@ -174,7 +174,7 @@ func TestResolveBdScopeTarget(t *testing.T) {
 
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "projectwrenunity-0xk" || beadID == "projectwrenunity-abc"
 	}
 	cityDir := filepath.Join(t.TempDir(), "city")
@@ -387,7 +387,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 	setCwd(t, t.TempDir())
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, _ string) bool { return false }
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, _ string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	cfg := &config.City{
@@ -443,7 +443,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		// Restore bdBeadExists to return true for a wren bead
 		origProbe2 := bdBeadExists
 		defer func() { bdBeadExists = origProbe2 }()
-		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
 		}
 		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false, io.Discard)
@@ -649,7 +649,7 @@ func TestGcBdUsesProjectionNotAmbientEnv(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "repo-abc"
 	}
 	cityFlag = ""
@@ -896,7 +896,7 @@ func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	}()
 	cityFlag = ""
 	rigFlag = ""
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "repo")
@@ -1434,7 +1434,7 @@ func listToMap(env []string) map[string]string {
 func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	rigDir := filepath.Join(cityDir, "frontend")
@@ -1465,7 +1465,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 		return target.ScopeKind == "city" && beadID == "mc-city1"
 	}
 
@@ -1505,7 +1505,7 @@ func TestGcBdRespectsRawCityFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 
@@ -1579,7 +1579,7 @@ func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 

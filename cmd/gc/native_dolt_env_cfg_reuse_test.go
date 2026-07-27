@@ -1,0 +1,159 @@
+package main
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"testing"
+)
+
+// openStoreResultAtForCityWithAuthority loads the city config, then opens the
+// store. Opening the native store with a nil config made the rig-scoped
+// projection load that same city config again — pack expansion and builtin
+// cache readiness included — for one store open, on a path `gc bd` reaches
+// while it is only resolving which store a bead ID belongs to.
+//
+// The reopen hook in the same closure is deliberately excluded: it fires long
+// after the open, on a reconnect where re-reading current config is the point.
+func TestOpenNativeStoreReusesTheLoadedCityConfig(t *testing.T) {
+	const (
+		enclosing = "openStoreResultAtForCityWithConfig"
+		field     = "OpenNativeStore"
+		callee    = "nativeDoltOpenEnvForScope"
+		wantArg   = "cfg"
+	)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing main.go: %v", err)
+	}
+
+	fn := findFuncDecl(file, enclosing)
+	if fn == nil {
+		t.Fatalf("%s not found in main.go", enclosing)
+	}
+	value := compositeLitFieldValue(fn, field)
+	if value == nil {
+		t.Fatalf("%s field not found in %s", field, enclosing)
+	}
+
+	var checked int
+	ast.Inspect(value, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || ident.Name != callee {
+			return true
+		}
+		checked++
+		if len(call.Args) != 3 {
+			t.Fatalf("%s: got %d args, want 3", callee, len(call.Args))
+		}
+		arg, ok := call.Args[1].(*ast.Ident)
+		if !ok || arg.Name != wantArg {
+			t.Fatalf("%s in %s.%s passes %s as its config; want the already-loaded %q",
+				callee, enclosing, field, exprText(call.Args[1]), wantArg)
+		}
+		return true
+	})
+	if checked != 1 {
+		t.Fatalf("found %d %s call(s) in %s.%s, want exactly 1", checked, callee, enclosing, field)
+	}
+}
+
+func findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Recv == nil && fn.Name.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+// compositeLitFieldValue returns the value assigned to the named key in any
+// composite literal inside fn.
+func compositeLitFieldValue(fn *ast.FuncDecl, key string) ast.Node {
+	var found ast.Node
+	ast.Inspect(fn, func(n ast.Node) bool {
+		kv, ok := n.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := kv.Key.(*ast.Ident); ok && ident.Name == key {
+			found = kv.Value
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func exprText(expr ast.Expr) string {
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return "a non-identifier expression"
+}
+
+// bd scope resolution probes candidate stores only to decide which store an
+// invocation is scoped to. Each probe opened a store, and the open re-loaded
+// the whole city config that bd scope resolution had already loaded, so a
+// single `gc bd show <id> --json` paid for the city config three times.
+func TestBdBeadExistsProbeReusesTheLoadedCityConfig(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cmd_bd.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing cmd_bd.go: %v", err)
+	}
+
+	var probe ast.Node
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 || value.Names[0].Name != "bdBeadExists" || len(value.Values) != 1 {
+				continue
+			}
+			probe = value.Values[0]
+		}
+	}
+	if probe == nil {
+		t.Fatal("bdBeadExists not found in cmd_bd.go")
+	}
+
+	var opens int
+	ast.Inspect(probe, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch ident.Name {
+		case "openStoreAtForCity":
+			t.Fatal("bdBeadExists opens the store without a config, which re-loads the city config it was handed")
+		case "openStoreAtForCityWithConfig":
+			opens++
+			if len(call.Args) != 3 {
+				t.Fatalf("openStoreAtForCityWithConfig: got %d args, want 3", len(call.Args))
+			}
+			arg, ok := call.Args[2].(*ast.Ident)
+			if !ok || arg.Name != "cfg" {
+				t.Fatalf("bdBeadExists passes %s as its config; want the already-loaded \"cfg\"", exprText(call.Args[2]))
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Fatalf("found %d config-carrying store open(s) in bdBeadExists, want exactly 1", opens)
+	}
+}

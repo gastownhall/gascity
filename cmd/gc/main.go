@@ -1332,6 +1332,19 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	return openStoreAtForCityWithAuthority(storePath, cityPath, false)
 }
 
+// openStoreAtForCityWithConfig is openStoreAtForCity for a caller that already
+// holds this city's config. Opening a store resolves the conditional-writes
+// mode from config, which otherwise means loading the whole city config —
+// builtin-cache readiness and pack expansion included — again inside the open.
+// A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
+func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
 func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	return openStoreAtForCityWithAuthority(storePath, cityPath, true)
 }
@@ -1359,11 +1372,21 @@ func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride g
 }
 
 func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
+}
+
+// openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
+// with the city config supplied by a caller that already loaded it. A nil
+// config is loaded here, which is what every caller outside the bd scope
+// resolution path passes.
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
-	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
+	if cfg == nil {
+		cfg, _ = loadCityConfig(runtimeCityPath, io.Discard)
+	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if authoritative {
@@ -1405,7 +1428,12 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
-			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, nil, scopeRoot)
+			// Reuse the config this call already loaded. Passing nil made the
+			// rig-scoped projection load the whole city config a second time,
+			// pack expansion included, for the same city at the same moment.
+			// The reopen hook below deliberately keeps re-loading: it fires long
+			// after this open, where re-reading current state is the point.
+			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
