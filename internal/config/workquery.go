@@ -200,6 +200,11 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 // beads.IsReadyBlockingDependencyType; parent-child and tracks edges never
 // block readiness. Status interpretation is left to the shared Go filter:
 // any non-closed blocker counts.
+//
+// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
+// degrades to the stock behavior of serving the candidate unchanged, never to
+// dropping it, so a malformed or log-prefixed bd stdout can never disable
+// crash recovery.
 func inProgressBlockedByEnrichmentScript(shellVar string) string {
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
@@ -209,6 +214,11 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 	const enrichJQ = `map(. + {blocked_by: $bb})`
 
 	v := `$` + shellVar
+	// The enriched payload lands in a scratch var derived from shellVar so the
+	// candidate itself is never clobbered: if jq fails (non-JSON or
+	// log-prefixed `bd list` stdout) the original is served unchanged.
+	enrichedVar := shellVar + `_enriched`
+	e := `$` + enrichedVar
 	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		`bb="[]"; ` +
 		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
@@ -217,9 +227,10 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
 		`[ -z "$nblocked" ] && nblocked=0; ` +
 		`if [ "$nblocked" = "0" ]; then ` +
-		shellVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
-		`[ -n "` + v + `" ] && [ "` + v + `" != "[]" ] && printf "%s" "` + v + `" && exit 0; ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`printf "%s" "` + v + `" && exit 0; ` +
 		`fi; `
 }
 

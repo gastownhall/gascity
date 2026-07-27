@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Regression coverage for the crash-recovery re-serve defect: the in_progress
@@ -16,7 +18,7 @@ import (
 // gate-blocked or dependency-blocked step was re-served on every hook tick.
 //
 // These tests EXECUTE the generated shell against a fake `bd` on PATH, so they
-// pin observable behaviour rather than the script's spelling (the byte-for-byte
+// pin observable behavior rather than the script's spelling (the byte-for-byte
 // shape is pinned separately by TestWorkQueryGolden).
 //
 // Substituting `bd ready` for `bd list` is NOT a valid fix -- bd ready excludes
@@ -121,6 +123,45 @@ func TestInProgressTierIgnoresNonBlockingDependencyTypes(t *testing.T) {
 				t.Fatalf("non-blocking %q edge wrongly suppressed the re-serve: %v", depType, rows)
 			}
 		})
+	}
+}
+
+// TestInProgressTierServesUnparseableCandidateUnchanged pins the fail-open
+// policy of the blocked_by enrichment: when `bd list` stdout is not a parseable
+// JSON array (a log-prefixed blob, a diagnostic line, an envelope shape), jq
+// cannot enrich it, and the tier must still serve the candidate byte-for-byte
+// as the stock script did. An enrichment that assigned the failed jq result
+// back over the candidate would drop the row instead and silently disable
+// crash recovery -- the exact failure this test exists to catch.
+func TestInProgressTierServesUnparseableCandidateUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	const blob = "warning: store not initialized\nargs=list --status in_progress"
+	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
+
+	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+	if out != blob {
+		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)
+	}
+}
+
+// TestLegacyControlInProgressTierServesUnparseableCandidateUnchanged is the
+// matching fail-open guard for the legacy-control shape.
+func TestLegacyControlInProgressTierServesUnparseableCandidateUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	const blob = "warning: store not initialized\nargs=list --status in_progress"
+	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
+
+	script := legacyControlAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+	if out != blob {
+		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)
 	}
 }
 
