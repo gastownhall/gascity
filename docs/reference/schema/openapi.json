@@ -168,6 +168,13 @@
               "null"
             ]
           },
+          "AssignedWorkDeferLimit": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -520,6 +527,7 @@
           "IdleTimeout",
           "MaxSessionAge",
           "MaxSessionAgeJitter",
+          "AssignedWorkDeferLimit",
           "SleepAfterIdle",
           "InstallAgentHooks",
           "Skills",
