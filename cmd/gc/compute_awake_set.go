@@ -458,7 +458,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// grace period are also exempt.
 		//
 		// On_demand named sessions woken by routed/named demand
-		// ("named-demand", "work-query") are also exempt: that demand means
+		// ("named-demand", "routed-demand", "work-query") are also exempt: that demand means
 		// there is pending work for this specific session, so an idle window
 		// must not put it back to sleep. Without this, an asleep on_demand
 		// named session (e.g. a refinery) with routed work that already exists
@@ -471,7 +471,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
-			desired[name] != "named-demand" && desired[name] != "work-query" &&
+			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
+			desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
