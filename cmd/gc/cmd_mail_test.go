@@ -2908,9 +2908,6 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
 	}
 
-	if _, err := store.Get(first.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("Get(%s) err = %v, want ErrNotFound", first.ID, err)
-	}
 	status := func(id string) string {
 		t.Helper()
 		b, err := store.Get(id)
@@ -2918,6 +2915,12 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
 		return b.Status
+	}
+	if got := status(first.ID); got != "closed" {
+		t.Fatalf("message %s status = %q, want closed (archive retains, never deletes)", first.ID, got)
+	}
+	if b, err := store.Get(first.ID); err != nil || b.Description == "" {
+		t.Fatalf("Get(%s) = %+v, %v; want retained bead with non-empty body", first.ID, b, err)
 	}
 	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
 		if got := status(id); got != "open" {
@@ -2961,8 +2964,12 @@ func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 		if !strings.Contains(stdout.String(), "Archived message "+id) {
 			t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), id)
 		}
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v, want retained bead (archive closes, never deletes)", id, err)
+		}
+		if b.Status != "closed" {
+			t.Fatalf("message %s status = %q, want closed", id, b.Status)
 		}
 	}
 	for _, id := range []string{nonEmpty.ID, otherSubject.ID} {
