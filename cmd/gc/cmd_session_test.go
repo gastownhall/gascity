@@ -3153,7 +3153,7 @@ func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, std
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return nil, errors.New("injected provider failure")
 	}
-	args := []string{"session", "list"}
+	args := []string{"--city", ".", "session", "list"}
 	if scenario == "json" {
 		args = append(args, "--json")
 	} else if scenario != "text" {
