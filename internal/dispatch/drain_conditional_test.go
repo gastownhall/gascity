@@ -109,7 +109,7 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = reserveDrainMember(store, controls[i], member, ProcessOptions{})
+			results[i] = reserveDrainMember(store, controls[i], member, "", ProcessOptions{})
 		}()
 	}
 	wg.Wait()
@@ -145,7 +145,7 @@ func TestReserveDrainMemberCASReentryIsIdempotent(t *testing.T) {
 	store := newStampedDrainStore(t, gate.Auto)
 	control, member := newDrainReservationFixtures(t, store)
 	for i := range 2 {
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		if err := reserveDrainMember(store, control, member, "", ProcessOptions{}); err != nil {
 			t.Fatalf("reserve #%d: %v (re-entry must be success, not skip)", i+1, err)
 		}
 	}
@@ -159,7 +159,7 @@ func TestReserveDrainMemberRequireIncapableFailsClosed(t *testing.T) {
 	store.DisableConditionalWrites = true
 	control, member := newDrainReservationFixtures(t, store)
 
-	err := reserveDrainMember(store, control, member, ProcessOptions{})
+	err := reserveDrainMember(store, control, member, "", ProcessOptions{})
 	if !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("err = %v, want the typed require refusal", err)
 	}
@@ -239,7 +239,7 @@ func TestReleaseDrainReservationCAS(t *testing.T) {
 	t.Run("owner clears its own reservation", func(t *testing.T) {
 		store := newStampedDrainStore(t, gate.Auto)
 		control, member := newDrainReservationFixtures(t, store)
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		if err := reserveDrainMember(store, control, member, "", ProcessOptions{}); err != nil {
 			t.Fatalf("reserve: %v", err)
 		}
 		if err := releaseDrainReservation(store, "drain-a", member.ID); err != nil {
