@@ -1261,6 +1261,22 @@ func collectAssignedWorkBeadsWithStores(
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 				}
 			}
+			// Open assigned molecule roots that count as wake demand. Whether an
+			// open assigned root is demand must be decided from the bead's RAW
+			// status, not the collapsed Bead.Status: mapBdStatus folds bd's
+			// blocked/deferred/review/testing into "open", so a blocked assigned
+			// root reads as "open" through the cache and would wrongly re-enter
+			// demand (EB-42o8/gc-nz5i; extends gc-4zb/#4395). A Live read reaches
+			// the backing store's raw --status=open filter, which excludes it —
+			// see listOpenForControllerDemandLive.
+			if openDemand, err := listOpenForControllerDemandLive(source.store); err == nil {
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+			} else {
+				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
+				if beads.IsPartialResult(err) && len(openDemand) > 0 {
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				}
+			}
 			// Open pool-routed beads that still carry an assignee. These are
 			// invisible to the in-progress pass (status is "open") and to the
 			// ready-by-assignee pass (the assignee is a dead session's
@@ -1271,13 +1287,22 @@ func collectAssignedWorkBeadsWithStores(
 			// (issue #2793). The release loop further gates each bead on
 			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
 			// live-session step beads in the same range are skipped untouched.
+			//
+			// This read stays on the collapsed-status cache tier ON PURPOSE. The
+			// gc-ft31x fix narrows only the DEMAND read above to live and leaves
+			// the blocked-routed reaper's input (appendOpenRoutedWorkUnique ->
+			// releaseOrphanedPoolAssignments) exactly as it was, so nothing the
+			// reaper relied on is removed — "do not remove the blocked-routed
+			// reaper until a reviewed binary is deployed" (gc-ft31x). A blocked
+			// bead captured here is not counted as demand regardless:
+			// appendOpenRoutedWorkUnique never markReadyAssigned (see the
+			// skipReadyAssignees note below), and releaseOrphanedPoolAssignments'
+			// own live re-read (liveWorkAssignmentStillReleasable) skips it.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
@@ -1898,6 +1923,25 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 		return handles.Live.List(query)
 	}
 	return rows, err
+}
+
+// listOpenForControllerDemandLive reads open work for the controller-demand and
+// spawn-capacity paths on the LIVE tier so the backing store's raw-status filter
+// runs. listBothTiersForControllerDemand serves a Status:"open" query from the
+// cache (handles.Cached forces Live=false), which filters against the collapsed
+// Bead.Status: mapBdStatus folds bd's blocked/deferred/review/testing into Gas
+// City's "open", so a blocked bead is indistinguishable from ready work and
+// would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
+// a Live read reaches the backing store's server-side --status=open filter
+// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
+// excludes the raw blocked status. This extends the fix gc-4zb/#4395 applied to
+// restoreCarriedWorkRoutes and the workflow projection to the controller-demand
+// List reads. AllowScan opts into the intentional open-status population read;
+// handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
+// latency on the demand path (see readyDemandCache): this pays one live
+// backing-store read rather than over-counting blocked work as demand.
+func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
@@ -4279,7 +4323,12 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 			}
 			storeRef = "city:" + cityName
 		}
-		open, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
+		// Live so the backing store's raw --status=open filter excludes blocked/
+		// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
+		// and the route-repair passes, and mapBdStatus would otherwise collapse a
+		// blocked bead to "open" and let it count as spawn capacity or get its route
+		// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
+		open, err := listOpenForControllerDemandLive(source.store)
 		if err != nil && !beads.IsPartialResult(err) {
 			fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", storeRef, err) //nolint:errcheck
 			continue
