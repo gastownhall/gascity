@@ -49,6 +49,10 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 
+	// Built at most once, and only if a deterministic session-name probe misses
+	// (see #4703 — bounded-pool slots never match their ephemeral session name).
+	liveSessions := s.memoizedAgentSessionIndex(cityName, sessTmpl)
+
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
@@ -63,8 +67,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				continue
 			}
 
-			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			running := sp.IsRunning(sessionName)
+			sessionName, running := resolveAgentRuntime(
+				sp,
+				agentSessionName(cityName, ea.qualifiedName, sessTmpl),
+				ea.qualifiedName,
+				liveSessions,
+			)
 
 			if input.Running == "true" && !running {
 				continue
@@ -184,8 +192,13 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	sessTmpl := cfg.Workspace.SessionTemplate
+	sessionName, running := resolveAgentRuntime(
+		sp,
+		agentSessionName(cityName, name, sessTmpl),
+		name,
+		s.memoizedAgentSessionIndex(cityName, sessTmpl),
+	)
 
 	suspended := agentCfg.Suspended
 	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
