@@ -19,21 +19,22 @@ const defaultOnDemandIdleTimeout = 5 * time.Minute
 // should be awake. All external I/O (shell commands, tmux checks, store
 // queries) happens before this function is called.
 type AwakeInput struct {
-	Agents             []AwakeAgent
-	NamedSessions      []AwakeNamedSession
-	SessionBeads       []AwakeSessionBead
-	WorkBeads          []AwakeWorkBead // in_progress assigned work plus ready open assigned work
-	ScaleCheckCounts   map[string]int  // agent template → scale_check count
-	NamedSessionDemand map[string]bool // named-session identity → routed/assigned work demand
-	NamedSessionWorkQ  map[string]bool // named-session identity → bridge-carried work_query demand
-	WorkSet            map[string]bool // agent template → work_query found pending work
-	RunningSessions    map[string]bool // session name → tmux exists
-	AttachedSessions   map[string]bool // session name → user attached
-	PendingSessions    map[string]bool // session name → pending interaction
-	ReadyWaitSet       map[string]bool // session bead ID → durable wait is ready
-	ChatIdleTimeout    time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
-	ManualGracePeriod  time.Duration   // grace period before manual sessions can be idle-slept (0 = disabled)
-	Now                time.Time
+	Agents                   []AwakeAgent
+	NamedSessions            []AwakeNamedSession
+	SessionBeads             []AwakeSessionBead
+	WorkBeads                []AwakeWorkBead // in_progress assigned work plus ready open assigned work
+	ScaleCheckCounts         map[string]int  // agent template → scale_check count
+	NamedSessionDemand       map[string]bool // named-session identity → routed/assigned work demand
+	NamedSessionRoutedDemand map[string]bool // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
+	NamedSessionWorkQ        map[string]bool // named-session identity → bridge-carried work_query demand
+	WorkSet                  map[string]bool // agent template → work_query found pending work
+	RunningSessions          map[string]bool // session name → tmux exists
+	AttachedSessions         map[string]bool // session name → user attached
+	PendingSessions          map[string]bool // session name → pending interaction
+	ReadyWaitSet             map[string]bool // session bead ID → durable wait is ready
+	ChatIdleTimeout          time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
+	ManualGracePeriod        time.Duration   // grace period before manual sessions can be idle-slept (0 = disabled)
+	Now                      time.Time
 }
 
 // AwakeAgent represents an [[agent]] config entry.
@@ -185,6 +186,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			switch {
 			case input.NamedSessionDemand[ns.Identity]:
 				reason = "named-demand"
+			case input.NamedSessionRoutedDemand[ns.Identity]:
+				reason = "routed-demand"
 			case input.NamedSessionWorkQ[ns.Identity]:
 				reason = "work-query"
 			default:

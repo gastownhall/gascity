@@ -82,16 +82,29 @@ remote_sha() {
 # Fake `bd`: behavior driven by state files, so each test writes exactly the
 # response it needs without a combinatorial helper signature.
 #
-#   <dir>/fake-bd-state/show-json   -- `bd show <any-id> --json` echoes this
-#                                       verbatim (exit 0).
-#   <dir>/fake-bd-state/show-exit   -- if present, `bd show` exits with this
-#                                       code instead (no output) — simulates
-#                                       bd/Dolt unreachable.
-#   <dir>/fake-bd-state/show-sleep  -- if present, `bd show` sleeps this many
-#                                       seconds first — simulates a hung
-#                                       read for timeout tests.
-#   <dir>/fake-bd-state/list-json   -- response to `bd list ... --json`
-#                                       (defaults to "[]").
+#   <dir>/fake-bd-state/show-json      -- `bd show <any-id> --json` echoes
+#                                          this verbatim (exit 0).
+#   <dir>/fake-bd-state/show-exit      -- if present, `bd show` exits with
+#                                          this code instead (no output) —
+#                                          simulates bd/Dolt unreachable.
+#   <dir>/fake-bd-state/show-sleep     -- if present, `bd show` sleeps this
+#                                          many seconds first — simulates a
+#                                          hung read for timeout tests.
+#   <dir>/fake-bd-state/show-fail-count -- if present, the first N `bd show`
+#                                          calls exit 1 (no output) and only
+#                                          call N+1 onward falls through to
+#                                          show-exit/show-json — simulates a
+#                                          transient failure that clears up
+#                                          after N attempts, for retry tests.
+#                                          Each call increments
+#                                          show-call-count (1-based) so a
+#                                          test can assert exactly how many
+#                                          attempts were made.
+#   <dir>/fake-bd-state/list-json      -- response to `bd list ... --json`
+#                                          (defaults to "[]").
+#   <dir>/fake-bd-state/list-fail-count -- same as show-fail-count, for
+#                                          `bd list` (counter:
+#                                          list-call-count).
 # ---------------------------------------------------------------------------
 
 write_fake_bd() {
@@ -106,6 +119,16 @@ case "$1" in
     if [ -f "$state/show-sleep" ]; then
       sleep "$(cat "$state/show-sleep")"
     fi
+    if [ -f "$state/show-fail-count" ]; then
+      n="$(cat "$state/show-fail-count")"
+      c=0
+      [ -f "$state/show-call-count" ] && c="$(cat "$state/show-call-count")"
+      c=$((c + 1))
+      echo "$c" > "$state/show-call-count"
+      if [ "$c" -le "$n" ]; then
+        exit 1
+      fi
+    fi
     if [ -f "$state/show-exit" ]; then
       exit "$(cat "$state/show-exit")"
     fi
@@ -116,6 +139,16 @@ case "$1" in
     exit 1
     ;;
   list)
+    if [ -f "$state/list-fail-count" ]; then
+      n="$(cat "$state/list-fail-count")"
+      c=0
+      [ -f "$state/list-call-count" ] && c="$(cat "$state/list-call-count")"
+      c=$((c + 1))
+      echo "$c" > "$state/list-call-count"
+      if [ "$c" -le "$n" ]; then
+        exit 1
+      fi
+    fi
     if [ -f "$state/list-json" ]; then
       cat "$state/list-json"
       exit 0
@@ -147,7 +180,32 @@ write_show_json() {
 # unchanged; supply them to exercise the session identity-set match.
 # Combined stdout+stderr is the caller's to capture; the subshell's exit
 # code is assert_bead_still_claimed's.
+#
+# POG_READ_ATTEMPTS defaults to 1 here (not the production default of 3) so
+# every pre-existing caller that doesn't care about retry behavior keeps its
+# original single-shot timing untouched. Tests that exercise retries set
+# POG_READ_ATTEMPTS as a prefix on the call, e.g.
+# `POG_READ_ATTEMPTS=3 run_guard ...`.
 run_guard() {
+    local repo="$1" fbd="$2" agent="$3" template="$4" pog_timeout="${5:-5}"
+    local session_id="${6:-}" session_name="${7:-}"
+    local read_attempts="${POG_READ_ATTEMPTS:-1}"
+    (
+        cd "$repo" || exit 1
+        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+            GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
+            POG_TIMEOUT_SECONDS="$pog_timeout" POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
+            bash -c '. "$LIB"; assert_bead_still_claimed'
+    )
+}
+
+# run_guard_zsh: identical to run_guard, but sources and calls the guard
+# under a real zsh subprocess instead of bash. push-ownership-guard.sh is
+# SOURCED into the deployer's ambient interactive shell (zsh, in this fork —
+# see rebase-resolve-lib.sh's attempt_bounded_self_rebase, Layer B), not
+# executed via its own bash shebang, so zsh's parsing/builtin rules apply to
+# assert_bead_still_claimed's body at call time (ga-xi7wi6).
+run_guard_zsh() {
     local repo="$1" fbd="$2" agent="$3" template="$4" pog_timeout="${5:-5}"
     local session_id="${6:-}" session_name="${7:-}"
     (
@@ -155,7 +213,7 @@ run_guard() {
         PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" LIB="$LIB" \
-            bash -c '. "$LIB"; assert_bead_still_claimed'
+            zsh -c '. "$LIB"; assert_bead_still_claimed'
     )
 }
 
@@ -174,6 +232,32 @@ test_allow_clean_claim() {
         record_pass "allow/clean-claim"
     else
         record_fail "allow/clean-claim" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# test_allow_clean_claim_under_zsh mirrors test_allow_clean_claim exactly,
+# but runs assert_bead_still_claimed under a real zsh subprocess (ga-xi7wi6):
+# a local variable named 'status' collides with zsh's read-only special
+# parameter of the same name, so the guard must never bind that name.
+# Skips (does not fail) when zsh isn't installed, matching the fallback
+# style of _pog_timeout degrading gracefully on a missing dev tool rather
+# than failing the whole suite closed.
+test_allow_clean_claim_under_zsh() {
+    if ! command -v zsh >/dev/null 2>&1; then
+        echo "  skip allow/clean-claim-under-zsh — zsh not installed"
+        return
+    fi
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard_zsh "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/clean-claim-under-zsh"
+    else
+        record_fail "allow/clean-claim-under-zsh" "expected rc=0, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -324,6 +408,94 @@ test_block_on_bd_timeout() {
 }
 
 # ---------------------------------------------------------------------------
+# Bounded retry (ga-e8hal3): a single transient bd/Dolt read failure must
+# not fail the push closed — only exhausting every attempt does. Retrying
+# must never mask a genuine, successfully-read ownership change.
+# ---------------------------------------------------------------------------
+
+test_retry_recovers_from_transient_failure() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" "[]"
+    echo 1 > "$fbd/fake-bd-state/show-fail-count"  # first bd show call fails, second succeeds
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "retry/recovers-from-transient-failure (rc=0, one flaky read then success allows the push)"
+    else
+        record_fail "retry/recovers-from-transient-failure" "expected rc=0 after one flaky read then success, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_retry_exhausted_still_blocks() {
+    local repo fbd out rc calls
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    echo 99 > "$fbd/fake-bd-state/show-fail-count"  # never succeeds within any attempt budget
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    calls="$(cat "$fbd/fake-bd-state/show-call-count" 2>/dev/null || echo 0)"
+    if [[ $rc -ne 0 ]] && [[ "$calls" -eq 3 ]] && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "retry/exhausted-still-blocks (rc=$rc, retried exactly 3x then blocked, mentions --no-verify)"
+    else
+        record_fail "retry/exhausted-still-blocks" "expected rc!=0 after exactly 3 attempts mentioning --no-verify, got rc=$rc calls=$calls, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_retry_recovers_then_still_blocks_on_real_ownership_change() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "closed" "agent-x" "tmpl-x" "[]"
+    echo 1 > "$fbd/fake-bd-state/show-fail-count"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -qi "status" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "retry/recovers-then-still-blocks-on-real-ownership-change (rc=$rc, retries don't mask a genuine close)"
+    else
+        record_fail "retry/recovers-then-still-blocks-on-real-ownership-change" "expected non-zero rc mentioning status+--no-verify after one flaky read then a real close, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_retry_unreachable_message_mentions_retry_before_no_verify() {
+    local repo fbd out rc before_noverify
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"
+    out="$(POG_READ_ATTEMPTS=2 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    before_noverify="${out%%--no-verify*}"
+    if [[ $rc -ne 0 ]] && grep -qi "re-run" <<<"$before_noverify" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "retry/unreachable-message-names-retry-before-no-verify (rc=$rc)"
+    else
+        record_fail "retry/unreachable-message-names-retry-before-no-verify" "expected retry-first wording before --no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_retry_parse_failure_message_mentions_retry_before_no_verify() {
+    local repo fbd out rc before_noverify
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    printf 'not valid json' > "$fbd/fake-bd-state/show-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    before_noverify="${out%%--no-verify*}"
+    if [[ $rc -ne 0 ]] && grep -qi "re-run" <<<"$before_noverify" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "retry/parse-failure-message-names-retry-before-no-verify (rc=$rc)"
+    else
+        record_fail "retry/parse-failure-message-names-retry-before-no-verify" "expected retry-first wording before --no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ---------------------------------------------------------------------------
 # Bead-id resolution.
 # ---------------------------------------------------------------------------
 
@@ -380,6 +552,23 @@ test_bead_id_fallback_used_when_branch_no_match() {
         record_pass "resolve/assignee-fallback-used-when-branch-no-match (rc=0)"
     else
         record_fail "resolve/assignee-fallback-used-when-branch-no-match" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_retry_recovers_bead_id_fallback_from_transient_failure() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    echo 1 > "$fbd/fake-bd-state/list-fail-count"  # first bd list call fails, second succeeds
+    printf '[{"id":"ga-fallbk.3"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-fallbk.3" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(POG_READ_ATTEMPTS=3 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "retry/recovers-bead-id-fallback-from-transient-failure (rc=0, list retry then resolved+allowed)"
+    else
+        record_fail "retry/recovers-bead-id-fallback-from-transient-failure" "expected rc=0, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -557,6 +746,7 @@ test_rebase_lib_calls_guard_before_force_with_lease() {
 
 run_all() {
     test_allow_clean_claim
+    test_allow_clean_claim_under_zsh
     test_block_on_closed
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id
@@ -566,9 +756,15 @@ run_all() {
     test_block_on_hold_external
     test_block_on_bd_unreachable
     test_block_on_bd_timeout
+    test_retry_recovers_from_transient_failure
+    test_retry_exhausted_still_blocks
+    test_retry_recovers_then_still_blocks_on_real_ownership_change
+    test_retry_unreachable_message_mentions_retry_before_no_verify
+    test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
+    test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
     test_hook_blocks_push_on_stale_claim

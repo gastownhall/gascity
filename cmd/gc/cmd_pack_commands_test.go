@@ -227,6 +227,7 @@ func TestNewRootCmdExposesRootPackCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	backstage := findSubcommand(root, "backstage")
