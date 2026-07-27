@@ -75,6 +75,15 @@ describe('supervisor bead reads', () => {
     expect(result.upstream_total).toBe(4);
   });
 
+  it('uses an explicit city instead of re-reading the active city', async () => {
+    const listBeads = vi.fn(async () => ({ items: [], total: 0 }));
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    await listSupervisorBeads({ city: 'captured-city' });
+
+    expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 1000 });
+  });
+
   // gascity-dashboard-sg9o: a "needs you" decision alert can deep-link to a
   // bead the supervisor has since pruned (e.g. gc-316879). fetchSupervisorBead
   // is the data edge the deep-link modal sits on: it must surface a true 404 as

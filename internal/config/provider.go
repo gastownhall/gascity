@@ -403,13 +403,23 @@ func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 	return args
 }
 
+// BinaryName returns the executable token of a command string, stripping
+// any arguments (everything from the first space onward). Used for PATH
+// detection so a command like "my-agent --flag" checks "my-agent".
+func BinaryName(cmd string) string {
+	if i := strings.IndexByte(cmd, ' '); i > 0 {
+		return cmd[:i]
+	}
+	return cmd
+}
+
 // pathCheckBinary returns the binary name to use for PATH detection.
 // If PathCheck is set, it is used; otherwise Command is used directly.
 func (ps *ProviderSpec) pathCheckBinary() string {
 	if ps.PathCheck != "" {
 		return ps.PathCheck
 	}
-	return ps.Command
+	return BinaryName(ps.Command)
 }
 
 // boolPtr returns a pointer to the given bool for tri-state capability fields.

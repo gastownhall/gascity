@@ -2303,6 +2303,56 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
+		t.Fatalf("Send ordinary: %v", err)
+	}
+	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "not deliverable",
+		ThreadID:    "thread-missing-marker",
+		ExtraLabels: []string{mail.AutoHandoffLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff missing archive marker: %v", err)
+	}
+	auto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff auto: %v", err)
+	}
+	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "already delivered",
+		ThreadID:    "thread-read-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff read auto: %v", err)
+	}
+	if err := p.MarkRead(readAuto.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+
+	messages, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(messages) != 1 || messages[0].ID != auto.ID {
+		t.Fatalf("CheckAutoHandoffs = %#v, want only %q (not %q)", messages, auto.ID, missingArchiveMarker.ID)
+	}
+}
+
 // --- Provider session-list cache (ga-q6ct) ---
 
 // countingSessionListStore counts broad gc:session List calls and forwards

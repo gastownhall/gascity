@@ -273,7 +273,14 @@ func drainAckAsyncStopKey(sessionID, name string) string {
 // for the async drain-ack stop path (see queueDrainAckAsyncStop).
 var drainAckAsyncStopPokeController = pokeController
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, tracker *asyncStartTracker, stderr io.Writer) {
+// drainAckStopConfirmDeadTimeout/Poll bound the post-kill confirm-dead loop in
+// queueDrainAckAsyncStop. Package vars so tests can shrink them.
+var (
+	drainAckStopConfirmDeadTimeout = 6 * time.Second
+	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
+)
+
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -317,11 +324,22 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
 			return
 		}
-		// The runtime session is now gone, but its pool session bead stays open
-		// (occupying the pool slot) until finalizeDrainAckStopPendingSessions
-		// closes it on a subsequent tick. Poke the controller so finalize +
-		// pool respawn runs on the next event-driven tick instead of waiting up
-		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
+		// The kill above is best-effort and does not verify the agent actually
+		// exited: a claude that ignores SIGHUP, reparents, or races the kill
+		// grace period can survive it. Re-observe liveness and re-issue the kill
+		// until the runtime is confirmed dead or a bounded deadline passes — a
+		// survivor here would otherwise keep occupying the pool slot forever
+		// (the reassigned next step stays runtime-missing). The expected token is
+		// threaded through so each re-kill stays fenced against a re-woken
+		// same-name replacement. Mirrors #4089's confirm-dead contract.
+		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr)
+		// The runtime session is now confirmed dead (or the confirm-dead
+		// deadline passed and we proceed best-effort), but its pool session
+		// bead stays open (occupying the pool slot) until
+		// finalizeDrainAckStopPendingSessions closes it on a subsequent tick.
+		// Poke the controller so finalize + pool respawn runs on the next
+		// event-driven tick instead of waiting up to a full patrol interval
+		// (ga-ryhnhd). Mirrors the drain-ack CLI poke.
 		// Poke is best-effort: a failure is not logged because the goroutine may
 		// outlive its reconcile invocation and write to stderr concurrently with
 		// the caller's subsequent writes on the same writer (data race on
@@ -329,6 +347,50 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// patrol tick regardless.
 		_ = poke(cityPath)
 	}()
+}
+
+// confirmDrainAckRuntimeDead re-observes a killed runtime and re-issues the
+// kill until liveness is false or the deadline passes. The async drain-ack
+// stop's kill is best-effort and does not verify the agent exited; a survivor
+// keeps the pool slot occupied so the reassigned next step stays
+// runtime-missing. Each re-kill is token-fenced against expectedToken (mirrors
+// verifiedStop and the first-kill fence): session names are reused across
+// incarnations, so once the original target dies a re-woken same-name
+// replacement must not be killed. Returns true if confirmed dead — including
+// when a definite token mismatch shows the name now belongs to a replacement —
+// and false if it outlived the deadline (caller proceeds best-effort). Mirrors
+// #4089's confirm-dead contract.
+func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
+	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
+	for {
+		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
+		if !running && !alive {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: runtime still alive after confirm-dead deadline; slot may stay occupied\n", name) //nolint:errcheck
+			return false
+		}
+		// Token fence before every re-kill (mirrors the first-kill fence above
+		// and verifiedStop): the re-kill targets the session by NAME, and a
+		// survivor that finally exits can be replaced by a freshly re-woken
+		// same-name session carrying a different GC_INSTANCE_TOKEN before this
+		// loop next observes it. A definite live-token mismatch means our
+		// intended target is already gone and the name now belongs to a live
+		// replacement — treat the original as confirmed dead and stop rather than
+		// killing the replacement. An empty expected or live token means "cannot
+		// verify" and falls through to the re-kill, matching verifiedStop.
+		if expectedToken != "" {
+			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+				return true
+			}
+		}
+		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck
+		}
+		time.Sleep(drainAckStopConfirmDeadPoll)
+	}
 }
 
 func recordDrainAckAssignedWorkEvent(
@@ -599,7 +661,7 @@ func reconcileDrainAckStopPending(
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
 		// instance_token off the Info snapshot (mirrors verifiedStop).
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, asyncStopTracker, stderr)
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
@@ -607,6 +669,24 @@ func reconcileDrainAckStopPending(
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
+}
+
+// drainAckStopPendingProcessNames resolves the configured agent process-name
+// hints for a persisted stop-pending session so the finalizer path observes and
+// confirm-dead-kills it with the same process liveness the reset-driven path
+// gets from tp.Hints.ProcessNames. The finalizer only has the session Info (no
+// resolved TemplateParams), so it recovers the hints from config via the
+// normalized template/agent. Returns nil when the agent cannot be resolved,
+// leaving the prior nil-hint behavior for unmanaged sessions.
+func drainAckStopPendingProcessNames(cfg *config.City, info sessionpkg.Info) []string {
+	if cfg == nil {
+		return nil
+	}
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
+	if agent == nil {
+		return nil
+	}
+	return processHints(cfg, agent)
 }
 
 func finalizeDrainAckStopPendingSessions(
@@ -637,9 +717,17 @@ func finalizeDrainAckStopPendingSessions(
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
-		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, nil)
+		// Resolve the configured agent process-name hints for this persisted
+		// stop-pending session, exactly as the reset-driven path threads
+		// tp.Hints.ProcessNames (see reconcileDrainAckStopPending). Without them
+		// the queued confirm-dead loop observes with nil hints, so once the
+		// runtime pane disappears ObserveLiveness collapses to IsRunning alone and
+		// a reparented/surviving agent process is misread as dead — freeing the
+		// pool slot while the agent still runs.
+		processNames := drainAckStopPendingProcessNames(cfg, info)
+		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
 		if err != nil || obs.Running || obs.Alive {
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, asyncStopTracker, stderr)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
 			continue
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
@@ -1744,7 +1832,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			if healErr != nil {
+				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+				continue
+			}
 			traceHealClearedPendingCreateLeaseInfo(
 				trace,
 				infoByID[id],
@@ -1877,7 +1969,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Token fence off the typed snapshot: the stop-pending fold
 								// preserves instance_token, so infoByID[id].InstanceToken is the
 								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, asyncStopTracker, stderr)
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2260,7 +2352,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(id, dt)
 							// Token fence off the typed snapshot (mirrors verifiedStop); the
 							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, asyncStopTracker, stderr)
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
@@ -2298,12 +2390,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// store/health queries so they run only for the rare already-stalled
 		// session. Set the restart_requested marker and let the block below
 		// perform the fresh-restart handoff.
-		if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && alive && sessionActivityReportable(sp, name) {
+		claimlessThreshold := cfg.Session.ProgressStallTimeoutDuration()
+		claimHolderThreshold := cfg.Session.ClaimHolderStallTimeoutDuration()
+		if gateThreshold := minPositiveDuration(claimlessThreshold, claimHolderThreshold); gateThreshold > 0 && alive && sessionActivityReportable(sp, name) {
 			lastActivity, lastActivityErr := sp.GetLastActivity(name)
 			if lastActivityErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
-			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
+			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
 				if !exempt {
@@ -2321,16 +2415,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				// Min-floor idle workers are legitimately unclaimed: they hold no
 				// bead because they are waiting for routed work to arrive, not
-				// because they parked on an error. Exempt them before the
-				// I/O-bound claim and provider-health checks so those queries
-				// are skipped entirely for floor workers every reconcile tick.
+				// because they parked on an error. That exemption applies only to
+				// the claim-less recycler: a city that opts into claim-holder
+				// recovery must still look up a floor worker's claim before it can
+				// decide whether it is really idle.
+				floorExempt := false
 				if !exempt && cfg != nil {
 					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
 						minFloor := cfgAgent.EffectiveMinActiveSessions()
 						if minFloor > 0 {
 							openInPool := openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)
 							if isMinFloorIdleWorker(minFloor, openInPool) {
-								exempt = true
+								floorExempt = true
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonMinFloorIdleWorker, TraceOutcomeExempt, tp.TemplateName, name, traceRecordPayload{
 										"pool_min":  minFloor,
@@ -2342,7 +2438,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				holdsClaim := false
-				if !exempt {
+				claimKnown := true
+				if !exempt && (!floorExempt || claimHolderThreshold > 0) {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, infoByID[id], cfg)
 					if err != nil {
 						// Fail safe: an unreadable claim check must not recycle a
@@ -2351,20 +2448,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// claim-check error rather than assume the session is idle).
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before progress-stall recycle for %s: %v\n", name, err) //nolint:errcheck
 						holdsClaim = true
+						claimKnown = false
 					} else {
 						holdsClaim = has
 					}
 				}
 				providerHealthy := true
-				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
+				if !exempt && (!floorExempt || holdsClaim) && tp.ResolvedProvider != nil {
 					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
 					// (provider RED) takes precedence: never recycle a session whose
-					// provider is red. Fail-open — absent/stale registry → healthy.
+					// provider is red. Evaluate this for claim-holders too so they are
+					// never restarted into a known-dead provider. Fail-open — an
+					// absent/stale registry is treated as healthy.
 					if h, present := phSnap.check(tp.ResolvedProvider.Name); present {
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -2374,7 +2474,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// restart). The base is coherent here (the zombie fold synced
 					// infoByID and every intervening mutating block `continue`s).
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
-					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
+					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
+				}
+				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+					// A confirmed holder can wedge mid-work on a provider condition it
+					// will not self-clear. This remains opt-in and uses a separate,
+					// more conservative timeout because it interrupts in-progress work.
+					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
+					fmt.Fprintf(stderr, "session reconciler: %s claim-holder-stalled (holds a claim but no progress for >%s, provider healthy, last activity %s); requesting fresh restart\n", name, claimHolderThreshold, lastActivity.UTC().Format(time.RFC3339)) //nolint:errcheck
 				}
 			}
 		}
@@ -2501,7 +2608,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		if healErr != nil {
+			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+			continue
+		}
 		traceHealClearedPendingCreateLeaseInfo(
 			trace,
 			infoByID[id],

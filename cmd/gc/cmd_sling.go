@@ -490,6 +490,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 			return shellSlingRunner(dir, command, merged)
 		}
 	}
+	sourceWorkflowScanWarnings := make(map[string]struct{})
 	deps := slingDeps{
 		CityName: cityName,
 		CityPath: cityPath,
@@ -504,15 +505,16 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 			}, func(dir string) (beads.Store, error) {
 				return openAuthoritativeStoreAtForCity(dir, cityPath)
 			})
-			if err != nil {
+			unscannedSkips, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, storeRef, skips)
+			if err != nil && !selectedRecovered {
 				return nil, err
 			}
-			if len(skips) > 0 {
+			if len(unscannedSkips) > 0 {
 				// The sling callback cannot push into SlingResult from
 				// this depth, but stderr is the only channel operators
 				// look at; silence here means singleton coverage can
 				// degrade without any breadcrumb.
-				fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(skips)) //nolint:errcheck
+				fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(unscannedSkips)) //nolint:errcheck
 			}
 			out := make([]sling.SourceWorkflowStore, 0, len(stores))
 			for _, storeView := range stores {
@@ -522,6 +524,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 				})
 			}
 			return out, nil
+		},
+		SourceWorkflowStoreScanWarning: func(storeRef string, scanErr error) {
+			key := strings.TrimSpace(storeRef)
+			if _, warned := sourceWorkflowScanWarnings[key]; warned {
+				return
+			}
+			sourceWorkflowScanWarnings[key] = struct{}{}
+			fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips([]sourceWorkflowStoreSkip{{ //nolint:errcheck
+				path: storeRef,
+				err:  scanErr,
+			}}))
 		},
 	}
 
@@ -1427,7 +1440,7 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
+	binding := graphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
 	if agentCfg.SupportsInstanceExpansion() {
 		binding.MetadataOnly = true
 		cache[stepID] = binding
@@ -2007,6 +2020,15 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 	// Fast path: heuristics already classify this as a bead ID.
 	if !looksLikeInlineText(cfg, beadOrFormula) {
 		return false, false, nil
+	}
+	// Multi-line inline text is never a legitimate bead title — it's almost
+	// always a caller bug (e.g. a newline-joined list of bead IDs passed as
+	// one sling argument instead of iterated one-per-call). Fail loud rather
+	// than silently fabricating a bead whose title is the whole blob; this
+	// applies to both the real and dry-run paths so a dry-run preview can't
+	// promise a bead that would never be created.
+	if lines := strings.Count(beadOrFormula, "\n") + 1; lines > 1 {
+		return false, false, fmt.Errorf("inline text argument spans %d lines; refusing to create a bead from it — pass a single bead ID, iterate over a list (one ID per gc sling), or use --stdin for multi-line bead text", lines)
 	}
 	// Store probe: covers IDs that pass the shape pre-check but fail the
 	// heuristic (e.g. descriptive multi-dash IDs like "fo-spawn-storm").

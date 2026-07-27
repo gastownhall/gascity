@@ -60,6 +60,7 @@ beads-store
 v2-routed-to-namespace
 census-owner-liveness
 run-target-routed-to-backfill
+hold-label-routed-to
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

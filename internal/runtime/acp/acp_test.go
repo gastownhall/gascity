@@ -17,18 +17,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // shortTempDir returns a temp directory short enough for Unix socket paths
 // (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gc-t-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testutil.ShortTempDir(t, "gc-t-")
 }
 
 // newTestProvider creates an ACP provider with an isolated temp directory.

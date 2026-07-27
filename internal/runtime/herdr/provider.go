@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -27,7 +28,12 @@ type Provider struct {
 	c            *client
 	metaDir      string        // sidecar KV root (herdr has no per-session metadata store)
 	setupTimeout time.Duration // per-command timeout for pre_start ([session] setup_timeout)
-	mu           sync.Mutex    // serializes workspace/tab find-or-create across concurrent Starts
+	// setupMaxTimeout enables the activity-aware pre_start budget
+	// ([session] setup_max_timeout): when > 0, runSetupCommand replaces the
+	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
+	// plus this absolute ceiling.
+	setupMaxTimeout time.Duration
+	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
 }
 
 // defaultSetupTimeout mirrors the tmux provider's [session] setup_timeout
@@ -47,14 +53,14 @@ var (
 // city-less construction). setupTimeout bounds each pre_start command
 // ([session] setup_timeout); non-positive values fall back to
 // defaultSetupTimeout.
-func New(herdrSession, metaDir, cityRoot string, setupTimeout time.Duration) *Provider {
+func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout time.Duration) *Provider {
 	if metaDir == "" {
 		metaDir = filepath.Join(os.TempDir(), "gc-herdr-meta", sanitize(herdrSession))
 	}
 	if setupTimeout <= 0 {
 		setupTimeout = defaultSetupTimeout
 	}
-	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir, setupTimeout: setupTimeout}
+	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir, setupTimeout: setupTimeout, setupMaxTimeout: setupMaxTimeout}
 }
 
 // ── ServerLifecycleProvider: own the shared herdr session-server ─────────────
@@ -125,16 +131,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if strayPane != "" && strayPane != info.PaneID {
 		_ = p.c.closePane(ctx, strayPane)
 	}
-	// Deliver the agent's first turn. Two mutually-exclusive sources: a pool/sling
-	// slot carries its claim instruction in cfg.Nudge; a named always-awake Claude
-	// session carries its behavioral prime in cfg.PromptSuffix (PromptMode=arg).
-	// herdr launches via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg
-	// slot to ride PromptSuffix onto, so without this it would drop the prime, boot
-	// a bare `claude` REPL, and (because the resolver already set
+	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
+	// a named always-awake Claude session carries its behavioral prime in
+	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
+	// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
+	// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
+	// ride PromptSuffix onto, so without this it would drop the prime, boot a
+	// bare `claude` REPL, and (because the resolver already set
 	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
-	// prime) leave the agent wholly unprimed and idle. Route both through the one
-	// hardened post-idle paste+submit path; cfg.Nudge takes precedence so the
-	// working pool path is byte-for-byte unchanged. See startupDeliveryText.
+	// prime) leave the agent wholly unprimed and idle. startupDeliveryText
+	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
+	// returned unchanged. Route it through the one hardened post-idle
+	// paste+submit path. See startupDeliveryText.
 	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening. The paste buffers and survives that window,
@@ -158,20 +166,39 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 // startupDeliveryText resolves the first-turn text Start delivers to a freshly
-// spawned agent. A pool/sling slot carries its claim instruction in cfg.Nudge and
-// is delivered unchanged (it takes precedence, so the working pool path is
-// untouched). A named always-awake Claude session instead carries its behavioral
-// prime in cfg.PromptSuffix (PromptMode=arg, shell-quoted for argv use that herdr's
-// exec launch has no slot for); unquote it — mirroring the parts[0] round-trip used
-// on the resume path in session_lifecycle_parallel.go — and deliver it through the
-// same post-idle paste+submit path. Returns "" when there is nothing to deliver
-// (deterministic workers, suppressed startup prompt). Falls back to the raw string
-// if PromptSuffix somehow fails to unquote: delivering something beats stranding the
-// agent idle.
+// spawned agent. Two independent sources, mirroring the tmux provider — which
+// rides the behavioral prime on the launch arg (buildLaunchCommand) and sends the
+// nudge as a separate Step-6 keystroke:
+//
+//   - a named always-awake Claude session carries its behavioral prime in
+//     cfg.PromptSuffix (PromptMode=arg, shell-quoted for argv use that herdr's
+//     exec launch has no slot for); startupPrimeText unquotes it.
+//   - a pool/sling slot carries its claim instruction in cfg.Nudge.
+//
+// A session may carry BOTH — a named session whose pack also configures a startup
+// nudge (e.g. an oversight tick). Deliver the prime first (the behavioral prompt)
+// then the nudge (the first task): returning only the nudge left such sessions
+// unprimed, because the prime was dropped and GC_STARTUP_PROMPT_DELIVERED=1 also
+// suppresses the SessionStart hook's fallback copy of the prime. A pool slot has
+// no prime, so its claim nudge is returned byte-for-byte unchanged. Returns ""
+// when there is nothing to deliver (deterministic workers, suppressed prompt).
 func startupDeliveryText(cfg runtime.Config) string {
-	if cfg.Nudge != "" {
+	prime := startupPrimeText(cfg)
+	if prime == "" {
 		return cfg.Nudge
 	}
+	if cfg.Nudge == "" {
+		return prime
+	}
+	return prime + "\n\n" + cfg.Nudge
+}
+
+// startupPrimeText recovers the behavioral prime from cfg.PromptSuffix, which is
+// shell-quoted for the launch-arg slot that herdr's exec launch lacks — mirroring
+// the parts[0] round-trip used on the resume path in session_lifecycle_parallel.go.
+// Falls back to the raw string if it somehow fails to unquote: delivering
+// something beats stranding the agent idle. Returns "" when no prime is set.
+func startupPrimeText(cfg runtime.Config) string {
 	if cfg.PromptSuffix == "" {
 		return ""
 	}
@@ -197,6 +224,9 @@ const (
 	// exits, so a pre_start that daemonizes a child holding inherited stdio
 	// cannot hang the start (mirrors tmux's setupCommandWaitDelay).
 	preStartWaitDelay = 2 * time.Second
+	// preStartCancelGrace is the rollback-trap budget when the activity-aware
+	// setup budget is enabled (mirrors tmux's setupCancelGrace).
+	preStartCancelGrace = 10 * time.Second
 )
 
 // runPreStart runs cfg.PreStart shell commands on the host before the agent is
@@ -233,9 +263,23 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// Deadline shape (mirrors tmux's runSetupCommand): with setupMaxTimeout
+	// unset the historical fixed wall-clock deadline applies; with it set the
+	// budget is activity-aware — timeout bounds output silence,
+	// setupMaxTimeout bounds total runtime.
+	idle, grace := time.Duration(0), preStartWaitDelay
+	if p.setupMaxTimeout > 0 {
+		idle, grace = timeout, preStartCancelGrace
+	}
+	mon := execgrace.NewMonitor(ctx, idle, p.setupMaxTimeout)
+	defer mon.Stop()
+	runCtx := mon.Context()
+	if !mon.Enabled() {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
 	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
 	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
 	// agent itself. A pool session's worktree is often created concurrently with
@@ -255,14 +299,24 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 		c.Env = append(c.Env, k+"="+v)
 	}
 	var out bytes.Buffer
-	c.Stdout, c.Stderr = &out, &out
-	c.WaitDelay = preStartWaitDelay
+	w := mon.Writer(&out)
+	c.Stdout, c.Stderr = w, w
+	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// the command's process group first so shell rollback traps run before
+	// the forced kill; the grace doubles as the pipe-closing WaitDelay
+	// (mirrors tmux's runSetupCommand).
+	execgrace.Apply(c, grace)
 	if err := c.Run(); err != nil {
 		// ErrWaitDelay means the command itself exited successfully and only the
 		// force-closed pipes ended the wait: a setup command that daemonizes a
 		// child holding inherited stdio succeeded (mirrors tmux).
 		if errors.Is(err, exec.ErrWaitDelay) {
 			return nil
+		}
+		// context.Cause surfaces which budget fired (execgrace.ErrIdle,
+		// execgrace.ErrCeiling, or the fixed deadline's DeadlineExceeded).
+		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		if tail := strings.TrimSpace(out.String()); tail != "" {
 			if len(tail) > preStartOutputLimit {
@@ -389,6 +443,65 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 		}
 	}
 	return proctable.DescendantAlive(records, roots, processNames)
+}
+
+// ObserveLiveness reports session presence (Running) and agent-process
+// liveness (Alive) in one `agent get` pass, derived from herdr's own agent
+// registry and status — the herdr analog of the tmux provider's
+// ObserveLiveness. This is the LivenessObserver fast-path that
+// runtime.ObserveLiveness prefers over the generic IsRunning + ProcessAlive
+// fold, so it is what every liveness consumer (the API observer, the session
+// manager, the worker handle, and city_runtime) actually reads.
+//
+// It deliberately does NOT consult the ProcessAlive host process-table walk.
+// That walk locates the agent by matching a configured process name against
+// the pane's process tree, widened by the GC_SESSION_ID carried in the
+// process environment — and both signals are unreliable for claude >= 2.1.x:
+// it runs as comm="<version>" (e.g. "2.1.216") rather than "claude", and it
+// does not reliably export GC_SESSION_ID through herdr's `/bin/sh -c` launch
+// wrapper (measured: most live claude procs carry no readable GC_SESSION_ID).
+// The walk therefore false-negatives a live-but-idle singleton (mayor/adjunct),
+// which upstream reads as "runtime missing" and drives an endless
+// continuation-reset / quarantine loop. herdr tracks the pane's agent process
+// directly, so its agent_status does not depend on either fragile signal and
+// keeps a live orchestrator classified alive. ProcessAlive is retained
+// unchanged for the non-observer call sites (doctor) and the caffeinate-wrapper
+// case; processNames is unused here because herdr's status supersedes it.
+func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}
+	}
+	info, present, err := p.c.getAgent(context.Background(), name)
+	return livenessFromAgent(info, present, err)
+}
+
+// livenessFromAgent folds a herdr `agent get` result into a Liveness verdict.
+// Split from ObserveLiveness so the decision is unit-testable without shelling
+// out to herdr. A failed query or an absent agent is not running; a present
+// agent is running, and its aliveness follows herdr's reported agent_status.
+func livenessFromAgent(info agentInfo, present bool, err error) runtime.Liveness {
+	if err != nil || !present {
+		return runtime.Liveness{}
+	}
+	return runtime.Liveness{Running: true, Alive: agentAliveFromStatus(info.AgentStatus)}
+}
+
+// agentAliveFromStatus maps a herdr agent_status to agent-process liveness. An
+// agent present in herdr's registry is alive unless herdr reports an explicit
+// terminal status: any active status (idle, working, done, running, …) means
+// the pane process is up, while a finished/gone marker means it has exited so a
+// genuine crash still restarts. Unknown or empty statuses fail SAFE toward
+// alive — the bug this fixes is a live singleton misread as dead (which drives
+// a destructive reset loop), so a missed restart of a truly-dead agent (visible
+// and non-destructive) is the acceptable direction to err. The terminal set is
+// validated against live herdr output during rollout; extend it there.
+func agentAliveFromStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "exited", "stopped", "dead", "gone", "terminated", "closed", "crashed":
+		return false
+	default:
+		return true
+	}
 }
 
 // Nudge injects and submits text into a running agent's input.

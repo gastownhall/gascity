@@ -38,6 +38,38 @@ func newSessionFakeState(t *testing.T) *fakeState {
 
 const testEventTimeout = 5 * time.Second
 
+func sameCanonicalTestPath(got, want string) bool {
+	canonicalGot, gotErr := filepath.EvalSymlinks(got)
+	canonicalWant, wantErr := filepath.EvalSymlinks(want)
+	if gotErr != nil || wantErr != nil {
+		return filepath.Clean(got) == filepath.Clean(want)
+	}
+	return canonicalGot == canonicalWant
+}
+
+func TestSameCanonicalTestPathResolvesSymlinkAliases(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir real dir: %v", err)
+	}
+	realPath := filepath.Join(realDir, "context.jsonl")
+	if err := os.WriteFile(realPath, []byte("transcript\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	aliasDir := filepath.Join(filepath.Dir(realDir), "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatalf("symlink real dir: %v", err)
+	}
+	aliasPath := filepath.Join(aliasDir, filepath.Base(realPath))
+
+	if !sameCanonicalTestPath(aliasPath, realPath) {
+		t.Fatalf("symlink aliases should identify the same path: got %q, want %q", aliasPath, realPath)
+	}
+	if sameCanonicalTestPath(aliasPath, filepath.Join(realDir, "missing.jsonl")) {
+		t.Fatal("distinct paths must not compare equal")
+	}
+}
+
 func decodeAsyncAccepted(t *testing.T, body io.Reader) asyncAcceptedBody {
 	t.Helper()
 
@@ -6021,7 +6053,7 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 	if err != nil {
 		t.Fatalf("TranscriptPath: %v", err)
 	}
-	if discoveredPath != path {
+	if !sameCanonicalTestPath(discoveredPath, path) {
 		t.Fatalf("discovered transcript path = %q, want %q", discoveredPath, path)
 	}
 

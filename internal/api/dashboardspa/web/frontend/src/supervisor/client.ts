@@ -105,6 +105,7 @@ export interface SupervisorApi {
   listBeads(
     cityName: string,
     query?: NonNullable<GetV0CityByCityNameBeadsData['query']>,
+    signal?: AbortSignal,
   ): Promise<ListBodyBead>;
   listEvents(
     cityName: string,
@@ -277,12 +278,13 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor rigs response was empty',
       );
     },
-    listBeads(cityName, query) {
+    listBeads(cityName, query, signal) {
       return unwrapSupervisorResult<ListBodyBead>(
         getV0CityByCityNameBeads({
           client,
           path: { cityName },
           ...(query === undefined ? {} : { query }),
+          ...(signal === undefined ? {} : { signal }),
         }) as Promise<SupervisorResult<ListBodyBead>>,
         'gc supervisor beads response was empty',
       );

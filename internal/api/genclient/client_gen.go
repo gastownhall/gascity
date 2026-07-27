@@ -1114,7 +1114,7 @@ type AsyncAcceptedBody struct {
 
 // AsyncAcceptedResponse defines model for AsyncAcceptedResponse.
 type AsyncAcceptedResponse struct {
-	// EventCursor Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
+	// EventCursor Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result. A populated cursor resumes each city at its exact per-city position, so no unrelated historical backlog is replayed. The value 0 is returned only when no event provider is registered at capture time; passing 0 back requests a replay from zero for every provider present at resume time, which still delivers this request result because no provider predates the capture boundary.
 	EventCursor string `json:"event_cursor"`
 
 	// RequestId Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
@@ -5029,7 +5029,7 @@ type SupervisorCitiesOutputBody struct {
 
 // SupervisorEventListOutputBody defines model for SupervisorEventListOutputBody.
 type SupervisorEventListOutputBody struct {
-	// EventCursor Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+	// EventCursor Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary. A populated cursor resumes each city at its exact per-city position, so no unrelated historical backlog is replayed. The value 0 is returned only when no event provider is registered at capture time; passing 0 back requests a replay from zero for every provider present at resume time.
 	EventCursor string                            `json:"event_cursor"`
 	Items       *[]TypedTaggedEventStreamEnvelope `json:"items"`
 	Total       int64                             `json:"total"`
@@ -7618,7 +7618,8 @@ type UnboundEventPayload struct {
 // UsageBody defines model for UsageBody.
 type UsageBody struct {
 	// Available True when this city is configured to record local usage estimates.
-	Available bool `json:"available"`
+	Available bool         `json:"available"`
+	Last24h   *UsageTotals `json:"last_24h,omitempty"`
 
 	// ObservedFrom RFC3339 timestamp of the oldest fact included in this bounded read.
 	ObservedFrom *string `json:"observed_from,omitempty"`

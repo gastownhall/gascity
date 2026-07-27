@@ -2363,6 +2363,73 @@ func TestResolveInlineBeadActionMultiDashStoreErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestResolveInlineBeadActionMultilineTextErrors(t *testing.T) {
+	// Reproduces ga-thcr5n: a newline-joined list of bead IDs passed as a
+	// single sling argument (e.g. by the always-on deacon script) must not
+	// be silently fabricated into one contentless junk bead. Fail loud.
+	blob := strings.Join([]string{
+		"ga-kn8yy6.1", "ga-zogqc1.2.5", "ga-zogqc1.2.4", "ga-zogqc1.2.3",
+		"ga-a700wu", "ga-rzdqvl", "ga-7sy2ac", "ga-cd1895", "ga-fxudqs",
+		"ga-9feee3", "ga-e3zcqv", "ga-gzmzej", "ga-uslskt",
+	}, "\n")
+
+	create, previewInlineText, err := resolveInlineBeadAction(&config.City{}, blob, false, nil)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want error for multi-line inline text")
+	}
+	if !strings.Contains(err.Error(), "13") {
+		t.Fatalf("resolveInlineBeadAction error = %q, want line count 13", err)
+	}
+	if create {
+		t.Fatal("create = true, want false for multi-line inline text")
+	}
+	if previewInlineText {
+		t.Fatal("previewInlineText = true, want false for multi-line inline text")
+	}
+}
+
+func TestResolveInlineBeadActionMultilineTextErrorsDuringDryRun(t *testing.T) {
+	// The dry-run path must fail the same way — a dry-run preview of a junk
+	// bead is still a lie about what gc sling would do.
+	blob := "ga-abc12\nga-def34\nga-ghi56"
+
+	create, previewInlineText, err := resolveInlineBeadAction(&config.City{}, blob, true, nil)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want error for multi-line inline text during dry-run")
+	}
+	if create {
+		t.Fatal("create = true, want false for multi-line inline text during dry-run")
+	}
+	if previewInlineText {
+		t.Fatal("previewInlineText = true, want false — must not preview a junk bead")
+	}
+}
+
+func TestResolveInlineBeadActionSingleLineWithSpacesStillCreates(t *testing.T) {
+	// Regression/over-correction guard: the newline guard must key ONLY on
+	// "\n", not general whitespace. Ordinary space-separated inline text
+	// must still create a bead.
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write a README", false, nil)
+	if !create {
+		t.Fatal("create = false, want true for single-line inline text with spaces")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionSingleBeadIDNoNewlineDoesNotError(t *testing.T) {
+	// Regression guard: a single bead ID (the common case) must not trip the
+	// newline guard or any other new logic.
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "ga-abc12", false, nil)
+	if create {
+		t.Fatal("create = true, want false for a single bead ID")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false for a single bead ID")
+	}
+}
+
 // TestCmdSlingConfiguredPrefixAllAlphaCrossRigRouteRefused verifies that
 // `gc sling` refuses a route whose source bead and target agent live in
 // different stores. Cross-store routes silently wedge pools because the

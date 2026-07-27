@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -162,6 +164,9 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 		{"update status=closed", []string{"update", "wr-1", "--status=closed"}, []string{"wr-1"}, true},
 		{"update --status closed", []string{"update", "wr-1", "--status", "closed"}, []string{"wr-1"}, true},
 		{"update -s closed", []string{"update", "wr-1", "-s", "closed"}, []string{"wr-1"}, true},
+		{"last repeated status closes", []string{"update", "wr-1", "--status=open", "--status=closed"}, []string{"wr-1"}, true},
+		{"last repeated status stays open", []string{"update", "wr-1", "--status=closed", "--status=open"}, nil, false},
+		{"status-looking value is consumed", []string{"update", "wr-1", "--notes", "--status=open", "--status", "closed"}, []string{"wr-1"}, true},
 		{"update to open is not a close", []string{"update", "wr-1", "--status=open"}, nil, false},
 		{"update without status is not a close", []string{"update", "wr-1", "--notes", "x"}, nil, false},
 		{"read subcommand is not a close", []string{"show", "wr-1"}, nil, false},
@@ -187,6 +192,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	beadsList := []beads.Bead{
 		{ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 		{ID: "wr-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}},
+		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 	}
@@ -206,6 +212,111 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
 		{"update --status=closed is gated", []string{"update", "wr-shipped-nocommit", "--status=closed"}, true, true, "close of wr-shipped-nocommit"},
+		{
+			"atomic update validates submitted metadata",
+			[]string{"update", "wr-atomic-noop", "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			false,
+			"",
+		},
+		{
+			"metadata JSON validates submitted no-op",
+			[]string{"update", "wr-missing", "--metadata", `{"gc.work_outcome":"no-op"}`, "--status=closed"},
+			true,
+			false,
+			"",
+		},
+		{
+			"metadata equals JSON validates submitted no-op",
+			[]string{"update", "wr-missing", `--metadata={"gc.work_outcome":"no-op"}`, "--status=closed"},
+			true,
+			false,
+			"",
+		},
+		{
+			"last repeated metadata JSON value wins",
+			[]string{"update", "wr-missing", `--metadata={"gc.work_outcome":"no-op"}`, `--metadata={"unrelated":"value"}`, "--status=closed"},
+			true,
+			true,
+			"missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
+		{
+			"last repeated metadata JSON ignores an earlier malformed value",
+			[]string{"update", "wr-missing", `--metadata={not-json}`, `--metadata={"gc.work_outcome":"no-op"}`, "--status=closed"},
+			true,
+			false,
+			"",
+		},
+		{
+			"metadata JSON cannot hide shipped evidence requirements behind stored no-op",
+			[]string{"update", "wr-noop", `--metadata={"gc.work_outcome":"shipped"}`, "--status=closed"},
+			true,
+			true,
+			beadmeta.WorkCommitMetadataKey,
+		},
+		{
+			"metadata JSON cannot combine with later set-metadata",
+			[]string{"update", "wr-noop", `--metadata={"gc.work_outcome":"shipped"}`, "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			true,
+			"cannot project metadata",
+		},
+		{
+			"metadata JSON cannot combine with earlier set-metadata",
+			[]string{"update", "wr-noop", "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, `--metadata={"gc.work_outcome":"shipped"}`, "--status=closed"},
+			true,
+			true,
+			"cannot project metadata",
+		},
+		{
+			"unset-metadata wins over set-metadata regardless of argv order",
+			[]string{"update", "wr-missing", "--unset-metadata", beadmeta.WorkOutcomeMetadataKey, "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			true,
+			"missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
+		{
+			"metadata JSON cannot combine with unset-metadata",
+			[]string{"update", "wr-noop", "--unset-metadata", beadmeta.WorkOutcomeMetadataKey, `--metadata={"gc.work_outcome":"no-op"}`, "--status=closed"},
+			true,
+			true,
+			"cannot project metadata",
+		},
+		{
+			"non-string metadata uses beads StringMap coercion",
+			[]string{"update", "wr-noop", `--metadata={"gc.work_outcome":true}`, "--status=closed"},
+			true,
+			true,
+			`invalid gc.work_outcome="true"`,
+		},
+		{
+			"malformed metadata JSON fails closed",
+			[]string{"update", "wr-noop", `--metadata={not-json}`, "--status=closed"},
+			true,
+			true,
+			"cannot project --metadata",
+		},
+		{
+			"metadata file input fails closed",
+			[]string{"update", "wr-noop", "--metadata", "@work-record.json", "--status=closed"},
+			true,
+			true,
+			"cannot project --metadata",
+		},
+		{
+			"metadata-looking positional after terminator is not projected",
+			[]string{"update", "wr-missing", "--status=closed", "--", "--set-metadata=" + beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp},
+			true,
+			true,
+			"missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
+		{
+			"metadata-like flag value is not submitted metadata",
+			[]string{"update", "wr-missing", "--notes", "--set-metadata=" + beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			true,
+			"missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,6 +336,43 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 				t.Fatalf("gate output %q does not contain %q", out, tc.wantWarn)
 			}
 		})
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	artifactPath := filepath.Join(repoDir, "artifact.txt")
+	if err := os.WriteFile(artifactPath, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "wr-atomic-shipped",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: repoDir,
+		},
+	}}, nil)
+	args := []string{
+		"update", "wr-atomic-shipped",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, store, repoDir, true, &stderr); block {
+		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("valid atomic shipped close warned: %q", got)
 	}
 }
 

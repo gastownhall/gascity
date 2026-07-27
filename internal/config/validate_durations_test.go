@@ -135,6 +135,17 @@ func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadClaimHolderStallTimeout(t *testing.T) {
+	cfg := &City{Session: SessionConfig{ClaimHolderStallTimeout: "not-a-duration"}}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "claim_holder_stall_timeout") {
+		t.Fatalf("warning = %q, want claim_holder_stall_timeout", warnings[0])
+	}
+}
+
 func TestValidateDurationsBadMailRetentionTTL(t *testing.T) {
 	cfg := &City{
 		Mail: MailConfig{RetentionTTL: "7d"},

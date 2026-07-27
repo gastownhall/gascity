@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
@@ -253,6 +254,39 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 			})
 		}
 	})
+}
+
+// TestReusablePoolSessionInfo_DrainAckStopPendingNotReusable is the regression
+// guard for the drain-ack + min_sessions=1 replacement bug.
+//
+// A pool session in state=draining (set by drain-ack-stop-pending) must NOT be
+// returned as reusable. Without this exclusion, the min-floor fires (draining
+// doesn't consume demand via poolSessionConsumesNewDemandInfo), but
+// selectOrPlanPoolSessionBead maps the draining bead as the desired slot via
+// reusablePoolSessionInfos, so no replacement session is started until the
+// draining bead is eventually closed — requiring another reload or several more
+// patrol ticks.
+func TestReusablePoolSessionInfo_DrainAckStopPendingNotReusable(t *testing.T) {
+	t.Parallel()
+
+	drainingInfo := session.Info{
+		ID:                  "session-draining",
+		Template:            "repo/worker",
+		SessionNameMetadata: "worker-1",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       string(session.StateDraining),
+	}
+
+	bp := &agentBuildParams{}
+	cfgAgent := &config.Agent{Name: "worker", Dir: "repo"}
+
+	if got := reusablePoolSessionInfo(bp, cfgAgent, "repo/worker", drainingInfo, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(state=%q) = true; "+
+			"a drain-ack-stop-pending session must not be reusable as the desired slot "+
+			"(fixes min_sessions=1 replacement stall, #drain-ack-min1-bug)",
+			drainingInfo.MetadataState)
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {

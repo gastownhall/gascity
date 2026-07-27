@@ -17,6 +17,36 @@ formula cooked, and `mayor` / `reviewer` / `worker` agents (see
 [Tutorial 05](/tutorials/05-formulas)). Everything below runs against the bead
 store with the `bd` tool.
 
+Confirm the local pack, rig registration, and reviewer binding carried forward
+from the earlier tutorials:
+
+```shell
+~/my-city
+$ cat pack.toml
+[pack]
+name = "my-city"
+schema = 2
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+
+~/my-city
+$ cat city.toml
+[workspace]
+provider = "claude"
+
+... # content elided
+
+[[rigs]]
+name = "my-project"
+
+~/my-city
+$ cat agents/reviewer/agent.toml
+dir = "my-project"
+provider = "codex"
+```
+
 ## What is a bead
 
 A bead is a unit of work with an ID, a title, a status, and a type. We use the
@@ -220,7 +250,7 @@ $ bd dep mc-a4l --blocks mc-xp7
 ✓ Added dependency: mc-a4l (Refactor auth module) blocks mc-xp7 (Update API docs)
 ```
 
-Now `mc-xp7` stays out of every agent's work query until `mc-a4l` closes —
+Now `mc-xp7` won't appear in any agent's work query until `mc-a4l` is closed —
 the same mechanism behind formula step ordering, where `needs` declarations
 become `blocks` edges.
 
@@ -381,10 +411,11 @@ $ bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=
 ```
 
 `mc-xp7` is blocked by `mc-a4l`, so this query won't return it — blocked work
-is invisible to work queries. Closing `mc-a4l` removes the readiness barrier
-(though `mc-xp7` would also need `gc.routed_to=my-project/worker` to land in
-this queue, which nothing here sets). Routing decides _which_ queue a bead
-appears in; readiness decides _whether_ it appears at all.
+is invisible to work queries. Once `mc-a4l` closes, rerun the same query. The
+readiness barrier is gone, though `mc-xp7` would also need
+`gc.routed_to=my-project/worker` to land in this queue, which nothing here
+sets. Routing decides _which_ queue a bead appears in; readiness decides
+_whether_ it appears at all.
 
 This is the "pull" model: agents check for work instead of having it pushed.
 

@@ -1147,8 +1147,7 @@ name = "bright-lights"
 }
 
 func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+	useTempSupervisorCityHome(t)
 
 	cityPath := filepath.Join(t.TempDir(), "force-city")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1227,6 +1226,59 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
 	}
+}
+
+func TestUnregisterCityFromSupervisorWithForceKeepsRegistrationAfterAmbiguousStop(t *testing.T) {
+	useTempSupervisorCityHome(t)
+
+	cityPath := filepath.Join(t.TempDir(), "force-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"force-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "force-city"); err != nil {
+		t.Fatal(err)
+	}
+	commands := startStandaloneControllerWithReply(t, cityPath, nil)
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	if !handled || code != 1 {
+		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1); stderr=%q", handled, code, stderr.String())
+	}
+	select {
+	case command := <-commands:
+		if command != "stop-force" {
+			t.Fatalf("controller command = %q, want stop-force", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for force controller command")
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registered {
+		t.Fatal("city was unregistered after ambiguous controller stop")
+	}
+}
+
+func useTempSupervisorCityHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
 }
 
 func TestUnregisterCityFromSupervisorSkipsProbesWhenCityDirMissing(t *testing.T) {

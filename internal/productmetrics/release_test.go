@@ -4,12 +4,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"reflect"
 	"testing"
 )
 
-func TestCurrentReleaseIdentityIsInertAndRuntimeUnpromotable(t *testing.T) {
-	want := ReleaseIdentity{}
+func TestCurrentReleaseIdentityIgnoresEnvAndDerivesDevelopmentWithoutReleaseTag(t *testing.T) {
 	for _, env := range []string{
 		"GC_PRODUCT_METRICS_ENDPOINT",
 		"GC_PRODUCT_METRICS_BUILD_KIND",
@@ -20,23 +18,53 @@ func TestCurrentReleaseIdentityIsInertAndRuntimeUnpromotable(t *testing.T) {
 		t.Setenv(env, "official-default-on-https://invalid.example-99")
 	}
 	got := CurrentReleaseIdentity()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("CurrentReleaseIdentity() = %#v, want inert zero identity %#v", got, want)
-	}
+	// The test binary carries no injected release tag, so it derives the
+	// development identity; environment variables cannot promote it, and the
+	// redirect-security core matches the compiled constants.
 	if got.BuildKind() != BuildDevelopment {
 		t.Errorf("BuildKind = %v, want development", got.BuildKind())
 	}
-	if got.ReleaseVersion() != "" {
-		t.Errorf("ReleaseVersion = %q, want empty", got.ReleaseVersion())
+	if got.ReleaseVersion() != developmentReleaseVersion {
+		t.Errorf("ReleaseVersion = %q, want %q", got.ReleaseVersion(), developmentReleaseVersion)
 	}
-	if got.Endpoint() != "" {
-		t.Errorf("Endpoint = %q, want empty", got.Endpoint())
+	if got.Endpoint() != compiledEndpoint {
+		t.Errorf("Endpoint = %q, want compiled %q", got.Endpoint(), compiledEndpoint)
 	}
-	if got.MetricsEpoch() != 0 {
-		t.Errorf("MetricsEpoch = %d, want zero", got.MetricsEpoch())
+	if got.PrivacyURL() != compiledPrivacyURL {
+		t.Errorf("PrivacyURL = %q, want compiled %q", got.PrivacyURL(), compiledPrivacyURL)
 	}
-	if got.Rollout() != RolloutDefaultOff {
-		t.Errorf("Rollout = %v, want default-off", got.Rollout())
+	if got.MetricsEpoch() != compiledMetricsEpoch {
+		t.Errorf("MetricsEpoch = %d, want compiled %d", got.MetricsEpoch(), compiledMetricsEpoch)
+	}
+	if got.Rollout() != compiledRollout {
+		t.Errorf("Rollout = %v, want compiled %v", got.Rollout(), compiledRollout)
+	}
+}
+
+func TestClassifyBuildTaxonomy(t *testing.T) {
+	cases := []struct {
+		name        string
+		tag         string
+		dirty       bool
+		wantKind    BuildKind
+		wantVersion string
+	}{
+		{"empty is development", "", false, BuildDevelopment, developmentReleaseVersion},
+		{"stable clean semver is release", "1.4.2", false, BuildRelease, "1.4.2"},
+		{"prerelease is canary", "1.4.2-canary-abc1234", false, BuildCanary, "1.4.2-canary-abc1234"},
+		{"rc prerelease is canary", "1.4.2-rc1", false, BuildCanary, "1.4.2-rc1"},
+		{"dirty release tag falls back to development", "1.4.2", true, BuildDevelopment, developmentReleaseVersion},
+		{"leading-v tag is not canonical semver", "v1.4.2", false, BuildDevelopment, developmentReleaseVersion},
+		{"non-semver garbage is development", "not-a-version", false, BuildDevelopment, developmentReleaseVersion},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKind, gotVersion := classifyBuild(tc.tag, tc.dirty)
+			if gotKind != tc.wantKind || gotVersion != tc.wantVersion {
+				t.Errorf("classifyBuild(%q, %v) = (%v, %q), want (%v, %q)",
+					tc.tag, tc.dirty, gotKind, gotVersion, tc.wantKind, tc.wantVersion)
+			}
+		})
 	}
 }
 
@@ -45,13 +73,17 @@ func TestCompiledReleaseInputsAreConstantsNotLinkerVariables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{
-		"compiledBuildKind":      false,
-		"compiledReleaseVersion": false,
-		"compiledEndpoint":       false,
-		"compiledMetricsEpoch":   false,
-		"compiledRollout":        false,
+	// The redirect-security identity fields must stay const so no ordinary
+	// -ldflags -X can promote a build (change endpoint/rollout/epoch/privacy).
+	// Only compiledReleaseTag — a reporting label that cannot redirect data or
+	// bypass consent — is a deliberately injectable var.
+	wantConst := map[string]bool{
+		"compiledEndpoint":     false,
+		"compiledPrivacyURL":   false,
+		"compiledMetricsEpoch": false,
+		"compiledRollout":      false,
 	}
+	tagIsVar := false
 	for _, declaration := range file.Decls {
 		general, ok := declaration.(*ast.GenDecl)
 		if !ok {
@@ -63,19 +95,25 @@ func TestCompiledReleaseInputsAreConstantsNotLinkerVariables(t *testing.T) {
 				continue
 			}
 			for _, name := range values.Names {
-				if _, tracked := want[name.Name]; !tracked {
+				if name.Name == "compiledReleaseTag" {
+					tagIsVar = general.Tok == token.VAR
+				}
+				if _, tracked := wantConst[name.Name]; !tracked {
 					continue
 				}
 				if general.Tok != token.CONST {
 					t.Errorf("%s is %s, allowing ordinary -X promotion; want const", name.Name, general.Tok)
 				}
-				want[name.Name] = true
+				wantConst[name.Name] = true
 			}
 		}
 	}
-	for name, found := range want {
+	for name, found := range wantConst {
 		if !found {
 			t.Errorf("compiled release input %s not found", name)
 		}
+	}
+	if !tagIsVar {
+		t.Error("compiledReleaseTag must be a var (the single deliberate linker-injectable input)")
 	}
 }

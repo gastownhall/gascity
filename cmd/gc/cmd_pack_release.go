@@ -449,6 +449,8 @@ func stampPackRelease(registryPath, packName string, opts packReleaseStampOption
 		}
 		catalog.Packs = append(catalog.Packs, packregistry.CatalogPack{
 			Name:        packName,
+			Tier:        packregistry.CatalogTierCommunity,
+			Publisher:   packregistry.UnknownPublisher,
 			Description: opts.PackDescription,
 			Source:      opts.Source,
 			SourceKind:  "git",

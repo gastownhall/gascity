@@ -869,7 +869,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		t.Fatalf("create routed bead: %v", err)
 	}
 
-	counts, demand, _, errs := defaultScaleCheckCountsAndDemand([]defaultScaleCheckTarget{{
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
@@ -894,6 +894,91 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
+// reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
+// identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
+// bypassing gc sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+// applied in doSling). Without read-side normalization, the raw instance name never
+// matches group.templates (keyed by the base template), so the demand is silently
+// dropped and the pool never scales up.
+func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:  "directly routed to instance slot",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create instance-routed bead: %v", err)
+	}
+
+	counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if len(partialTemplates) != 0 {
+		t.Fatalf("partialTemplates = %v, want none", partialTemplates)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 for an instance-suffixed gc.routed_to matching the base template", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{work.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want [%s]", got, work.ID)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone guards
+// against over-normalization: an instance number outside the agent's configured
+// capacity, or a suffix on an agent that isn't multi-session, is not a pool
+// instance identity and must not be rewritten or counted against the base
+// template.
+func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "routed beyond configured capacity",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-99",
+		},
+	}); err != nil {
+		t.Fatalf("create out-of-range instance-routed bead: %v", err)
+	}
+
+	counts, _, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 0 for an out-of-range instance suffix", template, got)
 	}
 }
 
@@ -4017,6 +4102,122 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 	}
 }
 
+// TestRealizePoolDesiredSessionsRebindPreservesDistinctWorkDirPerSlot pins
+// gastownhall/gascity ga-vqs6xr: realizePoolDesiredSessions resolves
+// qualifiedName := cfgAgent.QualifiedName() ONCE, outside the Phase C
+// finalize loop, and passes that same loop-invariant base name into
+// bindPoolSessionTriggerBead for every item. A FRESH multi-slot create
+// does not exercise this: selectOrPlanPoolSessionBead (Phase A) already
+// resolves the correct per-slot qualifiedInstance and bakes it into the
+// bead's initial trigger/work_dir metadata via poolTriggerMetadata, and
+// computePoolTriggerBindingPatch's same-trigger guard (oldWorkBeadID ==
+// workBeadID, true immediately after such a create) then preserves that
+// correct value instead of recomputing it.
+//
+// The bug surfaces on REBIND: an already-existing pool session (its own
+// distinct, previously-correct work_dir already on the bead) reassigned to
+// a NEW work bead in the same tick as a sibling slot's rebind. That is a
+// genuine oldWorkBeadID != workBeadID transition, so the preservation guard
+// does not fire, and bindPoolSessionTriggerBead recomputes the work dir from
+// the stale base qualifiedName shared by every item in the loop — collapsing
+// what should be two distinct per-slot directories onto the same base path.
+func TestRealizePoolDesiredSessionsRebindPreservesDistinctWorkDirPerSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir1 := filepath.Join(t.TempDir(), "worker-1")
+	workDir2 := filepath.Join(t.TempDir(), "worker-2")
+	reusable1, err := store.Create(beads.Bead{
+		Title:  "worker reusable 1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"agent_name":                      "worker-1",
+			"alias":                           "worker-1",
+			"session_name":                    "worker-reusable-1",
+			"state":                           string(sessionpkg.StateAsleep),
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: "gp-old-1",
+			beadmeta.WorkDirMetadataKey:       workDir1,
+			beadmeta.LegacyWorkDirMetadataKey: workDir1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusable2, err := store.Create(beads.Bead{
+		Title:  "worker reusable 2",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"agent_name":                      "worker-2",
+			"alias":                           "worker-2",
+			"session_name":                    "worker-reusable-2",
+			"state":                           string(sessionpkg.StateAsleep),
+			"pool_slot":                       "2",
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: "gp-old-2",
+			beadmeta.WorkDirMetadataKey:       workDir2,
+			beadmeta.LegacyWorkDirMetadataKey: workDir2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable1))
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable2))
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable1.ID, WorkBeadID: "gp-new-1", WorkBeadTitle: "Fix A"},
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable2.ID, WorkBeadID: "gp-new-2", WorkBeadTitle: "Fix B"},
+		},
+	}, map[string]TemplateParams{}, &stderr)
+
+	stored1, err := store.Get(reusable1.ID)
+	if err != nil {
+		t.Fatalf("Get(session 1): %v", err)
+	}
+	stored2, err := store.Get(reusable2.ID)
+	if err != nil {
+		t.Fatalf("Get(session 2): %v", err)
+	}
+	got1 := stored1.Metadata[beadmeta.WorkDirMetadataKey]
+	got2 := stored2.Metadata[beadmeta.WorkDirMetadataKey]
+	if got1 == "" || got2 == "" {
+		t.Fatalf("work dir metadata missing after rebind: session1=%q session2=%q; stderr=%q", got1, got2, stderr.String())
+	}
+	if got1 == got2 {
+		t.Fatalf("sessions 1 and 2 both bound to %s %q after rebind; want distinct per-slot identity (were %q and %q before rebind)", beadmeta.WorkDirMetadataKey, got1, workDir1, workDir2)
+	}
+	legacy1 := stored1.Metadata[beadmeta.LegacyWorkDirMetadataKey]
+	legacy2 := stored2.Metadata[beadmeta.LegacyWorkDirMetadataKey]
+	if legacy1 == "" || legacy2 == "" {
+		t.Fatalf("legacy work_dir metadata missing after rebind: session1=%q session2=%q", legacy1, legacy2)
+	}
+	if legacy1 == legacy2 {
+		t.Fatalf("sessions 1 and 2 both bound to legacy %s %q after rebind; want distinct per-slot identity", beadmeta.LegacyWorkDirMetadataKey, legacy1)
+	}
+}
+
 func TestRealizePoolDesiredSessionsHonorsExplicitPackWorkspace(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -4077,7 +4278,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 			"agent_name":                            "worker-7",
 			"alias":                                 "worker-7",
 			"session_name":                          "worker-reusable",
-			"state":                                 "awake",
+			"state":                                 string(sessionpkg.StateAsleep),
 			"pool_slot":                             "7",
 			poolManagedMetadataKey:                  boolMetadata(true),
 			beadmeta.TriggerBeadIDMetadataKey:       "gp-old",
@@ -11511,6 +11712,47 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 	}
 	if len(refs) != 2 || refs[0] != "city:test-city" || refs[1] != "rig:city" {
 		t.Fatalf("store refs = %v, want [city:test-city rig:city]", refs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkUsesDemandStoreScope(t *testing.T) {
+	candidates := []beads.Bead{
+		{ID: "same-id", Status: "open", Title: "city copy"},
+		{ID: "same-id", Status: "open", Title: "rig copy"},
+	}
+	refs := []string{"city:test-city", "rig:fixture"}
+	demand := map[string]scaleCheckDemand{
+		"fixture/worker": {
+			WorkBeadIDs: []string{"same-id"},
+			StoreRefs:   map[string]string{"same-id": "rig:fixture"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].Title != "rig copy" {
+		t.Fatalf("selected work = %#v, want only rig copy", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "rig:fixture" {
+		t.Fatalf("selected refs = %v, want [rig:fixture]", gotRefs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkNormalizesCityRef(t *testing.T) {
+	candidates := []beads.Bead{{ID: "city-ready", Status: "open"}}
+	refs := []string{"city:test-city"}
+	demand := map[string]scaleCheckDemand{
+		"worker": {
+			WorkBeadIDs: []string{"city-ready"},
+			StoreRefs:   map[string]string{"city-ready": "city"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].ID != "city-ready" {
+		t.Fatalf("selected work = %#v, want city-ready", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "city:test-city" {
+		t.Fatalf("selected refs = %v, want [city:test-city]", gotRefs)
 	}
 }
 

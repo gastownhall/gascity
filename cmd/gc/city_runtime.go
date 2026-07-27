@@ -922,6 +922,50 @@ func convergenceStartupComplete(cr *CityRuntime) bool {
 	return true
 }
 
+// reconcilePoolDeaths detects pool instances that stopped since the prior
+// reconciliation and runs their configured death hooks.
+func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
+	if len(cr.poolDeathHandlers) == 0 {
+		return
+	}
+	currentRunning, listErr := cr.sp.ListRunning("")
+	if listErr != nil {
+		if runtime.IsPartialListError(listErr) {
+			fmt.Fprintf(cr.stderr, "%s: pool death check skipped due to partial session listing: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(cr.stderr, "%s: pool death check skipped while listing sessions: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	currentSet := make(map[string]bool, len(currentRunning))
+	for _, name := range currentRunning {
+		currentSet[name] = true
+	}
+	if *prevPoolRunning != nil {
+		for sn, info := range cr.poolDeathHandlers {
+			if (*prevPoolRunning)[sn] && !currentSet[sn] {
+				out, err := shellRunHook(info.Command, info.Dir, info.Env)
+				if err != nil {
+					fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+				}
+				// Surface only the DEFAULT hook's gc-recovery diagnostic for
+				// a bd release it could not complete (the loop exits 0 even
+				// when a bd write fails, so this is the only signal). A user
+				// on_death override carries no marker and is left alone.
+				if strings.Contains(out, config.RecoveryHookMarker) {
+					fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
+				}
+			}
+		}
+	}
+	*prevPoolRunning = make(map[string]bool)
+	for sn := range cr.poolDeathHandlers {
+		if currentSet[sn] {
+			(*prevPoolRunning)[sn] = true
+		}
+	}
+}
+
 // tick performs one reconciliation tick: pool death detection, config
 // reload (if dirty), agent reconciliation, wisp GC, and order
 // dispatch.
@@ -954,45 +998,7 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
-	// Detect pool instance deaths since last tick.
-	if len(cr.poolDeathHandlers) > 0 {
-		currentRunning, listErr := cr.sp.ListRunning("")
-		if listErr != nil {
-			if runtime.IsPartialListError(listErr) {
-				fmt.Fprintf(cr.stderr, "%s: pool death check skipped due to partial session listing: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
-			} else {
-				fmt.Fprintf(cr.stderr, "%s: pool death check skipped while listing sessions: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
-			}
-		} else {
-			currentSet := make(map[string]bool, len(currentRunning))
-			for _, name := range currentRunning {
-				currentSet[name] = true
-			}
-			if *prevPoolRunning != nil {
-				for sn, info := range cr.poolDeathHandlers {
-					if (*prevPoolRunning)[sn] && !currentSet[sn] {
-						out, err := shellRunHook(info.Command, info.Dir, info.Env)
-						if err != nil {
-							fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-						}
-						// Surface only the DEFAULT hook's gc-recovery diagnostic for
-						// a bd release it could not complete (the loop exits 0 even
-						// when a bd write fails, so this is the only signal). A user
-						// on_death override carries no marker and is left alone.
-						if strings.Contains(out, config.RecoveryHookMarker) {
-							fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-						}
-					}
-				}
-			}
-			*prevPoolRunning = make(map[string]bool)
-			for sn := range cr.poolDeathHandlers {
-				if currentSet[sn] {
-					(*prevPoolRunning)[sn] = true
-				}
-			}
-		}
-	}
+	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
@@ -1143,13 +1149,27 @@ func (cr *CityRuntime) tick(
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
-	if cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled() {
+	reapEnabled := cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled()
+	reapDryRun := cr.cfg.Daemon.AutoReapClosedBeadWorktreesDryRunEnabled()
+	if reapEnabled || reapDryRun {
 		phaseStart = time.Now()
-		beadWorktreesReaped := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.rec, cr.stderr)
-		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{"reaped": beadWorktreesReaped})
-		phaseStart = time.Now()
-		agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
-		recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
+		// Cross-check the liveness gate against the current open-session set in
+		// addition to the authoritative /proc cwd scan. Real removal supersedes
+		// dry-run when both flags are set.
+		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
+			"reaped":    len(report.Reaped),
+			"protected": len(report.Protected),
+			"dry_run":   !reapEnabled,
+		})
+		// Agent-home worktree cleanup performs real removals, so it runs only
+		// when real reaping is enabled — never under dry-run.
+		if reapEnabled {
+			phaseStart = time.Now()
+			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
+			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
+		}
 	}
 	if ctx.Err() != nil {
 		return
@@ -2043,6 +2063,28 @@ func (cr *CityRuntime) reloadConfigTraced(
 		trace.syncArms(time.Now().UTC(), nextCfg)
 	}
 
+	// Stage-1 skill materialization must also run here, not just at city
+	// start: its only other call site (prepareCityForSupervisor) is reached
+	// exclusively for cities not yet running (reconcileCities' toStart
+	// filter), so a skill added/removed via a live config reload was
+	// advertised in the catalog and prompt appendix but never materialized
+	// into (or pruned from) the vendor sink until a full supervisor
+	// restart (#3459). Idempotent — a converged pass creates nothing new;
+	// per-agent errors are logged to stderr internally and never abort
+	// the reload.
+	//
+	// Match the start/supervisor invariant: validate skill collisions
+	// before materializing so a colliding live-reload config can't write
+	// half-written/conflicting sinks. The config is already applied and
+	// passed agent validation; on collision we keep the previously
+	// materialized sink in place (supervisor semantics) and surface a
+	// warning rather than aborting the reload.
+	if err := checkSkillCollisions(nextCfg, cr.cityPath); err != nil {
+		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
+	} else {
+		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	}
+
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))
@@ -2356,7 +2398,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
-	// their assigned trigger bead. Runs for every runtime, not just herdr.
+	// their assigned or ready-routed trigger bead. Runs for every runtime, not
+	// just herdr.
 	// tmux's relaunch/respawn path only heals a session that DIED; it does
 	// nothing for a session that is alive but idle at its prompt on a trigger
 	// bead it never began (a warm slot resumed onto work whose submit-CR was
@@ -2378,7 +2421,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
 	} else {
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
+		claimWork := make([]beads.Bead, 0, len(assignedWorkBeads)+len(result.ReadyUnassignedRoutedWorkBeads))
+		claimWork = append(claimWork, assignedWorkBeads...)
+		claimWork = append(claimWork, result.ReadyUnassignedRoutedWorkBeads...)
+		claimWorkStoreRefs := make([]string, len(claimWork))
+		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
+		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }

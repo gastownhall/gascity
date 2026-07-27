@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,8 +12,19 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
+
+type primeHookFailWriter struct {
+	err error
+}
+
+func (w primeHookFailWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
 
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 	t.Setenv("GC_RIG", "demo")
@@ -607,9 +619,8 @@ func mustCreateInProgressStore(t *testing.T, store beads.Store, b beads.Bead) be
 // managed-SessionStart regression: when the startup prompt is suppressed
 // (GC_STARTUP_PROMPT_DELIVERED=1 + managed hook + SessionStart), the rendered
 // startup prompt must be absent from the single hook payload, but the agent's
-// active formula step <system-reminder> must still be injected. The step
-// reminder is hook-only context, not the startup prompt, so it survives
-// suppression — this is the SessionStart leg of the hook-inject feature.
+// active formula step and durable auto-handoff <system-reminders> must still be
+// injected. Both are hook-only context, so they survive suppression.
 func TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder(t *testing.T) {
 	for _, hookFormat := range []string{"codex", hookOutputFormatGemini} {
 		t.Run(hookFormat, func(t *testing.T) {
@@ -633,6 +644,9 @@ name = "gastown"
 [[agent]]
 name = "worker"
 prompt_template = "prompts/worker.md"
+
+[mail]
+provider = "exec:/not-used-by-auto-handoff"
 `), 0o644); err != nil {
 				t.Fatalf("WriteFile(city.toml): %v", err)
 			}
@@ -662,6 +676,16 @@ prompt_template = "prompts/worker.md"
 			t.Setenv("GC_TEMPLATE", "worker")
 			t.Setenv("GC_SESSION_NAME", "gastown--worker")
 			sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+			auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+				[]string{"context cycle", "continue the durable task"}, "context cycle",
+				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+			if !ok {
+				t.Fatal("createHandoffMail(auto) failed")
+			}
+			ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "leave this for UserPromptSubmit")
+			if err != nil {
+				t.Fatalf("Send ordinary mail: %v", err)
+			}
 			t.Setenv("GC_SESSION_ID", sessionID)
 			t.Setenv(managedSessionHookEnv, "1")
 			t.Setenv("GC_HOOK_SOURCE", "startup")
@@ -697,7 +721,128 @@ prompt_template = "prompts/worker.md"
 			if !strings.Contains(context, "[gastown] worker") {
 				t.Fatalf("additionalContext = %q, want hook beacon", context)
 			}
+			for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+				if !strings.Contains(context, want) {
+					t.Fatalf("additionalContext = %q, want auto-handoff substring %q", context, want)
+				}
+			}
+			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
+				t.Fatalf("additionalContext = %q, must not inject ordinary mail %q at SessionStart", context, ordinary.ID)
+			}
+			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
+			}
+			if _, err := store.Get(ordinary.ID); err != nil {
+				t.Fatalf("ordinary mail should remain for UserPromptSubmit: %v", err)
+			}
+
+			// A provider-hook write failure must leave the next auto-handoff
+			// durable for retry; delivery acknowledgement is the archive point.
+			undelivered, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+				[]string{"context cycle retry", "retry the durable task"}, "context cycle",
+				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+			if !ok {
+				t.Fatal("createHandoffMail(undelivered) failed")
+			}
+			if code := doPrimeWithHookFormat(nil, primeHookFailWriter{err: errors.New("hook output unavailable")}, &stderr, true, hookFormat, false); code != 0 {
+				t.Fatalf("doPrimeWithHookFormat(failed writer) = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if _, err := store.Get(undelivered.ID); err != nil {
+				t.Fatalf("auto-handoff must remain durable when SessionStart output fails: %v", err)
+			}
 		})
+	}
+}
+
+// TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff pins the preview
+// contract of `gc prime --hook --json`: it renders exactly what the hook would
+// emit, including durable auto-handoff mail, but must not consume it. The
+// --json path buffers into a strings.Builder whose writes never fail, so a
+// consuming run would archive the handoff before the real stdout write — and
+// even on success would eat the continuation the next SessionStart must deliver.
+func TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("launch-only startup prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+		[]string{"context cycle", "continue the durable task"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newPrimeCmd(&stdout, &stderr)
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--hook", "--hook-format", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc prime --json --hook = %v; stderr=%q", err, stderr.String())
+	}
+
+	var got primeJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	// The preview must be faithful: the handoff the hook would emit is present.
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(got.Content, want) {
+			t.Fatalf("content = %q, want auto-handoff substring %q", got.Content, want)
+		}
+	}
+	// ...but previewing must not consume it.
+	if _, err := store.Get(auto.ID); err != nil {
+		t.Fatalf("--json preview must leave auto-handoff durable, got err=%v", err)
+	}
+
+	// The real hook invocation still consumes it, so the preview did not
+	// merely mark the mail read in a way that suppresses later delivery.
+	var hookStdout bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &hookStdout, &stderr, true, "codex", false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(hookStdout.String(), auto.ID) {
+		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
 	}
 }
 

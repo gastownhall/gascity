@@ -3107,6 +3107,7 @@ export const zUsageTotals = z.object({
 
 export const zUsageBody = z.object({
     available: z.boolean(),
+    last_24h: zUsageTotals.optional(),
     observed_from: z.string().optional(),
     partial: z.boolean().optional(),
     partial_reasons: z.array(z.string()).nullish(),

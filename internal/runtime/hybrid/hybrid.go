@@ -24,6 +24,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserver              = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -82,6 +83,14 @@ func (p *Provider) Attach(name string) error {
 // ProcessAlive delegates to the routed backend.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.route(name).ProcessAlive(name, processNames)
+}
+
+// ObserveLiveness delegates to the routed backend through runtime.ObserveLiveness
+// so the backend's native LivenessObserver fast-path is preserved (e.g. herdr's
+// agent-status liveness) instead of collapsing to the generic
+// IsRunning+ProcessAlive fold.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	return runtime.ObserveLiveness(p.route(name), name, processNames)
 }
 
 // Nudge delegates to the routed backend.

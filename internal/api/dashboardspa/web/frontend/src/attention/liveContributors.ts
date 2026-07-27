@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { type RunSummary, type SourceState } from 'gas-city-dashboard-shared';
 import { api, formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
@@ -6,7 +6,11 @@ import { type OperatorConfig } from '../contexts/OperatorConfigContext';
 import { useCachedData } from '../hooks/useCachedData';
 import { listAgentPendingInteractions } from '../supervisor/agentPending';
 import { listSupervisorBeads } from '../supervisor/beadReads';
-import { supervisorApi, supervisorApiForRequestBudget } from '../supervisor/client';
+import {
+  SupervisorApiError,
+  supervisorApi,
+  supervisorApiForRequestBudget,
+} from '../supervisor/client';
 import { DEFAULT_MAIL_HISTORY_LIMIT, listSupervisorMail } from '../supervisor/mailReads';
 import type { AttentionContributor } from './compose';
 import {
@@ -25,6 +29,12 @@ const ATTENTION_LIST_LIMIT = 1000;
 const ACTIVITY_EVENT_FETCH_LIMIT = 100;
 const ACTIVITY_EVENT_WINDOW = '24h';
 const HEALTH_ATTENTION_SUPERVISOR_TIMEOUT_MS = 2_500;
+// Cover the normal supervisor registration window without hammering its shared
+// readiness boundary. A longer outage renders consistently unavailable, then
+// revalidates at the slower cadence below for as long as this city stays mounted.
+const BEADS_ATTENTION_CITY_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
+const BEADS_ATTENTION_CITY_REVALIDATE_DELAY_MS = 5_000;
+const CITY_NOT_FOUND_CODE = 'city-not-found';
 
 export function useLiveAttentionContributors(
   operator: OperatorConfig,
@@ -46,7 +56,7 @@ export function useLiveAttentionContributors(
   );
   const beads = useCachedData<BeadsAttentionFacts>(
     `attention:beads:${cacheSuffix}:${decisionLabel}`,
-    () => fetchBeadsAttention(cityName, decisionLabel),
+    (signal) => fetchBeadsAttention(cityName, decisionLabel, signal),
   );
   const mail = useCachedData<MailAttentionFacts>(
     `attention:mail:${cacheSuffix}:${operatorWireAlias}`,
@@ -58,6 +68,16 @@ export function useLiveAttentionContributors(
   const health = useCachedData<HealthAttentionFacts>(`attention:health:${cacheSuffix}`, () =>
     fetchHealthAttention(cityName),
   );
+  const beadsData = beads.data;
+  const refreshBeads = beads.refresh;
+
+  useEffect(() => {
+    if (beadsData?.cityUnavailable !== true) return;
+    const timeout = setTimeout(() => {
+      void refreshBeads();
+    }, BEADS_ATTENTION_CITY_REVALIDATE_DELAY_MS);
+    return () => clearTimeout(timeout);
+  }, [beadsData, refreshBeads]);
 
   return useMemo(
     () =>
@@ -65,13 +85,13 @@ export function useLiveAttentionContributors(
         compactFacts({
           activity: activity.data,
           agents: agents.data,
-          beads: beads.data,
+          beads: beadsData,
           health: health.data,
           mail: mail.data,
           runs,
         }),
       ),
-    [activity.data, agents.data, beads.data, health.data, mail.data, runs],
+    [activity.data, agents.data, beadsData, health.data, mail.data, runs],
   );
 }
 
@@ -118,9 +138,10 @@ async function fetchAgentsAttention(cityName: string | null): Promise<AgentsAtte
   }
 }
 
-async function fetchBeadsAttention(
+export async function fetchBeadsAttention(
   cityName: string | null,
   decisionLabel: string,
+  signal?: AbortSignal,
 ): Promise<BeadsAttentionFacts> {
   if (cityName === null) return { decisionLabel };
   // Three independent reads: the general bead list (capped) and two dedicated
@@ -129,12 +150,39 @@ async function fetchBeadsAttention(
   // complete. Settled separately so one failing does not blank the others — the
   // decision queue, the escalation queue, and generic bead alerts are distinct
   // signals (gascity-dashboard-2j8e.3).
-  const [list, decisions, escalations] = await Promise.allSettled([
-    listSupervisorBeads({ limit: ATTENTION_LIST_LIMIT }),
-    listDecisionBeads(cityName, decisionLabel),
-    listEscalationBeads(cityName),
-  ]);
+  const read = () =>
+    Promise.allSettled([
+      listSupervisorBeads({
+        limit: ATTENTION_LIST_LIMIT,
+        city: cityName,
+        ...(signal === undefined ? {} : { signal }),
+      }),
+      listDecisionBeads(cityName, decisionLabel, signal),
+      listEscalationBeads(cityName, signal),
+    ] as const);
+  throwIfAborted(signal);
+  let reads = await read();
+  throwIfAborted(signal);
+  for (const retryDelayMs of BEADS_ATTENTION_CITY_RETRY_DELAYS_MS) {
+    if (!reads.some(isCityUnavailableRead)) break;
+    await delay(retryDelayMs, signal);
+    throwIfAborted(signal);
+    reads = await read();
+    throwIfAborted(signal);
+  }
+  const [list, decisions, escalations] = reads;
   const facts: BeadsAttentionFacts = { nowMs: Date.now(), decisionLabel };
+  const cityUnavailable = reads.find(isCityUnavailableRead);
+  if (cityUnavailable !== undefined && cityUnavailable.status === 'rejected') {
+    const error = formatApiError(cityUnavailable.reason, 'city unavailable');
+    return {
+      ...facts,
+      cityUnavailable: true,
+      error,
+      decisionsError: error,
+      escalationsError: error,
+    };
+  }
   if (list.status === 'fulfilled') {
     facts.items = list.value.items;
     facts.partial = list.value.partial === true;
@@ -154,18 +202,63 @@ async function fetchBeadsAttention(
   return facts;
 }
 
-async function listDecisionBeads(cityName: string, decisionLabel: string) {
-  return supervisorApi().listBeads(cityName, {
-    label: decisionLabel,
-    status: 'open',
+function isCityUnavailableRead(result: PromiseSettledResult<unknown>): boolean {
+  return (
+    result.status === 'rejected' &&
+    result.reason instanceof SupervisorApiError &&
+    result.reason.status === 404 &&
+    result.reason.code === CITY_NOT_FOUND_CODE
+  );
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return new Promise((resolve) => setTimeout(resolve, ms));
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', abort, { once: true });
   });
 }
 
-async function listEscalationBeads(cityName: string) {
-  return supervisorApi().listBeads(cityName, {
-    label: GC_ESCALATION_LABEL,
-    status: 'open',
-  });
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw abortReason(signal);
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+async function listDecisionBeads(
+  cityName: string,
+  decisionLabel: string,
+  signal?: AbortSignal,
+) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      label: decisionLabel,
+      status: 'open',
+    },
+    signal,
+  );
+}
+
+async function listEscalationBeads(cityName: string, signal?: AbortSignal) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      label: GC_ESCALATION_LABEL,
+      status: 'open',
+    },
+    signal,
+  );
 }
 
 async function fetchMailAttention(

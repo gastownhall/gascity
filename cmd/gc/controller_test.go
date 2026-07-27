@@ -21,74 +21,68 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestControllerLoopCancel(t *testing.T) {
+	setScopedBeadsProviderForTest(t, "", "file")
 	sp := runtime.NewFake()
-	name := "mayor"
-	tp := TemplateParams{
-		SessionName:  name,
-		TemplateName: name,
-		Command:      "echo hello",
-	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
 
 	var reconcileCount atomic.Int32
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
 		reconcileCount.Add(1)
-		return DesiredStateResult{State: map[string]TemplateParams{name: tp}}
+		cancel()
+		return DesiredStateResult{}
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
-
-	// Cancel immediately after initial reconciliation completes.
-	go func() {
-		for reconcileCount.Load() < 1 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
+	var stdout, stderr lockedBuffer
 
 	controllerLoop(ctx, time.Hour, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
-	if reconcileCount.Load() < 1 {
-		t.Error("expected at least one reconciliation")
+	if got := reconcileCount.Load(); got != 1 {
+		t.Errorf("reconcile count = %d, want 1", got)
+	}
+	if strings.Contains(stderr.String(), "reconciler tick panicked") {
+		t.Fatalf("controller loop recovered a reconciliation panic:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "native_store_unavailable") {
+		t.Fatalf("controller loop selected the native store:\n%s", stderr.String())
 	}
 }
 
 func TestControllerLoopTick(t *testing.T) {
+	setScopedBeadsProviderForTest(t, "", "file")
 	sp := runtime.NewFake()
-	name := "mayor"
-	tp := TemplateParams{
-		SessionName:  name,
-		TemplateName: name,
-		Command:      "echo hello",
-	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
 
 	var reconcileCount atomic.Int32
 	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		reconcileCount.Add(1)
-		return DesiredStateResult{State: map[string]TemplateParams{name: tp}}
+		if reconcileCount.Add(1) == 2 {
+			cancel()
+		}
+		return DesiredStateResult{}
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
-	// Use a very short interval so the tick fires quickly.
-	go func() {
-		for reconcileCount.Load() < 2 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
+	controllerLoop(ctx, time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
-	controllerLoop(ctx, 10*time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
-
-	if got := reconcileCount.Load(); got < 2 {
-		t.Errorf("reconcile count = %d, want >= 2", got)
+	if got := reconcileCount.Load(); got != 2 {
+		t.Errorf("reconcile count = %d, want 2", got)
+	}
+	if !strings.Contains(stdout.String(), "City started.") {
+		t.Fatalf("controller loop did not reach the patrol loop:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "reconciler tick panicked") {
+		t.Fatalf("controller loop recovered a reconciliation panic:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "native_store_unavailable") {
+		t.Fatalf("controller loop selected the native store:\n%s", stderr.String())
 	}
 }
 
@@ -116,7 +110,7 @@ func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T
 	}
 	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr)
 	if sp.IsRunning("alpha") {
 		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
@@ -177,7 +171,7 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -283,6 +277,36 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("stop did not invoke cancel via fallback socket")
+	}
+}
+
+func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
+	base := shortSocketTempDir(t, "gc-controller-alias-")
+	realCityPath := filepath.Join(base, "city")
+	if err := os.MkdirAll(filepath.Join(realCityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	aliasName := "alias"
+	for len(filepath.Join(base, aliasName, ".gc", "controller.sock")) <= controllerSocketPathLimit {
+		aliasName += "-segment"
+	}
+	aliasCityPath := filepath.Join(base, aliasName)
+	if err := os.Symlink(realCityPath, aliasCityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalSocketPath := filepath.Join(normalizePathForCompare(aliasCityPath), ".gc", "controller.sock")
+	if len(canonicalSocketPath) > controllerSocketPathLimit {
+		t.Fatalf("canonical test socket path length = %d, want <= %d: %s", len(canonicalSocketPath), controllerSocketPathLimit, canonicalSocketPath)
+	}
+	aliasSocketPath := filepath.Join(aliasCityPath, ".gc", "controller.sock")
+	if len(aliasSocketPath) <= controllerSocketPathLimit {
+		t.Fatalf("alias test socket path length = %d, want > %d: %s", len(aliasSocketPath), controllerSocketPathLimit, aliasSocketPath)
+	}
+
+	if got := controllerSocketPath(aliasCityPath); got != canonicalSocketPath {
+		t.Fatalf("controllerSocketPath(%q) = %q, want short canonical path %q", aliasCityPath, got, canonicalSocketPath)
 	}
 }
 
@@ -457,7 +481,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -487,7 +511,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	// the directory write, debounce (5ms) sets dirty, and the next tick reloads
 	// config and writes "Config reloaded" to stdout. Polling stdout directly
 	// avoids depending on reconcile count which varies with tick timing.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -498,7 +522,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -551,7 +575,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -574,7 +598,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	writeCityTOML(t, dir, "test", "mayor", "worker")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -585,7 +609,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -1177,7 +1201,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1834,7 +1858,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1911,7 +1935,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
 		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
@@ -2008,7 +2032,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		return DesiredStateResult{State: ds}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
@@ -2023,7 +2047,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2050,7 +2074,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}
 
 	var names []string
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ = lastAgentNames.Load().([]string)
 		if reconcileCount.Load() > before &&
@@ -2108,7 +2132,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -2129,7 +2153,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	waitForController(t, dir)
 
 	// Wait for initial tick.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2174,18 +2198,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 // are unreliable under load.
 func waitForController(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		if controllerAlive(dir) != 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return controllerAlive(dir) != 0 },
+		"controller socket becoming available")
 }
 
 // osFS is a minimal fsys.FS for test helpers that delegates to the os package.

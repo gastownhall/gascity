@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -31,31 +32,86 @@ type rawDBGetter interface {
 var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
 
 // repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
-// and only issues the ALTER when the id column exists without a default.
+// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
+// the id column exists without a default.
 //
-//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
+// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
+// probe was a full catalog scan — cheap once, but it runs per store open per
+// repair table, and a fleet of concurrent gc/bd sessions firing it several
+// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
+// Default cell directly, so one cheap statement replaces the scan.
 func repairIDDefault(db *sql.DB, table string) error {
-	var idCols, withDefault int
-	err := db.QueryRow(`
-		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = ?
-		  AND COLUMN_NAME = 'id'
-	`, table).Scan(&idCols, &withDefault)
+	// 'id' contains no LIKE wildcards, but Field is still compared exactly
+	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+	if err != nil {
+		if isTableNotExistError(err) {
+			return nil
+		}
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("checking %s.id default: %w", table, err)
 	}
-	if idCols == 0 || withDefault > 0 {
-		// Table/column absent, or the default is already present.
+	defaultIdx := -1
+	for i, col := range cols {
+		if strings.EqualFold(col, "Default") {
+			defaultIdx = i
+			break
+		}
+	}
+	if defaultIdx < 0 {
+		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
+	}
+
+	idFound, withDefault := false, false
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("checking %s.id default: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == "id" {
+			idFound = true
+			withDefault = cells[defaultIdx] != nil
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	if !idFound || withDefault {
+		// Column absent, or the default is already present.
 		return nil
 	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
-	if err != nil {
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
 		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
+}
+
+// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
+// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
+// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
+// wisp_events on an older schema) is not an error.
+func isTableNotExistError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	// The embedded Dolt driver surfaces the same condition without the
+	// go-sql-driver error type; match Dolt's message shape.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
 }
 
 const nativeDoltStoreActor = "gascity"
@@ -229,10 +285,33 @@ type NativeDoltStore struct {
 	readRetryBudgetOverride time.Duration
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode.
-	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
-	// effect today is require→typed refusal / auto→loud degrade at the
-	// seam, never a silent legacy write under require.
+	// NativeDoltStore implements the NARROW metadata value-CAS
+	// (MetadataCASWriter, see native_dolt_store_conditional.go) but NOT
+	// ConditionalWriter, so the stamp's effect at the seam is unchanged:
+	// require→typed refusal / auto→loud degrade, never a silent legacy write
+	// under require.
+	//
+	// The gap is the revision-CAS trio, and it is a BACKEND gap, not an
+	// unwritten method. UpdateIfMatch/CloseIfMatch/DeleteIfMatch need a fence
+	// token that advances on every mutation and is never reused; beads v1.1.0
+	// has none. types.Issue carries no revision, the issues DDL has no version
+	// column, updated_at is second-granularity — so two same-second writes
+	// compare EQUAL and a stale fence silently succeeds, which is the lost
+	// update the fence exists to prevent — and label mutations never touch
+	// updated_at at all. A counter this store maintained itself would fence
+	// nothing, because the Dolt database is multi-writer (bd CLI, other
+	// gascity processes, graph-apply). Upstream beads #4697 (claim_fence) is
+	// the missing primitive; when it lands the trio becomes implementable and
+	// this store can declare ConditionalWriter.
+	//
+	// Declaring ConditionalWriter early to expose the CAS method would make
+	// ResolveConditionalWriter resolve under require and hand the trio's
+	// callers a wrong fence — the precise silent-write failure this refusal
+	// currently makes impossible. internal/beads/metadata_cas.go carries the
+	// full reasoning and the narrow interface's own resolution path.
 	condWritesStamp
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -269,7 +348,7 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -294,6 +373,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -1208,6 +1288,17 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 				return err
 			}
 			for _, issue := range issues {
+				// The StatusDeferred branch exists so an expired time-bound
+				// deferral (defer_until in the past) can resurface. An issue
+				// with no defer_until at all was never time-bound — it's bd
+				// defer's status-based indefinite deferral — and must stay
+				// hidden. mapBdStatus collapses status to "open" and
+				// IsDeferred only inspects DeferUntil, so both would
+				// otherwise look identical to an ordinary open bead once
+				// beadFromNativeIssue erases the raw status.
+				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+					continue
+				}
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err
@@ -1331,6 +1422,11 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
+const (
+	nativeMetadataWriteAttempts     = 3
+	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+)
+
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
@@ -1338,8 +1434,23 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		cancel()
+		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
+	}
+	return err
+}
+
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
+// A retry must call this whole operation again so metadata committed by the
+// competing transaction is included rather than overwritten from a stale read.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1362,6 +1473,42 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+}
+
+// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
+// serialization conflicts, which are known not to have committed and are safe
+// to retry. Ambiguous connection failures intentionally remain fail-fast.
+func isNativeDoltSerializationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 1213") ||
+		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
+		strings.Contains(msg, "(40001)") ||
+		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+}
+
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than through Dolt storage: unlike SetMetadata,
+// this never touches the Dolt DB or commits. Does not validate that id
+// refers to an existing bead — see the interface doc comment for why.
+func (s *NativeDoltStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *NativeDoltStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
 }
 
 // Tx executes fn inside a single native Dolt transaction so every write in the
@@ -1428,7 +1575,13 @@ func (s *NativeDoltStore) Delete(id string) error {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	return nativeStoreError(id, storage.DeleteIssue(ctx, id))
+	if err := nativeStoreError(id, storage.DeleteIssue(ctx, id)); err != nil {
+		return err
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
+	}
+	return nil
 }
 
 // Ping verifies that the upstream storage is reachable.
@@ -1939,13 +2092,77 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 	return &priority
 }
 
+// nativeCreatedLimitPushdown reports the row limit to forward to the backing
+// search for a ListQuery, or 0 to fetch the full candidate set and let
+// ApplyListQuery cut the exact page client-side. Created-order sorts push down
+// to the backing search (IssueFilter.SortBy drives sqlbuild.OrderBy) so the
+// caller's limit survives and the store pages instead of materializing +
+// hydrating the whole corpus (sr-dp9o: the dispatcher's RecentRunsAll(2048) was
+// scanning ~22k closed order-tracking wisps per call with the limit stripped).
+// A backing limit is exact only when the backing's ordering and tie-break match
+// the query's client-side semantics; the guards below keep every shape whose
+// exact result needs client-side work from truncating the page early.
+func nativeCreatedLimitPushdown(query ListQuery) int {
+	if query.Limit <= 0 {
+		return 0
+	}
+	// The wisp tier still needs the gc-side post-filter over the full candidate
+	// set (it can discard rows), so a backing limit would cut the page short.
+	if query.TierMode == TierWisps {
+		return 0
+	}
+	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
+	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
+	// backing limit applied before them would cut rows before the residual filter
+	// runs and silently drop page rows. Fetch the full candidate set for those
+	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
+	// exec.go, bdstore canApplyWispsServerLimit).
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+		return 0
+	}
+	switch query.Sort {
+	case SortCreatedAsc:
+		// The backing renders created-asc ties as `id ASC`, matching the
+		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
+		return query.Limit
+	case SortCreatedDesc:
+		// The backing renders created-desc ties as `id ASC` (upstream
+		// sqlbuild.OrderBy hardcodes the id tie-break), but Gas City's canonical
+		// order and cursor continuation break created_at ties by `id DESC`
+		// (sortBeadsForQuery / SeekBoundary.After). A bounded desc read therefore
+		// keeps the smaller-id tie members at the boundary and drops the larger-id
+		// ties, so an exact or cursor-paginated caller loses rows across the page
+		// seam. Only push the limit when the caller opted into a bounded
+		// newest-by-created_at sample (aggregates); otherwise fetch the full set
+		// and let ApplyListQuery cut the exact (created_at DESC, id DESC) prefix.
+		if query.AllowBackingCreatedLimit {
+			return query.Limit
+		}
+		return 0
+	case SortDefault:
+		// The default backing order (priority, created_at DESC, id ASC) is
+		// deterministic, so a bounded default read cuts a stable prefix.
+		return query.Limit
+	default:
+		// Non-mappable sorts can't page server-side; fetch unbounded and sort
+		// client-side in ApplyListQuery.
+		return 0
+	}
+}
+
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
-	limit := query.Limit
-	if query.Sort != SortDefault || query.TierMode == TierWisps {
-		limit = 0
+	var sortBy string
+	var sortDesc bool
+	switch query.Sort {
+	case SortCreatedDesc:
+		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
+	case SortCreatedAsc:
+		sortBy, sortDesc = "created", true // flip the DESC default
 	}
 	filter := beadslib.IssueFilter{
-		Limit:               limit,
+		Limit:               nativeCreatedLimitPushdown(query),
+		SortBy:              sortBy,
+		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,

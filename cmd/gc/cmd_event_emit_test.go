@@ -185,6 +185,7 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	}
 
 	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
 	var stderr bytes.Buffer
 	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
 	if stderr.Len() != 0 {

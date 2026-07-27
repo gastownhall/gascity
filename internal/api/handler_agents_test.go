@@ -1195,6 +1195,21 @@ func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
 	}
 }
 
+// TestProviderPathCheck_StripsCommandArgs mirrors the config-side
+// pathCheckBinary behavior: an unset PathCheck with an args-bearing
+// Command must resolve to the bare executable token, so PATH detection
+// checks "my-agent" rather than the whole "my-agent --agent coder" string.
+func TestProviderPathCheck_StripsCommandArgs(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "my-agent --agent coder"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "my-agent" {
+		t.Errorf("providerPathCheck = %q, want my-agent", got)
+	}
+}
+
 // TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit covers the happy
 // path: the freshly created agent is already visible in the snapshot
 // and the wait returns without sleeping.

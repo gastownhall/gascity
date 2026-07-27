@@ -33,7 +33,7 @@ func TestInitEmptyTemplateNoProviderRequired(t *testing.T) {
 	if err := cmd.Flags().Set("template", "empty"); err != nil {
 		t.Fatalf("set --template empty: %v", err)
 	}
-	wiz, mode, err := initWizardConfigFromFlags(cmd, "", "", nil, "empty", "", hostedDoltInitOptions{})
+	wiz, mode, err := initWizardConfigFromFlags(cmd, "", "", nil, "empty", "", hostedDoltInitOptions{}, false)
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags(--template empty): %v", err)
 	}
@@ -59,7 +59,7 @@ func TestInitEmptyTemplateRejectsProviderFlags(t *testing.T) {
 	if err := cmd.Flags().Set("default-provider", "claude"); err != nil {
 		t.Fatalf("set --default-provider: %v", err)
 	}
-	_, _, err := initWizardConfigFromFlags(cmd, "", "claude", []string{"claude"}, "empty", "", hostedDoltInitOptions{})
+	_, _, err := initWizardConfigFromFlags(cmd, "", "claude", []string{"claude"}, "empty", "", hostedDoltInitOptions{}, false)
 	if err == nil {
 		t.Fatal("initWizardConfigFromFlags(--template empty --default-provider) = nil error, want rejection")
 	}

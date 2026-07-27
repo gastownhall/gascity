@@ -2213,6 +2213,65 @@ func assertQueuedMailNudgeMessage(t *testing.T, cityPath, sessionID, message, st
 	}
 }
 
+func TestMailCommandsRejectMissingIDBeforeProviderCall(t *testing.T) {
+	tests := []struct {
+		name       string
+		run        func(stdout, stderr *bytes.Buffer) int
+		wantStderr string
+	}{
+		{
+			name: "reply",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return cmdMailReply(nil, "", "", false, stdout, stderr)
+			},
+			wantStderr: "gc mail reply: missing message ID\n",
+		},
+		{
+			name: "mark-read",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailMarkRead(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail mark-read: missing message ID\n",
+		},
+		{
+			name: "mark-unread",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailMarkUnread(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail mark-unread: missing message ID\n",
+		},
+		{
+			name: "delete",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailDelete(countOnlyMailProvider{}, events.Discard, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail delete: missing message ID\n",
+		},
+		{
+			name: "thread",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doMailThread(countOnlyMailProvider{}, nil, stdout, stderr)
+			},
+			wantStderr: "gc mail thread: missing thread or message ID\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := tt.run(&stdout, &stderr); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+			if got := stderr.String(); got != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tt.wantStderr)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
 // --- gc mail mark-read / mark-unread ---
 
 func TestMailMarkReadSuccess(t *testing.T) {
@@ -2260,6 +2319,22 @@ func TestMailDeleteSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Deleted message gc-1") {
 		t.Errorf("stdout = %q, want deletion confirmation", stdout.String())
+	}
+}
+
+func TestMailDeleteNonexistentIDIsIdempotent(t *testing.T) {
+	mp := beadmail.New(beads.NewMemStore())
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{"no-such-msg-xyz"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("stderr = %q, want empty", got)
+	}
+	if got, want := stdout.String(), "Already deleted no-such-msg-xyz\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 
@@ -3516,20 +3591,35 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	}
 }
 
-func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
+// TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
+// invariant flip of the former TestMailCheckInjectLeavesTruncatedAutoHandoffMessages.
+// That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a
+// full window of ordinary mail was clamped out of the injection preview (never
+// surfaced, never archived). With the priority-sort-before-clamp patch (handoff
+// mail tagged priority:1 at the cmd_handoff send sites + sortMailByPriority run
+// before both the display and archive clamps), a priority:1 handoff now floats
+// into the window: it is injected AND archived, while a lower-priority ordinary
+// message is the one clamped out and left open. mail.Message.Priority is
+// otherwise unwritten, so ordinary all-priority-0 mail keeps arrival order.
+func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
+	ordinaryIDs := make([]string, 0, mailInjectMaxMessages)
 	for i := 0; i < mailInjectMaxMessages; i++ {
-		if _, err := mp.Send("human", "mayor", fmt.Sprintf("ordinary-%d", i), "still open"); err != nil {
+		m, err := mp.Send("human", "mayor", fmt.Sprintf("ordinary-%d", i), "still open")
+		if err != nil {
 			t.Fatalf("Send ordinary %d: %v", i, err)
 		}
+		ordinaryIDs = append(ordinaryIDs, m.ID)
 	}
+	// A restart handoff, tagged priority:1 (as the cmd_handoff send sites now do),
+	// arriving AFTER a full window of ordinary mail.
 	auto, err := store.Create(beads.Bead{
 		Title:    "context cycle",
 		Type:     "message",
 		Assignee: "mayor",
 		From:     "mayor",
-		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel, "priority:1"},
 	})
 	if err != nil {
 		t.Fatalf("Create auto handoff: %v", err)
@@ -3540,15 +3630,22 @@ func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), auto.ID) {
-		t.Fatalf("auto handoff id %s should not appear in truncated injection:\n%s", auto.ID, stdout.String())
+	// The priority:1 handoff now floats into the injection window...
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("priority:1 auto handoff id %s should float into the injection window:\n%s", auto.ID, stdout.String())
 	}
-	b, err := store.Get(auto.ID)
+	// ...and is archived (deleted) after injection.
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("priority:1 auto handoff should be archived after injection, got err=%v", err)
+	}
+	// The lowest-ranked ordinary message is the one clamped out — still open.
+	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
+	b, err := store.Get(clampedOut)
 	if err != nil {
-		t.Fatalf("truncated auto handoff mail should remain: %v", err)
+		t.Fatalf("clamped-out ordinary mail should remain: %v", err)
 	}
 	if b.Status != "open" {
-		t.Fatalf("truncated auto handoff status = %q, want open", b.Status)
+		t.Fatalf("clamped-out ordinary mail status = %q, want open", b.Status)
 	}
 }
 

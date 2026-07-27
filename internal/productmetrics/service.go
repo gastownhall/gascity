@@ -67,7 +67,7 @@ const (
 	ReasonGreaterEpochResumeNeeded  StateReason = "greater-epoch-resume-required"
 	ReasonDoNotTrack                StateReason = "do-not-track"
 	ReasonGCDisable                 StateReason = "gc-disable-usage-metrics"
-	ReasonDevelopmentBuild          StateReason = "development-build"
+	ReasonUnofficialBuild           StateReason = "unofficial-build"
 	ReasonUnsupportedPlatform       StateReason = "unsupported-platform"
 	ReasonEndpointMissing           StateReason = "endpoint-missing"
 	ReasonRolloutDisabled           StateReason = "rollout-default-off"
@@ -372,6 +372,7 @@ func OpenProduction(options ProductionOptions) (*Service, error) {
 		homeErr:    homeErr,
 		homeReason: ReasonHomeUnstable,
 		release:    productionServiceRelease(options.Release),
+		notice:     productionNotice(),
 		getenv:     os.Getenv,
 		newUUID: func() (string, error) {
 			return randomUUIDv4(rand.Reader)
@@ -401,12 +402,9 @@ func openWithDependencies(deps serviceDependencies) (*Service, error) {
 	if deps.verifyTTY == nil {
 		return nil, errors.New("productmetrics: TTY verifier dependency is nil")
 	}
-	if len(deps.notice.text) != 0 && !deps.notice.testOnly {
-		return nil, errors.New("productmetrics: unapproved production notice material is forbidden")
-	}
-	if deps.notice.testOnly {
+	if deps.notice.version != 0 || len(deps.notice.text) != 0 {
 		if deps.notice.version == 0 || len(deps.notice.text) == 0 {
-			return nil, errors.New("productmetrics: incomplete test-only notice dependency")
+			return nil, errors.New("productmetrics: incomplete notice dependency")
 		}
 	}
 	if deps.homeErr != nil && deps.homeReason == "" {
@@ -423,7 +421,7 @@ func productionNoticeWriterIsTTY(writer io.Writer) bool {
 func productionServiceRelease(identity ReleaseIdentity) serviceRelease {
 	return serviceRelease{
 		platformSupported:  runtime.GOOS == "linux" || runtime.GOOS == "darwin",
-		official:           identity.BuildKind() != BuildDevelopment && identity.BuildKind().String() != "unknown",
+		official:           identity.BuildKind().String() != "unknown",
 		endpointConfigured: identity.Endpoint() != "",
 		endpointHostname:   endpointHostnameForPolicy(identity.Endpoint()),
 		privacyURL:         identity.PrivacyURL(),
@@ -545,7 +543,7 @@ func (service *Service) project(invocation InvocationContext, loaded loadedState
 		return stateProjection{StateFailClosed, ReasonUnsupportedPlatform}
 	}
 	if !service.deps.release.official {
-		return stateProjection{StateFailClosed, ReasonDevelopmentBuild}
+		return stateProjection{StateFailClosed, ReasonUnofficialBuild}
 	}
 	if !service.deps.release.endpointConfigured {
 		return stateProjection{StateFailClosed, ReasonEndpointMissing}
@@ -556,7 +554,7 @@ func (service *Service) project(invocation InvocationContext, loaded loadedState
 	if service.deps.release.rollout != RolloutCanary && service.deps.release.rollout != RolloutDefaultOn {
 		return stateProjection{StateFailClosed, ReasonRolloutDisabled}
 	}
-	if !service.deps.notice.testOnly || service.deps.notice.version == 0 || len(service.deps.notice.text) == 0 {
+	if service.deps.notice.version == 0 || len(service.deps.notice.text) == 0 {
 		return stateProjection{StateFailClosed, ReasonNoticeUnavailable}
 	}
 	if service.deps.homeErr != nil {

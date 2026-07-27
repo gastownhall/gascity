@@ -16,8 +16,10 @@ but it no longer has to be launched from inside a city directory.
 ### Standalone city mode
 
 If you are using `gc start` without the machine-wide supervisor, the dashboard
-talks to that city's own API server. Ensure the city API is enabled in
-`city.toml`:
+talks to that city's own API server. This `[api]` config is only consulted in
+standalone mode — if the machine-wide supervisor is running, it takes over
+(see Supervisor mode below) and this per-city port is ignored. Ensure the
+city API is enabled in `city.toml`:
 
 ```toml
 [api]
@@ -43,9 +45,9 @@ routes requests through `/v0/city/{name}/...`.
 ## Starting the dashboard
 
 ```
-gc dashboard                               # Supervisor-only view from anywhere
-gc dashboard --port 3000                  # Same, custom dashboard port
-gc dashboard serve                        # Explicit subcommand; same discovery
+gc dashboard                               # Auto-discover API server, open dashboard in browser
+gc dashboard --no-open                    # Print the dashboard URL instead of opening a browser
+gc dashboard serve                        # Print where the web dashboard is served
 gc dashboard --city /path/to/city         # Optional city context for standalone discovery
 gc dashboard --api http://127.0.0.1:8372 # Optional override
 ```

@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -2118,6 +2119,20 @@ func reconcileCities(
 		cs.configDirty = configDirty
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
+
+		// One-time startup hygiene: release stale runtime name claims held by
+		// closed configured named-session beads so on-demand respawn is not
+		// blocked by pre-fix legacy entries inherited across a supervisor
+		// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
+		// failure must never block city startup.
+		if cs.cityBeadStore != nil {
+			if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
+			} else if released > 0 {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck
+			}
+		}
+
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
 
@@ -2185,7 +2200,7 @@ func reconcileCities(
 
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
-		sockPath := filepath.Join(path, ".gc", "controller.sock")
+		sockPath := controllerSocketPath(path)
 		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck

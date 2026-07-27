@@ -608,6 +608,44 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
+	var proof *ProofRef
+	var t3Waiver *Waiver
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.exec" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/exec", "NewSeamBacked"):
+				if claim.Disposition != DispositionProved {
+					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				proof = claim.Proof
+			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
+				if claim.Disposition != DispositionWaived {
+					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				}
+				t3Waiver = claim.Waiver
+			}
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("exec.NewSeamBacked proof is missing")
+	}
+	if proof.File != "internal/runtime/exec/exec_test.go" || proof.Test != "TestExecConformance" {
+		t.Errorf("exec.NewSeamBacked proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
+		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
+	}
+	if t3Waiver == nil || t3Waiver.Owner != "ga-80po0c.3" {
+		t.Errorf("legacy T3 exec-prefix waiver = %+v, want ga-80po0c.3 ownership", t3Waiver)
+	}
+}
+
 func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	var proof *ProofRef
 

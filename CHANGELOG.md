@@ -7,38 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-24
+
 ### Upgrading Notes
 
-- **Every graph-owning store scope needs a `Dir`-matched `control-dispatcher`
-  agent.** Control beads now route to the dispatcher that owns their store scope
-  (city vs. rig) rather than falling back to the city dispatcher, and that
-  routing is fail-closed: a graph owned by `rig:X` whose scope has no exactly
-  `Dir`-matched `control-dispatcher` agent now fails before instantiation with an
-  `OrderFailed` event instead of silently stranding its control lane on a
-  dispatcher that cannot read the rig store. Deployments that previously limped
-  along through shared-store mis-routing must add a matching rig-scoped
-  `control-dispatcher` agent; the reconciler logs `control bead <id> in rig
-  store "X" has no configured control-dispatcher for its store scope` to name
-  the missing scope.
+- **Configure one store-scoped `control-dispatcher` for every graph-owning
+  scope.** Formula control beads now route to the dispatcher whose `Dir`
+  matches the city or rig store that owns the graph. A rig-owned graph with no
+  matching dispatcher fails before instantiation instead of falling back to a
+  dispatcher that cannot read its work.
+- **Run `gc doctor --fix` after upgrading an existing city.** The current
+  doctor converges pack imports, provider catalogs, project identity, retired
+  hold labels, and managed beads/Dolt metadata before the orchestrator starts.
+- **Upgrading over an older install at a different path may need a manual
+  reseed.** If a machine already ran an older `gc` (for example a Homebrew
+  binary now replaced by a source build at a new path), `gc start` can keep the
+  stale supervisor running and can fail closed on a present-but-invalid
+  bundled-pack cache — only an *absent* cache self-heals. Run `gc import
+  install` to repopulate the cache, then let `gc start` auto-restart the
+  supervisor (or on Linux `systemctl --user restart gascity-supervisor`).
+- **An unrelated stale registered city can block `gc start`; fix or unregister
+  that city — not the one you are starting.** A pre-1.3 city still registered
+  with un-migrated provider config (for example `workspace.provider = "claude"`
+  with no `[providers.claude]` block) can fail the registry scan and abort
+  startup, with a misleading hint to `gc init` the healthy city you were
+  actually starting. Run `gc doctor --fix` inside the offending stale city, or
+  `gc unregister <stale-city>` to drop it.
+- **macOS: a supervisor left running from a prior version may need a manual
+  restart.** macOS cannot resolve a direct (non-launchd) supervisor's
+  executable for binary-drift detection, so the automatic post-upgrade restart
+  may not complete. Run `gc supervisor stop --wait`, then `gc start`.
+
+### Added
+
+- **A run-centered dashboard and API.** Run detail now combines the formula
+  stage ladder, structured transcripts, token rate, and estimated burn rate.
+  Session and run reads use typed, paginated API surfaces backed by warm
+  projections instead of ad hoc wire shapes.
+- **Durable usage and lifecycle observability.** Model, compute, and lifecycle
+  facts feed local usage history and OpenTelemetry metrics. End-of-interval
+  transcript sweeps keep live pool sessions' token and cost rates current even
+  when agents self-drive after their initial claim.
+- **Privacy-scoped command-usage metrics in release artifacts.** Before the
+  first eligible interactive command is recorded, `gc` shows the complete
+  disclosure. Events contain only a canonical command ID, the `gc` release,
+  operating system, and an anonymous installation ID—never arguments, paths,
+  file contents, or environment values. `gc metrics status`, `example`, `on`,
+  and `off` expose the local controls; `DO_NOT_TRACK=1` and
+  `GC_DISABLE_USAGE_METRICS=1` provide environment-level opt-outs.
+- **Broader runtime composition.** Provider routing, ACP/automatic runtime
+  selection, Herdr-backed sessions, and Kubernetes/subprocess/tmux execution
+  share the same session lifecycle and worker boundary.
+- **Production workflow controls.** Formulas v2 gained stronger retry,
+  fan-out, drain, scope, artifact, and finalization behavior, plus better live
+  status and event evidence for operators.
+- **An experimental OpenClaw bridge proof of concept.** The private package
+  under `contrib/openclaw-bridge` explores iMessage and Telegram connectors; it
+  is not a supported provider pack or a shipped connector artifact.
+
+### Changed
+
+- **Session lifecycle operations converge through the worker boundary.** Pool
+  demand, wake, resume, drain, close, and orphan recovery now reason from
+  persisted session/work identity rather than provider-specific shortcuts.
+- **Beads remains the persistence boundary while storage becomes more
+  resilient.** Native and CLI-backed stores share transactional lifecycle
+  semantics, bounded cached reads, store-aware routing, and explicit degraded
+  results across city and rig scopes.
+- **CI and local verification are sharded and event-driven.** The release gate
+  includes fast units, process tests, integration packages, tutorials, real
+  inference acceptance, and macOS regressions without one monolithic test
+  process.
 
 ### Fixed
 
-- **Attempt/fanout control routing no longer fails closed on a transient
-  route-config load.** The store-scoped dispatcher routing made attempt-spawn
-  (`spawnNextAttempt`) and fanout (`routeFanoutFragmentSteps`) control routing
-  return a hard error when the attempt-time `city.toml` load failed, so a
-  momentary config read or include-resolution blip could permanently quarantine
-  an in-flight molecule. Such load/parse failures are now classified as
-  transient controller-boundary errors and retried as pending, matching the
-  retry/Ralph tolerance. Terminal fail-closed remains reserved for a config that
-  loads successfully but lacks the required `Dir`-matched `control-dispatcher`
-  agent.
-- **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against
-  `beads v1.0.5`, which was subsequently withdrawn (demoted to a pre-release;
-  `v1.0.4` is the current stable release). v1.3.1 repins the `beads` Go module
-  and the CI `bd` toolchain (`BD_VERSION`) to `v1.0.4`. No behavior change is
-  expected — Gas City already defaults to `bd_compatibility = "bd-1.0.4"`
-  semantics, and the config still accepts both `bd-1.0.4` and `bd-1.0.5`.
+- **Pool sessions no longer lose or strand work while draining, restarting, or
+  reusing capacity.** Claim ownership, wake budgets, slot selection, and
+  confirmed-dead cleanup are now fenced against stale or partial observations.
+- **Formula control routing retries transient configuration reads.** Attempt
+  spawn and fan-out no longer quarantine an in-flight run because of a
+  momentary config/include read failure; a successfully loaded configuration
+  that lacks the required scoped dispatcher still fails closed.
+- **Managed beads and Dolt paths fail more honestly.** Provider health,
+  endpoint ownership, lock release, compaction, reindexing, stale data-dir
+  cleanup, and partial-store reads now preserve errors instead of silently
+  reporting complete state.
+- **Events, nudges, waits, and session output remain bounded under load.** The
+  CLI drains paginated event windows, request paths avoid unbounded scans, tmux
+  sessions keep their shared server, and structured transcripts preserve tool
+  and error frames.
+- **Live run cost fields populate for long-lived pool sessions.**
+  End-of-interval model-usage sweeps account for each transcript window once,
+  restoring `tokens/min` and `burn/hr` in run detail (PR #4436).
+- **Customer Zero dashboard and claim regressions are closed.** Cross-city
+  attention reads now cancel stale requests and recover after startup; Health
+  reports per-metric availability with cross-platform sampling instead of
+  false zero/NaN values; and hook claims no longer fuzzy-update a vanished
+  session record (#4354, #4356, #4361).
+- **Release-candidate gates are portable and reproducible.** Bash 3 scripts,
+  deep metrics fixtures, reusable pool slots, Tier C pack compatibility, and
+  container-tool vulnerability checks now exercise the same bounded behavior
+  expected from the shipped artifacts.
 
 ## [1.3.0] - 2026-06-18
 
@@ -658,7 +727,8 @@ community contributors. See the GitHub release page for the full narrative.
   semantics, watchdog reconciliation cadence, dirty-cache fallback reads.
 - Long tail of session lifecycle, wake-budget, and pool identity fixes.
 
-[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/gastownhall/gascity/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/gastownhall/gascity/releases/tag/v1.4.0
 [1.3.0]: https://github.com/gastownhall/gascity/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/gastownhall/gascity/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/gastownhall/gascity/releases/tag/v1.2.0
