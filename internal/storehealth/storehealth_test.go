@@ -266,6 +266,52 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 	}
 }
 
+// Compile-time check: nonTailProvider must implement Provider but not
+// TailProvider, exercising LastMaintenance's fallback branch.
+var _ events.Provider = (*nonTailProvider)(nil)
+
+// nonTailProvider is a Provider that deliberately does NOT implement
+// TailProvider, modeling the exec provider (internal/events/exec) and
+// transientCityEventProvider (cmd/gc/city_registry.go) — neither
+// implements ListTail, so both go through LastMaintenance's non-tail
+// fallback branch.
+type nonTailProvider struct {
+	inner *events.Fake
+}
+
+func (n *nonTailProvider) Record(e events.Event)                        { n.inner.Record(e) }
+func (n *nonTailProvider) List(f events.Filter) ([]events.Event, error) { return n.inner.List(f) }
+func (n *nonTailProvider) LatestSeq() (uint64, error)                   { return n.inner.LatestSeq() }
+func (n *nonTailProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	return n.inner.Watch(ctx, afterSeq)
+}
+func (n *nonTailProvider) Close() error { return n.inner.Close() }
+
+// TestLastMaintenanceNonTailFallbackReturnsNewest guards ASK 1: on the
+// non-tail fallback path, List must be called unbounded (no Limit: 1) so the
+// e.Ts.After(latestTs) reduction can pick the newest of several matching
+// events. Limit: 1 would return List's forward-scan match — the EARLIEST
+// event — inverting "most-recent" on this path.
+func TestLastMaintenanceNonTailFallbackReturnsNewest(t *testing.T) {
+	ep := &nonTailProvider{inner: events.NewFake()}
+	earliest := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	middle := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	newest := time.Date(2026, 4, 15, 3, 0, 0, 0, time.UTC)
+
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: earliest, Payload: payload})
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: newest, Payload: payload})
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: middle, Payload: payload})
+
+	ts, status := LastMaintenance(ep)
+	if !ts.Equal(newest) {
+		t.Fatalf("ts = %v, want %v (newest of 3 events on non-tail fallback path)", ts, newest)
+	}
+	if status != "success" {
+		t.Fatalf("status = %q, want success", status)
+	}
+}
+
 // tailCallRecord captures a single ListTail invocation for inspection.
 type tailCallRecord struct {
 	filter events.Filter
@@ -314,14 +360,15 @@ func TestLastMaintenanceUsesWindowedTailScan(t *testing.T) {
 	}
 }
 
-// TestLastMaintenanceBoundedScan_EventBeforeWindow verifies end-to-end that
-// when the bounded tail scan is used, maintenance events placed before the
-// scan window are NOT returned — they are treated as unknown.
+// TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded verifies
+// end-to-end that when the bounded tail scan finds nothing, LastMaintenance
+// falls back to an unbounded scan rather than reporting "never ran" — a
+// maintenance event placed before the scan window is still found.
 //
-// Failing case without the fix: ReadFilteredTail walks to byte 0, finds the
-// maintenance event, and LastMaintenance returns a non-zero timestamp.
-// With the fix: the walk stops at the window floor and returns (zero, "").
-func TestLastMaintenanceBoundedScan_EventBeforeWindow(t *testing.T) {
+// Failing case without the fallback: the windowed ListTail stops at the
+// window floor, finds nothing, and LastMaintenance returns (zero, "") even
+// though the event exists earlier in the same file.
+func TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
 
@@ -365,7 +412,10 @@ func TestLastMaintenanceBoundedScan_EventBeforeWindow(t *testing.T) {
 	defer ep.Close() //nolint:errcheck
 
 	ts, status := LastMaintenance(ep)
-	if !ts.IsZero() || status != "" {
-		t.Errorf("LastMaintenance returned (%v, %q): maintenance event before window should be treated as unknown", ts, status)
+	if !ts.Equal(maintenanceEvent.Ts) {
+		t.Errorf("ts = %v, want %v (unbounded fallback should recover the event before the window)", ts, maintenanceEvent.Ts)
+	}
+	if status != "success" {
+		t.Errorf("status = %q, want success", status)
 	}
 }
