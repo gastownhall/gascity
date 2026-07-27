@@ -869,8 +869,13 @@ provider = "exec:/not-used-by-auto-handoff"
 					t.Fatalf("additionalContext = %q, want auto-handoff substring %q", context, want)
 				}
 			}
+			// This city configures an exec: ordinary-mail provider, so the
+			// ordinary-mail read contributes nothing to the SessionStart payload
+			// while beadmail-backed auto-handoff still does. (The beadmail-backed
+			// ordinary case — where unread mail *is* injected — is pinned by
+			// TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen.)
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
-				t.Fatalf("additionalContext = %q, must not inject ordinary mail %q at SessionStart", context, ordinary.ID)
+				t.Fatalf("additionalContext = %q, want no ordinary mail %q from the exec: provider at SessionStart", context, ordinary.ID)
 			}
 			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
 				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
@@ -894,6 +899,103 @@ provider = "exec:/not-used-by-auto-handoff"
 				t.Fatalf("auto-handoff must remain durable when SessionStart output fails: %v", err)
 			}
 		})
+	}
+}
+
+// TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen is
+// the beadmail-backed counterpart to
+// TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder: with no [mail]
+// provider configured, beadmail backs ordinary mail too, so the SessionStart
+// ordinary-unread read (dip-bj7pgj) sees the auto-handoff as well. It pins the
+// three properties that shape depends on: the auto-handoff is rendered exactly
+// once (the dedup branch actually filters), ordinary unread mail *is* surfaced,
+// and the ordinary read is non-destructive — the message is still in the store
+// after the hook run, so the later UserPromptSubmit delivery is not consumed.
+func TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("launch-only startup prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	// No [mail] provider: beadmail backs ordinary mail, so the ordinary read
+	// and the auto-handoff read hit the same store.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+		[]string{"context cycle", "continue the durable task"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "review the auth PR")
+	if err != nil {
+		t.Fatalf("Send ordinary mail: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+
+	// The auto-handoff is rendered by sessionStartAutoHandoffInjection and must
+	// NOT be rendered a second time by the ordinary-mail block.
+	if n := strings.Count(context, auto.ID); n != 1 {
+		t.Fatalf("additionalContext contains auto-handoff %q %d time(s), want exactly 1:\n%s", auto.ID, n, context)
+	}
+	// Ordinary unread mail is surfaced at SessionStart so a promptless wake is
+	// not blind to it.
+	for _, want := range []string{ordinary.ID, ordinary.Body} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("additionalContext = %q, want ordinary-mail substring %q", context, want)
+		}
+	}
+	// ...and surfacing it is read-only: it stays in the store for the
+	// UserPromptSubmit delivery that archives it.
+	if _, err := store.Get(ordinary.ID); err != nil {
+		t.Fatalf("ordinary mail must remain open after a SessionStart injection: %v", err)
 	}
 }
 

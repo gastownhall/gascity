@@ -83,9 +83,11 @@ func primeUnreadMailInjection(skip map[string]bool) string {
 }
 
 // primeUnreadMailMessages returns the current agent's unread ordinary mail via
-// the configured city mail provider, resolving the self-recipient exactly as the
-// check path does (GC_SESSION_ID/GC_ALIAS/GC_AGENT via
-// defaultMailIdentityCandidates). It is read-only and returns nil on any error.
+// the configured city mail provider, using the same identity candidates as the
+// check path (GC_SESSION_ID/GC_ALIAS/GC_AGENT via defaultMailIdentityCandidates)
+// but resolved by the provider's own recipient routing rather than by
+// resolveMailTargetsWithConfig — so this reads the union of those candidates,
+// not the first-resolving target. It is read-only and returns nil on any error.
 func primeUnreadMailMessages() []mail.Message {
 	mp, _ := openCityMailProvider(io.Discard, "gc prime")
 	if mp == nil {
