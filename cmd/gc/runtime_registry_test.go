@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -56,6 +58,71 @@ func TestRuntimeRegistryRegistersAllBuiltinNames(t *testing.T) {
 		if !r.Has(name) {
 			t.Errorf("builtin runtime %q not registered", name)
 		}
+	}
+}
+
+func TestRuntimeRegistryACPUsesSessionSetupTimeout(t *testing.T) {
+	cityRoot := t.TempDir()
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"acp",
+		config.SessionConfig{SetupTimeout: "50ms"},
+		"city",
+		cityRoot,
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName(acp): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = sp.Start(ctx, "acp-setup-timeout", runtime.Config{
+		Command:  "exit 99",
+		WorkDir:  filepath.Join(cityRoot, "missing-workdir"),
+		Env:      map[string]string{"GC_DIR": filepath.Join(cityRoot, "missing-workdir")},
+		PreStart: []string{"sleep 30"},
+	})
+	if err == nil {
+		t.Fatal("Start = nil, want pre_start timeout")
+	}
+	if !strings.Contains(err.Error(), "pre_start") || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("Start error = %q, want pre_start deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Start took %v, want [session].setup_timeout to bound ACP pre_start", elapsed)
+	}
+}
+
+func TestRuntimeRegistryACPHonorsSessionSetupMaxTimeout(t *testing.T) {
+	cityRoot := t.TempDir()
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"acp",
+		config.SessionConfig{SetupTimeout: "50ms", SetupMaxTimeout: "2s"},
+		"city",
+		cityRoot,
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName(acp): %v", err)
+	}
+
+	start := time.Now()
+	err = sp.Start(context.Background(), "acp-setup-max-timeout", runtime.Config{
+		Command: "exit 99",
+		WorkDir: cityRoot,
+		PreStart: []string{
+			`i=0; while [ "$i" -lt 8 ]; do printf .; sleep 0.03; i=$((i + 1)); done`,
+		},
+	})
+	if err == nil {
+		t.Fatal("Start = nil, want agent launch/handshake error")
+	}
+	if strings.Contains(err.Error(), "pre_start") {
+		t.Fatalf("progressing pre_start was killed at setup_timeout: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("Start took %v; test did not outlive fixed setup_timeout", elapsed)
 	}
 }
 

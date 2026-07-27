@@ -15,39 +15,96 @@ import (
 func TestIsStage2EligibleSession(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name         string
-		cityProvider string
-		agentSession string
-		wantEligible bool
+		name            string
+		runtimeProvider string
+		wantEligible    bool
 	}{
-		{"default empty → tmux (eligible)", "", "", true},
-		{"tmux eligible", "tmux", "", true},
+		{"default empty → tmux (eligible)", "", true},
+		{"tmux eligible", "tmux", true},
 		// herdr executes PreStart via the herdr provider's runPreStart
 		// before the agent is created (internal/runtime/herdr/provider.go).
-		{"herdr eligible (executes PreStart)", "herdr", "", true},
-		{"herdr + acp agent → ineligible", "herdr", "acp", false},
+		{"herdr eligible (executes PreStart)", "herdr", true},
 		// subprocess runtime does not execute PreStart in v0.15.1 —
 		// ineligible per Phase 3 pass-1 review.
-		{"subprocess ineligible (no PreStart execution)", "subprocess", "", false},
-		{"k8s ineligible", "k8s", "", false},
-		{"acp city ineligible", "acp", "", false},
-		{"hybrid ineligible", "hybrid", "", false},
-		{"exec prefix ineligible", "exec:./run.sh", "", false},
-		{"fake ineligible", "fake", "", false},
-		{"tmux + acp agent → ineligible", "tmux", "acp", false},
+		{"subprocess ineligible (no PreStart execution)", "subprocess", false},
+		{"k8s ineligible", "k8s", false},
+		{"acp eligible (executes PreStart)", "acp", true},
+		{"hybrid ineligible", "hybrid", false},
+		{"exec prefix ineligible", "exec:./run.sh", false},
+		{"fake ineligible", "fake", false},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			agent := &config.Agent{Session: c.agentSession}
-			got := isStage2EligibleSession(c.cityProvider, agent)
+			got := isStage2EligibleSession(c.runtimeProvider)
 			if got != c.wantEligible {
-				t.Fatalf("isStage2EligibleSession(%q, %q) = %v, want %v",
-					c.cityProvider, c.agentSession, got, c.wantEligible)
+				t.Fatalf("isStage2EligibleSession(%q) = %v, want %v",
+					c.runtimeProvider, got, c.wantEligible)
 			}
 		})
 	}
+}
+
+func TestCanStage1Materialize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		runtimeProvider string
+		wantEligible    bool
+	}{
+		{"default empty eligible", "", true},
+		{"tmux eligible", "tmux", true},
+		{"subprocess eligible", "subprocess", true},
+		{"herdr eligible", "herdr", true},
+		{"acp eligible", "acp", true},
+		{"k8s ineligible", "k8s", false},
+		{"hybrid ineligible", "hybrid", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canStage1Materialize(c.runtimeProvider); got != c.wantEligible {
+				t.Fatalf("canStage1Materialize(%q) = %v, want %v",
+					c.runtimeProvider, got, c.wantEligible)
+			}
+		})
+	}
+}
+
+func TestAgentMaterializationRuntimeProviderUsesResolvedACPRoute(t *testing.T) {
+	t.Parallel()
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "custom-acp"},
+		Providers: map[string]config.ProviderSpec{
+			"custom-acp": {
+				Command:     "echo",
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+		},
+	}
+
+	for _, cityRuntime := range []string{"k8s", "subprocess", "hybrid"} {
+		cityRuntime := cityRuntime
+		t.Run(cityRuntime+" provider-default ACP", func(t *testing.T) {
+			cfg.Session.Provider = cityRuntime
+			agent := &config.Agent{Name: "worker", Provider: "custom-acp"}
+			if got := agentMaterializationRuntimeProvider(cfg, agent); got != "acp" {
+				t.Fatalf("agentMaterializationRuntimeProvider = %q, want acp", got)
+			}
+		})
+	}
+
+	t.Run("explicit tmux stays on city runtime", func(t *testing.T) {
+		cfg.Session.Provider = "k8s"
+		agent := &config.Agent{Name: "worker", Provider: "custom-acp", Session: "tmux"}
+		if got := agentMaterializationRuntimeProvider(cfg, agent); got != "k8s" {
+			t.Fatalf("agentMaterializationRuntimeProvider = %q, want k8s", got)
+		}
+	})
 }
 
 func TestAgentScopeRoot(t *testing.T) {

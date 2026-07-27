@@ -493,3 +493,47 @@ url = "http://localhost:3100/mcp/kb"
 		t.Fatalf("target agents = %+v, want [claude]", got)
 	}
 }
+
+func TestBuildStage1MCPTargetsUsesProviderDefaultACPRoute(t *testing.T) {
+	cityPath := t.TempDir()
+	mcpFile := filepath.Join(cityPath, "mcp", "kb.toml")
+	writeMCPSource(t, mcpFile, `
+name = "kb"
+transport = "http"
+url = "http://localhost:3100/mcp/kb"
+`)
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "gemini-acp"},
+		Session:    config.SessionConfig{Provider: "k8s"},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Providers: map[string]config.ProviderSpec{
+			"gemini-acp": {
+				Base:        stringPtr("builtin:gemini"),
+				Command:     "echo",
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		Agents: []config.Agent{{
+			Name: "worker", Scope: "city", Provider: "gemini-acp",
+		}},
+	}
+
+	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	if err != nil {
+		t.Fatalf("buildStage1MCPTargets: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("provider-default ACP stage1 targets len = %d, want 1: %+v", len(targets), targets)
+	}
+
+	cfg.Agents[0].Session = "tmux"
+	targets, err = buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	if err != nil {
+		t.Fatalf("buildStage1MCPTargets(explicit tmux): %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("explicit tmux on k8s must stay remote, got targets %+v", targets)
+	}
+}

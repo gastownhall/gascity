@@ -397,10 +397,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	//     session PreStart invokes `gc internal materialize-skills`
 	//     into the session workdir before the agent starts.
 	//
-	// Agents for which neither path delivers (ACP, k8s, hybrid,
+	// Agents for which neither path delivers (k8s, non-ACP hybrid,
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
+	materializationRuntime := materializationRuntimeProvider(p.sessionProvider, sessionTransport)
 	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
@@ -410,8 +411,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			stage1Delivers := canStage1Materialize(materializationRuntime) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(materializationRuntime)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
@@ -527,13 +528,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 11b: Skill materialization integration (per engdocs
 	// skill-materialization.md § "When FingerprintExtra[\"skills:*\"]
 	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
-	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
+	// runtimes (tmux, herdr, and ACP) get a PreStart entry for per-session
 	// materialization into non-scope-root workdirs, and every eligible
 	// agent gets per-skill fingerprint entries so catalog edits drain.
-	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
+	// Stage-2 ineligible runtimes (subprocess/k8s/non-ACP hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
-	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+	if isStage2EligibleSession(materializationRuntime) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 		wsProvider := ""
@@ -571,8 +572,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 11c: MCP projection integration. Provider-native MCP config is
 	// session/runtime state rather than passive content, so every deliverable
 	// target contributes a projection hash to the runtime fingerprint. When the
-	// session workdir differs from the scope root, tmux sessions reconcile the
-	// workdir-local target via a hidden PreStart command before launch.
+	// session workdir differs from the scope root, host-PreStart runtimes
+	// (tmux, herdr, ACP) reconcile the workdir-local target via a hidden
+	// command before launch.
 	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
 	mcpCity := p.city
@@ -615,8 +617,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
+		stage1Delivers := canStage1Materialize(materializationRuntime) && canonWorkDir == scopeRoot
+		stage2Delivers := isStage2EligibleSession(materializationRuntime) && canonWorkDir != scopeRoot
 		switch {
 		case stage1Delivers || stage2Delivers:
 			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
@@ -689,7 +691,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		MCPServers:       mcpServers,
 	}
 	params.SessionOverride = cfgAgent.Session
-	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	params.EffectiveSessionProvider = materializationRuntime
 	return params, nil
 }
 

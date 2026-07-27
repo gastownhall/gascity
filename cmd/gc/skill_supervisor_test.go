@@ -125,7 +125,7 @@ func TestRunStage1MaterializesIntoRigScope(t *testing.T) {
 	}
 }
 
-// TestRunStage1SkipsIneligibleRuntimes confirms k8s and acp
+// TestRunStage1SkipsIneligibleRuntimes confirms remote/routed
 // agents get no materialization even if their provider has a vendor
 // sink — the spec forbids populating skills for agents whose
 // runtime cannot reach the scope root.
@@ -136,11 +136,9 @@ func TestRunStage1SkipsIneligibleRuntimes(t *testing.T) {
 		agentSession string
 	}{
 		{"k8s city session", "k8s", ""},
-		{"tmux city + acp agent", "tmux", "acp"},
 		{"hybrid city session", "hybrid", ""},
-		// Note: subprocess is STAGE-1 eligible (host scope root is
-		// reachable) even though it's not stage-2 eligible (no
-		// PreStart execution). See TestRunStage1SubprocessEligible.
+		// Note: subprocess and ACP are stage-1 eligible because their
+		// processes can read the host scope root.
 	}
 	for _, c := range cases {
 		c := c
@@ -492,35 +490,104 @@ func TestRunStage1SharedCatalogFailureKeepsLastGoodSharedSymlink(t *testing.T) {
 	}
 }
 
-// TestRunStage1SubprocessEligible confirms that Phase 4 split the
-// stage-1 / stage-2 eligibility predicates correctly: a subprocess
-// city session receives stage-1 materialization at its scope root
-// (host-reachable filesystem) even though stage-2 PreStart isn't
-// executed by the subprocess runtime. Regression for the Phase 4
-// pass-1 Claude finding that over-gating was leaving subprocess
-// agents with no skills.
-func TestRunStage1SubprocessEligible(t *testing.T) {
-	clearGCEnv(t)
-	cityPath := t.TempDir()
-	t.Setenv("GC_HOME", t.TempDir())
-	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+// TestRunStage1HostRuntimeEligible confirms that local subprocess and ACP
+// sessions receive stage-1 materialization at their host-visible scope root.
+func TestRunStage1HostRuntimeEligible(t *testing.T) {
+	for _, sessionProvider := range []string{"subprocess", "acp"} {
+		sessionProvider := sessionProvider
+		t.Run(sessionProvider, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := t.TempDir()
+			t.Setenv("GC_HOME", t.TempDir())
+			writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
 
-	cfg := &config.City{
-		PackSkillsDir: filepath.Join(cityPath, "skills"),
-		Session:       config.SessionConfig{Provider: "subprocess"},
-		Agents: []config.Agent{
-			{Name: "mayor", Scope: "city", Provider: "claude"},
-		},
+			cfg := &config.City{
+				PackSkillsDir: filepath.Join(cityPath, "skills"),
+				Session:       config.SessionConfig{Provider: sessionProvider},
+				Agents: []config.Agent{
+					{Name: "mayor", Scope: "city", Provider: "claude"},
+				},
+			}
+
+			var stderr bytes.Buffer
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatalf("runStage1SkillMaterialization: %v", err)
+			}
+
+			if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "plan")); err != nil {
+				t.Errorf("%s session should receive stage-1 materialization: %v", sessionProvider, err)
+			}
+		})
+	}
+}
+
+func TestRunStage1ProviderDefaultACPUsesLocalRoute(t *testing.T) {
+	for _, cityRuntime := range []string{"k8s", "subprocess", "hybrid"} {
+		cityRuntime := cityRuntime
+		t.Run(cityRuntime, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := t.TempDir()
+			t.Setenv("GC_HOME", t.TempDir())
+			writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+
+			cfg := &config.City{
+				PackSkillsDir: filepath.Join(cityPath, "skills"),
+				Session:       config.SessionConfig{Provider: cityRuntime},
+				Workspace:     config.Workspace{Provider: "custom-acp"},
+				Providers: map[string]config.ProviderSpec{
+					"custom-acp": {
+						Base:        stringPtr("builtin:claude"),
+						Command:     "echo",
+						PromptMode:  "none",
+						SupportsACP: boolPtr(true),
+						ACPArgs:     []string{"acp"},
+					},
+				},
+				Agents: []config.Agent{
+					{Name: "worker", Scope: "city", Provider: "custom-acp"},
+				},
+			}
+
+			var stderr bytes.Buffer
+			if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "plan")); err != nil {
+				t.Fatalf("provider-default ACP should receive local stage-1 materialization: %v", err)
+			}
+		})
 	}
 
-	var stderr bytes.Buffer
-	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
-		t.Fatalf("runStage1SkillMaterialization: %v", err)
-	}
-
-	if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "plan")); err != nil {
-		t.Errorf("subprocess session should receive stage-1 materialization: %v", err)
-	}
+	t.Run("explicit tmux remains remote", func(t *testing.T) {
+		clearGCEnv(t)
+		cityPath := t.TempDir()
+		t.Setenv("GC_HOME", t.TempDir())
+		writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+		cfg := &config.City{
+			PackSkillsDir: filepath.Join(cityPath, "skills"),
+			Session:       config.SessionConfig{Provider: "k8s"},
+			Workspace:     config.Workspace{Provider: "custom-acp"},
+			Providers: map[string]config.ProviderSpec{
+				"custom-acp": {
+					Base:        stringPtr("builtin:claude"),
+					Command:     "echo",
+					PromptMode:  "none",
+					SupportsACP: boolPtr(true),
+					ACPArgs:     []string{"acp"},
+				},
+			},
+			Agents: []config.Agent{{
+				Name: "worker", Scope: "city", Provider: "custom-acp", Session: "tmux",
+			}},
+		}
+		var stderr bytes.Buffer
+		if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "plan")); !os.IsNotExist(err) {
+			t.Fatalf("explicit tmux on k8s must stay remote; lstat error = %v", err)
+		}
+	})
 }
 
 // TestRunStage1AgentLocalOnlyInItsOwnSink confirms that an agent-local

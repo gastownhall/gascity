@@ -19,20 +19,38 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
-// write fails. Sized to match terminateProcess's SIGTERM grace period so a
-// Nudge racing with Stop still converges to the best-effort nil contract
-// rather than surfacing a spurious error before SIGKILL lands.
-const nudgePostWriteDrainTimeout = 5 * time.Second
+const (
+	// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
+	// write fails. Sized to match terminateProcess's SIGTERM grace period so a
+	// Nudge racing with Stop still converges to the best-effort nil contract
+	// rather than surfacing a spurious error before SIGKILL lands.
+	nudgePostWriteDrainTimeout = 5 * time.Second
+
+	// defaultSetupTimeout mirrors the tmux and herdr providers' default for
+	// [session] setup_timeout.
+	defaultSetupTimeout = 10 * time.Second
+	// preStartOutputLimit bounds the diagnostic tail from a failed command.
+	preStartOutputLimit = 4096
+	// preStartWaitDelay prevents a successful command whose background child
+	// inherited stdout/stderr from hanging session startup indefinitely.
+	preStartWaitDelay = 2 * time.Second
+	// preStartCancelGrace is the rollback-trap budget when the activity-aware
+	// setup budget is enabled, matching tmux and herdr.
+	preStartCancelGrace = 10 * time.Second
+)
 
 // Config holds ACP provider settings.
 type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	SetupTimeout      time.Duration // default 10s; fixed deadline or output-idle budget
+	SetupMaxTimeout   time.Duration // optional activity-aware absolute ceiling
+	CityRoot          string        // fallback cwd when GC_DIR does not exist yet
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -54,6 +72,13 @@ func (c *Config) outputBufferLines() int {
 		return defaultOutputBufferLines
 	}
 	return c.OutputBufferLines
+}
+
+func (c *Config) setupTimeout() time.Duration {
+	if c.SetupTimeout <= 0 {
+		return defaultSetupTimeout
+	}
+	return c.SetupTimeout
 }
 
 // Provider manages agent sessions using the Agent Client Protocol.
@@ -130,7 +155,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// alive() returns true and duplicate checks above will reject.
 	// The cancel func lets Stop abort an in-progress handshake immediately.
 	hsCtx, hsCancel := context.WithCancel(ctx)
+	defer hsCancel()
 	sentinel := &sessionConn{done: make(chan struct{}), cancel: hsCancel, pending: make(map[int64]chan JSONRPCMessage)}
+	defer close(sentinel.done)
 	p.conns[name] = sentinel
 
 	// Store workDir for CopyTo.
@@ -150,11 +177,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	if err := runtime.StageSessionWorkDir(cfg); err != nil {
-		clearSentinel()
-		return fmt.Errorf("staging workdir for %q: %w", name, err)
-	}
-
 	command := cfg.Command
 	if cfg.PromptSuffix != "" {
 		if cfg.PromptFlag != "" {
@@ -167,6 +189,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		clearSentinel()
 		return fmt.Errorf("acp provider requires a command")
 	}
+	checkStartupContext := func() error {
+		if err := hsCtx.Err(); err != nil {
+			clearSentinel()
+			return fmt.Errorf("starting session %q: %w", name, context.Cause(hsCtx))
+		}
+		return nil
+	}
+	if err := checkStartupContext(); err != nil {
+		return err
+	}
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		clearSentinel()
+		return fmt.Errorf("staging workdir for %q: %w", name, err)
+	}
+	if err := checkStartupContext(); err != nil {
+		return err
+	}
+	if err := p.runPreStart(hsCtx, cfg); err != nil {
+		clearSentinel()
+		return fmt.Errorf("running pre_start for %q: %w", name, err)
+	}
+	if err := checkStartupContext(); err != nil {
+		return err
+	}
 
 	cmd := exec.Command("sh", "-c", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -175,18 +221,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	// Build environment: inherit parent env + apply overrides.
-	env := os.Environ()
-	if len(cfg.Env) > 0 {
-		keys := make([]string, 0, len(cfg.Env))
-		for k := range cfg.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = append(env, k+"="+cfg.Env[k])
-		}
-	}
-	cmd.Env = env
+	cmd.Env = commandEnv(cfg.Env)
 
 	// Set up stdio pipes for JSON-RPC.
 	stdinPipe, err := cmd.StdinPipe()
@@ -264,7 +299,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
-	// WithCancelCause) is already cancellable by Stop. Add a timeout
+	// WithCancel) is already cancellable by Stop. Add a timeout
 	// child so handshake_timeout applies even when the parent has a
 	// longer deadline.
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
@@ -284,10 +319,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("acp handshake for %q: %w", name, err)
 	}
 
-	// Before committing the real conn, check whether Stop was called
-	// during the handshake (which cancels hsCtx). If so, kill the process
-	// and clean up — the caller of Stop expects the session to be gone.
-	if err := hsCtx.Err(); err != nil {
+	// Commit under the same lock Stop uses to cancel a startup sentinel.
+	// If Stop wins the lock, cancellation is visible here before the real
+	// connection can replace the reservation. If Start wins, Stop observes
+	// the real connection and terminates it normally. This closes the narrow
+	// handoff window where Stop could otherwise cancel the old sentinel after
+	// Start had already committed a live process.
+	p.mu.Lock()
+	startupCanceled := hsCtx.Err() != nil || p.conns[name] != sentinel
+	if !startupCanceled {
+		p.conns[name] = sc
+	}
+	p.mu.Unlock()
+	if startupCanceled {
 		_ = stdinPipe.Close()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
@@ -295,16 +339,143 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
 
-	p.mu.Lock()
-	p.conns[name] = sc
-	p.mu.Unlock()
-
 	// Send initial nudge if configured (best-effort, outside lock).
 	if cfg.Nudge != "" {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 
 	return nil
+}
+
+// runPreStart runs cfg.PreStart commands on the host after workdir staging and
+// before the ACP agent process is launched. Stage-2 skill/MCP materialization
+// is carried in these commands, so failures are fatal rather than allowing an
+// agent to start with incomplete runtime state.
+func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
+	for i, command := range cfg.PreStart {
+		if err := p.runSetupCommand(ctx, command, cfg); err != nil {
+			return fmt.Errorf("pre_start[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (p *Provider) runSetupCommand(ctx context.Context, command string, cfg runtime.Config) error {
+	timeout := p.cfg.setupTimeout()
+	idle, grace := time.Duration(0), preStartWaitDelay
+	if p.cfg.SetupMaxTimeout > 0 {
+		idle, grace = timeout, preStartCancelGrace
+	}
+	mon := execgrace.NewMonitor(ctx, idle, p.cfg.SetupMaxTimeout)
+	defer mon.Stop()
+	runCtx := mon.Context()
+	if !mon.Enabled() {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(runCtx, "sh", "-c", command)
+	dir, err := p.preStartDir(cfg)
+	if err != nil {
+		return err
+	}
+	cmd.Dir = dir
+	cmd.Env = commandEnv(cfg.Env)
+
+	var output limitedWriter
+	output.max = preStartOutputLimit
+	writer := mon.Writer(&output)
+	cmd.Stdout, cmd.Stderr = writer, writer
+	execgrace.Apply(cmd, grace)
+
+	if err := cmd.Run(); err != nil {
+		// ErrWaitDelay means the command exited successfully and only a
+		// descendant kept its output pipe open past the bounded wait.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
+		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
+		}
+		if tail := strings.TrimSpace(output.String()); tail != "" {
+			return fmt.Errorf("%w: %s", err, tail)
+		}
+		return err
+	}
+	return nil
+}
+
+// preStartDir selects a deterministic existing cwd. GC_DIR wins when the
+// target workdir already exists. When a PreStart command must create it, use
+// the city root; city-less callers fall back to WorkDir itself or its nearest
+// existing ancestor. The provider state directory is the final safe fallback.
+func (p *Provider) preStartDir(cfg runtime.Config) (string, error) {
+	if dir := existingDirectory(cfg.Env["GC_DIR"]); dir != "" {
+		return dir, nil
+	}
+	if dir := existingDirectory(p.cfg.CityRoot); dir != "" {
+		return dir, nil
+	}
+	if dir := existingWorkDirAncestor(cfg.WorkDir); dir != "" {
+		return dir, nil
+	}
+	if dir := existingDirectory(p.dir); dir != "" {
+		return dir, nil
+	}
+	if dir := existingDirectory(os.TempDir()); dir != "" {
+		return dir, nil
+	}
+	return "", fmt.Errorf("selecting pre_start cwd: no existing GC_DIR, city root, workdir ancestor, provider directory, or temp directory")
+}
+
+func existingWorkDirAncestor(workDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return ""
+	}
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		if existing := existingDirectory(dir); existing != "" {
+			return existing
+		}
+	}
+}
+
+func existingDirectory(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return abs
+}
+
+func commandEnv(overrides map[string]string) []string {
+	env := os.Environ()
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env = append(env, key+"="+overrides[key])
+	}
+	return env
 }
 
 // handshake performs the ACP initialize → initialized → session/new sequence.
@@ -369,6 +540,18 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 func (p *Provider) Stop(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
+	// Keep an in-progress startup sentinel reserved until Start observes the
+	// cancellation and unwinds. Deleting it here would let a replacement Start
+	// run PreStart against the same workdir while the canceled command's
+	// rollback trap is still active. Deliver cancellation while holding the
+	// provider lock so Start cannot commit between sentinel lookup and cancel.
+	if ok && sc.cmd == nil {
+		if sc.cancel != nil {
+			sc.cancel()
+		}
+		p.mu.Unlock()
+		return nil
+	}
 	if ok {
 		delete(p.conns, name)
 	}
@@ -377,14 +560,6 @@ func (p *Provider) Stop(name string) error {
 	if ok {
 		if !sc.alive() {
 			p.cleanupMeta(name)
-			return nil
-		}
-		// Guard against sentinel sessionConn (nil cmd/stdin during handshake).
-		// Signal the in-progress handshake to abort via the cancel func.
-		if sc.cmd == nil {
-			if sc.cancel != nil {
-				sc.cancel()
-			}
 			return nil
 		}
 		_ = sc.stdin.Close()

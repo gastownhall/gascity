@@ -24,8 +24,19 @@ args = ["notes-mcp"]
 `)
 
 	cityCfg := &config.City{
-		Workspace:  config.Workspace{Provider: "gemini"},
-		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}, "cursor": {Command: "echo", PromptMode: "none"}, "copilot": {Command: "echo", PromptMode: "none"}},
+		Workspace: config.Workspace{Provider: "gemini"},
+		Providers: map[string]config.ProviderSpec{
+			"gemini": {Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)},
+			"gemini-acp": {
+				Base:        stringPtr("builtin:gemini"),
+				Command:     "echo",
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+			"cursor":  {Command: "echo", PromptMode: "none"},
+			"copilot": {Command: "echo", PromptMode: "none"},
+		},
 		PackMCPDir: filepath.Join(cityPath, "mcp"),
 	}
 
@@ -87,6 +98,83 @@ args = ["notes-mcp"]
 		}
 		if !found {
 			t.Fatalf("expected stage-2 project-mcp PreStart, got %v", tp.Hints.PreStart)
+		}
+	})
+
+	t.Run("acp worktree injects project-mcp prestart", func(t *testing.T) {
+		agent := &config.Agent{
+			Name:     "acp-worker",
+			Scope:    "city",
+			Provider: "gemini",
+			Session:  "acp",
+			WorkDir:  ".gc/worktrees/acp-worker-1",
+		}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:gemini"] == "" {
+			t.Fatalf("expected mcp fingerprint entry, got %+v", tp.FPExtra)
+		}
+		found := false
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal project-mcp") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected ACP stage-2 project-mcp PreStart, got %v", tp.Hints.PreStart)
+		}
+		if len(tp.MCPServers) != 1 {
+			t.Fatalf("TemplateParams.MCPServers len = %d, want 1 for ACP transport", len(tp.MCPServers))
+		}
+	})
+
+	t.Run("provider-default acp overrides remote city for stage2", func(t *testing.T) {
+		agent := &config.Agent{
+			Name:     "acp-default-worker",
+			Scope:    "city",
+			Provider: "gemini-acp",
+			WorkDir:  ".gc/worktrees/acp-default-worker",
+		}
+		tp, err := resolveTemplate(buildParams("hybrid"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if !tp.IsACP {
+			t.Fatal("provider-default ACP session did not resolve as ACP")
+		}
+		if tp.FPExtra["mcp:gemini"] == "" {
+			t.Fatalf("expected mcp fingerprint entry, got %+v", tp.FPExtra)
+		}
+		found := false
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal project-mcp") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected provider-default ACP stage-2 project-mcp, got %v", tp.Hints.PreStart)
+		}
+		if len(tp.MCPServers) != 1 {
+			t.Fatalf("TemplateParams.MCPServers len = %d, want 1", len(tp.MCPServers))
+		}
+	})
+
+	t.Run("explicit tmux does not override remote city topology", func(t *testing.T) {
+		agent := &config.Agent{
+			Name:     "remote-tmux-worker",
+			Scope:    "city",
+			Provider: "gemini-acp",
+			Session:  "tmux",
+			WorkDir:  ".gc/worktrees/remote-tmux-worker",
+		}
+		_, err := resolveTemplate(buildParams("k8s"), agent, agent.QualifiedName(), nil)
+		if err == nil {
+			t.Fatal("expected undeliverable MCP error, got nil")
+		}
+		if !strings.Contains(err.Error(), "effective MCP cannot be delivered") {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 

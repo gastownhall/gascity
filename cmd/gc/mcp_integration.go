@@ -139,7 +139,7 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 	byKey := make(map[string]mcpTargetSpec)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
-		if !canStage1Materialize(cfg.Session.Provider, agent) {
+		if !canStage1Materialize(agentMaterializationRuntimeProvider(cfg, agent)) {
 			continue
 		}
 		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
@@ -561,8 +561,9 @@ func resolveProjectedMCPForTarget(
 		return resolvedMCPProjection{}, err
 	}
 	canonWorkDir := canonicaliseFilePath(workDir, cityPath)
-	stage1 := canStage1Materialize(cfg.Session.Provider, agent) && canonWorkDir == scopeRoot
-	stage2 := isStage2EligibleSession(cfg.Session.Provider, agent) && canonWorkDir != scopeRoot
+	materializationRuntime := agentMaterializationRuntimeProvider(cfg, agent)
+	stage1 := canStage1Materialize(materializationRuntime) && canonWorkDir == scopeRoot
+	stage2 := isStage2EligibleSession(materializationRuntime) && canonWorkDir != scopeRoot
 	if len(catalog.Servers) > 0 && !stage1 && !stage2 {
 		return resolvedMCPProjection{}, fmt.Errorf(
 			"effective MCP cannot be delivered to workdir %q with session provider %q",

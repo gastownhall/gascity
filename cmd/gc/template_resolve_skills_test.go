@@ -24,8 +24,11 @@ import (
 //  2. Stage-2 eligible agent with WorkDir != scope root →
 //     FPExtra contains skills:<name>; PreStart ends with the
 //     materialize-skills command.
-//  3. ACP agent → FPExtra has no skills:*; no PreStart materialize-skills.
-//  4. K8s session → FPExtra has no skills:*; no PreStart materialize-skills.
+//  3. ACP agent at scope root → FPExtra contains skills:<name>; stage 1
+//     supplies the sink, so no materialize-skills PreStart entry.
+//  4. ACP agent in a worktree → FPExtra contains skills:<name>; PreStart
+//     carries stage-2 materialization.
+//  5. K8s session → FPExtra has no skills:*; no PreStart materialize-skills.
 //
 // Without this test, a refactor could drop or invert step 11b and the
 // helper-level tests would still pass.
@@ -105,7 +108,7 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 			wantMaterializeCmd: true,
 		},
 		{
-			name:            "acp session ineligible",
+			name:            "acp scope root uses stage 1",
 			sessionProvider: "tmux",
 			agent: &config.Agent{
 				Name:     "witness",
@@ -113,8 +116,21 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 				Provider: "claude",
 				Session:  "acp",
 			},
-			wantSkillsKey:      false,
+			wantSkillsKey:      true,
 			wantMaterializeCmd: false,
+		},
+		{
+			name:            "acp worktree uses stage 2",
+			sessionProvider: "tmux",
+			agent: &config.Agent{
+				Name:     "witness-worktree",
+				Scope:    "city",
+				Provider: "claude",
+				Session:  "acp",
+				WorkDir:  ".gc/worktrees/witness",
+			},
+			wantSkillsKey:      true,
+			wantMaterializeCmd: true,
 		},
 		{
 			name:               "k8s city session ineligible",
@@ -157,6 +173,85 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 					foundCmd, c.wantMaterializeCmd, tp.Hints.PreStart)
 			}
 		})
+	}
+}
+
+func TestResolveTemplateProviderDefaultACPUsesLocalStage2Route(t *testing.T) {
+	cityPath := t.TempDir()
+	skillDir := filepath.Join(cityPath, "skills", "plan")
+	writeSkillSource(t, skillDir)
+	catalog := materialize.CityCatalog{Entries: []materialize.SkillEntry{{
+		Name: "plan", Source: skillDir, Origin: "city",
+	}}}
+	params := &agentBuildParams{
+		cityName:  "city",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Provider: "custom-acp"},
+		providers: map[string]config.ProviderSpec{
+			"custom-acp": {
+				Base:        stringPtr("builtin:claude"),
+				Command:     "echo",
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+		fs:              fsys.OSFS{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		skillCatalog:    &catalog,
+		sessionProvider: "k8s",
+	}
+	agent := &config.Agent{
+		Name:     "worker",
+		Scope:    "city",
+		Provider: "custom-acp",
+		WorkDir:  ".gc/worktrees/worker",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tp.IsACP {
+		t.Fatal("provider-default ACP session did not resolve as ACP")
+	}
+	if tp.EffectiveSessionProvider != "acp" {
+		t.Fatalf("EffectiveSessionProvider = %q, want acp", tp.EffectiveSessionProvider)
+	}
+	if tp.FPExtra["skills:plan"] == "" {
+		t.Fatalf("provider-default ACP lost stage-2 fingerprint: FPExtra=%v", tp.FPExtra)
+	}
+	found := false
+	for _, entry := range tp.Hints.PreStart {
+		if strings.Contains(entry, "internal materialize-skills") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("provider-default ACP lost stage-2 materialization: PreStart=%v", tp.Hints.PreStart)
+	}
+
+	// A non-ACP override stays on the city runtime. It must not make a remote
+	// k8s session appear host-local merely because its transport is tmux.
+	tmuxAgent := agent.Clone()
+	tmuxAgent.Session = "tmux"
+	tp, err = resolveTemplate(params, &tmuxAgent, tmuxAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.IsACP {
+		t.Fatal("explicit tmux override resolved as ACP")
+	}
+	if tp.FPExtra["skills:plan"] != "" {
+		t.Fatalf("remote explicit-tmux session got an undeliverable skill fingerprint: %v", tp.FPExtra)
+	}
+	for _, entry := range tp.Hints.PreStart {
+		if strings.Contains(entry, "internal materialize-skills") {
+			t.Fatalf("remote explicit-tmux session got host PreStart: %v", tp.Hints.PreStart)
+		}
 	}
 }
 
@@ -517,10 +612,10 @@ func TestResolveTemplateAppendsAssignedSkillsPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("acp agent skipped", func(t *testing.T) {
+	t.Run("acp agent included", func(t *testing.T) {
 		// Give the provider ACP support so resolveTemplate accepts
-		// session = "acp"; the materialization gate is what should
-		// reject it.
+		// session = "acp"; the local ACP runtime can consume stage-1
+		// materialization from its host-visible scope root.
 		params := buildParams()
 		params.providers["claude"] = config.ProviderSpec{Command: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}
 		a := &config.Agent{Name: "witness", Scope: "city", Provider: "claude", Session: "acp"}
@@ -528,8 +623,8 @@ func TestResolveTemplateAppendsAssignedSkillsPrompt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(tp.Prompt, "Skills available to this session") {
-			t.Errorf("acp agent got the appendix despite stage-1/stage-2 ineligibility:\n%s", tp.Prompt)
+		if !strings.Contains(tp.Prompt, "Skills available to this session") {
+			t.Errorf("acp agent did not get the appendix despite stage-1 eligibility:\n%s", tp.Prompt)
 		}
 	})
 
