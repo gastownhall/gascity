@@ -75,8 +75,21 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		// Surface the command's stderr in the returned error. Without this,
+		// cmd.Output() collapses a failed scale_check / on_boot / on_death to
+		// a bare "exit status 1", discarding the bd schema-skew diagnostic that
+		// bdFatalGuardFunctionScript (internal/config) and the SessionStart
+		// guard deliberately print to stderr. The worker-side work-query path
+		// (shellWorkQueryWithEnv) already preserves stderr this way; these
+		// controller-side runners must too so the operator sees the same
+		// message on every path (ga-7xzmtd review item 3).
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("running command %q: %w: %s", command, err, msg)
+		}
 		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
 	return string(out), nil

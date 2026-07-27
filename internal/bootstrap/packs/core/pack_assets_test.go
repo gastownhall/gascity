@@ -22,6 +22,18 @@ var (
 	bareBDYAMLArgv         = regexp.MustCompile(`(?m)^[ \t]*-[ \t]+bd[ \t]*(?:\r?\n)[ \t]*-[ \t]+[A-Za-z]`)
 	gcImmediatelyBefore    = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])gc(?:[ \t]+--(?:city|rig)(?:=[^ \t\r\n]+|[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^ \t\r\n]+)))*(?:[ \t]|\\\r?\n)+$`)
 	gcSerializedBefore     = regexp.MustCompile(`["']gc["'][[:space:]]*,(?:(?:[[:space:]]*["']--(?:city|rig)=[^"']+["'][[:space:]]*,)|(?:[[:space:]]*["']--(?:city|rig)["'][[:space:]]*,[[:space:]]*["'][^"']+["'][[:space:]]*,))*[[:space:]]*$`)
+
+	// bdSchemaSkewProbeImmediatelyBefore recognizes the SessionStart bd-doctor
+	// schema-skew probe emitted by internal/hooks.bdDoctorProbeShell: a
+	// bounded `bd doctor` health check that must run before gc itself is
+	// trusted to be reachable, so it cannot be routed through `gc bd`
+	// without defeating its purpose (ga-ua1h7d / architect decision
+	// ga-2gs3pl-A). cmd/gc/doctor_bd_schema_skew.go's advisory check calls
+	// bd the same direct way for the same reason. Anchored on the probe's
+	// unique $_gcbd_skew capture variable rather than "bd doctor" alone, so
+	// this exemption cannot be widened by accident into a general doctor
+	// bypass — a bare `bd doctor` without this exact preamble still fails.
+	bdSchemaSkewProbeImmediatelyBefore = regexp.MustCompile(`\b_gcbd_skew=\$\((?:timeout 10 |gtimeout 10 )?$`)
 )
 
 func findBareBDCommands(data []byte) []int {
@@ -31,6 +43,9 @@ func findBareBDCommands(data []byte) []int {
 	for _, pattern := range []*regexp.Regexp{bareBDSubcommand, bareBDDynamicArg, bareBDLeadingFlag} {
 		for _, match := range pattern.FindAllStringIndex(body, -1) {
 			if gcImmediatelyBefore.MatchString(body[:match[0]]) {
+				continue
+			}
+			if bdSchemaSkewProbeImmediatelyBefore.MatchString(body[:match[0]]) {
 				continue
 			}
 			offsets[match[0]] = struct{}{}
@@ -110,6 +125,11 @@ func TestFindBareBDCommands(t *testing.T) {
 		{name: "serialized gc argv", body: `["gc", "bd", "show", "ga-123"]`},
 		{name: "serialized scoped gc argv", body: `["gc", "--city", "/x", "--rig", "r", "bd", "show"]`},
 		{name: "binary prose", body: `the bd CLI reads a bd-managed store`},
+		{name: "bd-doctor skew probe, timeout-bounded", body: `_gcbd_skew=$(timeout 10 bd doctor 2>&1)`},
+		{name: "bd-doctor skew probe, gtimeout-bounded", body: `_gcbd_skew=$(gtimeout 10 bd doctor 2>&1)`},
+		{name: "bd-doctor skew probe, unbounded fallback", body: `_gcbd_skew=$(bd doctor 2>&1)`},
+		{name: "bd doctor without the skew-probe preamble is still flagged", body: `bd doctor`, want: 1},
+		{name: "skew-probe variable name alone does not exempt an unrelated bd call", body: `_gcbd_skew=1; bd doctor`, want: 1},
 	}
 
 	for _, tt := range tests {

@@ -30,14 +30,16 @@ func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
+		script := bdFatalGuardFunctionScript() +
+			standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
+	script := bdFatalGuardFunctionScript() +
+		legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
@@ -52,9 +54,9 @@ func oldEffectiveAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) s
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
@@ -63,9 +65,9 @@ func oldEffectiveAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", bdFatalGuardFunctionScript() + standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
 }
 
 func oldEffectiveRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
@@ -97,21 +99,28 @@ func oldEffectiveOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		route = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | ` +
+	tsvFields := `[.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv`
+	return bdFatalGuardFunctionScript() +
+		`assigned_raw=$(` + bdOrFatalGuarded(`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`assigned_rows=$(printf '%s' "$assigned_raw" | jq -r '.[] | ` + tsvFields + `' 2>/dev/null); ` +
+		`ephemeral_raw=$(` + bdOrFatalGuarded(bdQueryEphemeralStatusShell("in_progress")) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`ephemeral_rows=$(printf '%s' "$ephemeral_raw" | jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | ` + tsvFields + `' 2>/dev/null); ` +
+		`{ printf '%s\n' "$assigned_rows"; printf '%s\n' "$ephemeral_rows"; } | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; ` +
 		`fi; ` +
-		`done`
+		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; ` +
+		`fi; ` +
+		`fi; ` +
+		`done; death_rc=$?; if [ $death_rc -eq 2 ]; then exit 1; fi`
 }
 
 func oldEffectiveOnBoot(a *Agent, includeEphemeralInProgress bool) string {
@@ -123,17 +132,26 @@ func oldEffectiveOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		template = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
-		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
-		ephemeralRead +
-		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
+		bdFatalGuardFunctionScript() +
+		`routed_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`routed_ids=$(printf '%s' "$routed_raw" | jq -r '.[].id' 2>/dev/null); ` +
+		`run_target_raw=$(` + bdOrFatalGuarded(`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`run_target_ids=$(printf '%s' "$run_target_raw" | jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null); ` +
+		`ephemeral_raw=$(` + bdOrFatalGuarded(bdQueryEphemeralStatusShell("in_progress")) + `); bd_rc=$?; ` +
+		`[ $bd_rc -eq 2 ] && exit 1; ` +
+		`ephemeral_ids=$(printf '%s' "$ephemeral_raw" | jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null); ` +
+		`{ printf '%s\n' "$routed_ids"; printf '%s\n' "$run_target_ids"; printf '%s\n' "$ephemeral_ids"; } | ` +
+		`awk 'NF && !seen[$0]++' | ` +
+		`while IFS= read -r id; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if ! err=$(bd update "$id" --status open 2>&1 >/dev/null); then ` +
+		`case "$err" in ` + bdFatalSkewCaseClauses() + `) printf '%s\n' "$err" >&2; exit 2 ;; esac; ` +
+		`printf 'gc-recovery: on_boot reopen failed for %s: %s\n' "$id" "$err"; ` +
+		`fi; ` +
+		`done; boot_rc=$?; if [ $boot_rc -eq 2 ]; then exit 1; fi`
 }
 
 // parityVariant binds an exported query kind's accessors to its frozen oracle.

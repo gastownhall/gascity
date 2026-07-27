@@ -865,7 +865,7 @@ func codexHookEntryHasCommandBody(entry map[string]any, body string) bool {
 }
 
 func codexHookCommandLooksManaged(event, command string) bool {
-	_, env, args, ok := parseManagedGCCommand(command)
+	_, _, env, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return false
 	}
@@ -884,8 +884,17 @@ func codexHookCommandLooksManaged(event, command string) bool {
 	}
 }
 
+// upgradeCodexHookCommand returns the upgraded form of an event-scoped
+// Codex command if it matches a known managed shape. Returns ("", false)
+// when no upgrade applies.
+//
+// SessionStart reassembles as prefix + guard + extraEnv + body (not
+// prefix + extraEnv + guard + body) so any user-added env prefix stays
+// adjacent to the substantive `gc` invocation, immediately after the
+// schema-compat guard rather than swallowed ahead of it — see
+// parseManagedGCCommand's doc comment for why that placement matters.
 func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
-	prefix, env, args, ok := parseManagedGCCommand(command)
+	prefix, extraEnv, env, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -894,14 +903,14 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 		if !codexSessionStartArgsMatch(env, args) && !codexLegacySessionStartRunArgsMatch(args) {
 			return "", false
 		}
-		desired := sessionStartCurrentFormBody(cityDir)
-		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
+		desired := prefix + sessionStartGuardedPrefix() + extraEnv + sessionStartPreGuardFormBody(cityDir)
+		return desired, command != desired
 	case "PreCompact":
 		if !codexPreCompactArgsMatch(args) {
 			return "", false
 		}
-		desired := preCompactCurrentFormBody(cityDir)
-		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
+		desired := prefix + extraEnv + preCompactCurrentFormBody(cityDir)
+		return desired, command != desired
 	case "UserPromptSubmit":
 		return upgradeManagedPromptHookCommand(command, "codex", cityDir)
 	default:
@@ -909,12 +918,12 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 			return upgraded, true
 		}
 		if codexSessionStartArgsMatch(env, args) || codexLegacySessionStartRunArgsMatch(args) {
-			desired := sessionStartCurrentFormBody(cityDir)
-			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
+			desired := prefix + sessionStartGuardedPrefix() + extraEnv + sessionStartPreGuardFormBody(cityDir)
+			return desired, command != desired
 		}
 		if codexPreCompactArgsMatch(args) {
-			desired := preCompactCurrentFormBody(cityDir)
-			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
+			desired := prefix + extraEnv + preCompactCurrentFormBody(cityDir)
+			return desired, command != desired
 		}
 		return "", false
 	}
@@ -925,7 +934,7 @@ func managedPromptHookRunPrefix(cityDir string) string {
 }
 
 func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (string, bool) {
-	prefix, _, args, ok := parseManagedGCCommand(command)
+	prefix, extraEnv, _, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -933,8 +942,8 @@ func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (strin
 	if !ok {
 		return "", false
 	}
-	desired := managedPromptHookRunPrefix(cityDir) + target
-	return prefix + desired, strings.TrimPrefix(command, prefix) != desired
+	desired := prefix + extraEnv + managedPromptHookRunPrefix(cityDir) + target
+	return desired, command != desired
 }
 
 func codexCityFlag(cityDir string) string {
@@ -1025,6 +1034,7 @@ func managedPromptTarget(base string, rest []string, hookFormat string) (string,
 }
 
 func parseGCCommandBody(body string) (map[string]string, []string, bool) {
+	body = stripSessionStartGuard(body)
 	tokens := shellquote.Split(body)
 	if len(tokens) == 0 {
 		return nil, nil, false
@@ -1063,16 +1073,33 @@ func isManagedGCCommandEnvKey(key string) bool {
 	}
 }
 
-func parseManagedGCCommand(command string) (string, map[string]string, []string, bool) {
+// parseManagedGCCommand splits a hook command into the leading
+// canonicalGCPathPrefix (if present), any extra (non-gc-managed) env-var
+// assignments the user prefixed onto an otherwise-managed command, and the
+// parsed gc invocation itself.
+//
+// extraEnvPrefix is returned separately from prefix — rather than folded
+// into it — because callers reassembling a SessionStart command must
+// splice it in *after* sessionStartGuardedPrefix() (immediately before the
+// substantive `gc ...` invocation) so it stays part of that command's
+// temporary environment, while PreCompact/UserPromptSubmit callers (which
+// have no guard) simply concatenate prefix+extraEnvPrefix+body as before.
+// Folding it into prefix, as an earlier version of this function did,
+// silently misplaced extra env ahead of the guard: `FOO=1 _gcbd_skew=...;
+// case ...; gc ...` sets FOO as a plain (non-exported) shell variable
+// instead of gc's process environment, since the assignment no longer
+// immediately precedes a command word (ga-ua1h7d).
+func parseManagedGCCommand(command string) (string, string, map[string]string, []string, bool) {
 	prefix := ""
 	body := command
 	if strings.HasPrefix(body, canonicalGCPathPrefix) {
 		prefix = canonicalGCPathPrefix
 		body = strings.TrimPrefix(body, canonicalGCPathPrefix)
 	}
+	body = stripSessionStartGuard(body)
 	tokens := shellquote.Split(body)
 	if len(tokens) == 0 {
-		return "", nil, nil, false
+		return "", "", nil, nil, false
 	}
 	env := map[string]string{}
 	var envTokens []string
@@ -1094,13 +1121,14 @@ func parseManagedGCCommand(command string) (string, map[string]string, []string,
 		i++
 	}
 	if i >= len(tokens) || tokens[i] != "gc" {
-		return "", nil, nil, false
+		return "", "", nil, nil, false
 	}
 	if len(envTokens) > 0 && prefix == "" && !hasManagedEnv {
-		return "", nil, nil, false
+		return "", "", nil, nil, false
 	}
+	extraEnvPrefix := ""
 	if len(extraEnvTokens) > 0 {
-		prefix += shellquote.Join(extraEnvTokens) + " "
+		extraEnvPrefix = shellquote.Join(extraEnvTokens) + " "
 	}
 	args := tokens[i+1:]
 	if len(args) >= 2 && args[0] == "--city" {
@@ -1108,7 +1136,7 @@ func parseManagedGCCommand(command string) (string, map[string]string, []string,
 	} else if len(args) >= 1 && strings.HasPrefix(args[0], "--city=") {
 		args = args[1:]
 	}
-	return prefix, env, args, true
+	return prefix, extraEnvPrefix, env, args, true
 }
 
 func codexSessionStartArgsMatch(env map[string]string, args []string) bool {
@@ -1463,6 +1491,128 @@ func isLegacyGCManagedCommand(event, command string) bool {
 	return false
 }
 
+// bdSchemaSkewHookSignatures identifies a bd schema-skew / unreachable-
+// database hard failure. Mirrors internal/config's bdFatalSkewSignatures and
+// cmd/gc's bdSchemaSkewSignatures (ga-qyw3wn) so the work-query claiming
+// path, the `gc doctor` advisory check, and this SessionStart boot-time
+// guard all agree on what counts as "skewed". Kept as an independent
+// literal rather than an internal/config import: internal/hooks emits
+// shell text for external hook runners and has no existing dependency on
+// internal/config, matching the precedent already set by
+// cmd/gc/doctor_bd_schema_skew.go.
+var bdSchemaSkewHookSignatures = []string{
+	"schema version mismatch",
+	"Unable to open database",
+}
+
+// bdSchemaSkewHookCaseClauses renders bdSchemaSkewHookSignatures as `sh`
+// case-pattern clauses, e.g. `*"a"*|*"b"*`.
+func bdSchemaSkewHookCaseClauses() string {
+	var b strings.Builder
+	for i, sig := range bdSchemaSkewHookSignatures {
+		if i > 0 {
+			b.WriteString("|")
+		}
+		b.WriteString(`*"` + sig + `"*`)
+	}
+	return b.String()
+}
+
+// bdDoctorProbeShell captures `bd doctor`'s combined stdout+stderr into the
+// shell variable $_gcbd_skew, bounding the probe with `timeout` (or macOS /
+// Homebrew coreutils' `gtimeout`) so a hung or slow Dolt sql-server cannot
+// stall session start fleet-wide (ga-7xzmtd review item 1). When neither
+// wrapper is on PATH (e.g. a macOS box without coreutils) it falls back to an
+// unbounded `bd doctor`, preserving the prior behavior there. The 10s bound
+// matches the Go-side advisory probe (cmd/gc's bdSchemaSkewProbeTimeout). A
+// timeout kill leaves $_gcbd_skew without a skew signature, so the guard falls
+// through (exit 0) and lets the session proceed rather than blocking on a
+// wedged bd.
+//
+// Any change to this text changes the SessionStart guard, and thus the guard
+// prefix stripped by stripSessionStartGuard: freeze the pre-change prefix into
+// sessionStartLegacyGuardedPrefixes() in the same change so already-deployed
+// hooks stay recognizable and upgradeable.
+func bdDoctorProbeShell() string {
+	return `if command -v timeout >/dev/null 2>&1; then _gcbd_skew=$(timeout 10 bd doctor 2>&1); ` +
+		`elif command -v gtimeout >/dev/null 2>&1; then _gcbd_skew=$(gtimeout 10 bd doctor 2>&1); ` +
+		`else _gcbd_skew=$(bd doctor 2>&1); fi;`
+}
+
+// bdSchemaCompatGuardShell emits a shell snippet that probes `bd doctor` (via
+// the time-bounded bdDoctorProbeShell) — the same lightweight, database-opening
+// command cmd/gc's advisory bd-schema-skew check uses — and exits non-zero with
+// the diagnostic message intact on stderr when the resolved `bd` binary is
+// schema-skewed against the live database (ga-ua1h7d / architect decision
+// ga-2gs3pl-A).
+//
+// This does NOT stop the underlying provider session: neither Claude Code
+// nor Codex treats a non-zero SessionStart hook exit as a boot-blocking
+// signal (both verified 2026-07-02; see ga-ua1h7d comments for sources).
+// The value is surfacing the failure at the earliest possible point,
+// instead of it appearing later as a more confusing failure inside `gc
+// prime --hook` itself. A healthy bd, or bd missing from PATH entirely
+// (case falls through unmatched), leaves this a no-op: exit 0, no output.
+func bdSchemaCompatGuardShell() string {
+	return bdDoctorProbeShell() +
+		` case "$_gcbd_skew" in ` +
+		bdSchemaSkewHookCaseClauses() +
+		`) printf '%s\n' "$_gcbd_skew" >&2; exit 1 ;; esac`
+}
+
+// sessionStartGuardedPrefix is bdSchemaCompatGuardShell chained ahead of the
+// substantive SessionStart body with ";" rather than "&&": the guard calls
+// exit 1 itself on a match, so unconditional sequencing is sufficient and
+// avoids needing a brace-group to keep the guard atomic inside an "&&"
+// chain. Recognition (parseGCCommandBody / parseManagedGCCommand) strips
+// this exact literal before tokenizing, symmetric to how
+// canonicalGCPathPrefix is stripped, so guarded and unguarded command
+// bodies both parse to the same env/args shape.
+func sessionStartGuardedPrefix() string {
+	return bdSchemaCompatGuardShell() + `; `
+}
+
+// sessionStartPreTimeoutGuardedPrefix is the exact SessionStart guard prefix
+// gc emitted before the `bd doctor` probe was time-bounded (ga-7xzmtd review
+// item 1). Frozen verbatim — never rebuilt from the current guard helpers — so
+// a hook already deployed carrying this guard is still recognized as managed
+// (and thus upgraded to the current, bounded guard) instead of being misread
+// as user-authored and stranded. Do not edit this literal; add a new frozen
+// literal to sessionStartLegacyGuardedPrefixes whenever the guard text changes
+// again.
+const sessionStartPreTimeoutGuardedPrefix = `_gcbd_skew=$(bd doctor 2>&1); case "$_gcbd_skew" in *"schema version mismatch"*|*"Unable to open database"*) printf '%s\n' "$_gcbd_skew" >&2; exit 1 ;; esac; `
+
+// sessionStartLegacyGuardedPrefixes lists SessionStart guard prefixes emitted
+// by prior gc versions. stripSessionStartGuard consults it so a hook carrying
+// an older guard is still recognized and can be upgraded in place. It grows by
+// one frozen literal each time the guard text changes; the current guard is
+// sessionStartGuardedPrefix() and is handled separately (tried first).
+func sessionStartLegacyGuardedPrefixes() []string {
+	return []string{sessionStartPreTimeoutGuardedPrefix}
+}
+
+// stripSessionStartGuard removes a leading SessionStart guard prefix from body,
+// trying the current guard (sessionStartGuardedPrefix) first and then every
+// known legacy guard (sessionStartLegacyGuardedPrefixes). It returns body
+// unchanged when no guard prefix is present.
+//
+// Recognizing legacy guards is what keeps an already-deployed hook upgradeable
+// after the guard text changes (ga-7xzmtd review item 4): stripping only the
+// current guard would leave a stale guard attached, the tokenizer would then
+// miss the `gc` command word, and the hook would be silently reclassified as
+// user-authored — never upgraded again.
+func stripSessionStartGuard(body string) string {
+	if rest, ok := strings.CutPrefix(body, sessionStartGuardedPrefix()); ok {
+		return rest
+	}
+	for _, legacy := range sessionStartLegacyGuardedPrefixes() {
+		if rest, ok := strings.CutPrefix(body, legacy); ok {
+			return rest
+		}
+	}
+	return body
+}
+
 // sessionStartCurrentFormBody is the canonical current-form managed
 // SessionStart command body (post-canonical-PATH-prefix). Recognized
 // via exact-body match in isLegacyGCManagedCommand so an already-upgraded
@@ -1472,6 +1622,15 @@ func isLegacyGCManagedCommand(event, command string) bool {
 // with additional arguments, update this constant alongside the
 // emission site so legacy detection remains tight.
 func sessionStartCurrentFormBody(cityDir string) string {
+	return sessionStartGuardedPrefix() + sessionStartPreGuardFormBody(cityDir)
+}
+
+// sessionStartPreGuardFormBody is sessionStartCurrentFormBody's shape from
+// before the bd-schema-compat guard (ga-ua1h7d) was prepended, frozen so
+// already-deployed hooks in that shape are still recognized as
+// upgradeable — the same role sessionStartPreviousManagedFormBody plays
+// for the form before it.
+func sessionStartPreGuardFormBody(cityDir string) string {
 	return `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc ` + codexCityFlag(cityDir) + `prime --hook --hook-format codex`
 }
 
@@ -1531,10 +1690,25 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 	case "SessionStart":
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
-		// current managed form expects.
-		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
-			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
-			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+		// current managed form expects. Also covers the form from before
+		// the bd-schema-compat guard (ga-ua1h7d) was prepended, which is
+		// itself now a legacy shape relative to sessionStartCurrentFormBody.
+		//
+		// Comparisons match against tail (body with any already-present
+		// guard prefix stripped) rather than body directly, so a body that
+		// already carries the guard ahead of an otherwise-legacy tail is
+		// still recognized — the guard and tail have historically only
+		// ever changed independently of each other (e.g. a fixture built
+		// by string-replacing just the tail literal), not merely in the
+		// fully-current combination. prefix reconstruction still uses the
+		// original (unstripped) body so any already-present guard is
+		// discarded wholesale rather than duplicated: sessionStartCurrentFormBody
+		// always supplies a fresh one.
+		tail := stripSessionStartGuard(body)
+		if equalsLegacyCommandBody(tail, `gc prime --hook`) ||
+			equalsLegacyCommandBody(tail, `gc prime --hook --hook-format codex`) ||
+			equalsLegacyCommandBody(tail, sessionStartPreviousManagedFormBody) ||
+			equalsLegacyCommandBody(tail, sessionStartPreGuardFormBody("")) {
 			prefix := strings.TrimSuffix(command, body)
 			return prefix + sessionStartCurrentFormBody(""), true
 		}

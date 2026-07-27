@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" && GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" && if command -v timeout >/dev/null 2>&1; then _gcbd_skew=$(timeout 10 bd doctor 2>&1); elif command -v gtimeout >/dev/null 2>&1; then _gcbd_skew=$(gtimeout 10 bd doctor 2>&1); else _gcbd_skew=$(bd doctor 2>&1); fi; case \"$_gcbd_skew\" in *\"schema version mismatch\"*|*\"Unable to open database\"*) printf '%s\\n' \"$_gcbd_skew\" >&2 ;; esac; GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity",
         "timeout": 30
       }
     ]

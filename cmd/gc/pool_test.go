@@ -1378,6 +1378,36 @@ func TestShellScaleCheck_NoBEADS_DOLT_SERVER_PORT_Injection(t *testing.T) {
 	// for the integration test.
 }
 
+// TestShellCommandSurfacesStderrOnFailure verifies the controller-side runners
+// (shellScaleCheck, shellRunHook) include the command's stderr in the returned
+// error rather than collapsing to a bare "exit status 1". Without this, a bd
+// schema-skew diagnostic emitted by the bd_or_fatal guard / SessionStart guard
+// is lost on the scale_check / on_boot / on_death paths (ga-7xzmtd review item 3).
+func TestShellCommandSurfacesStderrOnFailure(t *testing.T) {
+	// A representative schema-skew message printed to stderr, as the guarded bd
+	// probes emit it, followed by a non-zero exit.
+	const skew = "bd: schema version mismatch: database is at v7, binary knows up to v5"
+	command := "printf '%s\\n' " + shellSingleQuote(skew) + " >&2; exit 1"
+
+	for _, tc := range []struct {
+		name string
+		run  func(string, string, map[string]string) (string, error)
+	}{
+		{"shellScaleCheck", shellScaleCheck},
+		{"shellRunHook", shellRunHook},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.run(command, "", nil)
+			if err == nil {
+				t.Fatalf("%s: expected error on non-zero exit, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "schema version mismatch") {
+				t.Fatalf("%s: error does not preserve stderr diagnostic: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func runExternal(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 	runExternalOutput(t, dir, name, args...)

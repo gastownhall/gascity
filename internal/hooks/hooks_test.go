@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,30 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+// jsonEscape returns s as it would appear inside a JSON string literal
+// (quotes and backslashes escaped, surrounding quotes stripped), for
+// building hand-written JSON hook fixtures around dynamic Go string
+// constants — such as sessionStartGuardedPrefix(), whose shell text
+// contains literal `"` and `\n` that must be JSON-escaped to appear
+// inside a fixture's "command" value.
+//
+// Uses an Encoder with SetEscapeHTML(false): the embedded config/claude.json
+// and per-provider hooks.json fixtures are hand-authored with literal `>`
+// and `&` (e.g. `2>&1`), not json.Marshal's default >/& HTML
+// escapes, so the default encoder would never match their bytes.
+func jsonEscape(t *testing.T, s string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		t.Fatalf("json encode(%q): %v", s, err)
+	}
+	// Encode appends a trailing newline; the quoted string precedes it.
+	encoded := strings.TrimSuffix(buf.String(), "\n")
+	return encoded[1 : len(encoded)-1]
+}
 
 func claudeHookCommand(t *testing.T, data []byte, event string) string {
 	t.Helper()
@@ -41,11 +66,11 @@ func claudeHookEntries(t *testing.T, data []byte, event string) []claudeHookEntr
 	return cfg.Hooks[event]
 }
 
-func codexHookCommand(t *testing.T, data []byte, event string) string {
+func codexHookCommand(t *testing.T, data []byte) string {
 	t.Helper()
-	entries := claudeHookEntries(t, data, event)
+	entries := claudeHookEntries(t, data, "SessionStart")
 	if len(entries) == 0 || len(entries[0].Hooks) == 0 {
-		t.Fatalf("missing codex hook for %s", event)
+		t.Fatal("missing codex hook for SessionStart")
 	}
 	return entries[0].Hooks[0].Command
 }
@@ -260,7 +285,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), sessionStartCurrentFormBody(""), sessionStartPreviousManagedFormBody, 1)
+	stale := strings.Replace(string(current), jsonEscape(t, sessionStartCurrentFormBody("")), sessionStartPreviousManagedFormBody, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -276,6 +301,52 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
 	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
 		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	}
+	if string(runtimeData) != string(hookData) {
+		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallClaudeUpgradesPreGuardSessionStartToSchemaCompatGuard covers
+// the legacy tail introduced by ga-ua1h7d: a SessionStart command in
+// sessionStartPreGuardFormBody shape (already has --hook-format codex and
+// the managed env markers, predates only the bd-schema-compat guard) must
+// still be recognized as upgradeable and gain the guard, not be mistaken
+// for a foreign/custom command because it no longer exact-matches the
+// fully-current (now guarded) form.
+func TestInstallClaudeUpgradesPreGuardSessionStartToSchemaCompatGuard(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	stale := strings.Replace(string(current), jsonEscape(t, sessionStartCurrentFormBody("")), sessionStartPreGuardFormBody(""), 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check pre-guard SessionStart pattern")
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(stale)
+	fs.Files["/city/.gc/settings.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	runtimeData := fs.Files["/city/.gc/settings.json"]
+	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	}
+	if !strings.Contains(sessionStartCommand, "bd doctor") {
+		t.Fatalf("upgraded SessionStart command missing schema-compat guard:\n%s", sessionStartCommand)
+	}
+	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "startup" {
+		t.Fatalf("upgraded hook SessionStart matcher = %q, want startup", func() string {
+			if len(entries) == 0 {
+				return ""
+			}
+			return entries[0].Matcher
+		}())
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -366,7 +437,7 @@ func TestInstallCodexUpgradesSessionStartMissingManagedMarker(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
+	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"])
 	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
 		t.Fatalf("upgraded codex SessionStart missing managed marker: %s", sessionStartCommand)
 	}
@@ -375,6 +446,188 @@ func TestInstallCodexUpgradesSessionStartMissingManagedMarker(t *testing.T) {
 	}
 	if !strings.Contains(sessionStartCommand, "gc --city '/city' prime --hook --hook-format codex") {
 		t.Fatalf("upgraded codex SessionStart missing hook format: %s", sessionStartCommand)
+	}
+}
+
+// TestInstallCodexUpgradesPreGuardSessionStartToSchemaCompatGuard covers
+// the legacy tail introduced by ga-ua1h7d for the native Codex hooks.json
+// path: a SessionStart command already in current (pre-guard) managed
+// shape, installed before the bd-schema-compat guard existed, must be
+// recognized as upgradeable via upgradeCodexHookCommand and gain the
+// guard — mirroring the equivalent Claude-side coverage.
+func TestInstallCodexUpgradesPreGuardSessionStartToSchemaCompatGuard(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(fmt.Sprintf(`{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && %s"
+      }]
+    }]
+  }
+}`, sessionStartPreGuardFormBody("")))
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(sessionStartCommand, "bd doctor") {
+		t.Fatalf("upgraded codex SessionStart missing schema-compat guard: %s", sessionStartCommand)
+	}
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("/city") {
+		t.Fatalf("upgraded codex SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("/city"))
+	}
+}
+
+// TestStripSessionStartGuardRecognizesLegacyPreTimeoutGuard verifies the guard
+// stripper (used by parseGCCommandBody / parseManagedGCCommand and the Claude
+// upgrade path) removes both the current bounded guard and the frozen
+// pre-timeout guard, so a hook carrying either parses to the same body — the
+// recognition that keeps a hook deployed with an older guard upgradeable
+// instead of stranded (ga-7xzmtd review item 4).
+func TestStripSessionStartGuardRecognizesLegacyPreTimeoutGuard(t *testing.T) {
+	body := sessionStartPreGuardFormBody("")
+
+	if got := stripSessionStartGuard(sessionStartGuardedPrefix() + body); got != body {
+		t.Fatalf("current guard not stripped: got %q, want %q", got, body)
+	}
+	if got := stripSessionStartGuard(sessionStartPreTimeoutGuardedPrefix + body); got != body {
+		t.Fatalf("legacy pre-timeout guard not stripped: got %q, want %q", got, body)
+	}
+	// An unrecognized leading guard is left intact (treated as user authorship,
+	// never silently rewritten).
+	foreign := `foo=$(bar); ` + body
+	if got := stripSessionStartGuard(foreign); got != foreign {
+		t.Fatalf("unrecognized prefix must be left intact: got %q", got)
+	}
+
+	// parseManagedGCCommand must recognize a command carrying the legacy guard,
+	// so codexHookCommandLooksManaged / upgradeCodexHookCommand can upgrade it.
+	legacyCmd := canonicalGCPathPrefix + sessionStartPreTimeoutGuardedPrefix + body
+	_, _, env, args, ok := parseManagedGCCommand(legacyCmd)
+	if !ok {
+		t.Fatalf("parseManagedGCCommand did not recognize legacy-guarded command: %q", legacyCmd)
+	}
+	if env["GC_HOOK_EVENT_NAME"] != "SessionStart" {
+		t.Fatalf("parsed env missing SessionStart marker: %#v", env)
+	}
+	if len(args) < 1 || args[0] != "prime" {
+		t.Fatalf("parsed args = %#v, want prime ...", args)
+	}
+}
+
+// TestInstallClaudeUpgradesLegacyPreTimeoutGuardToBounded covers ga-7xzmtd
+// review item 4: a SessionStart command carrying the pre-timeout guard (the
+// exact form gc emitted before the bd doctor probe was time-bounded) must be
+// recognized as managed via the frozen legacy prefix and upgraded to the
+// current bounded guard — not stranded because its guard no longer
+// exact-matches sessionStartGuardedPrefix().
+func TestInstallClaudeUpgradesLegacyPreTimeoutGuardToBounded(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	legacyBody := sessionStartPreTimeoutGuardedPrefix + sessionStartPreGuardFormBody("")
+	stale := strings.Replace(string(current), jsonEscape(t, sessionStartCurrentFormBody("")), jsonEscape(t, legacyBody), 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check legacy guard pattern")
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(stale)
+	fs.Files["/city/.gc/settings.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	sessionStartCommand := claudeHookCommand(t, fs.Files["/city/hooks/claude.json"], "SessionStart")
+	if !strings.Contains(sessionStartCommand, "timeout 10 bd doctor") {
+		t.Fatalf("upgraded SessionStart command missing bounded guard:\n%s", sessionStartCommand)
+	}
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	}
+}
+
+// TestInstallCodexUpgradesLegacyPreTimeoutGuardToBounded is the Codex-side
+// counterpart: the native hooks.json upgrade path (parseManagedGCCommand ->
+// upgradeCodexHookCommand) must recognize the pre-timeout guard and rewrite it
+// to the bounded guard (ga-7xzmtd review item 4).
+func TestInstallCodexUpgradesLegacyPreTimeoutGuardToBounded(t *testing.T) {
+	fs := fsys.NewFake()
+	legacyBody := sessionStartPreTimeoutGuardedPrefix + sessionStartPreGuardFormBody("")
+	fs.Files["/work/.codex/hooks.json"] = []byte(fmt.Sprintf(`{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && %s"
+      }]
+    }]
+  }
+}`, jsonEscape(t, legacyBody)))
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(sessionStartCommand, "timeout 10 bd doctor") {
+		t.Fatalf("upgraded codex SessionStart missing bounded guard: %s", sessionStartCommand)
+	}
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("/city") {
+		t.Fatalf("upgraded codex SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("/city"))
+	}
+}
+
+// TestBdSchemaCompatGuardShellDetectsBothSkewSignatures locks the shell
+// snippet ga-ua1h7d's SessionStart guard emits: it must probe `bd doctor`,
+// switch on both known schema-skew signatures (mirroring
+// internal/config's bdFatalSkewSignatures / cmd/gc's bdSchemaSkewSignatures
+// per ga-qyw3wn, so the work-query claiming path, the `gc doctor` advisory
+// check, and this boot-time guard all agree on what counts as "skewed"),
+// exit non-zero, and preserve the diagnostic message on stderr rather than
+// swallowing it — a regression here would silently turn the guard into a
+// no-op or lose the message operators rely on to diagnose a skewed bd.
+func TestBdSchemaCompatGuardShellDetectsBothSkewSignatures(t *testing.T) {
+	guard := bdSchemaCompatGuardShell()
+	if !strings.Contains(guard, "bd doctor") {
+		t.Fatalf("guard does not probe bd doctor: %s", guard)
+	}
+	// The probe must be time-bounded (ga-7xzmtd review item 1) so a hung Dolt
+	// sql-server cannot stall session start, with an unbounded fallback when
+	// no timeout wrapper is on PATH.
+	if !strings.Contains(guard, "timeout 10 bd doctor") {
+		t.Fatalf("guard does not bound the bd doctor probe with timeout: %s", guard)
+	}
+	if !strings.Contains(guard, "command -v timeout") || !strings.Contains(guard, "else _gcbd_skew=$(bd doctor 2>&1)") {
+		t.Fatalf("guard does not fall back to an unbounded probe when timeout is absent: %s", guard)
+	}
+	for _, sig := range []string{"schema version mismatch", "Unable to open database"} {
+		if !strings.Contains(guard, sig) {
+			t.Fatalf("guard missing skew signature %q: %s", sig, guard)
+		}
+	}
+	if !strings.Contains(guard, "exit 1") {
+		t.Fatalf("guard does not exit non-zero on a match: %s", guard)
+	}
+	if !strings.Contains(guard, `>&2`) {
+		t.Fatalf("guard does not write the diagnostic to stderr: %s", guard)
+	}
+	if !strings.Contains(guard, `printf '%s\n' "$_gcbd_skew"`) {
+		t.Fatalf("guard does not preserve the bd doctor message intact: %s", guard)
+	}
+
+	prefix := sessionStartGuardedPrefix()
+	if !strings.HasPrefix(prefix, guard) {
+		t.Fatalf("sessionStartGuardedPrefix() does not lead with bdSchemaCompatGuardShell(): %s", prefix)
+	}
+	if !strings.HasSuffix(prefix, "; ") {
+		t.Fatalf("sessionStartGuardedPrefix() must terminate with '; ' so it sequences unconditionally ahead of the substantive command: %q", prefix)
 	}
 }
 
@@ -425,7 +678,7 @@ func TestInstallCodexDedupesManagedSessionStartDrift(t *testing.T) {
 	if entries[0].Matcher != "startup" {
 		t.Fatalf("SessionStart matcher = %q, want startup", entries[0].Matcher)
 	}
-	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
+	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"])
 	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
 		t.Fatalf("SessionStart missing managed marker: %s", sessionStartCommand)
 	}
@@ -542,7 +795,7 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 		t.Fatal("managed Codex hooks with stale city binding were not reported stale")
 	}
 
-	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
+	currentCity := []byte(fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && %sGC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`, jsonEscape(t, sessionStartGuardedPrefix())))
 	if CodexHooksNeedManagedUpgrade(currentCity, "/old/city") {
 		t.Fatal("managed Codex hooks already bound to requested city were reported stale")
 	}
@@ -736,8 +989,9 @@ func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`) {
-		t.Fatalf("managed codex hook lost extra env prefix:\n%s", got)
+	want := jsonEscape(t, sessionStartGuardedPrefix()) + `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`
+	if !strings.Contains(got, want) {
+		t.Fatalf("managed codex hook lost extra env prefix, or placed it ahead of the schema-compat guard instead of after it:\n%s", got)
 	}
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Fatalf("managed codex hook with extra env missing PreCompact:\n%s", got)
@@ -745,16 +999,16 @@ func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
 }
 
 func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
-	existing := []byte(`{
+	existing := []byte(fmt.Sprintf(`{
   "hooks": {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+        "command": "%sGC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
       }]
     }]
   }
-}`)
+}`, jsonEscape(t, sessionStartGuardedPrefix())))
 	for name, desired := range map[string][]byte{
 		"malformed": []byte(`{not-json`),
 		"missing":   []byte(`{"hooks":{}}`),
@@ -1678,7 +1932,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	codexHooks := fs.Files["/work/.codex/hooks.json"]
 	codexHooksText := string(codexHooks)
-	sessionStartCommand := codexHookCommand(t, codexHooks, "SessionStart")
+	sessionStartCommand := codexHookCommand(t, codexHooks)
 	if !strings.Contains(sessionStartCommand, `gc --city '/city' prime --hook --hook-format codex`) {
 		t.Fatalf("codex SessionStart hook command = %q, want city-bound gc prime --hook --hook-format codex", sessionStartCommand)
 	}
@@ -1745,7 +1999,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
-		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
+		"gascity-prime":       jsonEscape(t, antigravityGuardShellNoExit()) + `; GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
 		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
 		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
 	} {
@@ -1923,6 +2177,112 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
 		}
+	}
+}
+
+// antigravityGuardShellNoExit mirrors bdSchemaCompatGuardShell() but omits
+// "; exit 1": ga-3w44ma's spike found Antigravity's PreInvocation non-zero-exit
+// semantics are unconfirmed and, per the only reachable secondary sources,
+// likely unsafe (may "trigger fallback actions or crash the active turn")
+// rather than confirmed non-blocking like Claude Code/Codex's SessionStart
+// (ga-ua1h7d) — so the antigravity guard must never change the composed
+// command's own exit status. Shares bdSchemaSkewHookCaseClauses() with the
+// production guard so the skew signatures can't drift between the two
+// variants.
+func antigravityGuardShellNoExit() string {
+	return bdDoctorProbeShell() +
+		` case "$_gcbd_skew" in ` +
+		bdSchemaSkewHookCaseClauses() +
+		`) printf '%s\n' "$_gcbd_skew" >&2 ;; esac`
+}
+
+// antigravityHookCommand extracts the first PreInvocation command for the
+// named top-level hook key from an antigravity .agents/hooks.json document
+// (whose hook names, unlike Claude/Codex, ARE the top-level keys — there is
+// no "hooks" wrapper). Decoding via json.Unmarshal (rather than substring
+// matching against the raw, JSON-escaped file bytes) avoids the
+// escaped-vs-unescaped mismatch class of bug that caused ga-hutkxc Finding 1.
+func antigravityHookCommand(t *testing.T, data []byte, hookName string) string {
+	t.Helper()
+	var cfg map[string]map[string][]struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal antigravity hooks: %v", err)
+	}
+	entries := cfg[hookName]["PreInvocation"]
+	if len(entries) == 0 {
+		t.Fatalf("missing antigravity hook %q PreInvocation entries in:\n%s", hookName, data)
+	}
+	return entries[0].Command
+}
+
+// TestInstallAntigravityGascityPrimeIncludesSchemaCompatGuard is ga-3w44ma's
+// guard-text cross-check (mirrors TestBdSchemaCompatGuardShellDetectsBothSkewSignatures):
+// it asserts the installed "gascity-prime" command is derived from the shared
+// skew-signature source of truth rather than a hand-transcribed, independently
+// drifting copy.
+func TestInstallAntigravityGascityPrimeIncludesSchemaCompatGuard(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"antigravity"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	command := antigravityHookCommand(t, fs.Files["/work/.agents/hooks.json"], "gascity-prime")
+	if !strings.Contains(command, antigravityGuardShellNoExit()) {
+		t.Fatalf("gascity-prime command missing schema-compat guard (or guard has drifted from bdSchemaSkewHookCaseClauses()): %s", command)
+	}
+	if strings.Contains(command, `esac; exit 1`) || strings.Contains(command, `>&2; exit 1`) {
+		t.Fatalf("gascity-prime guard must never change the command's own exit status (unconfirmed/unsafe non-zero-exit semantics, ga-3w44ma): %s", command)
+	}
+	for _, want := range []string{
+		`GC_PROVIDER_SESSION_ID_REQUIRED=antigravity`,
+		`GC_PROVIDER_SESSION_ID="${ANTIGRAVITY_CONVERSATION_ID:-}"`,
+		`GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Errorf("gascity-prime command lost substantive body %q: %s", want, command)
+		}
+	}
+}
+
+// TestInstallAntigravityUpgradesStaleGascityPrimeToSchemaCompatGuard proves
+// ga-3w44ma's FR-03: an already-deployed, pre-guard "gascity-prime" entry
+// converges to the guarded form via antigravity's existing merge-based
+// install (writeJSONOverlayManaged / overlay.MergeSettingsJSON's "last
+// writer wins" branch for non-"hooks"-wrapper documents) with no new
+// upgrade-detector, mirroring the Claude/Codex
+// TestInstall*UpgradesPreGuardSessionStartToSchemaCompatGuard tests'
+// stale-to-guarded intent.
+func TestInstallAntigravityUpgradesStaleGascityPrimeToSchemaCompatGuard(t *testing.T) {
+	fs := fsys.NewFake()
+	stalePrimeCommand := `export PATH="$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" && GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID="${ANTIGRAVITY_CONVERSATION_ID:-}" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`
+	fs.Files["/work/.agents/hooks.json"] = []byte(`{
+  "gascity-prime": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "` + jsonEscape(t, stalePrimeCommand) + `",
+        "timeout": 30
+      }
+    ]
+  }
+}
+`)
+
+	if err := Install(fs, "/city", "/work", []string{"antigravity"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	command := antigravityHookCommand(t, fs.Files["/work/.agents/hooks.json"], "gascity-prime")
+	if command == stalePrimeCommand {
+		t.Fatalf("stale gascity-prime command was not upgraded to the guarded form: %s", command)
+	}
+	if !strings.Contains(command, antigravityGuardShellNoExit()) {
+		t.Fatalf("upgraded gascity-prime command missing schema-compat guard: %s", command)
+	}
+	if !strings.Contains(command, `gc prime --hook --hook-format antigravity`) {
+		t.Fatalf("upgraded gascity-prime command lost its substantive body: %s", command)
 	}
 }
 
@@ -2378,7 +2738,8 @@ func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
 	if bytes.Contains(data, []byte(`\u0026`)) {
 		t.Fatalf("codex hook escaped command operator:\n%s", data)
 	}
-	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime`)) {
+	want := []byte(` && ` + jsonEscape(t, sessionStartGuardedPrefix()) + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime`)
+	if !bytes.Contains(data, want) {
 		t.Fatalf("codex hook missing literal command operator:\n%s", data)
 	}
 	if !bytes.HasSuffix(data, []byte("\n")) {
