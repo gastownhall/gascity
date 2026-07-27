@@ -142,8 +142,9 @@ Work is done. Close this drain step, then signal the controller to reclaim this
 session:
 
 ```bash
-if [ -n "${GC_BEAD_ID:-}" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+DRAIN_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
+if [ -n "$DRAIN_BEAD_ID" ]; then
+  gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
 fi
 gc runtime drain-ack
 ```
