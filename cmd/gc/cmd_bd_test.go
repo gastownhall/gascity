@@ -2359,7 +2359,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent wrong assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "skipped" {
@@ -2375,7 +2375,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent matching assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {
@@ -2455,7 +2455,7 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {

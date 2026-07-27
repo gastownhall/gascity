@@ -233,7 +233,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
+		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
@@ -269,7 +269,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCity(target.ScopeRoot, cityPath)
+			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 			// Store-unavailable: we cannot verify, but we must not block
 			// legitimate writes. Fall through; bd will error on actual problems.
 			if storeErr == nil {
@@ -491,8 +491,8 @@ func bdMutationWriteID(args []string) (string, bool) {
 	return ids[0], true
 }
 
-func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
