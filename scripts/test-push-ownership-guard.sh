@@ -159,6 +159,24 @@ run_guard() {
     )
 }
 
+# run_guard_zsh: identical to run_guard, but sources and calls the guard
+# under a real zsh subprocess instead of bash. push-ownership-guard.sh is
+# SOURCED into the deployer's ambient interactive shell (zsh, in this fork —
+# see rebase-resolve-lib.sh's attempt_bounded_self_rebase, Layer B), not
+# executed via its own bash shebang, so zsh's parsing/builtin rules apply to
+# assert_bead_still_claimed's body at call time (ga-xi7wi6).
+run_guard_zsh() {
+    local repo="$1" fbd="$2" agent="$3" template="$4" pog_timeout="${5:-5}"
+    local session_id="${6:-}" session_name="${7:-}"
+    (
+        cd "$repo" || exit 1
+        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+            GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
+            POG_TIMEOUT_SECONDS="$pog_timeout" LIB="$LIB" \
+            zsh -c '. "$LIB"; assert_bead_still_claimed'
+    )
+}
+
 # ---------------------------------------------------------------------------
 # assert_bead_still_claimed — direct tests.
 # ---------------------------------------------------------------------------
@@ -174,6 +192,32 @@ test_allow_clean_claim() {
         record_pass "allow/clean-claim"
     else
         record_fail "allow/clean-claim" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# test_allow_clean_claim_under_zsh mirrors test_allow_clean_claim exactly,
+# but runs assert_bead_still_claimed under a real zsh subprocess (ga-xi7wi6):
+# a local variable named 'status' collides with zsh's read-only special
+# parameter of the same name, so the guard must never bind that name.
+# Skips (does not fail) when zsh isn't installed, matching the fallback
+# style of _pog_timeout degrading gracefully on a missing dev tool rather
+# than failing the whole suite closed.
+test_allow_clean_claim_under_zsh() {
+    if ! command -v zsh >/dev/null 2>&1; then
+        echo "  skip allow/clean-claim-under-zsh — zsh not installed"
+        return
+    fi
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard_zsh "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/clean-claim-under-zsh"
+    else
+        record_fail "allow/clean-claim-under-zsh" "expected rc=0, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -557,6 +601,7 @@ test_rebase_lib_calls_guard_before_force_with_lease() {
 
 run_all() {
     test_allow_clean_claim
+    test_allow_clean_claim_under_zsh
     test_block_on_closed
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id

@@ -163,14 +163,18 @@ assert_bead_still_claimed() {
         return 1
     fi
 
-    local status assignee routed_to labels
-    status="$(jq -r '.[0].status // empty' <<<"$json")"
+    # NOTE: never name this local 'status' — it is a zsh special parameter
+    # (linked to $?, alongside $pipestatus) and this function is sourced
+    # into the deployer's ambient zsh shell (ga-xi7wi6); binding a local
+    # named 'status' there is a read-only-variable error, not a shadow.
+    local bead_status assignee routed_to labels
+    bead_status="$(jq -r '.[0].status // empty' <<<"$json")"
     assignee="$(jq -r '.[0].assignee // empty' <<<"$json")"
     routed_to="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$json")"
     labels="$(jq -r '.[0].labels[]? // empty' <<<"$json")"
 
-    if [[ "$status" != "in_progress" && "$status" != "open" ]]; then
-        echo "push-ownership-guard: BLOCKED — $id status is '$status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
+    if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
+        echo "push-ownership-guard: BLOCKED — $id status is '$bead_status', not in_progress/open; the claim behind this push is stale. Bypass with: git push --no-verify" >&2
         return 1
     fi
 
