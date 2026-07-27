@@ -208,9 +208,16 @@ func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) 
 			case ".git", ".gc", "node_modules", "worktrees":
 				return filepath.SkipDir
 			}
-			// Skip git worktrees embedded in the repo (have a .git file, not dir).
-			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
-				return filepath.SkipDir
+			// Skip git worktrees embedded in the repo (have a .git file, not
+			// dir) — but never apply this to repoRoot itself. gc agent
+			// sessions run from inside a worktree, so repoRoot legitimately
+			// has a .git file rather than a .git directory; skipping on that
+			// condition here would SkipDir the walk's very first entry and
+			// silently visit zero files.
+			if path != repoRoot {
+				if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
