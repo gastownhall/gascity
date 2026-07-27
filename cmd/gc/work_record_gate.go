@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
@@ -182,11 +183,11 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // `gc bd update --status=closed`) invocation closes against the work-record
 // contract. Best-effort: it never blocks on its own read failure. Returns
 // whether the close should be blocked (only when enforcement is enabled).
-func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, stderr io.Writer) bool {
+func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, stderr io.Writer) bool {
 	if _, ok := workRecordCloseTargets(bdArgs); !ok {
 		return false
 	}
-	store, err := openStoreAtForCity(scopeRoot, cityPath)
+	store, err := openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
 	if err != nil {
 		// Cannot verify — never block a close on our own read failure.
 		return false

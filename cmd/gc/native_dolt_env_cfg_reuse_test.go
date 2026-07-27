@@ -157,3 +157,49 @@ func TestBdBeadExistsProbeReusesTheLoadedCityConfig(t *testing.T) {
 		t.Fatalf("found %d config-carrying store open(s) in bdBeadExists, want exactly 1", opens)
 	}
 }
+
+// The work-record close gate opens a store after doBd has already loaded the
+// city config. Opening it without that config re-ran the builtin readiness
+// pass — the expensive half of a config load — so `gc bd close` paid for it
+// twice.
+func TestWorkRecordCloseGateReusesTheLoadedCityConfig(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "work_record_gate.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing work_record_gate.go: %v", err)
+	}
+
+	fn := findFuncDecl(file, "runWorkRecordCloseGate")
+	if fn == nil {
+		t.Fatal("runWorkRecordCloseGate not found in work_record_gate.go")
+	}
+
+	var opens int
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch ident.Name {
+		case "openStoreAtForCity":
+			t.Fatal("runWorkRecordCloseGate opens the store without a config, which re-runs the builtin readiness pass doBd already ran")
+		case "openStoreAtForCityWithConfig":
+			opens++
+			if len(call.Args) != 3 {
+				t.Fatalf("openStoreAtForCityWithConfig: got %d args, want 3", len(call.Args))
+			}
+			arg, ok := call.Args[2].(*ast.Ident)
+			if !ok || arg.Name != "cfg" {
+				t.Fatalf("runWorkRecordCloseGate passes %s as its config; want the already-loaded \"cfg\"", exprText(call.Args[2]))
+			}
+		}
+		return true
+	})
+	if opens != 1 {
+		t.Fatalf("found %d config-carrying store open(s) in runWorkRecordCloseGate, want exactly 1", opens)
+	}
+}

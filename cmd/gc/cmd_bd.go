@@ -292,7 +292,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, stderr) {
 		return 1
 	}
 
