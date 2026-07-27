@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2000,8 +2001,20 @@ case "$*" in
   *) printf '[]' ;;
 esac
 `)
-	if strings.TrimSpace(out) != `[{"id":"assigned-in-progress","ephemeral":true}]` {
+	// The row is compared field-wise rather than byte-wise: the in_progress
+	// tier now attaches a blocked_by array (empty here — the fake bd reports
+	// no dependencies) so the hook-side unready filter can see readiness state
+	// that `bd list` does not compute. What matters is that unblocked assigned
+	// work is still surfaced for crash recovery.
+	var gotRows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRows); err != nil {
+		t.Fatalf("EffectiveAssignedInProgressQuery() output is not JSON: %v (%q)", err, out)
+	}
+	if len(gotRows) != 1 || gotRows[0]["id"] != "assigned-in-progress" {
 		t.Fatalf("EffectiveAssignedInProgressQuery() output = %q, want assigned in-progress work", out)
+	}
+	if _, ok := gotRows[0]["blocked_by"]; !ok {
+		t.Errorf("EffectiveAssignedInProgressQuery() row missing blocked_by: %q", out)
 	}
 }
 
