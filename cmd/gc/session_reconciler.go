@@ -3395,6 +3395,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
+			// Stamp currently_processing_bead_id so the next divergence check has
+			// a baseline. Backfills legacy sessions that were already alive before
+			// this metadata existed and refreshes the record after the agent
+			// picks up its next bead in resume mode. Unconditional on
+			// idleAssignedWorkOnly: a resume-mode session reassigned while alive
+			// and idle-assigned-work-only would otherwise never refresh this
+			// record, so a later crash-recovery restart could re-anchor on a
+			// stale sibling bead instead of the session's actual current
+			// assignment (Finding 4/#3835 review). Idempotent —
+			// recordCurrentBeadIDOnWake no-ops when the bead ID is unchanged.
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+				tick.apply(target.info.ID, fold)
+			}
 			if beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk) {
 				// Idle session awake only for assigned work: drained to asleep
 				// (open bead) so resume-on-ready re-spawns it fresh to run its
@@ -3404,31 +3417,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, nil)
 				}
 			} else if !idleAssignedWorkOnly(eval) {
-				// Stamp currently_processing_bead_id so the next divergence
-				// check has a baseline. Backfills legacy sessions that were
-				// already alive before this metadata existed and refreshes the
-				// record after the agent picks up its next bead in resume mode.
-				if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
-					tick.apply(target.info.ID, fold)
-				}
 				// Session is correctly awake. Cancel any non-drift drain
 				// (handles scale-back-up: agent returns to desired set while draining).
 				// Assigned-work-only sessions are intentionally skipped here so
 				// their idle probe can run to completion (sleep-and-respawn).
 				cancelSessionDrainInfo(info, sp, dt)
 				clearCompletedIdleProbe(target.info.ID, dt)
-				if info.SleepIntent == "idle-stop-pending" {
-					// OPTIMISTIC fold (origin/main parity): main cleared sleep_intent with an
-					// error-ignored write and folded the clear UNCONDITIONALLY (tick.apply),
-					// so the local fold must survive a failed write here too. This runs on an
-					// ALIVE session (the shouldWake && alive arm), which never enters
-					// startCandidates, and sleep_intent is not read off the raw session bead
-					// anywhere downstream this tick — so Step 5c dropped the raw
-					// session.Metadata mirror. The single-key clear rides the front door's
-					// SetMetadataBatch (empty-string clear), byte-equivalent to the raw
-					// SetMetadata it replaced.
-					tick.applyOptimistic(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
-				}
+			}
+			if info.SleepIntent == "idle-stop-pending" {
+				// Clear unconditionally on any re-wake, including
+				// assigned-work-only sessions that skip the cancel/clear above so
+				// their idle-respawn drain/probe can run to completion: the
+				// session did new work between the mark and now, so a future
+				// idle decision must re-prove idleness via
+				// shouldBeginIdleDrainInfo rather than bypass it on this stale
+				// authorization (Finding 2/#3835 review — an unhoisted clear let
+				// reason=="idle" fall through to beginSessionDrainInfo on
+				// authorization set before the work ran).
+				// OPTIMISTIC fold (origin/main parity): main cleared sleep_intent with an
+				// error-ignored write and folded the clear UNCONDITIONALLY (tick.apply),
+				// so the local fold must survive a failed write here too. This runs on an
+				// ALIVE session (the shouldWake && alive arm), which never enters
+				// startCandidates, and sleep_intent is not read off the raw session bead
+				// anywhere downstream this tick — so Step 5c dropped the raw
+				// session.Metadata mirror. The single-key clear rides the front door's
+				// SetMetadataBatch (empty-string clear), byte-equivalent to the raw
+				// SetMetadata it replaced.
+				tick.applyOptimistic(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
 			}
 		}
 
@@ -5047,6 +5062,17 @@ func selectIdleProbeTargets(
 		// an idle assigned-work session can sleep-and-respawn (resume-on-ready)
 		// instead of staying pinned awake-but-idle.
 		if (len(eval.Reasons) != 0 || !eval.ConfigSuppressed) && !idleAssignedWorkOnly(eval) {
+			continue
+		}
+		// Named sessions awake solely for assigned work are materialized by the
+		// named-session loop, not pool respawn: beginIdleRespawnDrainIfIdle
+		// refuses to drain them (mirrors this guard exactly). A probe started
+		// for that case is never consumed by any clear site, so the
+		// dt.idleProbes[id] != nil guard above would then block every future
+		// probe for this session ID permanently. Named sessions idle with no
+		// wake demand at all (eval.Reasons empty) are unaffected — they still
+		// need probing for their own ordinary "idle"-reason drain path.
+		if idleAssignedWorkOnly(eval) && isNamedSessionInfo(infoByID[target.info.ID]) {
 			continue
 		}
 		if eval.Policy.Class == config.SessionSleepNonInteractive {
