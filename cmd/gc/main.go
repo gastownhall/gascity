@@ -1468,13 +1468,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	return result, nil
 }
 
-func openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath string) (beads.Store, error) {
-	return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, nil)
-}
-
-// openExecStoreAtForCityWithConfig is openExecStoreAtForCity for a caller that
-// already holds this city's config. A nil config is loaded here, matching
-// openExecStoreAtForCity.
+// openExecStoreAtForCityWithConfig opens the exec-provider store for a city.
+// A caller that already holds this city's config passes it to avoid reloading
+// it; a nil config is loaded here.
 func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath string, cfg *config.City) (beads.Store, error) {
 	target, err := resolveConfiguredExecStoreTargetWithConfig(runtimeCityPath, scopeRoot, cfg)
 	if err != nil {
@@ -1536,12 +1532,9 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	return scopeRoot
 }
 
-func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
-	return openBdStoreAtWithConfig(storePath, cityPath, nil)
-}
-
-// openBdStoreAtWithConfig is openBdStoreAt for a caller that already holds
-// this city's config. A nil config is loaded here, matching openBdStoreAt.
+// openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
+// A caller that already holds this city's config passes it to avoid reloading
+// it; a nil config is loaded here.
 func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		store := bdStoreForCity(storePath, cityPath)
