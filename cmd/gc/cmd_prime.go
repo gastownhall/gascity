@@ -334,7 +334,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
 			if hookSPErr != nil {
-				// Fail open: skip the event-capable nudge-poller wiring this pass.
+				// Fail open: a momentarily-broken provider config must not fail
+				// the hook, so skip the event-capable nudge-poller wiring this
+				// pass — today's spawn still runs with the nil provider.
+				fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", hookSPErr) //nolint:errcheck
 			} else {
 				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 					cityPath:          cityPath,
