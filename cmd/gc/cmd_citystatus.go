@@ -96,14 +96,19 @@ type StatusSummaryJSON struct {
 // StoreHealth is the JSON shape of the Dolt bead store health block
 // surfaced by gc status. See ADR 0002 / bead ga-d5y design D9.
 type StoreHealth struct {
-	Path         string  `json:"path"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LiveRows     int     `json:"live_rows"`
-	RatioMB      float64 `json:"ratio_mb_per_row"`
-	Warning      bool    `json:"warning"`
-	ThresholdMB  float64 `json:"threshold_mb_per_row"`
-	LastGCAt     string  `json:"last_gc_at,omitempty"`
-	LastGCStatus string  `json:"last_gc_status,omitempty"`
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+	LiveRows  int    `json:"live_rows"`
+	// LiveRowsUnknown is true when the row count failed or timed out.
+	// LiveRows, RatioMB, and Warning carry no meaning in that case — a
+	// consumer MUST check this field before trusting a "0" LiveRows or a
+	// "false" Warning as a real measurement.
+	LiveRowsUnknown bool    `json:"live_rows_unknown,omitempty"`
+	RatioMB         float64 `json:"ratio_mb_per_row"`
+	Warning         bool    `json:"warning"`
+	ThresholdMB     float64 `json:"threshold_mb_per_row"`
+	LastGCAt        string  `json:"last_gc_at,omitempty"`
+	LastGCStatus    string  `json:"last_gc_status,omitempty"`
 }
 
 var (

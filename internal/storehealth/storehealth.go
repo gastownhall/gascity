@@ -37,11 +37,18 @@ const MinWarnSizeBytes = 1_000_000_000 // 1 GB
 // Health summarizes disk and maintenance health of the Dolt bead store.
 // A pointer *Health is included in status payloads so "no data" (e.g.
 // supervisor not running) is representable as nil rather than a
-// confusing zero-valued block.
+// confusing zero-valued block. The same idiom applies one level down at
+// RowsMeasured: LiveRows alone cannot distinguish a genuinely empty
+// store from a row count that failed or timed out, so a caller that
+// fabricates LiveRows=0 on measurement failure makes an unmeasured
+// store indistinguishable from a healthy one. RowsMeasured is that
+// distinction; when false, RatioMB and Warning are never computed and
+// LiveRows carries no meaning.
 type Health struct {
 	Path         string
 	SizeBytes    int64
 	LiveRows     int
+	RowsMeasured bool
 	RatioMB      float64
 	Warning      bool
 	ThresholdMB  float64
@@ -63,16 +70,24 @@ func StorePath(cityPath string) string {
 
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
-func Compute(cityPath string, sizeBytes int64, retainedRows int, lastGCAt time.Time, lastGCStatus string) Health {
+//
+// rowsMeasured tells Compute whether retainedRows is a real count or a
+// caller's placeholder for "the count did not complete" (nil store,
+// scan error, timeout). Callers MUST NOT pass rowsMeasured=true with a
+// fabricated retainedRows value — doing so is exactly the defect this
+// parameter exists to prevent: a failed measurement rendering
+// byte-identically to a healthy, genuinely-empty store.
+func Compute(cityPath string, sizeBytes int64, retainedRows int, rowsMeasured bool, lastGCAt time.Time, lastGCStatus string) Health {
 	h := Health{
 		Path:         StorePath(cityPath),
 		SizeBytes:    sizeBytes,
 		LiveRows:     retainedRows,
+		RowsMeasured: rowsMeasured,
 		ThresholdMB:  DefaultThresholdMB,
 		LastGCAt:     lastGCAt,
 		LastGCStatus: lastGCStatus,
 	}
-	if retainedRows > 0 {
+	if rowsMeasured && retainedRows > 0 {
 		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(retainedRows))
 		h.Warning = sizeBytes > MinWarnSizeBytes && sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(retainedRows)
 	}
