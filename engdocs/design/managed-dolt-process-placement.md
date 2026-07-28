@@ -151,6 +151,13 @@ converges, it rechecks both identities, cgroups, runtime state, port holder, and
 tree shape. Any uncertainty fails closed; adoption never converts into a Dolt
 restart.
 
+The watchdog-free path is verified separately by its exact `dolt sql-server
+--config` argv, canonical config path, managed-process environment sentinel,
+absence of session attribution, ownership, listener, and start identity. Its
+single server PID is attached and rechecked with the same fail-closed rules.
+Pre-sentinel direct servers are intentionally not adopted because their origin
+cannot be proved strongly enough.
+
 ### Bounded slice policy
 
 Before either spawn or adoption, `gc` applies and reads back:

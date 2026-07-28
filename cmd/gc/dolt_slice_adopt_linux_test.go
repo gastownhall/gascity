@@ -139,6 +139,59 @@ func TestManagedDoltAdopterFailsClosedOnAttachError(t *testing.T) {
 	}
 }
 
+func TestManagedDoltAdopterMovesDirectManagedServer(t *testing.T) {
+	adopter := validManagedDoltAdopterFixture()
+	adopter.readPPID = func(int) (int, error) { return 999, nil }
+	adopter.readCmdline = func(pid int) ([]string, error) {
+		if pid == 202 {
+			return []string{"dolt", "sql-server", "--config", "/city/config.yaml"}, nil
+		}
+		return []string{"/bin/sleep", "infinity"}, nil
+	}
+	adopter.readEnviron = func(int) (map[string]string, error) {
+		return map[string]string{managedDoltProcessSentinelEnv: managedDoltProcessSentinelValue}, nil
+	}
+	var attached []int
+	adopter.startScope = func(_ context.Context, _, _, _ string, pids []int) error {
+		attached = append([]int(nil), pids...)
+		return nil
+	}
+
+	if err := adopter.adopt(context.Background(), "/city", "29620", "gcdolt.slice"); err != nil {
+		t.Fatalf("adopt direct server: %v", err)
+	}
+	if want := []int{202}; !reflect.DeepEqual(attached, want) {
+		t.Fatalf("attached pids = %v, want direct server only %v", attached, want)
+	}
+}
+
+func TestManagedDoltAdopterRejectsForgedDirectServerWithoutSentinel(t *testing.T) {
+	adopter := validManagedDoltAdopterFixture()
+	adopter.readPPID = func(int) (int, error) { return 999, nil }
+	adopter.readCmdline = func(pid int) ([]string, error) {
+		if pid == 202 {
+			return []string{"dolt", "sql-server", "--config", "/city/config.yaml"}, nil
+		}
+		return []string{"/bin/sleep", "infinity"}, nil
+	}
+	adopter.readEnviron = func(int) (map[string]string, error) {
+		return map[string]string{}, nil
+	}
+	startCalls := 0
+	adopter.startScope = func(context.Context, string, string, string, []int) error {
+		startCalls++
+		return nil
+	}
+
+	err := adopter.adopt(context.Background(), "/city", "29620", "gcdolt.slice")
+	if err == nil || !strings.Contains(err.Error(), "missing managed-process sentinel") {
+		t.Fatalf("adopt error = %v, want direct-server sentinel rejection", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("startScope called %d times for forged direct server", startCalls)
+	}
+}
+
 func validManagedDoltAdopterFixture() managedDoltAdopter {
 	cgroupReads := map[int]int{}
 	return managedDoltAdopter{

@@ -21,6 +21,7 @@ type managedDoltAdopter struct {
 	readState       func(string, int) (doltRuntimeState, error)
 	readPPID        func(int) (int, error)
 	readCmdline     func(int) ([]string, error)
+	readEnviron     func(int) (map[string]string, error)
 	readChildren    func(int) ([]int, error)
 	readCgroup      func(int) (string, error)
 	snapshot        func(int) (uint64, string)
@@ -42,6 +43,22 @@ type managedDoltAdoptTarget struct {
 	serverIdentity   managedDoltAdoptIdentity
 }
 
+func (target managedDoltAdoptTarget) identities() []managedDoltAdoptIdentity {
+	if target.watchdogIdentity.pid > 1 {
+		return []managedDoltAdoptIdentity{target.watchdogIdentity, target.serverIdentity}
+	}
+	return []managedDoltAdoptIdentity{target.serverIdentity}
+}
+
+func (target managedDoltAdoptTarget) pids() []int {
+	identities := target.identities()
+	pids := make([]int, 0, len(identities))
+	for _, identity := range identities {
+		pids = append(pids, identity.pid)
+	}
+	return pids
+}
+
 func (a managedDoltAdopter) adopt(ctx context.Context, cityPath, port, slice string) error {
 	portNumber, err := strconv.Atoi(strings.TrimSpace(port))
 	if err != nil || portNumber <= 0 {
@@ -57,14 +74,7 @@ func (a managedDoltAdopter) adopt(ctx context.Context, cityPath, port, slice str
 	if err := a.attachIfNeeded(ctx, slice, target); err != nil {
 		return err
 	}
-	return a.verifyAfterAttach(
-		cityPath,
-		port,
-		slice,
-		target.state,
-		target.watchdogIdentity,
-		target.serverIdentity,
-	)
+	return a.verifyAfterAttach(cityPath, port, slice, target)
 }
 
 func (a managedDoltAdopter) attachIfNeeded(
@@ -74,8 +84,7 @@ func (a managedDoltAdopter) attachIfNeeded(
 ) error {
 	placed, err := a.alreadyPlaced(
 		slice,
-		target.watchdogIdentity,
-		target.serverIdentity,
+		target.identities()...,
 	)
 	if err != nil {
 		return err
@@ -93,15 +102,14 @@ func (a managedDoltAdopter) attachIfNeeded(
 		unit,
 		slice,
 		"Gas City managed Dolt adopted process tree",
-		[]int{target.watchdogIdentity.pid, target.serverIdentity.pid},
+		target.pids(),
 	); err != nil {
 		return fmt.Errorf("adopt managed dolt: attach watchdog/server: %w", err)
 	}
 	return a.waitForPlacement(
 		ctx,
 		slice,
-		target.watchdogIdentity,
-		target.serverIdentity,
+		target.identities()...,
 	)
 }
 
@@ -134,36 +142,43 @@ func (a managedDoltAdopter) resolveProcessTreeTarget(
 	state doltRuntimeState,
 ) (managedDoltAdoptTarget, error) {
 	serverPID := state.PID
-	watchdogPID, err := a.readPPID(serverPID)
-	if err != nil {
-		return managedDoltAdoptTarget{}, fmt.Errorf("adopt managed dolt: read server parent: %w", err)
-	}
-	if watchdogPID <= 1 || watchdogPID == serverPID {
-		return managedDoltAdoptTarget{}, fmt.Errorf(
-			"adopt managed dolt: invalid watchdog pid %d for server %d",
-			watchdogPID,
-			serverPID,
-		)
-	}
-	if err := a.validateWatchdog(cityPath, watchdogPID); err != nil {
-		return managedDoltAdoptTarget{}, err
-	}
-	if err := a.validateProcessTree(watchdogPID, serverPID); err != nil {
-		return managedDoltAdoptTarget{}, err
-	}
-
-	watchdogIdentity, err := a.captureIdentity(watchdogPID)
-	if err != nil {
-		return managedDoltAdoptTarget{}, err
-	}
 	serverIdentity, err := a.captureIdentity(serverPID)
 	if err != nil {
 		return managedDoltAdoptTarget{}, err
 	}
+
+	watchdogPID, parentErr := a.readPPID(serverPID)
+	watchdogErr := fmt.Errorf("invalid watchdog pid %d for server %d", watchdogPID, serverPID)
+	if parentErr == nil && watchdogPID > 1 && watchdogPID != serverPID {
+		watchdogErr = a.validateWatchdog(cityPath, watchdogPID)
+		if watchdogErr == nil {
+			if err := a.validateProcessTree(watchdogPID, serverPID); err != nil {
+				return managedDoltAdoptTarget{}, err
+			}
+			watchdogIdentity, err := a.captureIdentity(watchdogPID)
+			if err != nil {
+				return managedDoltAdoptTarget{}, err
+			}
+			return managedDoltAdoptTarget{
+				state:            state,
+				watchdogIdentity: watchdogIdentity,
+				serverIdentity:   serverIdentity,
+			}, nil
+		}
+	} else if parentErr != nil {
+		watchdogErr = fmt.Errorf("read server parent: %w", parentErr)
+	}
+
+	if err := a.validateDirectServer(cityPath, serverPID); err != nil {
+		return managedDoltAdoptTarget{}, fmt.Errorf(
+			"adopt managed dolt: process is neither canonical watchdog child (%w) nor direct managed server (%w)",
+			watchdogErr,
+			err,
+		)
+	}
 	return managedDoltAdoptTarget{
-		state:            state,
-		watchdogIdentity: watchdogIdentity,
-		serverIdentity:   serverIdentity,
+		state:          state,
+		serverIdentity: serverIdentity,
 	}, nil
 }
 
@@ -325,6 +340,44 @@ func (a managedDoltAdopter) validateProcessTree(watchdogPID, serverPID int) erro
 	return nil
 }
 
+func (a managedDoltAdopter) validateDirectServer(cityPath string, serverPID int) error {
+	argv, err := a.readCmdline(serverPID)
+	if err != nil {
+		return fmt.Errorf("read direct server argv: %w", err)
+	}
+	configFile, err := a.configFile(cityPath)
+	if err != nil {
+		return fmt.Errorf("resolve direct server config: %w", err)
+	}
+	if len(argv) != 4 ||
+		filepath.Base(argv[0]) != "dolt" ||
+		argv[1] != "sql-server" ||
+		argv[2] != "--config" ||
+		!samePath(argv[3], configFile) {
+		return fmt.Errorf("direct server argv does not match canonical managed process: %q", argv)
+	}
+	environ, err := a.readEnviron(serverPID)
+	if err != nil {
+		return fmt.Errorf("read direct server environment: %w", err)
+	}
+	if environ[managedDoltProcessSentinelEnv] != managedDoltProcessSentinelValue {
+		return fmt.Errorf("direct server is missing managed-process sentinel")
+	}
+	for _, key := range managedDoltSessionAttributionEnvKeys {
+		if _, present := environ[key]; present {
+			return fmt.Errorf("direct server retains session attribution %s", key)
+		}
+	}
+	children, err := a.readChildren(serverPID)
+	if err != nil {
+		return fmt.Errorf("read direct server children: %w", err)
+	}
+	if len(children) != 0 {
+		return fmt.Errorf("direct server has unverified descendants %v", children)
+	}
+	return nil
+}
+
 func (a managedDoltAdopter) captureIdentity(pid int) (managedDoltAdoptIdentity, error) {
 	ticks, fallback := a.snapshot(pid)
 	if ticks == 0 && strings.TrimSpace(fallback) == "" {
@@ -335,10 +388,9 @@ func (a managedDoltAdopter) captureIdentity(pid int) (managedDoltAdoptIdentity, 
 
 func (a managedDoltAdopter) verifyAfterAttach(
 	cityPath, port, slice string,
-	beforeState doltRuntimeState,
-	watchdogIdentity, serverIdentity managedDoltAdoptIdentity,
+	target managedDoltAdoptTarget,
 ) error {
-	for _, identity := range []managedDoltAdoptIdentity{watchdogIdentity, serverIdentity} {
+	for _, identity := range target.identities() {
 		if !a.identityMatches(identity.pid, identity.ticks, identity.fallback) {
 			return fmt.Errorf("adopt managed dolt: pid %d identity changed during attach", identity.pid)
 		}
@@ -350,29 +402,29 @@ func (a managedDoltAdopter) verifyAfterAttach(
 			return fmt.Errorf("adopt managed dolt: pid %d cgroup %q is outside %s", identity.pid, cgroup, slice)
 		}
 	}
-	afterState, err := a.readState(cityPath, beforeState.Port)
+	afterState, err := a.readState(cityPath, target.state.Port)
 	if err != nil {
 		return fmt.Errorf("adopt managed dolt: re-read runtime state: %w", err)
 	}
-	if afterState.Running != beforeState.Running ||
-		afterState.PID != beforeState.PID ||
-		afterState.Port != beforeState.Port {
+	if afterState.Running != target.state.Running ||
+		afterState.PID != target.state.PID ||
+		afterState.Port != target.state.Port {
 		return fmt.Errorf(
 			"adopt managed dolt: runtime state changed during attach: before=%+v after=%+v",
-			beforeState, afterState,
+			target.state, afterState,
 		)
 	}
 	afterInspection, err := a.inspect(cityPath, port)
 	if err != nil {
 		return fmt.Errorf("adopt managed dolt: re-inspect owned process: %w", err)
 	}
-	if err := validateManagedDoltAdoptInspection(afterInspection, beforeState.PID); err != nil {
+	if err := validateManagedDoltAdoptInspection(afterInspection, target.state.PID); err != nil {
 		return err
 	}
-	if err := a.validateProcessTree(watchdogIdentity.pid, serverIdentity.pid); err != nil {
-		return err
+	if target.watchdogIdentity.pid > 1 {
+		return a.validateProcessTree(target.watchdogIdentity.pid, target.serverIdentity.pid)
 	}
-	return nil
+	return a.validateDirectServer(cityPath, target.serverIdentity.pid)
 }
 
 func managedDoltCgroupContainsSlice(cgroup, slice string) bool {
@@ -399,6 +451,7 @@ func defaultManagedDoltAdopter() managedDoltAdopter {
 		readState:       readManagedDoltAdoptState,
 		readPPID:        readManagedDoltProcessPPID,
 		readCmdline:     readManagedDoltProcessCmdline,
+		readEnviron:     readManagedDoltProcessEnviron,
 		readChildren:    readManagedDoltProcessChildren,
 		readCgroup:      readManagedDoltProcessCgroup,
 		snapshot:        snapshotManagedDoltStartIdentity,
@@ -470,6 +523,20 @@ func readManagedDoltProcessCmdline(pid int) ([]string, error) {
 		return nil, err
 	}
 	return splitCmdline(data), nil
+}
+
+func readManagedDoltProcessEnviron(pid int) (map[string]string, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return nil, err
+	}
+	environ := make(map[string]string)
+	for _, entry := range strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00") {
+		if key, value, ok := strings.Cut(entry, "="); ok && key != "" {
+			environ[key] = value
+		}
+	}
+	return environ, nil
 }
 
 func readManagedDoltProcessChildren(pid int) ([]int, error) {

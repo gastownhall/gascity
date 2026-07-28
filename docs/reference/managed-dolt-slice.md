@@ -124,6 +124,12 @@ runtime state, and listener holder. It attaches both existing PIDs to one
 transient scope, waits for cgroup convergence, then repeats those checks.
 Failure is visible and fail-closed; adoption never restarts Dolt.
 
+With `GC_DOLT_SCOPE_WATCHDOG=0`, the same adoption boundary accepts only an
+exact direct `dolt sql-server --config` process carrying gc's managed-process
+sentinel and no session attribution. It attaches and rechecks that one PID.
+Older direct servers without the sentinel fail closed instead of being guessed
+safe.
+
 New spawns strip `GC_SESSION_ID` and related agent attribution. A canonical
 pre-fix watchdog/server that still carries stale attribution is identified by
 its exact managed command sentinel and excluded from ordinary session-orphan
