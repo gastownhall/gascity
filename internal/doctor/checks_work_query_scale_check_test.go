@@ -73,6 +73,10 @@ func TestScaleCheckWorkQueryCorrespondenceCheckWarnsForWorkQueryOnly(t *testing.
 		"scale_check",
 		`engdocs/architecture/dispatch.md`,
 		"Invariant 11",
+		"remove the raw work_query override",
+		"route_label",
+		"ga-atvk13",
+		"rather than adding a matching scale_check",
 	} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("Details[0] = %q, want to contain %q", detail, want)
@@ -106,6 +110,15 @@ func TestScaleCheckWorkQueryCorrespondenceCheckWarnsForScaleCheckOnly(t *testing
 		if !strings.Contains(detail, want) {
 			t.Fatalf("Details[0] = %q, want to contain %q", detail, want)
 		}
+	}
+	// The route_label remedy is only a safe direction for the work_query-only
+	// case (ga-f57vc7): narrowing scale_check to match a raw work_query
+	// override silently strands routed-but-unlabelled beads instead of
+	// noisily churning them. No equivalent safe remedy is established for
+	// the scale_check-only mirror case, so this message must stay generic
+	// rather than asymmetrically implying one.
+	if strings.Contains(detail, "route_label") {
+		t.Fatalf("Details[0] = %q, must not carry the work_query-only remedy wording for the scale_check-only case", detail)
 	}
 }
 
