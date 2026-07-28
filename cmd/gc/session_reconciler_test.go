@@ -3197,7 +3197,7 @@ func TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick(t *testing.T) 
 			reconcileSessionBeadsTracedWithNamedDemand(
 				context.Background(), "", snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
 				env.cfg, env.sp, beads.SessionStore{Store: failing}, newFakeDrainOps(), nil, nil, nil,
-				env.dt, nil, map[string]int{"worker": 1}, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
+				env.dt, nil, map[string]int{"worker": 1}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 				&env.stdout, &env.stderr, nil,
 			)
 		}
@@ -3254,7 +3254,7 @@ func TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot(t *testing.T) {
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), "", snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
 		env.cfg, env.sp, beads.SessionStore{Store: env.store}, newFakeDrainOps(), nil, nil, nil,
-		env.dt, nil, poolDesired, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
+		env.dt, nil, poolDesired, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 		&env.stdout, &env.stderr, nil,
 	)
 
@@ -4748,18 +4748,24 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromPoolDemandWithoutNam
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
 
-	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	woken, running, namedDemand, routedDemand, starts, postSessions := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
 	if namedDemand["mayor"] {
 		t.Fatalf("NamedSessionDemand[mayor] = true for routed_to=mayor, want false because routed_to targets pools")
+	}
+	if !routedDemand["mayor"] {
+		t.Fatalf("NamedSessionRoutedDemand[mayor] = false, want true: routed-but-unassigned demand on the backing template must set the new pre-suppression signal")
 	}
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
 	}
-	if running {
-		t.Fatalf("on-demand named session %q started from routed pool demand; starts=%v", sessionName, starts)
+	if !running {
+		t.Fatalf("on-demand named session %q did not wake from routed pool demand (asleep holder should wake directly instead of a pool standby); starts=%v", sessionName, starts)
 	}
-	if len(starts) == 0 {
-		t.Fatal("pool demand did not start any session")
+	if len(starts) != 1 || starts[0] != sessionName {
+		t.Fatalf("starts = %v, want exactly [%s]: the asleep named holder owns the canonical alias, so no pool standby should ever be spawned for it", starts, sessionName)
+	}
+	if len(postSessions) != 1 {
+		t.Fatalf("session beads after reconcile = %d, want 1: zero standby session beads must be created when the asleep named holder owns the canonical alias", len(postSessions))
 	}
 }
 
@@ -4775,22 +4781,28 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromSingletonPoolDemandW
 		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
 	}
 
-	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
+	woken, running, namedDemand, routedDemand, starts, postSessions := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
 	if namedDemand["primary"] {
 		t.Fatalf("NamedSessionDemand[primary] = true for routed_to=worker, want false because routed_to targets pools")
+	}
+	if !routedDemand["primary"] {
+		t.Fatalf("NamedSessionRoutedDemand[primary] = false, want true: routed-but-unassigned demand on the backing template must set the new pre-suppression signal")
 	}
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
 	}
-	if running {
-		t.Fatalf("on-demand named session primary started from routed pool demand; starts=%v", starts)
+	if !running {
+		t.Fatalf("on-demand named session primary did not wake from routed pool demand (asleep holder should wake directly instead of a pool standby); starts=%v", starts)
 	}
-	if len(starts) == 0 {
-		t.Fatal("pool demand did not start any session")
+	if len(starts) != 1 || starts[0] != "primary" {
+		t.Fatalf("starts = %v, want exactly [primary]: the asleep named holder owns the canonical alias, so no pool standby should ever be spawned for it", starts)
+	}
+	if len(postSessions) != 1 {
+		t.Fatalf("session beads after reconcile = %d, want 1: zero standby session beads must be created when the asleep named holder owns the canonical alias", len(postSessions))
 	}
 }
 
-func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool, map[string]bool, []string) {
+func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool, map[string]bool, map[string]bool, []string, []beads.Bead) {
 	t.Helper()
 
 	cityPath := t.TempDir()
@@ -4844,7 +4856,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, snap.OpenForReconcile(), snap, dsResult.State, cfgNames, cfg, sp,
 		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
-		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		dsResult.NamedSessionDemand, dsResult.NamedSessionRoutedDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	var starts []string
@@ -4853,7 +4865,59 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 			starts = append(starts, call.Name)
 		}
 	}
-	return woken, sp.IsRunning(sessionName), dsResult.NamedSessionDemand, starts
+	postSessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads (post-reconcile): %v", err)
+	}
+	return woken, sp.IsRunning(sessionName), dsResult.NamedSessionDemand, dsResult.NamedSessionRoutedDemand, starts, postSessions
+}
+
+// TestReconcileSessionBeads_AsleepNamedSingletonRegressionWakesInsteadOfStandby
+// is the end-to-end regression test for ga-jl73y2 (Option A): it drives the
+// real BuildDesiredState -> ComputePoolDesiredStates -> ComputeAwakeSet ->
+// reconcile pipeline (via reconcileExistingAsleepNamedSessionWithRoutedWork,
+// same as the two inverted tests above) for the exact live-incident shape —
+// canonical singleton "mayor", asleep, identity==template, one unit of
+// routed-but-unassigned demand, zero assignee-direct demand — and additionally
+// asserts on the surviving session bead's metadata directly, not just a bare
+// count: no bead of pool/ephemeral origin exists, and the one bead that does
+// exist is still the same named holder, not a replacement.
+func TestReconcileSessionBeads_AsleepNamedSingletonRegressionWakesInsteadOfStandby(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
+
+	woken, running, namedDemand, routedDemand, starts, postSessions := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	if namedDemand["mayor"] {
+		t.Fatalf("NamedSessionDemand[mayor] = true, want false: this scenario is routed-unassigned demand only, zero assignee-direct demand")
+	}
+	if !routedDemand["mayor"] {
+		t.Fatalf("NamedSessionRoutedDemand[mayor] = false, want true")
+	}
+	if woken != 1 || !running {
+		t.Fatalf("asleep named singleton must wake from routed-unassigned demand: woken=%d running=%v starts=%v", woken, running, starts)
+	}
+	if len(starts) != 1 || starts[0] != sessionName {
+		t.Fatalf("starts = %v, want exactly [%s]: no standby session may ever be started for a template whose canonical alias is held by an asleep named holder", starts, sessionName)
+	}
+	if len(postSessions) != 1 {
+		t.Fatalf("session beads after reconcile = %d, want 1: zero standby session beads created for the mayor template", len(postSessions))
+	}
+	held := postSessions[0]
+	if origin := held.Metadata["session_origin"]; origin == "ephemeral" {
+		t.Fatalf("surviving session bead has session_origin=%q — a pool-spawned standby was minted despite the asleep named holder owning the canonical alias", origin)
+	}
+	if held.Metadata[namedSessionIdentityMetadata] != "mayor" {
+		t.Fatalf("surviving session bead identity = %q, want %q: the original named holder must still be the one occupying the slot, not a replacement", held.Metadata[namedSessionIdentityMetadata], "mayor")
+	}
 }
 
 func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {

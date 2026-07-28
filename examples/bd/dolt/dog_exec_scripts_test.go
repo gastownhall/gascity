@@ -4461,6 +4461,23 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 	}
 }
 
+// doctorBackupStaleEnv sets the doctor's backup-staleness horizon for these
+// fixtures.
+//
+// It used to be 1 second, which raced the harness: the fixtures set a backup's
+// mtime to time.Now() and then exec the doctor script, so any delay above one
+// second between those two steps aged a deliberately-FRESH backup past the
+// horizon and the test failed. Under the parallel runner that delay is routine
+// (measured ~400ms latency and 2s test durations), which is why these tests
+// passed in isolation and failed nondeterministically in a full run — and why
+// a different one of the five failed on each run (ga-w97tq).
+//
+// 300s is chosen to sit far above any plausible process-startup delay while
+// staying far below the only STALE fixture in this file (-2h, in
+// TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase), so freshness
+// discrimination is still exercised exactly as before.
+const doctorBackupStaleEnv = "GC_DOCTOR_BACKUP_STALE_S=300"
+
 func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -4512,7 +4529,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4562,7 +4579,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4621,7 +4638,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4666,7 +4683,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "orphans: 2") {
 		t.Fatalf("doctor should report doctest/doctortest orphan databases, output:\n%s", out)
 	}
@@ -4724,7 +4741,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}

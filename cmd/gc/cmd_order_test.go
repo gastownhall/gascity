@@ -3655,6 +3655,7 @@ func TestOpenCityOrderStoreUsesProviderAwareStore(t *testing.T) {
 	}
 
 	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	var stderr bytes.Buffer
 	resolved, code := openCityOrderStore(&stderr, "gc order history")
 	if code != 0 {
