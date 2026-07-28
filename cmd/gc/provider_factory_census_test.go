@@ -92,8 +92,8 @@ var canonicalProviderCalls = map[string]int{
 	"providers.go:newStatusSessionProviderForCityWithSnapshot:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext": 1,
 	"providers.go:newStatusSessionProviderForCityWithSnapshot:withSessionProviderConstructionContext:bind-error":                               1,
 	"session_logs_resolve.go:resolveStoredSessionLogSource:newSessionProvider:bind-error":                                                      1,
-	"session_template_start.go:materializeSessionForAgentConfig:newSessionProvider:bind-error":                                                 1,
-	"session_template_start.go:materializeSessionForTemplateWithOptions:newSessionProvider:bind-error":                                         1,
+	"session_template_start.go:materializeSessionForAgentConfig:newSessionProviderForCity:bind-error":                                          1,
+	"session_template_start.go:materializeSessionForTemplateWithOptions:newSessionProviderForCity:bind-error":                                  1,
 }
 
 // Multi-result forwarding is intentionally narrower than ordinary result
