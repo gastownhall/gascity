@@ -135,6 +135,45 @@ func TestDoltServerEnv_DefaultsDoltConfigObjectToDisableEventFlush(t *testing.T)
 	}
 }
 
+func TestDoltServerEnv_StripsSessionAttributionAndMarksManagedProcess(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"GC_SESSION_ID=gc-closed-session",
+		"GC_RUNTIME_EPOCH=42",
+		"GC_SESSION_NAME=worker-1",
+		"GC_ALIAS=worker",
+		"GC_AGENT=worker",
+		"GC_TEMPLATE=worker",
+		"GC_SESSION_ORIGIN=pool",
+		"GC_CITY_PATH=/home/test/city",
+	}
+
+	out := doltServerEnv("", parent)
+	for _, kv := range out {
+		for _, key := range managedDoltSessionAttributionEnvKeys {
+			if strings.HasPrefix(kv, key+"=") {
+				t.Fatalf("managed Dolt env retained %s: %v", key, out)
+			}
+		}
+	}
+	if !containsEnvAssignment(out, managedDoltProcessSentinelEnv, managedDoltProcessSentinelValue) {
+		t.Fatalf("managed Dolt env missing process sentinel: %v", out)
+	}
+	if !containsEnvAssignment(out, "GC_CITY_PATH", "/home/test/city") {
+		t.Fatalf("managed Dolt env lost city ownership context: %v", out)
+	}
+}
+
+func containsEnvAssignment(env []string, key, value string) bool {
+	want := key + "=" + value
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {

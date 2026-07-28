@@ -146,9 +146,12 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	// shares the fate of the server it guards. `systemd-run --scope` execs in
 	// place, so cmd.Process.Pid below is still the watchdog's own PID and the
 	// WatchdogPID bookkeeping is unaffected.
-	argv := wrapManagedDoltArgv([]string{
+	argv, err := wrapManagedDoltArgv([]string{
 		watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath,
 	})
+	if err != nil {
+		return managedDoltStartedProcess{}, err
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil

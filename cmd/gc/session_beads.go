@@ -2775,6 +2775,10 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
+		if live.ManagedDolt {
+			fmt.Fprintf(stderr, "session reconciler: preserving managed dolt process-table runtime pid=%d stale_session=%s\n", live.PID, live.SessionID) //nolint:errcheck
+			continue
+		}
 		bead, err := store.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":

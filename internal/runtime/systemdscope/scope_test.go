@@ -1,7 +1,9 @@
 package systemdscope
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -124,5 +126,162 @@ func TestWrapperSkipsProbeWhenSliceEmpty(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("probe ran %d times for an empty slice, want 0", calls)
+	}
+}
+
+func TestWrapperWrapRequiredFailsClosedWhenProbeFails(t *testing.T) {
+	w := &Wrapper{
+		Probe: func(string) error { return errors.New("user bus unavailable") },
+		Warn:  &strings.Builder{},
+		Label: "GC_DOLT_SLICE",
+	}
+
+	got, err := w.WrapRequired("gcdolt.slice", []string{"dolt", "sql-server"})
+	if err == nil {
+		t.Fatalf("WrapRequired error = nil, got %q", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("WrapRequired returned fallback argv %q, want none", got)
+	}
+	if !strings.Contains(err.Error(), "user bus unavailable") {
+		t.Fatalf("WrapRequired error = %q, want probe cause", err)
+	}
+}
+
+func TestManagerEnsureSliceAppliesAndVerifiesRequiredPolicy(t *testing.T) {
+	var calls [][]string
+	manager := Manager{
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string{name}, args...))
+			if name == "systemctl" && len(args) > 1 && args[1] == "show" {
+				return []byte("MemoryMax=12884901888\nMemoryLow=2147483648\nManagedOOMPreference=avoid\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	policy := SlicePolicy{
+		MemoryMax:            "12884901888",
+		MemoryLow:            "2147483648",
+		ManagedOOMPreference: "avoid",
+	}
+
+	if err := manager.EnsureSlice(context.Background(), "gcdolt.slice", policy); err != nil {
+		t.Fatalf("EnsureSlice: %v", err)
+	}
+
+	want := [][]string{
+		{
+			"systemctl", "--user", "set-property", "--runtime", "gcdolt.slice",
+			"MemoryMax=12884901888", "MemoryLow=2147483648", "ManagedOOMPreference=avoid",
+		},
+		{
+			"systemctl", "--user", "show", "gcdolt.slice",
+			"--property=MemoryMax", "--property=MemoryLow", "--property=ManagedOOMPreference",
+		},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestManagerEnsureSliceRejectsIneffectivePolicy(t *testing.T) {
+	manager := Manager{
+		Run: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			if name == "systemctl" {
+				return []byte("MemoryMax=infinity\nMemoryLow=0\nManagedOOMPreference=none\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	err := manager.EnsureSlice(context.Background(), "gcdolt.slice", SlicePolicy{
+		MemoryMax:            "12884901888",
+		MemoryLow:            "2147483648",
+		ManagedOOMPreference: "avoid",
+	})
+	if err == nil {
+		t.Fatal("EnsureSlice error = nil for ineffective policy")
+	}
+	for _, want := range []string{"MemoryMax=infinity", "ManagedOOMPreference=none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("EnsureSlice error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestManagerStartScopeWithProcessesUsesOneAtomicTransientUnitCall(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	manager := Manager{
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			gotName = name
+			gotArgs = append([]string(nil), args...)
+			return []byte(`o "/org/freedesktop/systemd1/job/42"`), nil
+		},
+	}
+
+	if err := manager.StartScopeWithProcesses(
+		context.Background(),
+		"gcdolt-adopt-123.scope",
+		"gcdolt.slice",
+		"Gas City managed Dolt",
+		[]int{101, 102},
+	); err != nil {
+		t.Fatalf("StartScopeWithProcesses: %v", err)
+	}
+
+	if gotName != "busctl" {
+		t.Fatalf("runner name = %q, want busctl", gotName)
+	}
+	wantArgs := []string{
+		"--user", "call",
+		"org.freedesktop.systemd1",
+		"/org/freedesktop/systemd1",
+		"org.freedesktop.systemd1.Manager",
+		"StartTransientUnit",
+		"ssa(sv)a(sa(sv))",
+		"gcdolt-adopt-123.scope",
+		"fail",
+		"4",
+		"PIDs", "au", "2", "101", "102",
+		"Slice", "s", "gcdolt.slice",
+		"Description", "s", "Gas City managed Dolt",
+		"CollectMode", "s", "inactive-or-failed",
+		"0",
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("busctl args = %#v, want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestManagerStartScopeWithProcessesRejectsUnsafeInputsBeforeCallingBus(t *testing.T) {
+	calls := 0
+	manager := Manager{
+		Run: func(context.Context, string, ...string) ([]byte, error) {
+			calls++
+			return nil, nil
+		},
+	}
+	tests := []struct {
+		name  string
+		unit  string
+		slice string
+		pids  []int
+	}{
+		{name: "non-scope unit", unit: "gcdolt.service", slice: "gcdolt.slice", pids: []int{101}},
+		{name: "non-slice parent", unit: "gcdolt.scope", slice: "gcdolt.service", pids: []int{101}},
+		{name: "pid one", unit: "gcdolt.scope", slice: "gcdolt.slice", pids: []int{1}},
+		{name: "duplicate pid", unit: "gcdolt.scope", slice: "gcdolt.slice", pids: []int{101, 101}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := manager.StartScopeWithProcesses(
+				context.Background(), tc.unit, tc.slice, "test", tc.pids,
+			); err == nil {
+				t.Fatal("StartScopeWithProcesses error = nil")
+			}
+		})
+	}
+	if calls != 0 {
+		t.Fatalf("runner called %d times for invalid inputs, want 0", calls)
 	}
 }

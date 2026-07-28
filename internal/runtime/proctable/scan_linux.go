@@ -101,10 +101,11 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			city = env["GC_CITY"]
 		}
 		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       pid,
+			SessionID:   sessionID,
+			City:        city,
+			Epoch:       epoch,
+			PID:         pid,
+			ManagedDolt: isManagedDoltProcess(root, pid, env),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -114,6 +115,69 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		out = []runtime.LiveRuntime{}
 	}
 	return out, scanErr
+}
+
+func isManagedDoltProcess(root string, pid int, env map[string]string) bool {
+	cityPath := strings.TrimSpace(env["GC_CITY_PATH"])
+	if cityPath == "" {
+		cityPath = strings.TrimSpace(env["GC_CITY"])
+	}
+	if cityPath == "" {
+		return false
+	}
+	argv, err := readCmdline(filepath.Join(root, strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(argv) < 2 {
+		return false
+	}
+	configPath := strings.TrimSpace(env["GC_DOLT_CONFIG_FILE"])
+	if configPath == "" {
+		configPath = filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	}
+	logPath := strings.TrimSpace(env["GC_DOLT_LOG_FILE"])
+	if logPath == "" {
+		logPath = filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.log")
+	}
+
+	if len(argv) == 5 &&
+		filepath.Base(argv[0]) == "gc" &&
+		argv[1] == "__gc-managed-dolt-scope-watchdog" &&
+		sameCleanPath(argv[2], configPath) &&
+		sameCleanPath(argv[3], logPath) &&
+		sameCleanPath(argv[4], cityPath) {
+		return true
+	}
+	if env["GC_MANAGED_DOLT_PROCESS"] != "1" ||
+		filepath.Base(argv[0]) != "dolt" ||
+		argv[1] != "sql-server" {
+		return false
+	}
+	for i := 2; i < len(argv); i++ {
+		switch {
+		case argv[i] == "--config" && i+1 < len(argv):
+			return sameCleanPath(argv[i+1], configPath)
+		case strings.HasPrefix(argv[i], "--config="):
+			return sameCleanPath(strings.TrimPrefix(argv[i], "--config="), configPath)
+		}
+	}
+	return false
+}
+
+func readCmdline(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+	if len(fields) == 1 && fields[0] == "" {
+		return nil, nil
+	}
+	return fields, nil
+}
+
+func sameCleanPath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	return left != "" && right != "" && filepath.Clean(left) == filepath.Clean(right)
 }
 
 func mergeCurrentEnv(env map[string]string) map[string]string {

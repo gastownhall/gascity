@@ -13,9 +13,10 @@
 // inherited across fork, so wrapping a supervisor also places everything it
 // spawns.
 //
-// Every entry point degrades gracefully: a host without systemd-run, without a
-// reachable user bus, or with an empty slice runs the command unwrapped rather
-// than failing to start it.
+// The default Wrapper entry point degrades gracefully: a host without
+// systemd-run, without a reachable user bus, or with an empty slice runs the
+// command unwrapped. WrapRequired is the fail-closed boundary for callers that
+// must prove placement.
 package systemdscope
 
 import (
@@ -24,6 +25,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +82,7 @@ func Probe(slice string) error {
 // verdict is a cached probe result for one slice.
 type verdict struct {
 	ok      bool
+	err     error
 	checked time.Time
 }
 
@@ -107,6 +110,22 @@ func (w *Wrapper) Wrap(slice string, command []string) []string {
 	return Argv(slice, command)
 }
 
+// WrapRequired returns command placed in slice, or an error when placement
+// cannot be proved. Unlike [Wrapper.Wrap], it never degrades to an unwrapped
+// command.
+func (w *Wrapper) WrapRequired(slice string, command []string) ([]string, error) {
+	if len(command) == 0 {
+		return nil, fmt.Errorf("systemd scope: command is empty")
+	}
+	if strings.TrimSpace(slice) == "" {
+		return nil, fmt.Errorf("systemd scope: required slice is empty")
+	}
+	if err := w.check(slice, false); err != nil {
+		return nil, fmt.Errorf("systemd scope: required placement in %s: %w", slice, err)
+	}
+	return Argv(slice, command), nil
+}
+
 // Available reports whether transient user scopes can be used for slice.
 //
 // The verdict is cached per slice: a success is reused for the life of the
@@ -125,10 +144,14 @@ func (w *Wrapper) Available(slice string) bool {
 	if slice == "" {
 		return false
 	}
+	return w.check(slice, true) == nil
+}
+
+func (w *Wrapper) check(slice string, warn bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if cached, seen := w.verdicts[slice]; seen && (cached.ok || time.Since(cached.checked) < failureRetryInterval) {
-		return cached.ok
+		return cached.err
 	}
 	probe := w.Probe
 	if probe == nil {
@@ -138,11 +161,11 @@ func (w *Wrapper) Available(slice string) bool {
 	if w.verdicts == nil {
 		w.verdicts = make(map[string]verdict, 1)
 	}
-	w.verdicts[slice] = verdict{ok: err == nil, checked: time.Now()}
-	if err != nil {
+	w.verdicts[slice] = verdict{ok: err == nil, err: err, checked: time.Now()}
+	if err != nil && warn {
 		w.warn(slice, err)
 	}
-	return err == nil
+	return err
 }
 
 // warn reports a probe failure once per slice per retry window.
@@ -158,4 +181,157 @@ func (w *Wrapper) warn(slice string, err error) {
 		return
 	}
 	log.Printf("systemd scope: %s", msg)
+}
+
+// SlicePolicy is the resource policy applied to a systemd user slice.
+type SlicePolicy struct {
+	MemoryMax            string
+	MemoryLow            string
+	ManagedOOMPreference string
+}
+
+func (p SlicePolicy) assignments() ([]string, error) {
+	values := []struct {
+		name  string
+		value string
+	}{
+		{name: "MemoryMax", value: p.MemoryMax},
+		{name: "MemoryLow", value: p.MemoryLow},
+		{name: "ManagedOOMPreference", value: p.ManagedOOMPreference},
+	}
+	assignments := make([]string, 0, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(item.value)
+		if value == "" {
+			return nil, fmt.Errorf("systemd slice policy: %s is empty", item.name)
+		}
+		assignments = append(assignments, item.name+"="+value)
+	}
+	return assignments, nil
+}
+
+// CommandRunner executes one command and returns its combined output.
+type CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+// Manager performs fail-closed systemd user-manager operations.
+//
+// The zero value executes real commands. Run is a narrow test seam.
+type Manager struct {
+	Run CommandRunner
+}
+
+func (m Manager) run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if m.Run != nil {
+		return m.Run(ctx, name, args...)
+	}
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// EnsureSlice applies policy to slice and verifies the effective properties
+// before returning.
+func (m Manager) EnsureSlice(ctx context.Context, slice string, policy SlicePolicy) error {
+	if !strings.HasSuffix(slice, ".slice") {
+		return fmt.Errorf("systemd slice: invalid unit %q", slice)
+	}
+	assignments, err := policy.assignments()
+	if err != nil {
+		return err
+	}
+	args := []string{"--user", "set-property", "--runtime", slice}
+	args = append(args, assignments...)
+	if out, err := m.run(ctx, "systemctl", args...); err != nil {
+		return commandError("apply systemd slice policy", err, out)
+	}
+
+	showArgs := []string{
+		"--user", "show", slice,
+		"--property=MemoryMax",
+		"--property=MemoryLow",
+		"--property=ManagedOOMPreference",
+	}
+	out, err := m.run(ctx, "systemctl", showArgs...)
+	if err != nil {
+		return commandError("verify systemd slice policy", err, out)
+	}
+	actual := make(map[string]string, len(assignments))
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			actual[key] = value
+		}
+	}
+	var mismatches []string
+	for _, expected := range assignments {
+		key, value, _ := strings.Cut(expected, "=")
+		if actual[key] != value {
+			mismatches = append(mismatches, key+"="+actual[key]+" (want "+value+")")
+		}
+	}
+	if len(mismatches) > 0 {
+		return fmt.Errorf("verify systemd slice policy: %s", strings.Join(mismatches, ", "))
+	}
+	return nil
+}
+
+// StartScopeWithProcesses atomically creates a transient scope containing the
+// supplied existing processes.
+func (m Manager) StartScopeWithProcesses(
+	ctx context.Context,
+	unit string,
+	slice string,
+	description string,
+	pids []int,
+) error {
+	if !strings.HasSuffix(unit, ".scope") {
+		return fmt.Errorf("systemd scope: invalid unit %q", unit)
+	}
+	if !strings.HasSuffix(slice, ".slice") {
+		return fmt.Errorf("systemd scope: invalid slice %q", slice)
+	}
+	if len(pids) == 0 {
+		return fmt.Errorf("systemd scope: no processes supplied")
+	}
+	seen := make(map[int]struct{}, len(pids))
+	pidArgs := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if pid <= 1 {
+			return fmt.Errorf("systemd scope: invalid pid %d", pid)
+		}
+		if _, duplicate := seen[pid]; duplicate {
+			return fmt.Errorf("systemd scope: duplicate pid %d", pid)
+		}
+		seen[pid] = struct{}{}
+		pidArgs = append(pidArgs, strconv.Itoa(pid))
+	}
+
+	args := []string{
+		"--user", "call",
+		"org.freedesktop.systemd1",
+		"/org/freedesktop/systemd1",
+		"org.freedesktop.systemd1.Manager",
+		"StartTransientUnit",
+		"ssa(sv)a(sa(sv))",
+		unit,
+		"fail",
+		"4",
+		"PIDs", "au", strconv.Itoa(len(pidArgs)),
+	}
+	args = append(args, pidArgs...)
+	args = append(args,
+		"Slice", "s", slice,
+		"Description", "s", description,
+		"CollectMode", "s", "inactive-or-failed",
+		"0",
+	)
+	if out, err := m.run(ctx, "busctl", args...); err != nil {
+		return commandError("start transient systemd scope", err, out)
+	}
+	return nil
+}
+
+func commandError(action string, err error, output []byte) error {
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return fmt.Errorf("%s: %w: %s", action, err, detail)
+	}
+	return fmt.Errorf("%s: %w", action, err)
 }

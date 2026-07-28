@@ -707,6 +707,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
 		}
+		// A pre-fix managed-Dolt watchdog can retain a stale GC_SESSION_ID
+		// inherited from the agent that happened to start it. The process-table
+		// scanner marks only an exact canonical watchdog/server command as
+		// ManagedDolt; never treat that infrastructure singleton as a
+		// same-session agent orphan.
+		if live.ManagedDolt {
+			log.Printf("session: preserving managed dolt pid=%d stale_session=%s", live.PID, live.SessionID)
+			continue
+		}
 		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}

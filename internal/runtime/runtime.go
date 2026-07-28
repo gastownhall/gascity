@@ -371,6 +371,10 @@ type LiveRuntime struct {
 	// IsTracked is true when this runtime also appears in the provider's
 	// registry. False marks a live process that is invisible to the provider.
 	IsTracked bool
+	// ManagedDolt is true only when the process-table scanner verifies the
+	// managed-Dolt watchdog or server command sentinel for this runtime's city.
+	// Reapers use it to keep infrastructure processes out of session cleanup.
+	ManagedDolt bool
 }
 
 // ProcessTableScanner is an optional extension for runtimes that can discover

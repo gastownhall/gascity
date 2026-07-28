@@ -549,6 +549,44 @@ func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	}
 }
 
+func TestCreatePreservesManagedDoltWithStaleSessionIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:         1234,
+			IsTracked:   false,
+			ManagedDolt: true,
+		}},
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper",
+		Title:    "replacement",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+		Env:      nil,
+		Resume:   ProviderResume{},
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, event := range sp.events {
+		if strings.HasPrefix(event, "terminate:") {
+			t.Fatalf("managed Dolt was terminated: events=%v", sp.events)
+		}
+	}
+	if got := sp.events[len(sp.events)-1]; got != "start:"+info.ID {
+		t.Fatalf("last event = %q, want start:%s; events=%v", got, info.ID, sp.events)
+	}
+}
+
 // acpOrphanScanProvider augments orphanScanProvider with ACP route bookkeeping
 // so a resume that reserves an ACP route before the pre-start orphan gate can
 // be observed unwinding that reservation when the gate refuses. RouteACP and

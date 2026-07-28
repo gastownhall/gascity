@@ -12,6 +12,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,20 +111,23 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
-	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
-	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
-	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
-	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
-	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
-	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
-	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
-	reloadMu            sync.Mutex                   // guards activeReload
-	activeReload        *reloadRequest
-	onStarted           func()
-	onStatus            func(string)
-	managedDoltHealth   func(string) error
-	managedDoltOwned    func(string) (bool, error)
-	managedDoltPort     func(string) string
+	convScopes                map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
+	convScopesMu              sync.RWMutex                 // guards convScopes map pointer
+	convergenceReqCh          chan convergenceRequest      // receives CLI commands from controller.sock
+	reloadReqCh               chan reloadRequest           // receives structured reload requests from controller.sock
+	pokeCh                    chan struct{}                // non-blocking signal to trigger immediate reconciler tick
+	controlDispatcherCh       chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	nudgeWakeCh               chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	reloadMu                  sync.Mutex                   // guards activeReload
+	activeReload              *reloadRequest
+	onStarted                 func()
+	onStatus                  func(string)
+	managedDoltHealth         func(string) error
+	managedDoltOwned          func(string) (bool, error)
+	managedDoltPort           func(string) string
+	managedDoltPlacement      func(string, string) error
+	managedDoltPlacementMu    sync.Mutex
+	managedDoltPlacedIdentity string
 
 	shutdownOnce             sync.Once
 	preserveSessionsShutdown atomic.Bool
@@ -177,15 +181,16 @@ type CityRuntimeParams struct {
 	PoolDeathHandlers map[string]poolDeathInfo
 	ForceStopShutdown *atomic.Bool
 
-	ConvergenceReqCh    chan convergenceRequest // may be nil
-	ReloadReqCh         chan reloadRequest      // may be nil; receives structured reload commands
-	PokeCh              chan struct{}           // may be nil; triggers immediate tick
-	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
-	OnStarted           func()                  // called after initial reconciliation succeeds
-	OnStatus            func(string)            // called when init status changes
-	ManagedDoltHealth   func(string) error
-	ManagedDoltOwned    func(string) (bool, error)
-	ManagedDoltPort     func(string) string
+	ConvergenceReqCh     chan convergenceRequest // may be nil
+	ReloadReqCh          chan reloadRequest      // may be nil; receives structured reload commands
+	PokeCh               chan struct{}           // may be nil; triggers immediate tick
+	ControlDispatcherCh  chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
+	OnStarted            func()                  // called after initial reconciliation succeeds
+	OnStatus             func(string)            // called when init status changes
+	ManagedDoltHealth    func(string) error
+	ManagedDoltOwned     func(string) (bool, error)
+	ManagedDoltPort      func(string) string
+	ManagedDoltPlacement func(string, string) error
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -247,33 +252,66 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if managedDoltPort == nil {
 		managedDoltPort = currentResolvableManagedDoltPort
 	}
+	managedDoltPlacement := p.ManagedDoltPlacement
+	_, managedDoltSliceExplicit := os.LookupEnv(managedDoltSliceEnv)
+	if managedDoltPlacement == nil && (!managedDoltTestModeEnabled() || managedDoltSliceExplicit) {
+		managedDoltPlacement = adoptManagedDoltPlacement
+	}
 
 	logPrefix := p.LogPrefix
 	if logPrefix == "" {
 		logPrefix = "gc start"
 	}
 
-	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
+	// Perform one placement preflight before any constructor-time store sweep.
+	// Production constructors install managedDoltPlacement above, making an
+	// error strict; test-mode constructors without that seam retain their
+	// historical best-effort behavior.
+	managedDoltPlacementReady := true
+	managedDoltPlacedIdentity := ""
+	placementForPreflight := managedDoltPlacement
+	if placementForPreflight != nil {
+		placementForPreflight = func(cityPath, port string) error {
+			if err := managedDoltPlacement(cityPath, port); err != nil {
+				return err
+			}
+			managedDoltPlacedIdentity = managedDoltPlacementIdentity(cityPath, port)
+			return nil
+		}
+	}
+	if err := ensureManagedDoltPublishedForRuntime(
+		p.CityPath,
+		p.Stderr,
+		logPrefix,
+		managedDoltHealth,
+		managedDoltOwned,
+		managedDoltPort,
+		placementForPreflight,
+	); err != nil && managedDoltPlacement != nil {
+		managedDoltPlacementReady = false
+	}
 
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
-	func() {
-		sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
-		if err != nil {
-			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-			return
-		}
-		defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
-		if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
-			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
-		} else if n > 0 {
-			fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
-		}
-		warnIfClosedOrderTrackingBacklogLarge(sweepStore, p.Stderr)
-	}()
+	if managedDoltPlacementReady {
+		func() {
+			sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
+			if err != nil {
+				fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+				return
+			}
+			defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
+			if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
+				fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
+			} else if n > 0 {
+				fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
+			}
+			warnIfClosedOrderTrackingBacklogLarge(sweepStore, p.Stderr)
+		}()
+	}
 
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
 
@@ -328,15 +366,17 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:       make(chan struct{}, 1),
-		onStarted:         p.OnStarted,
-		onStatus:          p.OnStatus,
-		managedDoltHealth: managedDoltHealth,
-		managedDoltOwned:  managedDoltOwned,
-		managedDoltPort:   managedDoltPort,
-		logPrefix:         logPrefix,
-		stdout:            p.Stdout,
-		stderr:            p.Stderr,
+		nudgeWakeCh:               make(chan struct{}, 1),
+		onStarted:                 p.OnStarted,
+		onStatus:                  p.OnStatus,
+		managedDoltHealth:         managedDoltHealth,
+		managedDoltOwned:          managedDoltOwned,
+		managedDoltPort:           managedDoltPort,
+		managedDoltPlacement:      managedDoltPlacement,
+		managedDoltPlacedIdentity: managedDoltPlacedIdentity,
+		logPrefix:                 logPrefix,
+		stdout:                    p.Stdout,
+		stderr:                    p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -469,6 +509,14 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return true
 	}
 
+	// Managed-Dolt placement is a startup barrier. A surviving server may have
+	// inherited the previous controller's cgroup, and no order/session work is
+	// safe until its exact watchdog/server pair is verified in the bounded
+	// sibling slice and its port is published.
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		return
+	}
+
 	// Adoption barrier: ensure every running session has a bead.
 	// Runs on every startup (rerunnable, crash-safe).
 	adoptionComplete := false
@@ -549,7 +597,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// ctx cancellation, or normal completion alike.
 	startupComplete := false
 	if !retryStartupStep("startup", func() bool { return startupComplete }, func() {
-		cr.ensureManagedDoltPublishedForTick()
+		if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+			return
+		}
 		sessionBeads := cr.loadSessionBeadSnapshot()
 		startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
 		completion := TraceCompletionAborted
@@ -1082,7 +1132,9 @@ func (cr *CityRuntime) tick(
 	}
 
 	phaseStart := time.Now()
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		return
+	}
 	recordPhase(TraceSiteControllerTickPhase, "managed_dolt_preflight", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
@@ -2954,7 +3006,9 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		return
 	}
 
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		return
+	}
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	wfcResult := buildDesiredStateWithSessionBeads(
@@ -3042,7 +3096,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	cr.requestDeferredDrainFollowUpTick()
 }
 
-func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
+func (cr *CityRuntime) ensureManagedDoltPublishedForTick() error {
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
 		healthFn = healthBeadsProvider
@@ -3055,7 +3109,57 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
 	if portFn == nil {
 		portFn = currentResolvableManagedDoltPort
 	}
-	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, healthFn, ownedFn, portFn)
+	placementFn := cr.managedDoltPlacement
+	if placementFn != nil {
+		placementFn = func(cityPath, port string) error {
+			identity := managedDoltPlacementIdentity(cityPath, port)
+			cr.managedDoltPlacementMu.Lock()
+			defer cr.managedDoltPlacementMu.Unlock()
+			if cr.managedDoltPlacedIdentity == identity {
+				return nil
+			}
+			if err := cr.managedDoltPlacement(cityPath, port); err != nil {
+				return err
+			}
+			cr.managedDoltPlacedIdentity = identity
+			return nil
+		}
+	}
+	err := ensureManagedDoltPublishedForRuntime(
+		cr.cityPath,
+		cr.stderr,
+		cr.logPrefix,
+		healthFn,
+		ownedFn,
+		portFn,
+		placementFn,
+	)
+	// CityRuntime literals in focused tests and embedders predate the strict
+	// placement seam. Preserve their best-effort preflight behavior when no
+	// placement function was installed. newCityRuntime installs the real
+	// adopter in production, so controller-created runtimes still fail closed.
+	if err != nil && cr.managedDoltPlacement == nil {
+		return nil
+	}
+	return err
+}
+
+func managedDoltPlacementIdentity(cityPath, port string) string {
+	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
+	if cityPath == "" || cityPath == "." {
+		return ":" + strings.TrimSpace(port)
+	}
+	portNumber, _ := strconv.Atoi(strings.TrimSpace(port))
+	for _, path := range []string{
+		providerManagedDoltStatePath(cityPath),
+		managedDoltStatePath(cityPath),
+	} {
+		state, err := readDoltRuntimeStateFile(path)
+		if err == nil && state.Running && state.PID > 1 && state.Port == portNumber {
+			return fmt.Sprintf("%s:%d:%d", cityPath, state.PID, state.Port)
+		}
+	}
+	return cityPath + ":" + strings.TrimSpace(port)
 }
 
 func ensureManagedDoltPublishedForRuntime(
@@ -3065,25 +3169,31 @@ func ensureManagedDoltPublishedForRuntime(
 	healthFn func(string) error,
 	ownedFn func(string) (bool, error),
 	portFn func(string) string,
-) {
+	placementFn func(string, string) error,
+) error {
 	if !cityUsesBdStoreContract(cityPath) {
-		return
+		return nil
 	}
 	owned, err := ownedFn(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return
+		return fmt.Errorf("managed dolt ownership preflight: %w", err)
 	}
 	if !owned {
-		return
+		return nil
 	}
 	if port := portFn(cityPath); port != "" {
 		// Adopt path: the managed Dolt is already live (e.g. it survived a
-		// supervisor restart), so keep the supervisor's ambient env aligned
-		// with the resolved port instead of only exporting when this process
-		// starts the server itself.
+		// supervisor restart). Reparent and verify the exact owned process tree
+		// before publishing the endpoint to any controller work.
+		if placementFn != nil {
+			if err := placementFn(cityPath, port); err != nil {
+				fmt.Fprintf(stderr, "%s: managed dolt placement preflight: %v\n", logPrefix, err) //nolint:errcheck
+				return fmt.Errorf("managed dolt placement preflight: %w", err)
+			}
+		}
 		exportSupervisorAmbientDoltPortEnv(port)
-		return
+		return nil
 	}
 	if err := healthFn(cityPath); err != nil {
 		// Nothing to re-resolve: the port lookup below is expensive (ownership
@@ -3091,14 +3201,24 @@ func ensureManagedDoltPublishedForRuntime(
 		// failed will not have produced a fresh port. Matches the pre-export
 		// control flow, which ended here.
 		fmt.Fprintf(stderr, "%s: managed dolt health preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return
+		return fmt.Errorf("managed dolt health preflight: %w", err)
 	}
 	// The health preflight may have started or recovered the managed Dolt;
 	// re-resolve so the fresh port lands in the ambient env on this tick
 	// rather than the next one.
 	if port := portFn(cityPath); port != "" {
+		if placementFn != nil {
+			if err := placementFn(cityPath, port); err != nil {
+				fmt.Fprintf(stderr, "%s: managed dolt placement preflight: %v\n", logPrefix, err) //nolint:errcheck
+				return fmt.Errorf("managed dolt placement preflight: %w", err)
+			}
+		}
 		exportSupervisorAmbientDoltPortEnv(port)
+		return nil
 	}
+	err = fmt.Errorf("managed dolt health succeeded but no live port resolved")
+	fmt.Fprintf(stderr, "%s: managed dolt publication preflight: %v\n", logPrefix, err) //nolint:errcheck
+	return err
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.

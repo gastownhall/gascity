@@ -7417,6 +7417,32 @@ func TestSweepProcessTableOrphansReapsClosedAndAbsentUntrackedRuntimes(t *testin
 	}
 }
 
+func TestSweepProcessTableOrphansPreservesManagedDoltSentinel(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "gc-closed", Status: "closed"},
+	}, nil)
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{
+			SessionID:   "gc-closed",
+			City:        "/home/test/gas-city",
+			PID:         1224831,
+			ManagedDolt: true,
+		},
+	)
+
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, nil, store, "/home/test/gas-city", &stderr)
+	if got != 0 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if len(sp.terminated) != 0 {
+		t.Fatalf("managed Dolt runtime terminated: %+v", sp.terminated)
+	}
+	if !strings.Contains(stderr.String(), "preserving managed dolt") {
+		t.Fatalf("stderr = %q, want observable managed-Dolt exemption", stderr.String())
+	}
+}
+
 // The process-table scan is supervisor-wide, but the sweep runs per city with
 // that city's store. A sibling city's live session (a different GC_CITY_PATH)
 // is absent from this city's store and untracked by this city's provider, so

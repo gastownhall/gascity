@@ -27,24 +27,22 @@ package main
 // unprivileged process; negative values need CAP_SYS_RESOURCE.
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime/systemdscope"
 )
 
 const (
 	// managedDoltSliceEnv overrides the systemd user slice that managed dolt
-	// sql-servers are placed in. Unset selects managedDoltDefaultSlice; set to
-	// the empty string disables cgroup placement.
-	//
-	// It disables placement ONLY. The oom_score_adj hardening is independent
-	// and stays on, because it is gated by GC_DOLT_SCOPE_WATCHDOG instead —
-	// so restoring the full pre-fix spawn takes GC_DOLT_SLICE="" *and*
-	// GC_DOLT_SCOPE_WATCHDOG=0, not this knob alone.
+	// sql-servers are placed in. Unset selects managedDoltDefaultSlice. An
+	// explicit empty value is rejected by the production placement boundary.
 	managedDoltSliceEnv = "GC_DOLT_SLICE"
 
 	// managedDoltDefaultSlice is the slice managed dolt servers are placed in
@@ -59,10 +57,20 @@ const (
 	// guards the property.
 	managedDoltDefaultSlice = "gcdolt.slice"
 
-	// managedDoltOOMScoreAdj is the badness adjustment managed dolt servers
-	// are pinned to. Zero, not negative: lowering toward 0 is permitted for
-	// unprivileged processes, while any negative value requires
-	// CAP_SYS_RESOURCE and would fail on the deployments this runs in.
+	// The reference host observed a 5.7 GiB managed-Dolt peak during the
+	// incident window. Eight GiB leaves bounded headroom for that working set,
+	// the watchdog, and short compaction bursts without allowing the shared
+	// store to consume the whole user slice. MemoryLow reserves two GiB under
+	// systemd-oomd pressure; it is protection, not a guarantee, when an
+	// ancestor does not enable memory protection.
+	managedDoltMemoryMaxBytes            = "8589934592"
+	managedDoltMemoryLowBytes            = "2147483648"
+	managedDoltManagedOOMPreference      = "avoid"
+	managedDoltPlacementOperationTimeout = 5 * time.Second
+
+	// managedDoltOOMScoreAdj is the best-effort badness target. Zero, not
+	// negative: a manager-imposed unprivileged floor can still reject lowering
+	// to zero, while negative values additionally require CAP_SYS_RESOURCE.
 	managedDoltOOMScoreAdj = 0
 
 	// procSelfOOMScoreAdj is the calling process's badness knob. Writing it
@@ -72,10 +80,15 @@ const (
 )
 
 // managedDoltSliceWrapper carries the once-only systemd-run availability probe
-// for managed dolt spawns. A host without systemd-run or without a reachable
-// user bus warns once and spawns unwrapped — placement is hardening, and must
-// never be the reason the bead store fails to start.
-var managedDoltSliceWrapper = &systemdscope.Wrapper{Label: managedDoltSliceEnv}
+// for managed dolt spawns. Managed-Dolt callers use WrapRequired and fail
+// closed; the shared wrapper's graceful form remains available to other
+// process-placement users.
+var (
+	managedDoltSliceWrapper            = &systemdscope.Wrapper{Label: managedDoltSliceEnv}
+	managedDoltSliceManager            = systemdscope.Manager{}
+	managedDoltEnsureSlice             = managedDoltSliceManager.EnsureSlice
+	managedDoltStartScopeWithProcesses = managedDoltSliceManager.StartScopeWithProcesses
+)
 
 // managedDoltSlice resolves the slice for managed dolt spawns.
 func managedDoltSlice() string {
@@ -87,11 +100,11 @@ func managedDoltSlice() string {
 // for tests (the test binary is always in managed-dolt test mode, so the
 // production default is otherwise unreachable in-process).
 //
-// An explicit setting always wins, including an explicit empty value, so a
-// test can opt into real placement and an operator can opt out. Absent one,
-// test mode declines the implicit default: managed-dolt tests spawn fake
-// servers in tight loops and must not depend on a systemd user manager, nor
-// pay the probe timeout on hosts without one.
+// An explicit setting always wins at resolution time. The production boundary
+// rejects an empty result; keeping that case in this pure resolver lets tests
+// pin the configuration decision separately from enforcement. Absent a
+// setting, test mode declines the implicit default: managed-dolt tests spawn
+// fake servers in tight loops and must not depend on a systemd user manager.
 func managedDoltSliceFor(testMode bool, envValue string, envSet bool) string {
 	if envSet {
 		return strings.TrimSpace(envValue)
@@ -102,15 +115,69 @@ func managedDoltSliceFor(testMode bool, envValue string, envSet bool) string {
 	return managedDoltDefaultSlice
 }
 
-// wrapManagedDoltArgv places a managed dolt spawn in its slice, returning argv
-// unchanged when placement is disabled or unavailable.
+// prepareManagedDoltPlacement applies and verifies the bounded resource policy
+// before a managed-Dolt spawn or adoption can be considered safe.
+func prepareManagedDoltPlacement(ctx context.Context, slice string) error {
+	if err := validateManagedDoltSliceName(slice); err != nil {
+		return err
+	}
+	policy := systemdscope.SlicePolicy{
+		MemoryMax:            managedDoltMemoryMaxBytes,
+		MemoryLow:            managedDoltMemoryLowBytes,
+		ManagedOOMPreference: managedDoltManagedOOMPreference,
+	}
+	if err := managedDoltEnsureSlice(ctx, slice, policy); err != nil {
+		return fmt.Errorf("prepare managed dolt slice %s: %w", slice, err)
+	}
+	return nil
+}
+
+func validateManagedDoltSliceName(slice string) error {
+	slice = strings.TrimSpace(slice)
+	if !strings.HasSuffix(slice, ".slice") || filepath.Base(slice) != slice {
+		return fmt.Errorf("managed dolt slice %q is not a systemd slice unit name", slice)
+	}
+	base := strings.TrimSuffix(slice, ".slice")
+	if base == "" || strings.Contains(base, "-") {
+		return fmt.Errorf("managed dolt slice %q is not top-level; systemd hyphens encode nested slices", slice)
+	}
+	return nil
+}
+
+// wrapManagedDoltArgv places a managed dolt spawn in its verified bounded
+// slice. Production placement is fail-closed: no unwrapped fallback is
+// returned when the slice policy or transient-scope probe fails.
 //
 // Wrapping is safe for the callers' PID bookkeeping: `systemd-run --scope`
 // execs in place, so the PID observed from Cmd.Start is the spawned process's
 // own PID, and the start-identity snapshot, termination guards and reaping all
 // continue to address the right process.
-func wrapManagedDoltArgv(argv []string) []string {
-	return managedDoltSliceWrapper.Wrap(managedDoltSlice(), argv)
+func wrapManagedDoltArgv(argv []string) ([]string, error) {
+	slice := managedDoltSlice()
+	_, explicitlyConfigured := os.LookupEnv(managedDoltSliceEnv)
+	return wrapManagedDoltArgvFor(argv, slice, explicitlyConfigured)
+}
+
+func wrapManagedDoltArgvFor(argv []string, slice string, explicitlyConfigured bool) ([]string, error) {
+	if slice == "" {
+		// The test suite deliberately declines the production default unless a
+		// test opts into real systemd placement. An explicit empty setting is
+		// not an opt-out: in production that would recreate the incident path.
+		if managedDoltTestModeEnabled() && !explicitlyConfigured {
+			return argv, nil
+		}
+		return nil, fmt.Errorf("managed dolt placement is required; %s is empty", managedDoltSliceEnv)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltPlacementOperationTimeout)
+	defer cancel()
+	if err := prepareManagedDoltPlacement(ctx, slice); err != nil {
+		return nil, err
+	}
+	wrapped, err := managedDoltSliceWrapper.WrapRequired(slice, argv)
+	if err != nil {
+		return nil, fmt.Errorf("prepare managed dolt spawn: %w", err)
+	}
+	return wrapped, nil
 }
 
 // managedDoltOOMScoreAdjNeedsLowering reports whether the current badness
@@ -127,11 +194,11 @@ func managedDoltOOMScoreAdjNeedsLowering(current int) bool {
 // such that the second server inherits the value the first restored.
 var managedDoltOOMScoreAdjMu sync.Mutex
 
-// applyManagedDoltOOMScoreAdj clears the inherited badness bonus from the
-// calling process so a dolt server forked from it inherits a neutral
-// oom_score_adj. It reports the previous value — so a caller that must not keep
-// the new one can hand it to [restoreManagedDoltOOMScoreAdj] — and whether anything
-// changed.
+// applyManagedDoltOOMScoreAdj attempts to clear the inherited badness bonus
+// from the calling process so a dolt server forked from it inherits the best
+// value available to this unprivileged process. It reports the previous value
+// — so a caller that must not keep the new one can hand it to
+// [restoreManagedDoltOOMScoreAdj] — and whether anything changed.
 //
 // The knob only exists on the calling process and is inherited across fork, and
 // Go's os/exec offers no pre-exec hook, so writing it here is the only way to

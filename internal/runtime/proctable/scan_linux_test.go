@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +29,15 @@ func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {
 	stat := strconv.Itoa(pid) + " (cmd) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
 	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
 		t.Fatalf("write stat: %v", err)
+	}
+}
+
+func writeFakeProcCmdline(t *testing.T, root string, pid int, argv ...string) {
+	t.Helper()
+	path := filepath.Join(root, strconv.Itoa(pid), "cmdline")
+	data := []byte(strings.Join(argv, "\x00") + "\x00")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write cmdline: %v", err)
 	}
 }
 
@@ -169,5 +179,112 @@ func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d entries, want 0", len(got))
+	}
+}
+
+func TestScanWithRootMarksLegacyManagedDoltWatchdogByArgvSentinel(t *testing.T) {
+	root := t.TempDir()
+	const (
+		pid      = 410
+		cityPath = "/home/test/gas-city"
+	)
+	configPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	buildFakeProc(t, root, pid, map[string]string{
+		"GC_SESSION_ID": "gc-closed-session",
+		"GC_CITY_PATH":  cityPath,
+	})
+	writeFakeProcCmdline(t, root, pid,
+		"/usr/local/bin/gc",
+		"__gc-managed-dolt-scope-watchdog",
+		configPath,
+		filepath.Join(filepath.Dir(configPath), "dolt.log"),
+		cityPath,
+	)
+
+	got, err := scanWithRoot(root, "gc-closed-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 || !got[0].ManagedDolt {
+		t.Fatalf("scanWithRoot = %+v, want one protected managed-Dolt watchdog", got)
+	}
+}
+
+func TestScanWithRootRequiresManagedDoltCommandShapeForEnvironmentSentinel(t *testing.T) {
+	root := t.TempDir()
+	const (
+		pid      = 420
+		cityPath = "/home/test/gas-city"
+	)
+	buildFakeProc(t, root, pid, map[string]string{
+		"GC_SESSION_ID":           "gc-closed-session",
+		"GC_CITY_PATH":            cityPath,
+		"GC_MANAGED_DOLT_PROCESS": "1",
+	})
+	writeFakeProcCmdline(t, root, pid, "/usr/bin/sleep", "300")
+
+	got, err := scanWithRoot(root, "gc-closed-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("scanWithRoot returned %d runtimes, want 1", len(got))
+	}
+	if got[0].ManagedDolt {
+		t.Fatalf("ordinary process with forged env sentinel was protected: %+v", got[0])
+	}
+}
+
+func TestScanWithRootRejectsForgedManagedDoltWatchdogPaths(t *testing.T) {
+	root := t.TempDir()
+	const (
+		pid      = 425
+		cityPath = "/home/test/gas-city"
+	)
+	configPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	buildFakeProc(t, root, pid, map[string]string{
+		"GC_SESSION_ID": "gc-closed-session",
+		"GC_CITY_PATH":  cityPath,
+	})
+	writeFakeProcCmdline(t, root, pid,
+		"/usr/local/bin/gc",
+		"__gc-managed-dolt-scope-watchdog",
+		configPath,
+		"/tmp/forged-dolt.log",
+		cityPath,
+	)
+
+	got, err := scanWithRoot(root, "gc-closed-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("scanWithRoot returned %d runtimes, want 1", len(got))
+	}
+	if got[0].ManagedDolt {
+		t.Fatalf("watchdog with forged log path was protected: %+v", got[0])
+	}
+}
+
+func TestScanWithRootMarksSentinelManagedDoltServerWithCanonicalConfig(t *testing.T) {
+	root := t.TempDir()
+	const (
+		pid      = 430
+		cityPath = "/home/test/gas-city"
+	)
+	configPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	buildFakeProc(t, root, pid, map[string]string{
+		"GC_SESSION_ID":           "gc-closed-session",
+		"GC_CITY_PATH":            cityPath,
+		"GC_MANAGED_DOLT_PROCESS": "1",
+	})
+	writeFakeProcCmdline(t, root, pid, "dolt", "sql-server", "--config", configPath)
+
+	got, err := scanWithRoot(root, "gc-closed-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 || !got[0].ManagedDolt {
+		t.Fatalf("scanWithRoot = %+v, want one protected managed-Dolt server", got)
 	}
 }

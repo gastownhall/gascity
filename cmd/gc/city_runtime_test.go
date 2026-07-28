@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -875,7 +876,9 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortM
 			return ""
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if healthCalls != 1 {
 		t.Fatalf("healthCalls = %d, want 1", healthCalls)
@@ -905,7 +908,9 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickSkipsHealthWhenManagedPortP
 			return "3307"
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0", healthCalls)
@@ -927,6 +932,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickExportsAdoptedPort(t *testi
 	ambientEnv := fakeAmbientDoltEnv(t, nil)
 
 	healthCalls := 0
+	placementCalls := 0
 	cr := &CityRuntime{
 		cityPath: "/tmp/test-city",
 		stderr:   io.Discard,
@@ -940,11 +946,29 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickExportsAdoptedPort(t *testi
 		managedDoltPort: func(string) string {
 			return "43307"
 		},
+		managedDoltPlacement: func(_ string, port string) error {
+			placementCalls++
+			if port != "43307" {
+				t.Fatalf("placement port = %q, want 43307", port)
+			}
+			if _, exported := ambientEnv["GC_DOLT_PORT"]; exported {
+				t.Fatal("port exported before managed-Dolt placement completed")
+			}
+			return nil
+		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("second ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0", healthCalls)
+	}
+	if placementCalls != 1 {
+		t.Fatalf("placementCalls = %d, want one per unchanged managed-Dolt identity", placementCalls)
 	}
 	if got := ambientEnv["GC_DOLT_PORT"]; got != "43307" {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, "43307")
@@ -981,8 +1005,19 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickExportsRecoveredPort(t *tes
 			}
 			return "43308"
 		},
+		managedDoltPlacement: func(_ string, port string) error {
+			if port != "43308" {
+				t.Fatalf("placement port = %q, want 43308", port)
+			}
+			if _, exported := ambientEnv["GC_DOLT_PORT"]; exported {
+				t.Fatal("recovered port exported before managed-Dolt placement completed")
+			}
+			return nil
+		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if !recovered {
 		t.Fatal("health preflight was not invoked")
@@ -993,6 +1028,76 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickExportsRecoveredPort(t *tes
 	if got := ambientEnv["BEADS_DOLT_SERVER_PORT"]; got != "43308" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "43308")
 	}
+
+	t.Run("fails closed before export", func(t *testing.T) {
+		delete(ambientEnv, "GC_DOLT_PORT")
+		delete(ambientEnv, "BEADS_DOLT_SERVER_PORT")
+		runtime := &CityRuntime{
+			cityPath: "/tmp/test-city",
+			stderr:   io.Discard,
+			managedDoltOwned: func(string) (bool, error) {
+				return true, nil
+			},
+			managedDoltPort: func(string) string {
+				return "43307"
+			},
+			managedDoltPlacement: func(string, string) error {
+				return errors.New("attach denied")
+			},
+		}
+		err := runtime.ensureManagedDoltPublishedForTick()
+		if err == nil || !strings.Contains(err.Error(), "attach denied") {
+			t.Fatalf("ensureManagedDoltPublishedForTick error = %v, want placement cause", err)
+		}
+		if _, exported := ambientEnv["GC_DOLT_PORT"]; exported {
+			t.Fatal("GC_DOLT_PORT exported after placement failure")
+		}
+		if _, exported := ambientEnv["BEADS_DOLT_SERVER_PORT"]; exported {
+			t.Fatal("BEADS_DOLT_SERVER_PORT exported after placement failure")
+		}
+	})
+
+	t.Run("revalidates changed pid on same port", func(t *testing.T) {
+		cityPath := t.TempDir()
+		const port = 43307
+		writeState := func(pid int) {
+			t.Helper()
+			if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+				Running: true,
+				PID:     pid,
+				Port:    port,
+			}); err != nil {
+				t.Fatalf("write provider state: %v", err)
+			}
+		}
+		writeState(201)
+
+		placementCalls := 0
+		runtime := &CityRuntime{
+			cityPath: cityPath,
+			stderr:   io.Discard,
+			managedDoltOwned: func(string) (bool, error) {
+				return true, nil
+			},
+			managedDoltPort: func(string) string {
+				return strconv.Itoa(port)
+			},
+			managedDoltPlacement: func(string, string) error {
+				placementCalls++
+				return nil
+			},
+		}
+		if err := runtime.ensureManagedDoltPublishedForTick(); err != nil {
+			t.Fatalf("first preflight: %v", err)
+		}
+		writeState(202)
+		if err := runtime.ensureManagedDoltPublishedForTick(); err != nil {
+			t.Fatalf("changed-pid preflight: %v", err)
+		}
+		if placementCalls != 2 {
+			t.Fatalf("placementCalls = %d, want revalidation after same-port PID change", placementCalls)
+		}
+	})
 }
 
 // TestCityRuntimeEnsureManagedDoltPublishedForTickNoExportWhenUnowned pins
@@ -1016,7 +1121,9 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickNoExportWhenUnowned(t *test
 			return "43309"
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if _, ok := ambientEnv["GC_DOLT_PORT"]; ok {
 		t.Fatal("GC_DOLT_PORT exported for an unowned dolt lifecycle")
@@ -1051,7 +1158,9 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 			return ""
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0", healthCalls)
@@ -1391,7 +1500,9 @@ func TestCityRuntimeTickPreflightUsesResolvableProviderStateByDefault(t *testing
 		},
 	}
 
-	cr.ensureManagedDoltPublishedForTick()
+	if err := cr.ensureManagedDoltPublishedForTick(); err != nil {
+		t.Fatalf("ensureManagedDoltPublishedForTick: %v", err)
+	}
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)

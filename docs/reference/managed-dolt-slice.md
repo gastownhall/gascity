@@ -2,7 +2,7 @@
 
 `GC_DOLT_SLICE` controls the systemd user slice that managed `dolt sql-server`
 processes are placed in. Unlike [`GC_AGENT_SLICE`](/reference/tmux-agent-slice),
-which is opt-in, this placement is **on by default** and degrades gracefully.
+which is opt-in, this placement is **on by default** and fail-closed.
 
 ## Why placement is default-on
 
@@ -24,9 +24,9 @@ server back in the wrong cgroup.
 
 | `GC_DOLT_SLICE` | Effect |
 |---|---|
-| unset | placed in `gcdolt.slice` (the built-in default) |
-| set to a slice name | placed in that slice |
-| set to the empty string | no cgroup placement |
+| unset | placed in bounded `gcdolt.slice` (the built-in default) |
+| set to a slice name | placed in that bounded slice |
+| set to the empty string | rejected; managed-Dolt placement is required |
 
 Placement wraps the spawn as:
 
@@ -38,10 +38,10 @@ systemd-run --user --scope --slice=<slice> --collect --quiet -- <command>
 gc observed and stays trackable and signalable. Placement is inherited across
 `fork`, so gc places the scope watchdog and the server inherits it.
 
-When `systemd-run` is missing or the systemd user manager is unreachable — a
-container, a non-systemd host, no user bus — gc warns once and spawns the server
-unwrapped. Placement is hardening; it is never a reason for the bead store to
-fail to start.
+When `systemd-run` is missing, the systemd user manager is unreachable, or the
+slice policy cannot be read back exactly, gc fails the managed-Dolt preflight.
+It does not spawn an unwrapped server or publish an unsafe adopted server to the
+controller.
 
 ## Slice naming
 
@@ -57,17 +57,20 @@ pressure cannot select the server. It is still a descendant of the user
 manager's own slice, so a user-level or system-level OOM can — this bounds the
 blast radius, it does not exempt the server.
 
-Give the slice a ceiling with a drop-in, for example:
+gc applies and verifies these runtime properties before spawn or adoption:
 
-```ini
-[Slice]
-MemoryMax=4G
-MemorySwapMax=0
+```
+MemoryMax=8589934592
+MemoryLow=2147483648
+ManagedOOMPreference=avoid
 ```
 
-Size the ceiling for both processes: the scope watchdog shares the slice with
-the server by design (it must share the server's fate), and costs roughly 100 MB
-resident on top of the server's own working set.
+The 8 GiB ceiling covers the observed 5.7 GiB peak plus watchdog and compaction
+headroom. The 2 GiB low protection preserves a useful working set under
+systemd-oomd pressure. It only becomes effective when the ancestor hierarchy
+also participates in memory protection; ancestors with `MemoryLow=0` leave it
+declarative. `ManagedOOMPreference=avoid` is defense-in-depth for systemd-oomd,
+not a fix for the kernel memcg OOM killer.
 
 Prefer `MemoryMax` over `MemoryHigh` here. `MemoryHigh` throttles by reclaim,
 and a cgroup that is anon-dominated with swap disabled has nothing to reclaim,
@@ -81,10 +84,11 @@ a proportion of total RAM to a process's badness score for a positive
 adjustment, which on a large host can rank a modest server as though it were an
 order of magnitude bigger than it is.
 
-The scope watchdog therefore clears its own `oom_score_adj` to 0 before spawning
-the server, which inherits the neutral value. Lowering toward 0 is permitted for
-unprivileged processes; negative values require `CAP_SYS_RESOURCE` and are not
-attempted.
+The scope watchdog therefore attempts to lower its own `oom_score_adj` toward
+zero before spawning the server. This is best-effort: a manager-imposed
+unprivileged floor can make the write fail with `permission denied`. The server
+then keeps the watchdog's actual inherited value, which is logged and verified.
+Negative values are not attempted.
 
 This hardening is gated by `GC_DOLT_SCOPE_WATCHDOG`, not by `GC_DOLT_SLICE`.
 With `GC_DOLT_SCOPE_WATCHDOG=0` the server is still placed in the slice, but is
@@ -96,7 +100,9 @@ restores it immediately.
 
 ```sh
 cat /proc/<dolt-pid>/cgroup          # expect the configured slice
-cat /proc/<dolt-pid>/oom_score_adj   # expect 0
+cat /proc/<dolt-pid>/oom_score_adj   # record actual inherited value; zero is not required
+systemctl --user show gcdolt.slice \
+  -p MemoryMax -p MemoryLow -p ManagedOOMPreference
 ```
 
 On the watchdog-free path (`GC_DOLT_SCOPE_WATCHDOG=0`) a missing `dolt` binary
@@ -108,3 +114,17 @@ Placement is not observable the instant the process starts: `systemd-run`
 registers the transient scope over D-Bus and only then execs, so a check run
 immediately after spawn can still see the pre-placement cgroup. Re-read after a
 moment.
+
+## Supervisor adoption
+
+`KillMode=process` lets the managed watchdog/server survive a controlled
+supervisor restart. Before exporting the surviving port, the new controller
+verifies the exact owned PID pair, start identities, process tree, command,
+runtime state, and listener holder. It attaches both existing PIDs to one
+transient scope, waits for cgroup convergence, then repeats those checks.
+Failure is visible and fail-closed; adoption never restarts Dolt.
+
+New spawns strip `GC_SESSION_ID` and related agent attribution. A canonical
+pre-fix watchdog/server that still carries stale attribution is identified by
+its exact managed command sentinel and excluded from ordinary session-orphan
+reaping.

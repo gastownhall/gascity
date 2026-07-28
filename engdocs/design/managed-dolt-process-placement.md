@@ -19,11 +19,12 @@ where that starter was an agent pane, the kernel's memcg OOM killer selected the
 shared bead store four times in one morning, and each respawn took a new port
 and opened the Dolt circuit breaker across every rig.
 
-This proposes placing the managed server into a dedicated systemd user slice
-through a transient scope, and clearing the badness adjustment it inherits from
-the systemd user manager. Placement is default-on with graceful degradation:
-where transient user scopes are unavailable, `gc` warns once and spawns exactly
-as it does today.
+This places the managed server into a dedicated, bounded systemd user slice
+through a transient scope. The slice ships with an 8 GiB `MemoryMax`, a 2 GiB
+`MemoryLow`, and `ManagedOOMPreference=avoid`. Placement is default-on and
+fail-closed for managed Dolt: if the user manager cannot apply and read back
+that policy, `gc` does not start an unwrapped server or publish an adopted
+server as controller-ready.
 
 ## Problem
 
@@ -68,20 +69,24 @@ descendant process across fork.
 
 - Place the managed `dolt sql-server` deterministically, regardless of which
   process triggers auto-start.
-- Remove the inherited badness bonus so the kernel ranks the server by its
-  actual footprint.
+- Lower the inherited badness bonus where the unprivileged process is allowed
+  to do so, and report the actual inherited value where the manager-imposed
+  floor prevents lowering.
+- Bound the dedicated slice and apply `ManagedOOMPreference=avoid`.
+- Reparent an owned watchdog/server pair that survives a supervisor restart
+  without restarting either process or changing the listener port.
 - Preserve every existing PID-tracking guarantee: health checks, termination,
   and the `/proc` start-time reuse guard must continue to address the right
   process.
-- Degrade to current behavior on hosts without transient user scopes.
+- Fail closed before controller work when placement cannot be proved.
 
 ## Non-goals
 
 - Writing to an operator's systemd configuration. `DefaultOOMScoreAdjust` in
   `user.conf` is the operator's to set.
-- Bounding Dolt's memory. The slice makes a ceiling possible; choosing one is a
-  deployment decision, and the reference doc carries guidance rather than a
-  default.
+- Eliminating host-global OOM risk. The bounded sibling prevents agent-slice
+  pressure from selecting Dolt, but user-level or system-level pressure can
+  still do so.
 - Placing any other `gc`-managed process. The tmux server has a similar latent
   inherited-cgroup problem, but one instance does not justify generalizing the
   mechanism further than the shared helper already does.
@@ -131,23 +136,57 @@ The watchdog-free path (`GC_DOLT_SCOPE_WATCHDOG=0`) is wrapped directly. A
 single "wrap every managed-dolt exec" choke point was considered and rejected;
 see Alternatives.
 
-### Clearing the inherited badness adjustment
+### Adopting a surviving process tree
+
+The supervisor uses `KillMode=process`, so a controlled supervisor restart can
+leave the canonical watchdog and server alive in the old controller's cgroup.
+Spawn wrapping cannot move those existing PIDs.
+
+Before exporting the adopted port, the new controller verifies the published
+runtime state, exact server PID and port holder, managed ownership, watchdog
+parent relationship, exact watchdog argv, process-tree shape, and both
+process start identities. It then uses one `StartTransientUnit` D-Bus call with
+the watchdog and server PIDs in the scope's `PIDs=` property. After the job
+converges, it rechecks both identities, cgroups, runtime state, port holder, and
+tree shape. Any uncertainty fails closed; adoption never converts into a Dolt
+restart.
+
+### Bounded slice policy
+
+Before either spawn or adoption, `gc` applies and reads back:
+
+```
+MemoryMax=8589934592
+MemoryLow=2147483648
+ManagedOOMPreference=avoid
+```
+
+The 8 GiB ceiling is based on a 5.7 GiB observed peak plus watchdog and
+compaction headroom. The 2 GiB low protection preserves a useful working set
+under systemd-oomd pressure. `MemoryLow` is only effective when the ancestor
+hierarchy participates in memory protection; on the reference host its
+ancestors currently report zero, so it is declarative protection for a future
+ancestor policy rather than a host-global guarantee.
+
+`ManagedOOMPreference=avoid` steers systemd-oomd only. It does not affect the
+kernel memcg OOM killer that caused the incident, so the bounded sibling slice
+is the primary isolation mechanism.
+
+### Best-effort inherited badness adjustment
 
 `oom_score_adj` is settable only on the calling process and inherited across
 fork, and Go's `os/exec` exposes no pre-exec hook, so the value has to be
 written before the spawn. The two paths differ in what they do afterwards:
 
-The watchdog lowers its own adjustment and keeps it, because a watchdog exists
-only to supervise one server and has no other work whose scheduling the change
-could affect. The watchdog-free path lowers across the fork and restores the
-previous value immediately, because its caller is a general-purpose `gc`
-invocation whose badness must not be permanently rewritten as a side effect of
-starting a database. The policy is one sentence in both cases: the managed dolt
-tree runs at `oom_score_adj` 0. Only the lifetime of the change differs.
+The watchdog attempts to lower its own adjustment toward zero and keeps the
+result, because it exists only to supervise one server. The watchdog-free path
+attempts the same lowering across the fork and restores the caller's previous
+value immediately.
 
-Lowering toward 0 is permitted for an unprivileged process. Negative values
-require `CAP_SYS_RESOURCE`, so 0 is the floor, and an operator who has already
-set something lower is never overridden.
+This is best-effort. On the reference host the user manager established an
+unprivileged floor of 200, and writing zero returned `permission denied`.
+Tests therefore record and compare the watchdog/server's actual inherited
+value rather than asserting zero. Negative values are never attempted.
 
 ### Slice naming is a correctness constraint
 
@@ -162,13 +201,13 @@ The protection this buys is bounded and worth stating plainly. The server
 escapes the agent slice's memory limit, but it remains a descendant of the user
 manager's own slice, so a user-level or system-level OOM can still select it.
 
-### Degradation and defaults
+### Fail-closed defaults
 
-Every entry point falls back to an unwrapped spawn: a host without
-`systemd-run`, without a reachable user bus, or with placement explicitly
-disabled runs the command exactly as it does today, after one warning. Placement
-is hardening, and hardening must never be the reason the bead store fails to
-start.
+The canonical managed-Dolt path has no unwrapped fallback. A missing
+`systemd-run`, unreachable user bus, empty slice setting, property mismatch, or
+unsafe adoption stops the managed-Dolt/controller preflight with the underlying
+cause. Test binaries still decline implicit systemd placement unless they opt
+in explicitly, so unit tests do not depend on a user manager.
 
 A probe failure is cached for a retry window rather than for the process
 lifetime. `gc supervisor run` stays up for weeks, and caching a transient bus
@@ -187,12 +226,11 @@ for the pane's whole life.
 
 ## Alternatives Considered
 
-**`ManagedOOMPreference=avoid` on the slice.** This was the original proposal
-and it does not address the failure. `ManagedOOMPreference` steers
-`systemd-oomd`; every kill on 2026-07-21 was `CONSTRAINT_MEMCG`, the kernel's
-own memcg killer, which ignores the setting. `journalctl -u systemd-oomd` for
-that day is empty. The reference deployment carries the setting as
-defense-in-depth, documented as not the fix.
+**Relying on `ManagedOOMPreference=avoid` alone.** Rejected.
+`ManagedOOMPreference` steers systemd-oomd; every kill on 2026-07-21 was
+`CONSTRAINT_MEMCG`, the kernel's own memcg killer, which ignores the setting.
+The shipped policy includes it as defense-in-depth alongside the actual
+bounded-sibling fix.
 
 **Naming the slice as a child of the agent slice's parent.** Rejected on the
 nesting rule above. It reads as the obvious name and is the most dangerous
@@ -224,10 +262,10 @@ the badness adjustment, the per-slice probe cache, and the failure-retry window.
 
 Integration coverage runs against a real systemd user manager. Both spawn paths
 are exercised end to end from a parent carrying the inherited adjustment, and
-the assertions read `/proc/<pid>/cgroup` and `/proc/<pid>/oom_score_adj` on live
-PIDs rather than checking that a wrapper was called. The tests skip where
-transient user scopes are unavailable, which is the same condition that makes
-the feature degrade.
+the assertions read `/proc/<pid>/cgroup`, `/proc/<pid>/oom_score_adj`, and the
+effective slice properties. A separate real-systemd adoption test starts the
+exact watchdog argv outside the target slice and proves the watchdog PID,
+server PID, and listener port are unchanged after both processes move.
 
 The acceptance test was validated by reverting the fix and confirming it
 reproduces the production symptom exactly: both processes in the caller's
@@ -259,13 +297,12 @@ correct wherever the number lands.
 
 ## Open Questions
 
-Nothing in `gc` detects whether placement actually took effect. Every
-degradation path writes one line to a log, and the reference doc asks the
-operator to read `/proc/<pid>/cgroup` by hand. The state this design exists to
-prevent, a server running unwrapped because a probe failed, is therefore
-invisible until the next OOM. A `gc doctor` drift check comparing the live
-server's cgroup and badness against the resolved slice would close that gap, and
-`cmd_doctor_drift.go` already owns comparable Dolt checks.
+Startup verifies placement before publishing the port. The controller caches
+that result by canonical city/PID/port identity, avoiding repeated systemd and
+process-table work on every patrol; a PID change forces revalidation even when
+the port is reused. A `gc doctor` drift check would still improve operator
+visibility for external cgroup/property changes that do not replace the
+process; `cmd_doctor_drift.go` already owns comparable Dolt checks.
 
 The supervisor's ambient-port export is gated by a process-global flag rather
 than by the runtime object that owns the behavior, which leaves it ambiguous
