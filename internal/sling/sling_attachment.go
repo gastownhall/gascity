@@ -470,8 +470,18 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
+	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		// A pool session claims routed work under its own session identity
+		// ("<target>-<session bead id>"), not under the bare pool target, so
+		// bare equality reads already-claimed pool work as un-slung and mints a
+		// second attempt for it. The original keeps gc.routed_to once wrapped,
+		// so both it and its do-work step satisfy the pool work_query: one unit
+		// of work, two dispatchable rows, two sessions. Treat a claim by any of
+		// this pool's own sessions as idempotent. Anchored to target+"-", so a
+		// claim by a different pool still falls through to the warning below.
+		claimedByOwnPoolSession := isMulti && strings.HasPrefix(b.Assignee, target+"-")
+		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -479,7 +489,6 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)

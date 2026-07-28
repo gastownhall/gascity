@@ -4583,3 +4583,115 @@ func TestBuildSlingFormulaVarsBaseBranchPrefersBeadTarget(t *testing.T) {
 		t.Fatalf("base_branch var = %q, want %q (bead metadata.target wins)", got, "release/v2")
 	}
 }
+
+// TestCheckBeadStateRoutedPoolWorkClaimedByPoolSessionIsIdempotent guards the
+// double-mint the pool work_query used to produce. A bead routed to a
+// multi-session pool keeps gc.routed_to after it is wrapped, so the pool query
+//
+//	bd ready --unassigned --metadata-field gc.routed_to=<pool> --exclude-type=epic
+//
+// can surface the ORIGINAL alongside its own wrapper's do-work step: one unit of
+// work, two dispatchable rows, two sessions. Once a pool session has claimed the
+// bead its assignee is a pool session identity ("<pool>-<session bead id>"), not
+// the bare pool target — so the bare-equality check treated an already-claimed
+// bead as un-slung and minted a second attempt. For a multi-session agent, a
+// pool-session assignee must read as idempotent.
+func TestCheckBeadStateRoutedPoolWorkClaimedByPoolSessionIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "pool work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "smiths-sess1",
+		Metadata: map[string]string{"gc.routed_to": "smiths"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+	a := config.Agent{
+		Name:              "smiths",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(4),
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when pool work is already claimed by a pool session, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateRoutedSingletonForeignAssigneeStillWarns is the
+// anti-inversion control for the case above: the pool-session-prefix reading is
+// scoped to multi-session agents, so a SINGLETON agent is untouched by it and a
+// prefix-shaped assignee on its routed bead must still warn.
+//
+// max_active_sessions=1 is what makes the agent a singleton here
+// (UsesCanonicalSingletonPoolIdentity), and it is load-bearing for this control:
+// an agent with no session limits at all reports IsMultiSessionAgent()==true,
+// which is the branch the case above covers.
+func TestCheckBeadStateRoutedSingletonForeignAssigneeStillWarns(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "routed work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor-sess1",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	a := config.Agent{
+		Name:              "mayor",
+		MaxActiveSessions: intPtr(1),
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for a singleton agent with a foreign assignee, got %+v", result)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected a warning naming the conflicting assignee, got none")
+	}
+}
+
+// TestCheckBeadStateRoutedPoolForeignAssigneeStillWarns is the second
+// anti-inversion control: prefix matching must be anchored to this pool's
+// target, not to any pool-shaped assignee. Work claimed by a DIFFERENT pool is
+// still a conflict and must still warn.
+func TestCheckBeadStateRoutedPoolForeignAssigneeStillWarns(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "pool work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "novices-sess1",
+		Metadata: map[string]string{"gc.routed_to": "smiths"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	a := config.Agent{
+		Name:              "smiths",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(4),
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when another pool holds the bead, got %+v", result)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected a warning naming the conflicting assignee, got none")
+	}
+}
