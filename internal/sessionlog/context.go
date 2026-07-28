@@ -24,13 +24,25 @@ const millionTokenWindow = 1_000_000
 // Without the suffix they use the 200K default in modelFamilyWindows.
 var claudeFamilies = map[string]bool{"opus": true, "sonnet": true, "haiku": true}
 
+// nativeMillionTokenModels are model IDs whose context window is 1M with no
+// "[1m]" suffix required. Opus 5 ships 1M natively and is the CLI's default
+// Opus — there is no 200K Opus 5 variant to select. Matched before the family
+// loop below, which keys on the bare family word "opus" and would otherwise
+// return the 200K default for every Opus id, Opus 5 included.
+var nativeMillionTokenModels = []string{"opus-5"}
+
 // ModelContextWindow returns the context window size for a model ID.
 // It parses the model ID to extract the family name and looks it up.
-// Claude families carrying the "[1m]" suffix resolve to the 1M window so
-// context utilization does not saturate against the 200K default.
-// Returns 0 if the model family is unknown.
+// Models that are natively 1M resolve to the 1M window directly; older Claude
+// families reach 1M only via the "[1m]" suffix. Returns 0 if the model family
+// is unknown.
 func ModelContextWindow(model string) int {
 	lower := strings.ToLower(model)
+	for _, native := range nativeMillionTokenModels {
+		if strings.Contains(lower, native) {
+			return millionTokenWindow
+		}
+	}
 	// Try longer matches first to avoid "gpt-4" matching before "gpt-4o".
 	for _, family := range []string{"gpt-4o", "gpt-5", "gpt-4", "opus", "sonnet", "haiku", "gemini", "codex"} {
 		if strings.Contains(lower, family) {
