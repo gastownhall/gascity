@@ -1315,8 +1315,12 @@ write_compact_marker() {
     return 1
   fi
   if [ "$dir" = "$quarantine_dir" ]; then
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at" || true
-    record_quarantine_notify_state "$db" "$reason" 1
+    emit_compact_quarantine_event "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
+      record_quarantine_notify_state "$db" "$reason" 1
+    else
+      record_quarantine_notify_state "$db" "$reason" 0
+    fi
   fi
   return 0
 }
@@ -1338,7 +1342,10 @@ mail_compact_quarantine_alert() {
   _ca_reason="$4"
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
-  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
+  if gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg"; then
+    return 0
+  fi
+  return 1
 }
 
 send_compact_quarantine_alert() {
@@ -1377,7 +1384,7 @@ record_quarantine_notify_state() {
   _qn_emitted="$3"
 
   _qn_marker=$(compact_marker_path "$quarantine_dir" "$db")
-  [ -f "$_qn_marker" ] || return 0
+  [ -f "$_qn_marker" ] && [ -r "$_qn_marker" ] || return 0
 
   _qn_seen_count=$(compact_marker_value "$quarantine_dir" "$db" seen_count || true)
   case "$_qn_seen_count" in ''|*[!0-9]*) _qn_seen_count=0 ;; esac
@@ -1400,13 +1407,20 @@ record_quarantine_notify_state() {
     return 0
   }
   umask "$_qn_old_umask"
+  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_qn_marker" > "$_qn_tmp" 2>/dev/null; then
+    rm -f "$_qn_tmp"
+    return 0
+  fi
   if ! {
-    awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_qn_marker"
     printf 'seen_count=%s\n' "$_qn_seen_count"
     printf 'notify_count=%s\n' "$_qn_notify_count"
     printf 'last_notified_ts=%s\n' "$_qn_last_ts"
     printf 'last_notified_reason=%s\n' "$_qn_last_reason"
-  } > "$_qn_tmp" 2>/dev/null; then
+  } >> "$_qn_tmp" 2>/dev/null; then
+    rm -f "$_qn_tmp"
+    return 0
+  fi
+  if ! grep -q '^db=' "$_qn_tmp" 2>/dev/null; then
     rm -f "$_qn_tmp"
     return 0
   fi
@@ -1430,8 +1444,9 @@ report_existing_quarantine() {
 
   quarantine_alert_emitted=0
   if quarantine_should_notify "$db" "${quarantine_reason:-<unknown>}"; then
-    mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
-    quarantine_alert_emitted=1
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"; then
+      quarantine_alert_emitted=1
+    fi
   fi
   record_quarantine_notify_state "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted"
 }
