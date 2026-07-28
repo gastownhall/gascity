@@ -461,6 +461,106 @@ func TestAgentListFilterByRunning(t *testing.T) {
 	}
 }
 
+// TestAgentListSuspendedCheckGatedByRunning guards against a regression
+// where the suspended-flag GetMeta lookup ran unconditionally, even for
+// agents with no session at all. A non-running agent has no session to
+// query, so the handler must not issue any GetMeta call for it.
+func TestAgentListSuspendedCheckGatedByRunning(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	if n := state.sp.CountCalls("GetMeta", "myrig--worker"); n != 0 {
+		t.Errorf("GetMeta calls for non-running agent = %d, want 0 (suspended check must be gated behind running)", n)
+	}
+}
+
+// rosterFake augments runtime.Fake with the optional batch-read interfaces
+// ([runtime.SessionRosterProvider], [runtime.EnvironmentBatchProvider]) so
+// tests can assert the handler prefers them over per-session-name calls.
+type rosterFake struct {
+	*runtime.Fake
+	roster map[string]runtime.SessionRosterEntry
+	env    map[string]map[string]string
+}
+
+func (r *rosterFake) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return r.roster, nil
+}
+
+func (r *rosterFake) GetAllEnvironment(name string) (map[string]string, error) {
+	return r.env[name], nil
+}
+
+// TestAgentListPrefersBatchSessionRosterAndEnvironment verifies that when
+// the session provider implements the optional batch-read interfaces, the
+// handler sources running/attached/last-activity/suspended/session-id from
+// the single batched calls instead of falling back to the per-session-name
+// IsRunning/IsAttached/GetLastActivity/GetMeta path.
+func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
+	state := newFakeState(t)
+	lastActivity := time.Unix(1700000000, 0)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			"myrig--worker": {Attached: true, LastActivity: lastActivity},
+		},
+		env: map[string]map[string]string{
+			"myrig--worker": {"suspended": "true", "GC_SESSION_ID": "sess-xyz"},
+		},
+	}
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if !item.Running {
+		t.Error("Running = false, want true (from roster presence)")
+	}
+	if !item.Suspended {
+		t.Error("Suspended = false, want true (from batched GetAllEnvironment)")
+	}
+	if item.Session == nil || !item.Session.Attached {
+		t.Errorf("Session.Attached = %+v, want Attached=true (from roster)", item.Session)
+	}
+	if item.Session == nil || item.Session.LastActivity == nil || !item.Session.LastActivity.Equal(lastActivity) {
+		t.Errorf("Session.LastActivity = %+v, want %v (from roster)", item.Session, lastActivity)
+	}
+
+	for _, method := range []string{"IsRunning", "IsAttached", "GetLastActivity", "GetMeta"} {
+		if n := fake.Fake.CountCalls(method, "myrig--worker"); n != 0 {
+			t.Errorf("%s calls = %d, want 0 (batch path should bypass per-session-name methods)", method, n)
+		}
+	}
+}
+
 func TestAgentGet(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)

@@ -293,6 +293,31 @@ type DialogProvider interface {
 	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// SessionRosterProvider is an optional extension for providers whose
+// per-session attribute reads are otherwise expensive (e.g. one subprocess
+// fork per call). Callers iterating a full session roster should prefer
+// this over IsRunning/IsAttached per name when available.
+type SessionRosterProvider interface {
+	// SessionRoster returns attributes for every session currently known
+	// to the runtime, keyed by session name. A name absent from the
+	// result is not running.
+	SessionRoster() (map[string]SessionRosterEntry, error)
+}
+
+// SessionRosterEntry holds the batch-readable attributes of a single
+// session, as returned by [SessionRosterProvider.SessionRoster].
+type SessionRosterEntry struct {
+	Attached     bool
+	LastActivity time.Time
+}
+
+// EnvironmentBatchProvider is an optional extension exposing a single-exec
+// full-environment read for a session, letting callers that need multiple
+// keys avoid one subprocess fork per key.
+type EnvironmentBatchProvider interface {
+	GetAllEnvironment(name string) (map[string]string, error)
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //
