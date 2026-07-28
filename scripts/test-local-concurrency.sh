@@ -18,8 +18,8 @@
 # per-run echo, and self-tested from both the fast) and full) job lists.
 #
 # Coverage: outer-job load subtraction (zero/mid/saturating load), the
-# min_auto_jobs=2 floor, GC_TEST_LOCAL_CPUS overriding load-awareness
-# outright, fractional-load truncation (not rounding), a malformed
+# min_auto_jobs=2 floor, a small machine skipping load adjustment
+# entirely, fractional-load truncation (not rounding), a malformed
 # GC_TEST_LOCAL_LOADAVG failing by name, a live-host regression guard that
 # the default path actually reads /proc/loadavg (skipped when strace is
 # unavailable), inner-parallelism arithmetic (clean division, the real
@@ -69,7 +69,7 @@ GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LO
 assert_eq "loadavg.floors_at_min_auto_jobs" "$GOT" "2"
 
 GOT="$(GC_TEST_LOCAL_CPUS=4 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG=28 "$JOB_COUNT")"
-assert_eq "loadavg.explicit_cpus_override_wins_outright" "$GOT" "4"
+assert_eq "loadavg.small_machine_skips_load_adjustment" "$GOT" "4"
 
 GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG=3.9 "$JOB_COUNT")"
 assert_eq "loadavg.truncates_fractional_load" "$GOT" "13"
@@ -86,14 +86,19 @@ assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$J
 # /proc/loadavg, mirroring how detect_memory_kib is already proven to read
 # /proc/meminfo. Skipped gracefully where strace is unavailable (containers
 # without CAP_SYS_PTRACE, macOS) rather than failing the whole suite on an
-# environment gap unrelated to the feature itself.
+# environment gap unrelated to the feature itself. The cpu seam is pinned
+# above the small-machine threshold because test-local-job-count skips
+# load-awareness entirely at cpus <= min_auto_jobs*2 — an unpinned probe
+# inherits the real host's core count and so false-fails on a small host.
+# GC_TEST_LOCAL_LOADAVG stays unset, which is what gives the guard its
+# teeth: it still proves the default path reads /proc/loadavg.
 if command -v strace >/dev/null 2>&1; then
     # Captured into a variable rather than piped live into grep: a piped
     # `grep -q` closes its end of the pipe as soon as it finds a match, and
     # under pipefail that early close can race strace's own exit — SIGPIPEing
     # strace mid-write turns into a spurious pipeline failure even though the
     # match was genuinely found. Capturing first removes the race entirely.
-    STRACE_OUT="$(strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null || true)"
+    STRACE_OUT="$(GC_TEST_LOCAL_CPUS=16 strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null || true)"
     if [[ "$STRACE_OUT" == *"/proc/loadavg"* ]]; then
         record_pass "loadavg.default_path_opens_proc_loadavg"
     else
