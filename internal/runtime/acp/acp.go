@@ -258,8 +258,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
-		// Drain buffered stdout before the publisher's final flush so the last
-		// session/update cannot race publication shutdown.
+		// Wait for readLoop to finish before the publisher's final flush, so a
+		// session/update already dispatched cannot race publication shutdown.
+		// (cmd.Wait closes the stdout read end, so bytes still in the pipe
+		// buffer at exit are not recoverable here.)
 		<-sc.readDone
 		sc.drainPending()
 		sc.closeActivityPublisher()
@@ -350,7 +352,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
 		p.mu.Lock()
-		if _, replaced := p.conns[name]; !replaced {
+		if _, stillPresent := p.conns[name]; !stillPresent {
 			p.cleanupMeta(name)
 		}
 		p.mu.Unlock()
