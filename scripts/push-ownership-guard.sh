@@ -36,6 +36,13 @@
 # response doesn't parse) blocks the push. The only sanctioned bypass is
 # `git push --no-verify` for Layer A; Layer B has no bypass by design — an
 # automated force-push is exactly the case this guard exists to stop.
+# EXCEPTION (deploy/*-gate branches): these deliberately ignore the
+# branch-embedded id and resolve solely via the assignee fallback (see
+# _pog_resolve_bead_id). A *failed* assignee read is still ambiguity and
+# still blocks; but a read that succeeds and finds no in-progress
+# assignment leaves nothing to check, and the push is allowed — the same
+# "no session, nothing to check" semantics every unmatched branch already
+# has.
 #
 # This file ONLY defines functions and one default-value assignment;
 # sourcing it must not produce output or otherwise mutate state.
@@ -59,6 +66,11 @@
 
 POG_TIMEOUT_SECONDS="${POG_TIMEOUT_SECONDS:-5}"
 POG_READ_ATTEMPTS="${POG_READ_ATTEMPTS:-3}"
+
+# Sentinel emitted by _pog_resolve_bead_id when it cannot resolve an id
+# *and* the failure is ambiguous (a failed bd read) rather than a clean
+# "no such assignment". Not a valid bead id by construction.
+POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
 
 # _pog_timeout <seconds> <cmd...>: run <cmd...> bounded by <seconds>,
 # mirroring the timeout/gtimeout fallback shim in
@@ -122,7 +134,9 @@ _pog_read_with_retry() {
 # If both resolve and disagree, the branch match wins (it's the more
 # specific signal) and a warning goes to stderr — this is a best-effort
 # cross-check, not a hard failure, since branch-naming habits can
-# legitimately drift from bd's bookkeeping.
+# legitimately drift from bd's bookkeeping. EXCEPTION: deploy/*-gate
+# branches (see below) embed the id of the bead being gated, not the bead
+# this push is for, so for that branch shape the live assignee wins instead.
 #
 # KNOWN LIMITATION of path 2 (confirmed by manual repro, not yet filed as
 # its own bead): the fallback query itself filters on --status=in_progress,
@@ -134,7 +148,10 @@ _pog_read_with_retry() {
 # branch below allows the push. This does NOT affect path 1: this repo's
 # real branch convention (builder/<bead-id>-<slug>) always encodes the
 # bead id, so the primary path is unaffected by a bead's status changing
-# out from under it — confirmed via manual repro, see
+# out from under it — with one deliberate exception: deploy/*-gate branches
+# now route through path 2 by design (their branch-embedded id is the gated
+# bead, not this push's bead), so that branch shape inherits this gap.
+# Confirmed via manual repro, see
 # test_fallback_cannot_detect_staleness_after_status_leaves_in_progress in
 # scripts/test-push-ownership-guard.sh. The fallback query shape matches
 # ga-fip9ps.1's own spec verbatim; widening it (e.g. dropping the status
@@ -153,13 +170,44 @@ _pog_resolve_bead_id() {
         branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
     fi
 
+    # assignee_read_failed distinguishes "the read failed" (ambiguity) from
+    # "the read succeeded and found nothing" (a clean answer):
+    # _pog_read_with_retry returns non-zero only when every attempt failed or
+    # produced no output, and a successful `[]` read is non-empty, so its exit
+    # status separates the two cleanly.
     local assignee_id=""
-    if [[ -n "${GC_AGENT:-}" ]] && command -v bd >/dev/null 2>&1; then
-        local list_json
-        list_json="$(_pog_read_with_retry bd list --assignee="$GC_AGENT" --status=in_progress --json || true)"
-        if [[ -n "$list_json" ]]; then
-            assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+    local assignee_read_failed=0
+    if [[ -n "${GC_AGENT:-}" ]]; then
+        if ! command -v bd >/dev/null 2>&1; then
+            assignee_read_failed=1
+        else
+            local list_json
+            if list_json="$(_pog_read_with_retry bd list --assignee="$GC_AGENT" --status=in_progress --json)"; then
+                assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+            else
+                assignee_read_failed=1
+            fi
         fi
+    fi
+
+    # deploy/*-gate branches embed the id of the bead being GATED, not the
+    # bead this push is for -- that gated bead is routinely closed by the
+    # time its deploy-gate branch is pushed (that's the whole point of a
+    # deploy gate: ga-wwswme). For this branch shape the live in-progress
+    # assignment is the correct id and must win over the branch-derived id.
+    if [[ "$branch" == deploy/*-gate ]]; then
+        if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
+            echo "push-ownership-guard: NOTE deploy-gate branch resolves to $branch_id (the gated bead, not this push's bead); using this session's in-progress assignment $assignee_id instead" >&2
+        fi
+        # Discarding the branch-derived id means the assignee read is the ONLY
+        # signal left for this branch shape, so a failed read is ambiguity, not
+        # "nothing to check" — hand the caller the sentinel so it fails closed.
+        if [[ -z "$assignee_id" && $assignee_read_failed -eq 1 ]]; then
+            printf '%s' "$POG_AMBIGUOUS_SENTINEL"
+            return
+        fi
+        printf '%s' "$assignee_id"
+        return
     fi
 
     if [[ -n "$branch_id" && -n "$assignee_id" && "$branch_id" != "$assignee_id" ]]; then
@@ -182,6 +230,10 @@ assert_bead_still_claimed() {
 
     local id
     id="$(_pog_resolve_bead_id)"
+    if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
+        echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
     if [[ -z "$id" ]]; then
         return 0  # nothing to check
     fi
