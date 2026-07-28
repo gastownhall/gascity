@@ -41,10 +41,11 @@ structurally incapable of reaching the regression they were meant to catch,
 both citing `make test-fast-parallel` plus scoped/package-level commands
 that leave `GC_FAST_UNIT` at `1` or unset:
 
-- `release-gates/ga-bucf4p-live-session-workdir-isolation-gate.md`
-  (PR #4735): the cwd-collision guard change shipped with a "Tests pass"
-  row that never ran a pool scenario. `TestTutorial01/08-agent-pools` would
-  have caught the regression traced in bead `ga-9x4z1g`.
+- `release-gates/ga-bucf4p-live-session-workdir-isolation-gate.md`, on the
+  branch of open PR #4735 (not yet in `main`): the cwd-collision guard
+  change was signed off with a "Tests pass" row that never ran a pool
+  scenario. Per the root-cause trace in bead `ga-9x4z1g`,
+  `TestTutorial01/08-agent-pools` is the scenario that exercises that path.
 - `release-gates/ga-7vhfyj-cwd-fallback-guard-gate.md` (PR #4738): recorded
   "The reviewer independently ran the full `cmd/gc` package: 8,030 PASS,
   0 FAIL, 96 SKIP" — `TestTutorial01` was inside the 96 `SKIP`. The change
