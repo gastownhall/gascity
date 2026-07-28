@@ -161,7 +161,7 @@ Run `make help` for the full list. The most useful targets are:
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
 | `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
-| `make dashboard-build` | Regenerate SPA types + compile the dashboard bundle |
+| `make dashboard-build` | Compile the dashboard bundle and sync it into the embedded `dist/` |
 | `make dashboard-dev` | Vite dev server for SPA iteration |
 | `make dashboard-check` | Typecheck + build + test the dashboard |
 | `make dashboard-ci` | `dashboard-check` plus fail-on-drift for the generated API client and `dist/` — the gate for openapi.json/dashboard changes |
