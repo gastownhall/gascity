@@ -538,13 +538,13 @@ func finalizeDrainAckStoppedSession(
 			Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain acknowledged"),
 		})
 	}
-	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, rigStores, info)
 	if assignedErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 		hasAssignedWork = true
 	}
 	if closeIfUnassigned && !hasAssignedWork {
-		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, info, "drained", clk.Now().UTC(), stderr) {
+		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, info, "drained", clk.Now().UTC(), stderr, true) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
 				_ = dops.clearDrain(name)
@@ -584,7 +584,7 @@ func finalizeDrainAckStoppedSession(
 			recordStopped(false)
 			return drainAckFinalizeResult{witnessInfo: &witnessInfo}
 		}
-		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, rigStores, info)
 		if closeGateAssignedErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: checking assigned work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
 			assignedAfterCloseGate = true
@@ -1817,7 +1817,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false) {
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
 						// session closed this tick must not still count as open in its
@@ -2126,7 +2126,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
 					}
-					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr) {
+					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false) {
 						// Keep the snapshot's Info.Closed in step with the in-memory
 						// close so the cross-session min-floor scan does not count this
 						// orphan. Store-only close (closeBead/closeFailedCreateBead stamp
@@ -3903,6 +3903,159 @@ func sessionHasOpenAssignedWorkForReachableStore(
 		}
 	}
 	return false, nil
+}
+
+// sessionHasOpenAssignedWorkForReachableStoreForCloseGate is the drain-ack
+// close-gate form of sessionHasOpenAssignedWorkForReachableStore: identical
+// reachability/identifier resolution, but the per-store probe additionally
+// excludes the session's own mol-do-work "drain" step. That
+// step's title is literally "Close drain step and signal completion" — counting
+// it as assigned work means a session that has already signaled completion is
+// judged to still have work, so the session bead never closes and the pool
+// controller respawns a fresh session onto the same still-open step forever.
+//
+// This is a deliberately SEPARATE chain from sessionHasOpenAssignedWorkForReachableStore,
+// not a shared-helper change: sessionHasOpenAssignedWorkForTier and
+// sessionHasOpenAssignedWispWork (the functions that would otherwise need the
+// exclusion) are also called from the awake-work chain
+// (sessionHasInProgressAssignedWorkForTier), which gates unrelated decisions
+// (config-drift drain deferral, the max-session-age timer, the pool-slot-freeable
+// check, wake-on-assigned-work). None of those should start ignoring a session's
+// own drain step — only the drain-ack close decision should. Use this function
+// (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
+// ONLY from the drain-ack finalize path.
+func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+) (bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	stores, err := reachableStoresForSessionInfo(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return false, err
+	}
+	for _, s := range stores {
+		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers); err != nil || has {
+			return has, err
+		}
+	}
+	return false, nil
+}
+
+func sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(store beads.Store, identifiers []string) (bool, error) {
+	return sessionHasAssignedWorkInStoreByIdentifiersForStatusesForCloseGate(store, identifiers, []string{"open", "in_progress"})
+}
+
+func sessionHasAssignedWorkInStoreByIdentifiersForStatusesForCloseGate(store beads.Store, identifiers []string, statuses []string) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, status := range statuses {
+		for _, assignee := range identifiers {
+			if assignee == "" {
+				continue
+			}
+			key := status + "\x00" + assignee
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if has, err := sessionHasOpenAssignedWorkForTierForCloseGate(store, assignee, status, beads.TierIssues, true); err != nil || has {
+				return has, err
+			}
+			if has, err := sessionHasOpenAssignedWispWorkForCloseGate(store, assignee, status); err != nil || has {
+				return has, err
+			}
+		}
+	}
+	return false, nil
+}
+
+// sessionHasOpenAssignedWorkForTierForCloseGate mirrors sessionHasOpenAssignedWorkForTier
+// but filters through hasNonSessionNonOwnDrainStepWork instead of the shared
+// wa.HasNonSessionWork, so the drain-step exclusion cannot leak into
+// sessionHasOpenAssignedWorkForTier's other caller (the awake-work chain).
+func sessionHasOpenAssignedWorkForTierForCloseGate(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	items, err := wa.OpenAssignedTo(assignee, status, tierMode, live)
+	if err != nil {
+		return false, err
+	}
+	return hasNonSessionNonOwnDrainStepWork(store, items), nil
+}
+
+// sessionHasOpenAssignedWispWorkForCloseGate mirrors sessionHasOpenAssignedWispWork
+// for the close gate. It intentionally skips the CachedOpenAssignedWisps fast
+// path: that cache is a positive-only accelerator built on the shared
+// wa.HasNonSessionWork filter, and drain-ack is not a hot loop, so the extra
+// live read here is cheap and keeps the exclusion correct rather than stale.
+func sessionHasOpenAssignedWispWorkForCloseGate(store beads.Store, assignee, status string) (bool, error) {
+	return sessionHasOpenAssignedWorkForTierForCloseGate(store, assignee, status, beads.TierWisps, true)
+}
+
+// hasNonSessionNonOwnDrainStepWork is wa.HasNonSessionWork plus the own-drain-step
+// exclusion: skips session beads/repairable session beads (as HasNonSessionWork
+// already does) AND the session's own mol-do-work drain step.
+func hasNonSessionNonOwnDrainStepWork(store beads.Store, items []beads.Bead) bool {
+	for _, item := range items {
+		if sessionpkg.IsSessionBeadOrRepairable(item) {
+			continue
+		}
+		if isSessionOwnDrainStepBead(store, item) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isSessionOwnDrainStepBead reports whether item is a mol-do-work "drain" step
+// bead: gc.step_ref's final dot-separated segment is "drain" AND its molecule
+// root (gc.root_bead_id) was compiled from the mol-do-work formula. The store
+// writes gc.step_ref formula-qualified (e.g. "mol-do-work.drain"), never the
+// bare step id, so the match is on the LAST segment, not the whole string.
+// The formula pin below already narrows to mol-do-work, so this
+// segment check only has to identify "this is the drain step", not re-pin the
+// formula itself. The match is deliberately narrow — it must not match
+// any other step, including one that happens to reuse the literal step id
+// "drain" in an unrelated formula. The identifiers-scoped assignee filter
+// upstream already guarantees any matching item is assigned to THIS session,
+// so no separate "is this session's own molecule" check is needed beyond
+// confirming the step/formula shape itself.
+func isSessionOwnDrainStepBead(store beads.Store, item beads.Bead) bool {
+	stepRef := strings.TrimSpace(item.Metadata[beadmeta.StepRefMetadataKey])
+	if idx := strings.LastIndex(stepRef, "."); idx >= 0 {
+		stepRef = stepRef[idx+1:]
+	}
+	if stepRef != "drain" {
+		return false
+	}
+	rootID := strings.TrimSpace(item.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || store == nil {
+		return false
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		return false
+	}
+	return drainStepRootFormulaName(root) == "mol-do-work"
+}
+
+// drainStepRootFormulaName mirrors internal/api's workflowFormulaName (root.Ref,
+// falling back to gc.formula_name, falling back to the root bead's own ID) — the
+// canonical way this codebase names the formula a molecule root was compiled
+// from (see internal/formula/compile.go's rootStep stamping).
+func drainStepRootFormulaName(root beads.Bead) string {
+	if name := strings.TrimSpace(root.Ref); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]); name != "" {
+		return name
+	}
+	return root.ID
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
