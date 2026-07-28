@@ -714,12 +714,17 @@ func pinnedBeadsModuleVersion() (string, error) {
 // fresh from the pinned dependency, so its correctness never depends on
 // whatever happens to be installed on the host.
 func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
+	// Load-bearing for the census even though waitTestRealBDPath calls it
+	// again: this is the cmd/gc+untagged slow_process_gate call site the
+	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
+	// TESTING.md. Deleting it as redundant fails the ledger gate.
 	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
 
-	bdPath, err := buildPinnedBDBinaryForTests()
-	if err != nil {
-		t.Fatalf("buildPinnedBDBinaryForTests: %v", err)
-	}
+	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
+	// with the other bd-consuming tests. Calling buildPinnedBDBinaryForTests
+	// directly builds a second ~91 MB binary, and leaks a second temp dir, in
+	// any shard that also holds a waitTestRealBDPath caller.
+	bdPath := waitTestRealBDPath(t)
 
 	pinned, err := pinnedBeadsModuleVersion()
 	if err != nil {
