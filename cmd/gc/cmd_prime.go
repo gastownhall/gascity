@@ -224,7 +224,13 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
 	}
-	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
+	// A SessionStart hook with no managed session identity has nothing to
+	// prime, so emit an empty hook payload. When an identity IS present (even if
+	// the session is not currently live, or its bead is missing/closed), fall
+	// through: the beacon must always be emitted, and a stale pane continuation
+	// epoch has to be able to redeliver the startup prompt (handled below via
+	// startupPromptDeliveredMarkerStale).
+	if hookMode && primeHookSessionStart(hookContext) && strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "" {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 		return 0
 	}
@@ -321,21 +327,26 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
 			// Resolve the session provider so the spawn respects the
-			// event-capable suppression. Fail open on resolution errors
-			// (nil provider → today's spawn) — a hook must not start
-			// failing because the provider config is momentarily broken.
+			// event-capable suppression. Fail open on resolution errors — a hook
+			// must not start failing because the provider config is momentarily
+			// broken; the possibly-nil provider is confined to the else branch so
+			// today's spawn still runs when construction fails.
 			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-			hookSP, _ := newSessionProviderFromContext(spctx, nil)
-			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
-				cityPath:          cityPath,
-				cityName:          cityName,
-				cfg:               cfg,
-				agent:             a,
-				resolved:          resolved,
-				sessionID:         os.Getenv("GC_SESSION_ID"),
-				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
-				sessionName:       sessionName,
-			}), hookSP)
+			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
+			if hookSPErr != nil {
+				// Fail open: skip the event-capable nudge-poller wiring this pass.
+			} else {
+				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
+					cityPath:          cityPath,
+					cityName:          cityName,
+					cfg:               cfg,
+					agent:             a,
+					resolved:          resolved,
+					sessionID:         os.Getenv("GC_SESSION_ID"),
+					continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+					sessionName:       sessionName,
+				}), hookSP)
+			}
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
@@ -510,54 +521,6 @@ func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
 
 func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
-}
-
-func primeHookHasLiveManagedSession(cityPath string) bool {
-	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
-	if sessionID == "" {
-		return false
-	}
-	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
-	if sessionName == "" {
-		return false
-	}
-	store, err := openCityStoreAt(cityPath)
-	if err != nil {
-		return false
-	}
-	// Route the session-bead read through the session coordination-class store so
-	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
-	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
-	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
-	// identity.
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	// The front-door Get rejects a present-but-non-session bead
-	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
-	info, err := sessionFrontDoor(sessStore).Get(sessionID)
-	if err != nil {
-		return false
-	}
-	if info.Closed {
-		return false
-	}
-	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
-	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
-	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
-		return false
-	}
-	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
-		strings.TrimSpace(info.Template) != template {
-		return false
-	}
-	// MetadataState is the RAW state metadata; Info.State is blanked on closed
-	// beads, so the raw mirror preserves the original exact comparison.
-	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
-	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
-		return true
-	default:
-		return false
-	}
 }
 
 // startupPromptDeliveredMarkerStale reports whether the pane-stamped

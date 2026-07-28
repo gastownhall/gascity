@@ -53,7 +53,14 @@ case "$1 $2" in
 		printf 'probe-at-agent-start: absent\n' >> '` + f.log + `'
 	fi
 	printf '{"result":{"agent":{"name":"%s","pane_id":"p1"}}}' "$3" ;;
-"agent get") printf '{"result":{"agent":{"name":"%s","pane_id":"p1","agent_status":"idle"}}}' "$3" ;;
+# agent get reports the session absent so the provider's ObserveLiveness /
+# IsRunning gate (herdr >=0.7.5 pane-binding liveness, #4691) treats a fresh
+# name as not-yet-running — otherwise every start would short-circuit with
+# ErrSessionExists before pre_start.
+"agent get") printf '{"error":{"code":"not_found","message":"no such agent"}}' ;;
+# pane process-info reports a ready, idle shell so waitPaneShellReady returns
+# immediately on the kind-launch path (shell present, no foreground process).
+"pane process-info") printf '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[]}}}' ;;
 "workspace list") printf '{"result":{"workspaces":[]}}' ;;
 "workspace create") printf '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"stray"}}}' ;;
 "tab list") printf '{"result":{"tabs":[]}}' ;;
@@ -114,6 +121,7 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 
 	cfg := runtime.Config{
 		WorkDir: work,
+		Command: "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		PreStart: []string{
 			"mkdir -p " + sq(work), // the worktree-setup role
 			"touch " + sq(marker),
@@ -136,9 +144,12 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 	if probeIdx := logIndex(lines, "probe-at-agent-start: present"); probeIdx != startIdx+1 {
 		t.Errorf("pre_start effects not visible at agent launch; log:\n%s", strings.Join(lines, "\n"))
 	}
-	// The prepared workdir — not the city root — is the launch cwd.
-	if !strings.Contains(lines[startIdx], "--cwd "+work) {
-		t.Errorf("agent start line missing --cwd %s: %q", work, lines[startIdx])
+	// The prepared workdir — not the city root — is the pane cwd. Under herdr
+	// >=0.7.5 cwd is a property of the pane, set at workspace/tab creation
+	// (#4691 pane-shell model), not an agent-start flag.
+	wsIdx := logIndex(lines, "workspace create")
+	if wsIdx < 0 || !strings.Contains(lines[wsIdx], "--cwd "+work) {
+		t.Errorf("workspace create line missing --cwd %s; log:\n%s", work, strings.Join(lines, "\n"))
 	}
 }
 
@@ -185,6 +196,7 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 
 	cfg := runtime.Config{
 		WorkDir:   work,
+		Command:   "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		CopyFiles: []runtime.CopyEntry{{Src: src}},
 		PreStart:  []string{"test -f " + sq(staged)},
 	}
@@ -200,8 +212,10 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 	if startIdx < 0 {
 		t.Fatal("agent was never started")
 	}
-	if !strings.Contains(lines[startIdx], "--cwd "+work) {
-		t.Errorf("agent start line missing --cwd %s: %q", work, lines[startIdx])
+	// cwd is a pane property set at workspace/tab creation under herdr >=0.7.5.
+	wsIdx := logIndex(lines, "workspace create")
+	if wsIdx < 0 || !strings.Contains(lines[wsIdx], "--cwd "+work) {
+		t.Errorf("workspace create line missing --cwd %s; log:\n%s", work, strings.Join(lines, "\n"))
 	}
 }
 
@@ -237,6 +251,7 @@ func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 
 	cfg := runtime.Config{
 		WorkDir: work,
+		Command: "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		SessionSetup: []string{
 			`printf 'session_setup-ran\n' >> ` + sq(f.log) + `; printf '%s' "$GC_SESSION" > ` + sq(sessionEnvOut),
 			"exit 1", // non-fatal: Start must still succeed
