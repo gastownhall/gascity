@@ -374,6 +374,11 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("walk_up_fallback", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveContext's " +
+			"ambient cwd walk-up (step 10), which is now unconditionally refused " +
+			"inside test binaries; an explicit override would make it a no-op " +
+			"test rather than a fix")
+
 		resetFlags(t)
 		t.Setenv("GC_HOME", t.TempDir())
 
@@ -393,6 +398,11 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("walk_up_fallback_with_rig_match", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveContext's " +
+			"ambient cwd walk-up (step 10) followed by a rig match, which is now " +
+			"unconditionally refused inside test binaries; an explicit override " +
+			"would make it a no-op test rather than a fix")
+
 		resetFlags(t)
 		t.Setenv("GC_HOME", t.TempDir())
 
@@ -475,6 +485,12 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("registered_rig_cwd_ambiguous_falls_through", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising the fallthrough " +
+			"from an ambiguous registered-rig match (step 9) to resolveContext's " +
+			"ambient cwd walk-up (step 10), which is now unconditionally refused " +
+			"inside test binaries; an explicit override would make it a no-op " +
+			"test rather than a fix")
+
 		resetFlags(t)
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)

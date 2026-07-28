@@ -9833,10 +9833,16 @@ func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *t
 
 // TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout pins the
 // max-age half of the timer asymmetry (SESSION-RECON-009): a max-age deferral
-// leaves the session in the rest of the tick. The busy witness is max-age
-// deferred on assigned work but must still be idle-evaluated on the same
-// tick, so the idle stop fires. Fails if the max-age defer path ever gains a
-// `continue`.
+// leaves the session in the rest of the tick instead of `continue`-ing past
+// it. The busy witness is max-age deferred on assigned work and must still
+// be idle-evaluated on the same tick. Since ga-nllza6 gave DecideIdleTimeout
+// its own AssignedWork rung, idle-timeout's independent evaluation of the
+// same in-progress bead now defers too (not stops) — so this proves
+// fall-through via a recorded idle-timeout decision (site
+// TraceSiteReconcilerIdleTimeout, AssignedWork/DeferredBusy) rather than via
+// an idle-kill event, and additionally asserts no idle kill fires. Fails if
+// the max-age defer path ever gains a `continue` that skips idle-timeout
+// entirely.
 func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
@@ -9861,6 +9867,21 @@ func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testi
 	it.idle["witness"] = true
 	rec := events.NewFake()
 	env.rec = rec
+	trace := &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{"witness": TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
 
 	poolDesired := make(map[string]int)
 	for _, tp := range env.desiredState {
@@ -9872,7 +9893,7 @@ func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testi
 	reconcileSessionBeadsTraced(
 		context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
-		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, nil,
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, trace,
 		withMaxSessionAgeTracker(tr),
 	)
 
@@ -9888,8 +9909,287 @@ func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testi
 	if maxAgeKilled {
 		t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
 	}
-	if !idleKilled {
-		t.Error("idle timeout must still run on the same tick after a max-age busy deferral")
+	if idleKilled {
+		t.Error("idle timeout must defer (not stop) while the same assigned bead is still in progress")
+	}
+
+	var sawIdleTimeoutDefer bool
+	for _, r := range trace.records {
+		if r.SiteCode == TraceSiteReconcilerIdleTimeout &&
+			r.ReasonCode == TraceReasonAssignedWork &&
+			r.OutcomeCode == TraceOutcomeDeferredBusy {
+			sawIdleTimeoutDefer = true
+		}
+	}
+	if !sawIdleTimeoutDefer {
+		t.Error("idle timeout must still be evaluated on the same tick after a max-age busy deferral, recording an AssignedWork/DeferredBusy decision")
+	}
+}
+
+// idleTimeoutBackstopTrace builds a sessionReconcilerTraceCycle wired so
+// RecordDecision actually appends to records instead of stashing pending
+// (RecordDecision only appends when detailSource finds template as a key in
+// tracer.detail, and ensureAutoArm needs an armStore this literal has none
+// of) — mirrors the literal already proven in
+// TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout.
+func idleTimeoutBackstopTrace(templateName string) *sessionReconcilerTraceCycle {
+	return &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{templateName: TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
+}
+
+func idleTimeoutBackstopTraceHasDecision(trace *sessionReconcilerTraceCycle, reason TraceReasonCode, outcome TraceOutcomeCode) bool {
+	for _, r := range trace.records {
+		if r.SiteCode == TraceSiteReconcilerIdleTimeout && r.ReasonCode == reason && r.OutcomeCode == outcome {
+			return true
+		}
+	}
+	return false
+}
+
+func idleTimeoutBackstopKilled(rec *events.Fake) bool {
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit
+// proves the ga-nllza6 Part 2 consecutive-defer backstop: a session that
+// keeps deferring the idle-timeout stop on the SAME anchor bead every tick
+// eventually gets force-stopped under the distinct assigned_work_exhausted
+// trace reason / assigned-work-exhausted sleep reason, instead of running
+// forever. DecideIdleTimeout stays a pure decider (no counter parameter) —
+// the reconciler tracks the streak itself via assignedWorkDeferTracker, keyed
+// by session name and the session's currently_processing_bead_id. With the
+// tracker's limit set to 2, the first two ticks defer (count 1, 2 — neither
+// exceeds the limit) and the third tick's count (3) exceeds it, overriding
+// DecideIdleTimeout's ordinary AssignedWorkHas defer with
+// DecideAssignedWorkExhausted's forced stop.
+func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"currently_processing_bead_id": "ga-anchor1",
+	})
+	if err := env.sp.SetMeta("witness", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newAssignedWorkDeferTracker()
+	tr.setLimit("witness", 2)
+	it := newFakeIdleTracker()
+	it.idle["witness"] = true
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	runTick := func() (*sessionReconcilerTraceCycle, *events.Fake) {
+		rec := events.NewFake()
+		trace := idleTimeoutBackstopTrace("witness")
+		reconcileSessionBeadsTraced(
+			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
+			withAssignedWorkDeferTracker(tr),
+		)
+		return trace, rec
+	}
+
+	for i, wantDefer := range []bool{true, true, false} {
+		trace, rec := runTick()
+		if wantDefer {
+			if idleTimeoutBackstopKilled(rec) {
+				t.Fatalf("tick %d: session killed, want deferred (count %d must not yet exceed limit 2)", i+1, i+1)
+			}
+			if !idleTimeoutBackstopTraceHasDecision(trace, TraceReasonAssignedWork, TraceOutcomeDeferredBusy) {
+				t.Fatalf("tick %d: no AssignedWork/DeferredBusy decision recorded", i+1)
+			}
+			continue
+		}
+		if !idleTimeoutBackstopKilled(rec) {
+			t.Fatalf("tick %d: session not killed, want forced stop once the defer streak exceeds the limit", i+1)
+		}
+		if !idleTimeoutBackstopTraceHasDecision(trace, TraceReasonAssignedWorkExhausted, TraceOutcomeStopDeferExhausted) {
+			t.Fatalf("tick %d: no AssignedWorkExhausted/StopDeferExhausted decision recorded", i+1)
+		}
+		b, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonAssignedWorkExhausted) {
+			t.Errorf("sleep_reason = %q, want %q", b.Metadata["sleep_reason"], sessionpkg.SleepReasonAssignedWorkExhausted)
+		}
+	}
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange
+// proves the backstop counts consecutive defers PER ANCHOR BEAD, not per
+// session: changing the session's currently_processing_bead_id between ticks
+// resets the streak, so a session that finishes one assigned bead and picks
+// up a different one is not punished for the first bead's defer count. With
+// the limit set to 1, two consecutive defers on the SAME anchor force a stop
+// (proven by ticks 2->3, a sanity check that the limit is actually live); the
+// anchor change at tick 2 must reset that streak so tick 2 still defers.
+func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("witness", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newAssignedWorkDeferTracker()
+	tr.setLimit("witness", 1)
+	it := newFakeIdleTracker()
+	it.idle["witness"] = true
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	runTick := func(anchorBeadID string) *events.Fake {
+		env.setSessionMetadata(&session, map[string]string{
+			"currently_processing_bead_id": anchorBeadID,
+		})
+		rec := events.NewFake()
+		trace := idleTimeoutBackstopTrace("witness")
+		reconcileSessionBeadsTraced(
+			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
+			withAssignedWorkDeferTracker(tr),
+		)
+		return rec
+	}
+
+	if rec := runTick("ga-anchorA"); idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 1: session killed on the very first defer (limit 1, count 1 must not exceed it)")
+	}
+	if rec := runTick("ga-anchorB"); idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 2: session killed after switching anchor bead — the streak must reset on anchor change, not carry over from anchor A")
+	}
+	if rec := runTick("ga-anchorB"); !idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 3: session not killed on a second CONSECUTIVE defer for the same anchor (ga-anchorB) — sanity check that the limit is actually enforced when the anchor does NOT change")
+	}
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnOtherOutcome
+// proves the backstop's streak resets whenever a tick's idle-timeout outcome
+// is not itself an assigned-work defer — here, the timer simply not
+// triggering — matching assignedWorkDeferTracker.reset's documented contract
+// ("blocker, pending, no timer trigger, or an ordinary AssignedWorkNone
+// stop"). With the limit set to 1, tick 3 reuses anchor A from tick 1: if the
+// intervening non-triggering tick 2 had NOT reset the streak, tick 3 would be
+// the second consecutive defer on anchor A and would exceed the limit. Tick 4
+// then proves the counter is genuinely live (not merely always-reset) by
+// repeating anchor A with no intervening reset, which must exceed the limit.
+func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnOtherOutcome(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"currently_processing_bead_id": "ga-anchorA",
+	})
+	if err := env.sp.SetMeta("witness", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newAssignedWorkDeferTracker()
+	tr.setLimit("witness", 1)
+	it := newFakeIdleTracker()
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	runTick := func() *events.Fake {
+		rec := events.NewFake()
+		trace := idleTimeoutBackstopTrace("witness")
+		reconcileSessionBeadsTraced(
+			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
+			withAssignedWorkDeferTracker(tr),
+		)
+		return rec
+	}
+
+	it.idle["witness"] = true
+	if rec := runTick(); idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 1: session killed on the very first defer (limit 1, count 1 must not exceed it)")
+	}
+
+	it.idle["witness"] = false
+	if rec := runTick(); idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 2: session killed while idle timer did not even trigger")
+	}
+
+	it.idle["witness"] = true
+	if rec := runTick(); idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 3: session killed reusing anchor A — the streak must have reset at tick 2 (non-triggering tick), so this is only the first defer since the reset")
+	}
+
+	if rec := runTick(); !idleTimeoutBackstopKilled(rec) {
+		t.Fatal("tick 4: session not killed on a second CONSECUTIVE defer for anchor A with no intervening reset — sanity check that the limit is actually enforced")
 	}
 }
 

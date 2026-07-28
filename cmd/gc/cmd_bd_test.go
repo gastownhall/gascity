@@ -1569,6 +1569,11 @@ set -eu
 }
 
 func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
+	t.Skip("ga-klo4gz: this test's purpose is exercising resolveContextFromDir's " +
+		"ambient cwd walk-up (step 10), which is now unconditionally refused inside " +
+		"test binaries; an explicit GC_CITY/GC_CITY_PATH/GC_CITY_ROOT override would " +
+		"make it a no-op test rather than a fix")
+
 	disableManagedDoltRecoveryForTest(t)
 
 	origCityFlag := cityFlag

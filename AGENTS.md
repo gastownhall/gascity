@@ -217,7 +217,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
   `docs/reference/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `internal/api/dashboardspa/web/shared/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -450,12 +450,12 @@ Before considering any task complete:
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
-- `make dashboard-check` passes for any change touching `internal/api/`,
+- `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-ci`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases

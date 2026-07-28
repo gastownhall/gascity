@@ -34,6 +34,7 @@ named-always-min-conflict
 instructions-file
 service-secrets-perms
 skill-collision
+skill-dangling-sink
 order-firing-current
 codex-hooks-drift
 rig-pack-coverage
