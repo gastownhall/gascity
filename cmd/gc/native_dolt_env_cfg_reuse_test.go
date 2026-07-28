@@ -101,8 +101,9 @@ func exprText(expr ast.Expr) string {
 
 // bd scope resolution probes candidate stores only to decide which store an
 // invocation is scoped to. Each probe opened a store, and the open re-loaded
-// the whole city config that bd scope resolution had already loaded, so a
-// single `gc bd show <id> --json` paid for the city config three times.
+// the whole city config that bd scope resolution had already loaded — so on a
+// mutating invocation that reaches multiple candidate probes, the city config
+// was paid for once per probe on top of the load doBd had already done.
 func TestBdBeadExistsProbeReusesTheLoadedCityConfig(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "cmd_bd.go", nil, 0)

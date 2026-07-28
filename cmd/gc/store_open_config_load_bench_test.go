@@ -23,10 +23,10 @@ func newBenchCity(b *testing.B) string {
 // pack expansion plus the builtin-cache readiness walk that reads every file
 // of every cached pack.
 //
-// This is the unit of work the store open used to repeat. A `gc bd show <id>
-// --json` crossed this boundary three times — once in the bd command and twice
-// more inside the single store open that scope resolution performs to decide
-// which store holds a bead ID — so two crossings per invocation were redundant.
+// This is the unit of work the store open used to repeat. `gc bd close`
+// crossed this boundary three times and `gc bd update` twice — once in the bd
+// command, then again inside each store open on the write path — so those
+// extra crossings were redundant. Reads already crossed exactly once.
 func BenchmarkLoadCityConfig(b *testing.B) {
 	b.Setenv("GC_HOME", b.TempDir())
 	cityPath := newBenchCity(b)

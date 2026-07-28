@@ -121,6 +121,12 @@ func builtinRuntimeReadied(cityPath string) bool {
 // supplied config came from that same pass and re-running it would repeat the
 // cache walk the reuse exists to avoid — the walk, not the parse, is what a
 // config load costs. Any other config gets a full pass.
+//
+// Scoped to short-lived invocations: unlike EnsureBuiltinRuntimeAssets, the
+// early return skips the per-call requiredBuiltinSourcesUsable /
+// lockedBundledImportsUsable revalidation, and nothing resets ready to false.
+// A long-lived process (supervisor, API server) must call
+// EnsureBuiltinRuntimeAssets directly rather than adopt a WithConfig variant.
 func ensureBuiltinRuntimeAssetsForSuppliedConfig(cityPath string, warningWriter io.Writer) error {
 	if builtinRuntimeReadied(cityPath) {
 		return nil
