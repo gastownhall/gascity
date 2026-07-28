@@ -82,12 +82,21 @@ type DesiredStateResult struct {
 	// there is routed-but-unassigned demand on the identity's backing template
 	// (ScaleCheckCounts[backingTemplate] > 0), computed BEFORE canonical-alias
 	// pool suppression runs. Unlike NamedSessionDemand this is not
-	// assignee-direct and must never be merged into poolDesired or treated as
-	// sleep-suppressing — it exists solely to give ComputeAwakeSet a wake-only
-	// signal for an asleep named holder whose alias correctly suppresses the
-	// redundant pool standby (ga-jl73y2): routed-but-unclaimed demand that
-	// should wake the holder once, without affecting pool sizing or later
-	// idle-sleep decisions.
+	// assignee-direct and must never be merged into poolDesired — it exists
+	// solely to give ComputeAwakeSet a wake-only signal for an asleep named
+	// holder whose alias correctly suppresses the redundant pool standby
+	// (ga-jl73y2): routed-but-unclaimed demand that should wake the holder,
+	// without affecting pool sizing.
+	//
+	// It IS sleep-suppressing while the routed demand remains live. The
+	// resulting "routed-demand" wake reason is exempt from ComputeAwakeSet's
+	// idle-sleep pass and overrides non-interactive sleep suppression in
+	// wakeDemandOverridesSleepSuppression — otherwise a long-lived holder
+	// carrying a non-zero idle reference is re-slept on the same tick and the
+	// wake is silently undone. Suppression ends when demand clears: the holder
+	// then drains via the non-exempt "on-demand:running" reason. Scoped to
+	// canonical singleton backing pools, so only the one session that can
+	// serve the demand is kept awake.
 	NamedSessionRoutedDemand map[string]bool
 	// ReadyAssigned is the set of AssignedWorkBeads that carry real wake-demand
 	// readiness, keyed by store ref + bead ID: in-progress work, assigned
