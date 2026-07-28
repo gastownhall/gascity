@@ -1391,6 +1391,10 @@ export type ListBodyAgentPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1413,6 +1417,10 @@ export type ListBodyAgentResponse = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1437,6 +1445,10 @@ export type ListBodyBead = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1459,6 +1471,10 @@ export type ListBodyCityPendingEntry = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1483,6 +1499,10 @@ export type ListBodyConversationTranscriptRecord = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1505,6 +1525,10 @@ export type ListBodyExtmsgAdapterInfo = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1529,6 +1553,10 @@ export type ListBodyProviderPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1551,6 +1579,10 @@ export type ListBodyProviderResponse = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1575,6 +1607,10 @@ export type ListBodyRigPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1597,6 +1633,10 @@ export type ListBodyRigResponse = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1621,6 +1661,10 @@ export type ListBodySessionBindingRecord = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1643,6 +1687,10 @@ export type ListBodySessionResponse = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1667,6 +1715,10 @@ export type ListBodyStatus = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1689,6 +1741,10 @@ export type ListBodyWireEvent = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */

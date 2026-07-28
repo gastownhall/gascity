@@ -1505,6 +1505,10 @@
         "rotation": {
           "$ref": "#/$defs/EventsRotationConfig",
           "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
+        },
+        "scan_budget": {
+          "$ref": "#/$defs/EventsScanBudgetConfig",
+          "description": "ScanBudget configures the archive-scan budget for selective,\nunbounded-lower-edge list queries. Defaults are applied by\nEventsScanBudgetConfig helper methods when this table is absent."
         }
       },
       "additionalProperties": false,
@@ -1541,6 +1545,18 @@
       "additionalProperties": false,
       "type": "object",
       "description": "EventsRotationConfig holds file-backed events rotation settings."
+    },
+    "EventsScanBudgetConfig": {
+      "properties": {
+        "max_archive_bytes_per_request": {
+          "type": "integer",
+          "description": "MaxArchiveBytesPerRequest bounds the compressed-archive bytes read in\na single ListNewestBounded call. Defaults to\nDefaultEventsScanBudgetMaxArchiveBytes.",
+          "default": 134217728
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsScanBudgetConfig holds the archive-scan budget for events.BoundedScanProvider (a selective filter with no AfterSeq/Since floor)."
     },
     "ExtMsgConfig": {
       "properties": {

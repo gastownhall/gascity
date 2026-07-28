@@ -150,13 +150,20 @@ type PaginationParam struct {
 // count and optional pagination cursor. Partial/PartialErrors signal that
 // the aggregation swept over multiple backends and at least one of them
 // failed — callers then know the list is not authoritative without the
-// endpoint having to return a 5xx.
+// endpoint having to return a 5xx. ScanTruncated is the same kind of signal
+// for a different cause: the events list endpoint sets it when the
+// provider's bounded archive scan (events.BoundedScanProvider) stopped at
+// its byte budget rather than exhausting history, so Total under-counts and
+// NextCursor must still be followed to reach older matches. Endpoints that
+// never hit that path leave it at the zero value and it is omitted from the
+// wire.
 type ListBody[T any] struct {
 	Items         []T      `json:"items" doc:"The list of items."`
 	Total         int      `json:"total" doc:"Total number of items matching the query."`
 	NextCursor    string   `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
 	Partial       bool     `json:"partial,omitempty" doc:"True when one or more backends failed and the list is incomplete."`
 	PartialErrors []string `json:"partial_errors,omitempty" doc:"Human-readable errors from backends that failed during aggregation."`
+	ScanTruncated bool     `json:"scan_truncated,omitempty" doc:"True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed."`
 }
 
 // ListOutput is a generic output type for list endpoints. It sets the

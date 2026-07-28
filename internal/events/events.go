@@ -364,6 +364,31 @@ type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
 }
 
+// BoundedScanProvider is an optional extension for providers that can answer
+// a filtered, unbounded-lower-edge query (no AfterSeq/Since floor) without
+// scanning the provider's entire retained history. A selective filter (a
+// type or actor most events don't match) with no lower bound has nothing to
+// skip-fast on, so List's archive-oldest-to-newest walk must open every
+// archive back to the beginning of retention to find the newest limit+1
+// matches — unbounded CPU/IO cost per request, and the cost that motivated
+// this interface. ListNewestBounded instead walks newest-to-oldest and stops
+// once either fetch matches are found or a provider-configured byte budget
+// is exhausted, returning a truncated signal and a resume boundary instead
+// of continuing to scan. Providers with bounded or already-indexed history
+// (in-memory fakes, exec scripts) need not implement it.
+type BoundedScanProvider interface {
+	// ListNewestBounded returns up to fetch of filter's newest-Seq matches,
+	// in ascending Seq order. truncated is true only when the scan stopped
+	// due to budget exhaustion before finding fetch matches and before
+	// exhausting all candidate history — not when fetch matches were found
+	// within budget, which is ordinary pagination. When truncated,
+	// reachedSeq is the resume boundary: a follow-up call with
+	// Filter.BeforeSeq set to reachedSeq continues with no gap and no
+	// overlap. ctx cancellation (e.g. client disconnect) aborts the scan
+	// early and returns ctx.Err().
+	ListNewestBounded(ctx context.Context, filter Filter, fetch int) (events []Event, truncated bool, reachedSeq uint64, err error)
+}
+
 // Watcher yields events one at a time. Created by [Provider.Watch].
 // Callers must call Close() when done watching.
 type Watcher interface {

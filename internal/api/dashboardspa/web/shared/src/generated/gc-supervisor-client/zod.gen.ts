@@ -688,6 +688,7 @@ export const zListBodyBead = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -696,6 +697,7 @@ export const zListBodyCityPendingEntry = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -704,6 +706,7 @@ export const zListBodyExtmsgAdapterInfo = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1079,6 +1082,7 @@ export const zListBodyAgentPatch = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1152,6 +1156,7 @@ export const zListBodyProviderPatch = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1213,6 +1218,7 @@ export const zListBodyProviderResponse = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1344,6 +1350,7 @@ export const zListBodyRigPatch = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1380,6 +1387,7 @@ export const zListBodyRigResponse = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1538,6 +1546,7 @@ export const zListBodySessionBindingRecord = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1595,6 +1604,7 @@ export const zListBodyAgentResponse = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -2731,6 +2741,7 @@ export const zListBodyStatus = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -2937,6 +2948,7 @@ export const zListBodySessionResponse = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -3068,6 +3080,7 @@ export const zListBodyConversationTranscriptRecord = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -4753,6 +4766,7 @@ export const zListBodyWireEvent = z.object({
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
+    scan_truncated: z.boolean().optional(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 

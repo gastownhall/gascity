@@ -1502,6 +1502,47 @@ func TestFetchCityEventsSinglePageChronological(t *testing.T) {
 	}
 }
 
+// TestFetchCityEventsScanTruncatedWarnsWithBudgetDiagnostic pins that a
+// server-signaled scan_truncated (the bounded archive scan hit its byte
+// budget, ga-hzfu61) surfaces its own distinct stderr diagnostic — never
+// silently presented as a complete result — separate from the generic
+// "older matching events were omitted" next_cursor notice, since the cause
+// (and the operator remedy: raise the configured scan budget) differs from
+// an ordinary next-page signal.
+func TestFetchCityEventsScanTruncatedWarnsWithBudgetDiagnostic(t *testing.T) {
+	page1 := []cliWireEvent{
+		{Actor: "gc", Seq: 9, Type: "e.t", Ts: time.Unix(1700000090, 0).UTC()},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "9")
+			body := cityEventsListResponse(t, page1)
+			next := "v1:eyJrIjoic3EiLCJzIjo4fQ"
+			body.NextCursor = &next
+			truncated := true
+			body.ScanTruncated = &truncated
+			writeJSONResponse(t, w, body)
+		},
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "", &warn)
+	if err != nil {
+		t.Fatalf("fetchCityEvents: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if !strings.Contains(warn.String(), "byte budget") {
+		t.Fatalf("expected a scan-budget truncation diagnostic on stderr, got %q", warn.String())
+	}
+}
+
 // pagedCityEventsHandler serves allDesc (events in seq-DESC order) as keyset
 // pages of at most pageSize, honoring the opaque `cursor` query param the same
 // way the #4194 server does: the cursor is the seq boundary and each page

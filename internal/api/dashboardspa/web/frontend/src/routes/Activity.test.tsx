@@ -14,7 +14,7 @@ interface FetchCall {
 }
 
 const fetchCalls: FetchCall[] = [];
-let eventFetchMode: 'ok' | 'partial' | 'fail' | 'duplicate-audit' = 'ok';
+let eventFetchMode: 'ok' | 'partial' | 'scan-truncated' | 'fail' | 'duplicate-audit' = 'ok';
 
 beforeEach(() => {
   setActiveCity('test-city');
@@ -89,6 +89,7 @@ beforeEach(() => {
           partial: eventFetchMode === 'partial',
           partial_errors:
             eventFetchMode === 'partial' ? ['events truncated at archive boundary'] : undefined,
+          scan_truncated: eventFetchMode === 'scan-truncated',
           total: 2,
         });
       }
@@ -237,6 +238,17 @@ describe('ActivityPage', () => {
 
     expect(await screen.findByText(/event history incomplete/i)).toBeTruthy();
     expect(screen.getByText(/events truncated at archive boundary/i)).toBeTruthy();
+  });
+
+  it('surfaces a scan-truncated event history on the Activity route', async () => {
+    eventFetchMode = 'scan-truncated';
+
+    renderPage('/activity?mode=events');
+
+    // scan_truncated (ga-hzfu61) carries no partial_errors detail, so the
+    // notice degrades to the plain incomplete-history sentence — a truncated
+    // page must never render as if it were complete.
+    expect(await screen.findByText(/event history incomplete/i)).toBeTruthy();
   });
 
   it('keeps deploys and commits visible when supervisor events fail', async () => {

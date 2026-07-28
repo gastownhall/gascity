@@ -1039,10 +1039,18 @@ const cityEventsPageLimit = int64(500)
 // the command timeout for no user benefit. In that single-page case, when the
 // server signals more via next_cursor, an explicit truncation notice is written
 // to warn rather than silently dropping the older matches.
+//
+// Independently, a page can carry ScanTruncated: the server's bounded archive
+// scan (ga-hzfu61) hit its per-request byte budget before it could rule out
+// further matches. That's a different cause than an ordinary next-page signal
+// (next_cursor alone doesn't distinguish "more history exists" from "the scan
+// gave up early"), so it gets its own one-time diagnostic on warn rather than
+// being folded into the message above.
 func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string, warn io.Writer) ([]cliWireEvent, error) {
 	paginate := strings.TrimSpace(sinceFlag) != ""
 	var all []cliWireEvent
 	cursor := ""
+	scanTruncated := false
 	for {
 		limit := cityEventsPageLimit
 		params := &genclient.GetV0CityByCityNameEventsParams{
@@ -1066,6 +1074,9 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
 			break
+		}
+		if resp.JSON200.ScanTruncated != nil && *resp.JSON200.ScanTruncated {
+			scanTruncated = true
 		}
 		for _, item := range *resp.JSON200.Items {
 			wire, err := cityWireEventFromTyped(item)
@@ -1092,6 +1103,9 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 			break
 		}
 		cursor = next
+	}
+	if scanTruncated {
+		fmt.Fprintf(warn, "gc events: the server's archive scan hit its per-request byte budget at least once while fetching this range; increase events.scan_budget.max_archive_bytes_per_request in city.toml to reduce round trips.\n") //nolint:errcheck
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	return all, nil

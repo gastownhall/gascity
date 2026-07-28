@@ -35,6 +35,16 @@ const (
 	// and uniform timing simplifies test assertions; 5 ms guarantees the
 	// loop sees a freed lock within one cadence after a healthy release.
 	recordFlockRetryInterval = 5 * time.Millisecond
+
+	// defaultScanBudgetMaxArchiveBytes bounds ListNewestBounded's
+	// compressed-archive read per call when no operator override is
+	// configured. Matches config.DefaultEventsScanBudgetMaxArchiveBytes;
+	// validated against this fleet's own retained archives (53 files, this
+	// city's .gc/ dir, 2026-07-25): median 53.8 MiB, p90 54.7 MiB, max
+	// 152.9 MiB — 128 MiB clears the typical archive more than 2x over and
+	// fits 52 of 53 sampled archives outright. See that const's doc comment
+	// for the full distribution and rationale.
+	defaultScanBudgetMaxArchiveBytes = 128 * 1024 * 1024 // 128 MiB
 )
 
 // FileRecorder appends events to a JSONL file. It uses O_APPEND for
@@ -69,6 +79,10 @@ type FileRecorder struct {
 	archiveRetainAge      time.Duration
 	recordCount           uint64
 	lastSizeCheck         time.Time
+
+	// scanBudgetMaxArchiveBytes bounds ListNewestBounded's compressed-archive
+	// read per call. See WithScanBudget.
+	scanBudgetMaxArchiveBytes int64
 }
 
 // FileRecorderOption customizes a FileRecorder at construction time.
@@ -104,6 +118,16 @@ func WithRotationCheckInterval(d time.Duration) FileRecorderOption {
 // all archives forever.
 func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
 	return func(r *FileRecorder) { r.archiveRetainAge = d }
+}
+
+// WithScanBudget sets the maximum total compressed-archive bytes
+// ListNewestBounded will open in a single call. A non-positive value
+// disables the budget check for the very first archive it would open only
+// via chargeArchiveBudget's forward-progress guarantee — practically,
+// operators should always pass a positive value; defaultScanBudgetMaxArchiveBytes
+// is used when this option is not supplied.
+func WithScanBudget(bytes int64) FileRecorderOption {
+	return func(r *FileRecorder) { r.scanBudgetMaxArchiveBytes = bytes }
 }
 
 // RotationResult is returned by ForceRotate (and B-3's API endpoint)
@@ -178,14 +202,15 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 	}
 
 	r := &FileRecorder{
-		path:                  path,
-		file:                  file,
-		seq:                   maxSeq,
-		stderr:                stderr,
-		maxSize:               0,
-		rotationCheckRecords:  defaultRotationCheckRecords,
-		rotationCheckInterval: defaultRotationCheckInterval,
-		lastSizeCheck:         time.Now(),
+		path:                      path,
+		file:                      file,
+		seq:                       maxSeq,
+		stderr:                    stderr,
+		maxSize:                   0,
+		rotationCheckRecords:      defaultRotationCheckRecords,
+		rotationCheckInterval:     defaultRotationCheckInterval,
+		lastSizeCheck:             time.Now(),
+		scanBudgetMaxArchiveBytes: defaultScanBudgetMaxArchiveBytes,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -444,6 +469,16 @@ func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
 // ListTail returns trailing matching events from the underlying file.
 func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
 	return ReadFilteredTail(r.path, filter, limit)
+}
+
+// ListNewestBounded returns up to fetch matching events newest-first-scanned
+// (but ascending-Seq-returned), bounding the compressed-archive bytes read
+// per call at scanBudgetMaxArchiveBytes. It implements [BoundedScanProvider]
+// so a selective filter with no lower bound (no AfterSeq/Since) does not
+// force a full-history scan. See readNewestBounded for the truncation and
+// resume-cursor contract.
+func (r *FileRecorder) ListNewestBounded(ctx context.Context, filter Filter, fetch int) ([]Event, bool, uint64, error) {
+	return readNewestBounded(ctx, r.path, filter, fetch, r.scanBudgetMaxArchiveBytes)
 }
 
 // LatestSeq returns the highest sequence number in the event log.
