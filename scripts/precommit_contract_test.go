@@ -342,6 +342,224 @@ exit 0
 	}
 }
 
+func TestPreCommitFailsClosedWhenSpecStagedButNpmAbsent(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
+
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+
+	runGit("init")
+	writeTestFile(t, specPath, "{}\n")
+	runGit("add", "-A")
+	runGit("commit", "-m", "init")
+
+	// Stage ONLY a change to openapi.json -- same repro shape as
+	// TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged, but this
+	// time npm itself is unreachable on PATH.
+	writeTestFile(t, specPath, `{"changed":true}`+"\n")
+	runGit("add", "internal/api/openapi.json")
+
+	cmd := exec.Command("bash", hookPath)
+	cmd.Dir = tmpRepo
+	cmd.Env = []string{
+		"PATH=" + restrictedPathWithoutNpm(t, nil),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("pre-commit hook must fail when internal/api/openapi.json is staged and npm is not on PATH "+
+			"-- the generated TS client can't be regenerated, so the commit would silently ship a stale "+
+			"client with no enforcement until CI runs. Hook exited 0, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "npm ci") || !strings.Contains(string(out), "generate:client") {
+		t.Fatalf("pre-commit hook's npm-absent+spec-staged failure must name the exact recovery command "+
+			"(cd internal/api/dashboardspa/web && npm ci && npm run generate:client), got:\n%s", out)
+	}
+}
+
+func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
+
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	goFilePath := filepath.Join(tmpRepo, "main.go")
+	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+	formatStagedGoPath := filepath.Join(tmpRepo, "scripts", "precommit-format-staged-go")
+	// Every path the Go block unconditionally `git add`s after each
+	// generation step must already exist on disk, or that `git add` fails
+	// closed under `set -euo pipefail` before the hook ever reaches the
+	// npm-absent branch this test targets.
+	generatedPaths := []string{
+		specPath,
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "openapi.json"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "openapi.txt"),
+		filepath.Join(tmpRepo, "internal", "api", "genclient", "client_gen.go"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.json"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.txt"),
+		filepath.Join(tmpRepo, "docs", "reference", "config.md"),
+		filepath.Join(tmpRepo, "docs", "reference", "cli.md"),
+	}
+
+	runGit("init")
+	writeTestFile(t, goFilePath, "package main\n\nfunc main() {}\n")
+	for _, p := range generatedPaths {
+		writeTestFile(t, p, "{}\n")
+	}
+	if err := os.MkdirAll(filepath.Dir(formatStagedGoPath), 0o755); err != nil {
+		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
+	}
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	runGit("add", "-A")
+	runGit("commit", "-m", "init")
+
+	// Stage ONLY a .go file -- internal/api/openapi.json is untouched by the
+	// user's own `git add`. The hook's own Go block (staged_go_files branch)
+	// regenerates and stages openapi.json as a SIDE EFFECT via
+	// `go run ./cmd/genspec`, which is exactly the #4627/#4607 staleness
+	// trap the npm-present branch re-reads for (fresh spec_changed) but
+	// which the npm-absent fail-closed branch used to miss (ga-jg89a5): it
+	// checked a snapshot taken before the hook ran at all, so it never saw
+	// the spec this commit was actually about to ship.
+	writeTestFile(t, goFilePath, "package main\n\nfunc main() { println(1) }\n")
+	runGit("add", "main.go")
+
+	goStub := `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "run" ] && [ "$2" = "./cmd/genspec" ]; then
+  printf '{"changed":true}\n' > internal/api/openapi.json
+fi
+exit 0
+`
+
+	cmd := exec.Command("bash", hookPath)
+	cmd.Dir = tmpRepo
+	cmd.Env = []string{
+		"PATH=" + restrictedPathWithoutNpm(t, map[string]string{
+			"make": "#!/usr/bin/env bash\nexit 0\n",
+			// Stands in for format/lint/genspec/genclient/genschema/vet.
+			// Only `run ./cmd/genspec` has an observable side effect
+			// (rewriting internal/api/openapi.json, which the hook's own
+			// `git add` then stages), matching what the real cmd/genspec
+			// does against a live Huma API -- the rest of the Go block is
+			// exercised for control-flow only.
+			"go": goStub,
+		}),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("pre-commit hook must fail when its own Go block stages internal/api/openapi.json as a side "+
+			"effect (go run ./cmd/genspec, triggered by staging a .go file) and npm is not on PATH -- the "+
+			"generated TS client can't be regenerated, so the commit would silently ship a stale client with "+
+			"no enforcement until CI runs. Hook exited 0, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "npm ci") || !strings.Contains(string(out), "generate:client") {
+		t.Fatalf("pre-commit hook's npm-absent+spec-staged-as-side-effect failure must name the exact "+
+			"recovery command (cd internal/api/dashboardspa/web && npm ci && npm run generate:client), got:\n%s", out)
+	}
+}
+
+func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
+
+	tmpRepo := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmpRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	docPath := filepath.Join(tmpRepo, "README.md")
+
+	runGit("init")
+	writeTestFile(t, docPath, "hello\n")
+	runGit("add", "-A")
+	runGit("commit", "-m", "init")
+
+	// Stage a docs-only change -- internal/api/openapi.json is untouched,
+	// so npm's absence must stay a warning, not a hard failure. staged_docs
+	// being non-empty also exercises `make check-docs`, so stub `make` as a
+	// no-op; the fixture repo has none of the real doc-lint machinery.
+	writeTestFile(t, docPath, "hello again\n")
+	runGit("add", "README.md")
+
+	cmd := exec.Command("bash", hookPath)
+	cmd.Dir = tmpRepo
+	cmd.Env = []string{
+		"PATH=" + restrictedPathWithoutNpm(t, map[string]string{
+			"make": "#!/usr/bin/env bash\nexit 0\n",
+		}),
+		"HOME=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-commit hook must still succeed (warn-only) when npm is absent and "+
+			"internal/api/openapi.json is NOT staged -- contributors without Node tooling must not be "+
+			"blocked on unrelated commits, got exit error: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "npm not on PATH") {
+		t.Fatalf("pre-commit hook should still warn when npm is absent, got:\n%s", out)
+	}
+}
+
+// restrictedPathWithoutNpm builds a PATH containing only symlinks to the
+// real bash and git (plus any provided stub scripts), guaranteeing npm is
+// unreachable regardless of what's installed on the test host -- falling
+// back to the ambient PATH would make these tests flaky on any machine
+// that actually has npm installed.
+func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range []string{"bash", "git", "xargs"} {
+		realPath, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("resolve real %s on test host PATH: %v", name, err)
+		}
+		if err := os.Symlink(realPath, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+	for name, script := range stubs {
+		writeExecutable(t, filepath.Join(binDir, name), script)
+	}
+	return binDir
+}
+
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 	repoRoot := repoRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
