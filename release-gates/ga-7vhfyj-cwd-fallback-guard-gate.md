@@ -8,6 +8,8 @@
 **Isolated branch:** `deploy/ga-7vhfyj-gate`
 **Verdict:** **PASS**
 
+See "Post-gate amendment" below: criteria 2 and 3 are corrected.
+
 `docs/PROJECT_MANIFEST.md` is absent from both the reviewed commit and current
 `origin/main`, so there are no additional repository-local release criteria to
 apply beyond the seven deployer gate criteria below.
