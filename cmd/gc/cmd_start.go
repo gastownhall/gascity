@@ -791,6 +791,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := workdirutil.ValidatePoolWorkDirIsolation(cityPath, cityName, cfg.Agents, cfg.Rigs); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Skill collision validator — hard gate. Two agents sharing a
 	// (scope-root, vendor) sink cannot both provide an agent-local

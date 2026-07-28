@@ -81,6 +81,7 @@ func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+	RegisterPayload(SessionStartRefusedCwd, SessionStartRefusedCwdPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
@@ -133,3 +134,26 @@ func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt stri
 	})
 	return b
 }
+
+// SessionStartRefusedReasonCollision indicates a session start or respawn
+// was refused because its working directory is already occupied by
+// another live session (ga-ighomh.1).
+const SessionStartRefusedReasonCollision = "collision"
+
+// SessionStartRefusedReasonLivenessUnavailable indicates a session start
+// or respawn was refused because the live-process scan needed to verify
+// working-directory safety could not be completed, so the guard failed
+// closed (ga-ighomh.1).
+const SessionStartRefusedReasonLivenessUnavailable = "liveness_unavailable"
+
+// SessionStartRefusedCwdPayload is the typed payload for
+// session.start_refused_cwd events. CollidingSessionID identifies the
+// session already occupying the directory; it is set only when Reason is
+// SessionStartRefusedReasonCollision.
+type SessionStartRefusedCwdPayload struct {
+	Reason             string `json:"reason"`
+	CollidingSessionID string `json:"colliding_session_id,omitempty"`
+}
+
+// IsEventPayload marks SessionStartRefusedCwdPayload as an events.Payload variant.
+func (SessionStartRefusedCwdPayload) IsEventPayload() {}

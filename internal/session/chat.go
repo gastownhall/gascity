@@ -209,15 +209,22 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 	}
 	cfg.Command = freshCmd
-	// Refuse the fresh start if a prior escaped process for this session could
-	// not be confirmed dead: a survivor would race this replacement for the
-	// same work bead. This path reuses the existing bead ID, so there is no
+	// Refuse the fresh start if the working directory is already occupied by
+	// another live session, or if a prior escaped process for this session
+	// could not be confirmed dead: either risks two runtimes touching the
+	// same worktree. This path reuses the existing bead ID, so there is no
 	// fresh-create to roll back — unroute and propagate the error before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	refuseStart := func(stage string, err error) (bool, error) {
 		if unroute != nil {
 			unroute()
 		}
-		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return false, fmt.Errorf("pre-start %s: %w", stage, err)
+	}
+	if cwdErr := m.checkNoCWDCollision(ctx, id, *b, cfg.WorkDir); cwdErr != nil {
+		return refuseStart("cwd collision check", cwdErr)
+	}
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		return refuseStart("orphan cleanup", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
@@ -387,16 +394,23 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to resume if a prior escaped process for this session could not be
-	// confirmed dead: a survivor would race this replacement for the same work
-	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
-	// exact "old process survives alongside its replacement" scenario. No
-	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	// Refuse to resume if the working directory is already occupied by
+	// another live session, or if a prior escaped process for this session
+	// could not be confirmed dead: either risks two runtimes touching the
+	// same worktree. This is the stable/reused-bead-ID path — the exact "old
+	// process survives alongside its replacement" scenario. No fresh-create
+	// to roll back, so unroute and propagate before Start.
+	refuseStart := func(stage string, err error) error {
 		if unroute != nil {
 			unroute()
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return fmt.Errorf("pre-start %s: %w", stage, err)
+	}
+	if cwdErr := m.checkNoCWDCollision(ctx, id, b, cfg.WorkDir); cwdErr != nil {
+		return refuseStart("cwd collision check", cwdErr)
+	}
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		return refuseStart("orphan cleanup", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
@@ -464,6 +478,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		return nil
 	}
 	if resumeCommand == "" {
+		resumeCommand = freshStartCommandFromMetadata(b.Metadata, "")
+	}
+	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
@@ -508,15 +525,23 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	// Refuse to respawn if a prior escaped process for this session could not
-	// be confirmed dead: a survivor would race this replacement for the same
-	// work bead. This is the reconciler respawn bridge on a stable/reused bead
-	// ID. No fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+	// Refuse to respawn if the working directory is already occupied by
+	// another live session, or if a prior escaped process for this session
+	// could not be confirmed dead: either risks two runtimes touching the
+	// same worktree. This is the reconciler respawn bridge on a
+	// stable/reused bead ID. No fresh-create to roll back, so unroute and
+	// propagate before Start.
+	refuseStart := func(stage string, err error) error {
 		if unroute != nil {
 			unroute()
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return fmt.Errorf("pre-start %s: %w", stage, err)
+	}
+	if cwdErr := m.checkNoCWDCollision(ctx, id, b, cfg.WorkDir); cwdErr != nil {
+		return refuseStart("cwd collision check", cwdErr)
+	}
+	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+		return refuseStart("orphan cleanup", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
@@ -1025,12 +1050,16 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 // target b, restricted to the same provider family when the target's provider is
 // known. For a live target, closed historical sessions are excluded; for a
 // closed target they are kept so historical same-workdir ambiguity is preserved.
+// A beads.PartialResultError from the list is tolerated and scanned with
+// whatever rows came back: this feeds checkNoCWDCollision, whose real safety
+// gate is the independent process-liveness scan, so one corrupt bead elsewhere
+// in the store must not block every session start fleet-wide.
 func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
 	all, err := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: b.Status == "closed",
 	})
-	if err != nil {
+	if err != nil && !beads.IsPartialResult(err) {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	var same []beads.Bead

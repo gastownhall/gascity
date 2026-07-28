@@ -74,6 +74,7 @@ name = "polecat-city"
 name = "polecat"
 start_command = "echo hello"
 dir = "myproject"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 5
 scale_check = "echo 2"
@@ -86,6 +87,7 @@ name = "clamped-city"
 [[agent]]
 name = "worker"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 3
 scale_check = "echo 100"
@@ -98,6 +100,7 @@ name = "min-pool-city"
 [[agent]]
 name = "builder"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 2
 max_active_sessions = 10
 scale_check = "echo 0"
@@ -114,6 +117,7 @@ start_command = "echo hello"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 3
 scale_check = "echo 0"
@@ -130,12 +134,14 @@ start_command = "echo hello"
 [[agent]]
 name = "polecat"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 5
 scale_check = "echo 1"
 [[agent]]
 name = "dog"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 3
 scale_check = "echo 1"

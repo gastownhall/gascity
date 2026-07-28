@@ -79,6 +79,7 @@ schema = 1
 name = "dog"
 scope = "city"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 0
 max_active_sessions = 3
 scale_check = "echo 0"

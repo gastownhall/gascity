@@ -103,10 +103,18 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionStartRefusedCwd fires when a session start or respawn is
+	// refused because its working directory is already occupied by another
+	// live session, or because the live-process scan needed to verify that
+	// could not be completed (fail-closed rather than risk two sessions
+	// sharing a directory). The payload's Reason distinguishes the two
+	// cases; CollidingSessionID is set only for the collision case. See
+	// ga-ighomh.1.
+	SessionStartRefusedCwd = "session.start_refused_cwd"
+	ConvoyCreated          = "convoy.created"
+	ConvoyClosed           = "convoy.closed"
+	ControllerStarted      = "controller.started"
+	ControllerStopped      = "controller.stopped"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -254,6 +262,7 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
+	SessionStartRefusedCwd,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,

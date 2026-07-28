@@ -19,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -563,6 +565,8 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	livenessScanner         LivenessScanner
+	eventRecorder           events.Recorder
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -721,6 +725,110 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	return nil
 }
 
+// checkNoCWDCollision refuses to start or resume a session whose working
+// directory is already occupied by another live session. Liveness is
+// established by any of three independent signals: the runtime provider's
+// own IsRunning check (catches sessions this Manager started), a PID cross-
+// reference between the host-wide live-process scan and each candidate's own
+// known runtime PID (catches sessions started by another Manager instance or
+// process entirely, attributed to the correct candidate — ga-9x4z1g.1 FR3),
+// or — only once every candidate has been checked and none could be
+// positively attributed — the scan confirming some live process occupies the
+// directory at all. That last, unattributed signal still refuses (fail
+// closed: never assume two live sessions can safely share a directory) but
+// is recorded without naming a specific candidate, since the scan alone
+// cannot say which bead (if any) it actually belongs to. When the scan
+// itself could not be completed, the guard fails closed before even
+// reaching candidates — refusing rather than risking two live sessions
+// sharing a directory (ga-ighomh.1).
+func (m *Manager) checkNoCWDCollision(ctx context.Context, id string, b beads.Bead, workDir string) error {
+	_ = ctx
+	if strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	live := m.livenessScanner()
+	if !live.Scanned {
+		m.recordCWDRefusal(id, events.SessionStartRefusedReasonLivenessUnavailable, "")
+		return fmt.Errorf("%w: %s", ErrWorkDirLivenessUnavailable, workDir)
+	}
+	normalizedWorkDir := pathutil.NormalizePathForCompare(strings.TrimSpace(workDir))
+	scannerConfirmsLive := false
+	for _, cwd := range live.CWDs {
+		if cwd == normalizedWorkDir {
+			scannerConfirmsLive = true
+			break
+		}
+	}
+	candidates, err := m.sameWorkDirSessionBeads(b, "", workDir)
+	if err != nil {
+		return fmt.Errorf("checking working directory collisions: %w", err)
+	}
+	hasOtherCandidate := false
+	for _, other := range candidates {
+		if other.ID == id {
+			continue
+		}
+		hasOtherCandidate = true
+		if m.sp.IsRunning(sessionName(other.ID, other)) || m.candidateConfirmedLiveByPID(other, live, normalizedWorkDir) {
+			m.recordCWDRefusal(id, events.SessionStartRefusedReasonCollision, other.ID)
+			return fmt.Errorf("%w: %s is occupied by session %s", ErrWorkDirCollision, workDir, other.ID)
+		}
+	}
+	if hasOtherCandidate && scannerConfirmsLive {
+		m.recordCWDRefusal(id, events.SessionStartRefusedReasonCollision, "")
+		return fmt.Errorf("%w: %s is occupied by an unattributed live process", ErrWorkDirCollision, workDir)
+	}
+	return nil
+}
+
+// candidateConfirmedLiveByPID reports whether other's own known runtime PID
+// (from the runtime provider's process-table scan, when it supports one) is
+// among the live PIDs the scan found at normalizedWorkDir. This is the
+// positive-attribution signal that lets checkNoCWDCollision name a specific
+// candidate instead of guessing among several sharing the same historical
+// work_dir (ga-9x4z1g.1 FR3). A scan error is logged and treated as
+// fail-closed for attribution purposes: this candidate simply cannot be
+// confirmed by PID, so the caller falls back to its other signals rather
+// than blocking on the error here.
+func (m *Manager) candidateConfirmedLiveByPID(other beads.Bead, live pidutil.LiveState, normalizedWorkDir string) bool {
+	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	if !ok {
+		return false
+	}
+	runtimes, err := scanner.FindRuntimesBySessionID(other.ID)
+	if err != nil {
+		log.Printf("session: finding runtimes for candidate %s (failing closed on attribution): %v", other.ID, err)
+	}
+	for _, rt := range runtimes {
+		if rt.PID == 0 {
+			continue
+		}
+		if cwd, ok := live.PIDCWDs[rt.PID]; ok && cwd == normalizedWorkDir {
+			return true
+		}
+	}
+	return false
+}
+
+// recordCWDRefusal emits a session.start_refused_cwd event for a working
+// directory collision guard refusal. Best-effort: a marshal failure is
+// silently dropped rather than blocking the real refusal error it accompanies.
+func (m *Manager) recordCWDRefusal(id, reason, collidingSessionID string) {
+	payload, err := json.Marshal(events.SessionStartRefusedCwdPayload{
+		Reason:             reason,
+		CollidingSessionID: collidingSessionID,
+	})
+	if err != nil {
+		return
+	}
+	m.eventRecorder.Record(events.Event{
+		Type:    events.SessionStartRefusedCwd,
+		Actor:   "session",
+		Subject: id,
+		Payload: payload,
+	})
+}
+
 func (m *Manager) now() time.Time {
 	if m != nil && m.clk != nil {
 		return m.clk.Now()
@@ -793,11 +901,40 @@ func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
 	}
 }
 
+// WithLivenessScanner supplies the /proc-derived liveness signal used by the
+// working-directory collision guard (ga-ighomh.1). A nil scanner retains the
+// immutable production scanner.
+func WithLivenessScanner(scanner LivenessScanner) ManagerOption {
+	return func(m *Manager) {
+		if scanner != nil {
+			m.livenessScanner = scanner
+		}
+	}
+}
+
+// WithEventRecorder supplies the events.Recorder used to emit observability
+// events for session lifecycle decisions, including refused starts from the
+// working-directory collision guard (ga-ighomh.1). A nil recorder retains the
+// immutable production default of discarding events.
+func WithEventRecorder(recorder events.Recorder) ManagerOption {
+	return func(m *Manager) {
+		if recorder != nil {
+			m.eventRecorder = recorder
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
 func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
-	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
+	m := &Manager{
+		store:                   store,
+		sp:                      sp,
+		staleKeyDetectionWaiter: waitForStaleKeyDetection,
+		livenessScanner:         pidutil.LiveCWDs,
+		eventRecorder:           events.Discard,
+	}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -980,14 +1117,21 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
-		// Start the runtime session. Refuse to start if a prior escaped process
-		// for this session could not be confirmed dead: a survivor would race
-		// the replacement for the same work bead (duplicate bd close).
-		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
+		// Refuse to start if the working directory is already occupied by
+		// another live session, or if a prior escaped process for this
+		// session could not be confirmed dead: either risks two runtimes
+		// touching the same worktree (duplicate bd close).
+		refuseStart := func(stage string, err error) error {
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
-				return errors.Join(fmt.Errorf("pre-start orphan cleanup: %w", orphanErr), rbErr)
+				return errors.Join(fmt.Errorf("pre-start %s: %w", stage, err), rbErr)
 			}
-			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+			return fmt.Errorf("pre-start %s: %w", stage, err)
+		}
+		if cwdErr := m.checkNoCWDCollision(ctx, b.ID, b, cfg.WorkDir); cwdErr != nil {
+			return refuseStart("cwd collision check", cwdErr)
+		}
+		if orphanErr := m.killExistingOrphans(ctx, b.ID); orphanErr != nil {
+			return refuseStart("orphan cleanup", orphanErr)
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {

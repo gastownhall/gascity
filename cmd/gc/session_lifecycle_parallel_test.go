@@ -5520,6 +5520,102 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 }
 
+// TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable proves a
+// checkNoCWDCollision refusal is treated as a terminal, non-retryable provider
+// error rather than falling into the generic wake-failure retry path. Before
+// this fix the reconciler treated ErrWorkDirCollision like any other transient
+// start error: it cleared last_woke_at and called recordWakeFailure, which
+// re-attempts the start on the very next tick — and since the working
+// directory is still occupied, the next attempt fails the same way, forever.
+// That retry storm is exactly what a genuinely occupied directory must not
+// trigger: the operator (or another live session) owns that directory until
+// something changes, and no amount of retrying fixes it (ga-9x4z1g.1 FR4).
+func TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable(t *testing.T) {
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "worker",
+		"state":        "active",
+		"last_woke_at": "2026-05-27T12:00:00Z",
+	})
+	session.Type = sessionBeadType
+	session.Labels = []string{sessionBeadLabel}
+	session.Title = "worker"
+	candidate := startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: candidate},
+		err:      fmt.Errorf("%w: /rig/work is occupied by session other-session", sessionpkg.ErrWorkDirCollision),
+		outcome:  "provider_error",
+	}
+
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true for a work-dir collision")
+	}
+	got := store.metadata[session.ID]
+	if got[sessionHealthStateMetadataKey] != "unhealthy" {
+		t.Fatalf("session health = %q, want unhealthy", got[sessionHealthStateMetadataKey])
+	}
+	if got[sessionHealthReasonMetadataKey] != "work_dir_collision" {
+		t.Fatalf("health reason = %q, want work_dir_collision", got[sessionHealthReasonMetadataKey])
+	}
+	if got[sessionDrainableMetadataKey] != boolMetadata(true) {
+		t.Fatalf("drainable = %q, want true", got[sessionDrainableMetadataKey])
+	}
+	if got["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want unset: a work-dir collision must not feed the retry-accounting path", got["wake_attempts"])
+	}
+}
+
+// TestCommitStartResult_WorkDirLivenessUnavailableMarksTerminalNotRetryable
+// mirrors TestCommitStartResult_WorkDirCollisionMarksTerminalNotRetryable for
+// the sibling refusal reason: the guard could not even complete its liveness
+// scan, so it fails closed rather than risk starting a second session atop a
+// directory it could not verify was empty. That refusal carries the same
+// "retrying will not help until something external changes" property as an
+// attributed collision, so it gets the same terminal treatment (ga-9x4z1g.1
+// FR4).
+func TestCommitStartResult_WorkDirLivenessUnavailableMarksTerminalNotRetryable(t *testing.T) {
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"template":     "worker",
+		"session_name": "worker",
+		"state":        "active",
+		"last_woke_at": "2026-05-27T12:00:00Z",
+	})
+	session.Type = sessionBeadType
+	session.Labels = []string{sessionBeadLabel}
+	session.Title = "worker"
+	candidate := startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: candidate},
+		err:      fmt.Errorf("%w: /rig/work", sessionpkg.ErrWorkDirLivenessUnavailable),
+		outcome:  "provider_error",
+	}
+
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(3, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true for an unavailable liveness scan")
+	}
+	got := store.metadata[session.ID]
+	if got[sessionHealthStateMetadataKey] != "unhealthy" {
+		t.Fatalf("session health = %q, want unhealthy", got[sessionHealthStateMetadataKey])
+	}
+	if got[sessionHealthReasonMetadataKey] != "work_dir_liveness_unavailable" {
+		t.Fatalf("health reason = %q, want work_dir_liveness_unavailable", got[sessionHealthReasonMetadataKey])
+	}
+	if got[sessionDrainableMetadataKey] != boolMetadata(true) {
+		t.Fatalf("drainable = %q, want true", got[sessionDrainableMetadataKey])
+	}
+	if got["wake_attempts"] != "" {
+		t.Fatalf("wake_attempts = %q, want unset: an unavailable liveness scan must not feed the retry-accounting path", got["wake_attempts"])
+	}
+}
+
 func TestInterruptTargetsBounded_LogsSuccessOutcome(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {

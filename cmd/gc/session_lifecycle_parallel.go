@@ -2179,6 +2179,28 @@ func commitStartResultTraced(
 	return true
 }
 
+// cwdCollisionTerminalErrorReason classifies the working-directory collision
+// guard's sentinel errors (internal/session.ErrWorkDirCollision,
+// ErrWorkDirLivenessUnavailable) as terminal provider-error reasons. Unlike
+// runtime.ProviderTerminalErrorReason, which pattern-matches provider screen
+// text, these are typed Go sentinel errors wrapped with %w, so they are
+// classified with errors.Is against the wrapped result.err rather than a
+// string scan of its message. Both refusals share the same "retrying will not
+// help until something external changes" property as the other terminal
+// reasons: the directory is occupied by another live session, or liveness
+// could not even be verified, and no amount of immediate retrying resolves
+// either (ga-9x4z1g.1 FR4).
+func cwdCollisionTerminalErrorReason(err error) string {
+	switch {
+	case errors.Is(err, sessionpkg.ErrWorkDirCollision):
+		return "work_dir_collision"
+	case errors.Is(err, sessionpkg.ErrWorkDirLivenessUnavailable):
+		return "work_dir_liveness_unavailable"
+	default:
+		return ""
+	}
+}
+
 // commitStartFailure performs the failure-path side effects for a start that
 // returned an error: startup rate-limit quarantine, pending-create rollback, or
 // wake-failure accounting, plus the matching trace and log records. It is split
@@ -2189,7 +2211,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
+	reason := runtime.ProviderTerminalErrorReason(result.err.Error())
+	if reason == "" {
+		reason = cwdCollisionTerminalErrorReason(result.err)
+	}
+	if reason != "" {
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still

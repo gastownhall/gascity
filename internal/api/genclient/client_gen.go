@@ -3664,6 +3664,12 @@ type SessionResponse struct {
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
 
+// SessionStartRefusedCwdPayload defines model for SessionStartRefusedCwdPayload.
+type SessionStartRefusedCwdPayload struct {
+	CollidingSessionId *string `json:"colliding_session_id,omitempty"`
+	Reason             string  `json:"reason"`
+}
+
 // SessionStrandedPayload defines model for SessionStrandedPayload.
 type SessionStrandedPayload struct {
 	// SessionId Canonical session bead ID for the stranded pool session (also the envelope Subject).
@@ -6131,6 +6137,21 @@ type TypedEventStreamEnvelopeSessionResetStalled struct {
 	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionStartRefusedCwd defines model for TypedEventStreamEnvelopeSessionStartRefusedCwd.
+type TypedEventStreamEnvelopeSessionStartRefusedCwd struct {
+	Actor     string                        `json:"actor"`
+	Message   *string                       `json:"message,omitempty"`
+	Payload   SessionStartRefusedCwdPayload `json:"payload"`
+	RunId     *string                       `json:"run_id,omitempty"`
+	Seq       int64                         `json:"seq"`
+	SessionId *string                       `json:"session_id,omitempty"`
+	StepId    *string                       `json:"step_id,omitempty"`
+	Subject   *string                       `json:"subject,omitempty"`
+	Ts        time.Time                     `json:"ts"`
+	Type      string                        `json:"type"`
+	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor     string                   `json:"actor"`
@@ -7367,6 +7388,22 @@ type TypedTaggedEventStreamEnvelopeSessionResetStalled struct {
 	Ts        time.Time                  `json:"ts"`
 	Type      string                     `json:"type"`
 	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd defines model for TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd.
+type TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd struct {
+	Actor     string                        `json:"actor"`
+	City      string                        `json:"city"`
+	Message   *string                       `json:"message,omitempty"`
+	Payload   SessionStartRefusedCwdPayload `json:"payload"`
+	RunId     *string                       `json:"run_id,omitempty"`
+	Seq       int64                         `json:"seq"`
+	SessionId *string                       `json:"session_id,omitempty"`
+	StepId    *string                       `json:"step_id,omitempty"`
+	Subject   *string                       `json:"subject,omitempty"`
+	Ts        time.Time                     `json:"ts"`
+	Type      string                        `json:"type"`
+	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionStopped defines model for TypedTaggedEventStreamEnvelopeSessionStopped.
@@ -9957,6 +9994,32 @@ func (t *EventPayload) FromSessionResetStalledPayload(v SessionResetStalledPaylo
 
 // MergeSessionResetStalledPayload performs a merge with any union data inside the EventPayload, using the provided SessionResetStalledPayload
 func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStartRefusedCwdPayload returns the union data inside the EventPayload as a SessionStartRefusedCwdPayload
+func (t EventPayload) AsSessionStartRefusedCwdPayload() (SessionStartRefusedCwdPayload, error) {
+	var body SessionStartRefusedCwdPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStartRefusedCwdPayload overwrites any union data inside the EventPayload as the provided SessionStartRefusedCwdPayload
+func (t *EventPayload) FromSessionStartRefusedCwdPayload(v SessionStartRefusedCwdPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStartRefusedCwdPayload performs a merge with any union data inside the EventPayload, using the provided SessionStartRefusedCwdPayload
+func (t *EventPayload) MergeSessionStartRefusedCwdPayload(v SessionStartRefusedCwdPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13768,6 +13831,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionResetStal
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionStartRefusedCwd returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStartRefusedCwd
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStartRefusedCwd() (TypedEventStreamEnvelopeSessionStartRefusedCwd, error) {
+	var body TypedEventStreamEnvelopeSessionStartRefusedCwd
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionStartRefusedCwd overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionStartRefusedCwd
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStartRefusedCwd(v TypedEventStreamEnvelopeSessionStartRefusedCwd) error {
+	v.Type = "session.start_refused_cwd"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionStartRefusedCwd performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStartRefusedCwd
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStartRefusedCwd(v TypedEventStreamEnvelopeSessionStartRefusedCwd) error {
+	v.Type = "session.start_refused_cwd"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStopped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStopped() (TypedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedEventStreamEnvelopeSessionStopped
@@ -14356,6 +14447,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
 		return t.AsTypedEventStreamEnvelopeSessionResetStalled()
+	case "session.start_refused_cwd":
+		return t.AsTypedEventStreamEnvelopeSessionStartRefusedCwd()
 	case "session.stopped":
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
@@ -16137,6 +16230,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd() (TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd(v TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd) error {
+	v.Type = "session.start_refused_cwd"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd(v TypedTaggedEventStreamEnvelopeSessionStartRefusedCwd) error {
+	v.Type = "session.start_refused_cwd"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStopped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStopped() (TypedTaggedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionStopped
@@ -16725,6 +16846,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionResetStalled()
+	case "session.start_refused_cwd":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionStartRefusedCwd()
 	case "session.stopped":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":

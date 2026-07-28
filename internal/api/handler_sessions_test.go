@@ -221,7 +221,7 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
 	mgr := session.NewManagerWithOptions(store, sp)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -1030,7 +1030,6 @@ func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time
 func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
-	workDir := t.TempDir()
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 
 	type wantTelemetry struct {
@@ -1047,6 +1046,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 	cachedInputTokens := []int{5_840, 29_200}
 	now := time.Now()
 	for i := range wants {
+		workDir := t.TempDir()
 		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 			Template: "myrig/worker",
 			Title:    fmt.Sprintf("Codex Chat %d", i+1),

@@ -1,12 +1,11 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -45,9 +44,11 @@ type liveWorktreeState struct {
 var collectLiveWorktreeStateFn = collectLiveWorktreeState
 
 // collectLiveWorktreeState walks /proc/<pid>/cwd for every process on the host
-// and records their canonical working directories. On a host without /proc (or
-// when the top-level /proc walk fails outright) it returns scanned=false so the
-// caller fails closed and reaps nothing.
+// and records their canonical working directories, via the shared
+// pidutil.LiveCWDs primitive (ga-ighomh.1 acceptance criterion 5 — the same
+// scan backs internal/session's working-directory collision guard). On a host
+// without /proc (or when the top-level /proc walk fails outright) it returns
+// scanned=false so the caller fails closed and reaps nothing.
 //
 // Per-process readlink failures are skipped, not fatal: a process may exit
 // mid-walk, and a process owned by another user may have a cwd this process
@@ -57,43 +58,8 @@ var collectLiveWorktreeStateFn = collectLiveWorktreeState
 // this scan cannot see. This matches the dolt reaper's posture: the /proc
 // signal protects, it never authorizes a deletion the other gates would refuse.
 func collectLiveWorktreeState() liveWorktreeState {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return liveWorktreeState{scanned: false}
-	}
-	seen := make(map[string]struct{})
-	var cwds []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue // not a PID directory
-		}
-		link, err := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
-		if err != nil || link == "" {
-			continue
-		}
-		// A cwd whose inode has been unlinked carries a trailing " (deleted)"
-		// marker. The directory is gone, so it can never match a live worktree
-		// path on disk — drop it rather than canonicalize a bogus path. (The
-		// rare live directory literally named "... (deleted)" would be dropped
-		// too; that only ever loses protection for a pathological path the
-		// fleet never creates, and the git-clean gate still applies.)
-		if strings.HasSuffix(link, " (deleted)") {
-			continue
-		}
-		canon := pathutil.NormalizePathForCompare(link)
-		if canon == "" {
-			continue
-		}
-		if _, ok := seen[canon]; ok {
-			continue
-		}
-		seen[canon] = struct{}{}
-		cwds = append(cwds, canon)
-	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
+	live := pidutil.LiveCWDs()
+	return liveWorktreeState{cwds: live.CWDs, scanned: live.Scanned}
 }
 
 // worktreeIsLive reports whether any live signal sits at or beneath
@@ -130,23 +96,14 @@ func worktreeIsLive(worktreePath string, live liveWorktreeState, sessionDirs []s
 }
 
 // pathAtOrUnder reports whether candidate equals root or is lexically contained
-// beneath it. Both arguments must already be normalized (symlink-resolved,
-// absolute, cleaned) — collectLiveWorktreeState normalizes cwds once at
-// gather-time and worktreeIsLive normalizes the worktree once, so this avoids
-// re-resolving symlinks on every pair in what can be a large process × worktree
+// beneath it, via the shared pidutil.PathAtOrUnder primitive. Both arguments
+// must already be normalized (symlink-resolved, absolute, cleaned) —
+// collectLiveWorktreeState normalizes cwds once at gather-time and
+// worktreeIsLive normalizes the worktree once, so this avoids re-resolving
+// symlinks on every pair in what can be a large process × worktree
 // cross-product each tick.
 func pathAtOrUnder(root, candidate string) bool {
-	if root == "" || candidate == "" {
-		return false
-	}
-	if root == candidate {
-		return true
-	}
-	rel, err := filepath.Rel(root, candidate)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return pidutil.PathAtOrUnder(root, candidate)
 }
 
 // liveSessionWorktreeDirs collects the recorded working directories of every

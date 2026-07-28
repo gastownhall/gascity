@@ -58,6 +58,7 @@ name = "pool-city"
 [[agent]]
 name = "worker"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 
 min_active_sessions = 0
 max_active_sessions = 5
@@ -71,6 +72,7 @@ name = "min-city"
 [[agent]]
 name = "builder"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 
 min_active_sessions = 2
 max_active_sessions = 10
@@ -98,6 +100,7 @@ start_command = "echo hello"
 [[agent]]
 name = "worker"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 
 min_active_sessions = 0
 max_active_sessions = 5

@@ -49,6 +49,7 @@ start_command = "echo hello"
 [[agent]]
 name = "worker"
 start_command = "echo hello"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 
 min_active_sessions = 0
 max_active_sessions = 5

@@ -21,11 +21,11 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	clk := &clock.Fake{Time: now}
 
 	// Create two sessions.
-	s1, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S1", Command: "echo s1", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	s1, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S1", Command: "echo s1", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S2", Command: "echo s2", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	s2, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "S2", Command: "echo s2", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}
