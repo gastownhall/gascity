@@ -4403,6 +4403,10 @@ func TestDoInitPreservesExistingPackToml(t *testing.T) {
 func TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 
+	old := stdinIsRealTerminal
+	stdinIsRealTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsRealTerminal = old })
+
 	dir := t.TempDir()
 	t.Chdir(dir)
 
