@@ -2,6 +2,7 @@ package graphv2
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -1019,5 +1020,38 @@ func TestRootKeyIgnoresDeprecatedIssueRuntimeVar(t *testing.T) {
 	}, "", "")
 	if base != withAlias {
 		t.Fatalf("RootKey with alias vars = %q, want %q (issue/bead_id must not affect idempotence keys)", withAlias, base)
+	}
+}
+
+// depAddFailingStore fails every DepAdd, simulating the cross-store dep-add
+// failure that aborts input-convoy tracking mid-pour.
+type depAddFailingStore struct {
+	beads.Store
+}
+
+func (s depAddFailingStore) DepAdd(fromID, toID, depType string) error {
+	return fmt.Errorf("resolving issue ID %s: no issue found matching %q", fromID, fromID)
+}
+
+func TestCreateSingleItemInputConvoyClosesConvoyOnTrackFailure(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := depAddFailingStore{Store: mem}
+
+	_, err = CreateSingleItemInputConvoy(store, target)
+	if err == nil {
+		t.Fatal("CreateSingleItemInputConvoy succeeded, want tracking failure")
+	}
+	// The synthetic convoy minted for this pour must not survive as an open
+	// claim-attracting bead.
+	open, err := mem.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open synthetic convoys after failed pour = %d, want 0 (ids: %v)", len(open), open)
 	}
 }

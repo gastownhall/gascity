@@ -402,6 +402,11 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 		return beads.Bead{}, fmt.Errorf("creating input convoy for %s: %w", target.ID, err)
 	}
 	if err := convoycore.TrackItem(store, created.ID, target.ID); err != nil {
+		// The convoy was minted for this pour and tracks nothing; leaving it
+		// open would strand a synthetic claim-attracting bead every time a
+		// pour fails here (cross-store dep-adds are the observed trigger).
+		// Best-effort close: the tracking error is the failure to surface.
+		_ = store.Close(created.ID) //nolint:errcheck // best-effort cleanup of this pour's own artifact
 		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
 	}
 	return created, nil
