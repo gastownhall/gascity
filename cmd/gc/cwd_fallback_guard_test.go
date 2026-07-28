@@ -163,7 +163,14 @@ func TestCmdInitFromDir_NoArgsNonTerminalRefuses(t *testing.T) {
 	}
 }
 
-func TestResolveStartDir_NoArgsNonTerminalRefuses(t *testing.T) {
+// TestResolveStartDir_NoArgsNonTerminalUsesCWD pins the scope boundary of the
+// implicit-cwd guard: it applies to the state-creating gc init entry points,
+// not to start/restart. A no-path start under non-interactive stdin must still
+// resolve cwd, because requireBootstrappedCity rejects a cwd that is not
+// inside an existing city before any side effect runs — there is no state to
+// leak, and guarding here breaks the documented scripted flow (README
+// quickstart, gc start --foreground, and the 01-hello-gas-city testscript).
+func TestResolveStartDir_NoArgsNonTerminalUsesCWD(t *testing.T) {
 	oldCityFlag := cityFlag
 	cityFlag = ""
 	t.Cleanup(func() { cityFlag = oldCityFlag })
@@ -172,12 +179,18 @@ func TestResolveStartDir_NoArgsNonTerminalRefuses(t *testing.T) {
 	stdinIsRealTerminal = func() bool { return false }
 	t.Cleanup(func() { stdinIsRealTerminal = old })
 
-	dir, err := resolveStartDir(nil)
-	if err == nil {
-		t.Fatalf("resolveStartDir(nil) returned nil error, dir = %q; want an error", dir)
+	t.Chdir(t.TempDir())
+	want, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "interactive terminal") {
-		t.Fatalf("error = %q; want it to mention the non-interactive-terminal reason", err.Error())
+
+	dir, err := resolveStartDir(nil)
+	if err != nil {
+		t.Fatalf("resolveStartDir(nil) error = %v; want nil (the guard must not cover start)", err)
+	}
+	if dir != want {
+		t.Fatalf("dir = %q; want %q", dir, want)
 	}
 }
 

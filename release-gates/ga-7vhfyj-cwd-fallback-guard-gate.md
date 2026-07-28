@@ -66,3 +66,38 @@ gc start             </dev/null  -> exit 1, explicit non-interactive error
 gc init <path> --no-start </dev/null
                                 -> exit 0, city.toml created in scratch path
 ```
+
+## Post-gate amendment — guard narrowed to gc init (ga-w3rhto)
+
+CI on PR #4738 failed after this gate recorded PASS. `cmd/gc process / shard 7
+of 12` failed `TestTutorial01/01-hello-gas-city` and `TestTutorial01/session-fail`,
+both at a bare `exec gc start`. Reproduced locally on the gate branch and
+confirmed green on `origin/main`, so it is a regression from this change, not a
+flake.
+
+**Correction to criterion 2.** Applying the guard to `gc start` was not
+required by the stated hazard and is now reverted. `resolveStartDir` feeds
+`requireBootstrappedCity` (`cmd/gc/cmd_start.go`), which resolves through
+`findCity` — an upward walk for an existing `city.toml`/`.gc` — and returns an
+error *before any side effect* when there is none. `gc start` therefore cannot
+bootstrap or leak state in an arbitrary checkout; only `gc init` can. The guard
+now covers the three `gc init` implicit-path branches only, and criterion 2's
+"no bare `os.Getwd()` remains in `cmd_start.go`" no longer holds by design.
+
+The guard on `gc start` also reached two commands outside the stated scope:
+`gc restart` (via the shared `restartTarget` → `resolveStartDir`) and
+`gc start --foreground`, the documented foreground/container controller entry
+point. Neither is mentioned in the PR description.
+
+**Gap in criterion 3.** Every suite cited under criterion 3 is structurally
+unable to reach the failing tests. `TestTutorial01` is gated by
+`skipSlowCmdGCTest`, which skips unless `GC_FAST_UNIT=0`
+(`cmd/gc/fast_loop_helpers_test.go:17`). `make test-fast-parallel` sets
+`GC_FAST_UNIT=1`, and a bare `go test ./cmd/gc` leaves it unset — so the
+reviewer's "8,030 PASS, 0 FAIL, 96 SKIP" full-package run skipped these
+scenarios rather than passing them. Only `make test-cmd-gc-process`
+(`GC_FAST_UNIT=0`) runs them. A change to a command's path-resolution behavior
+should be gated on a suite that executes the CLI end to end.
+
+**Verification after narrowing:** `TestTutorial01` (full) passes; all `gc init`
+guard tests still pass unchanged.
