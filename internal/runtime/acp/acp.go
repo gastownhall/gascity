@@ -258,8 +258,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
-		// Drain buffered stdout before the publisher's final flush so the last
-		// session/update cannot race publication shutdown.
+		// Order the read loop's exit ahead of the publisher's final flush so a
+		// session/update the loop did dispatch cannot race publication
+		// shutdown. This is ordering, not a drain guarantee: cmd.Wait closes
+		// the stdout read end itself, so bytes still unread at that point are
+		// not guaranteed to be dispatched.
 		<-sc.readDone
 		sc.drainPending()
 		sc.closeActivityPublisher()
@@ -691,7 +694,8 @@ func (p *Provider) publishActivity(name string, t time.Time) error {
 	return nil
 }
 
-// GetLastActivity returns the time of the last session/update notification.
+// GetLastActivity returns the time of the last observed session/update, or the
+// Start-time seed if none has been observed.
 //
 // It reads the in-process connection when this process owns it, and otherwise
 // falls back to the durable stamp on disk — the same
