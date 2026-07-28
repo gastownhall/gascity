@@ -91,6 +91,38 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 	}
 }
 
+func TestStoreHealthFromInputsUnknownOmitsTimestampKeepsStatus(t *testing.T) {
+	h := storeHealthFromInputs("/c", 1_000_000, 1, time.Time{}, storehealth.StatusUnknown)
+	if h.LastGCAt != "" {
+		t.Errorf("LastGCAt = %q, want empty for unknown (no timestamp known)", h.LastGCAt)
+	}
+	if h.LastGCStatus != storehealth.StatusUnknown {
+		t.Errorf("LastGCStatus = %q, want %q", h.LastGCStatus, storehealth.StatusUnknown)
+	}
+
+	data, err := json.Marshal(h)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "last_gc_at") {
+		t.Errorf("JSON contains last_gc_at for unknown status, got: %s", data)
+	}
+	if !strings.Contains(string(data), `"last_gc_status":"unknown"`) {
+		t.Errorf("JSON missing last_gc_status=unknown, got: %s", data)
+	}
+}
+
+func TestRenderStoreHealthBlockUnknown(t *testing.T) {
+	h := storeHealthFromInputs("/c", 50_000_000, 221, time.Time{}, storehealth.StatusUnknown)
+	var buf bytes.Buffer
+	renderStoreHealthBlock(&buf, h)
+
+	out := buf.String()
+	if !strings.Contains(out, "Last GC:     unknown (no matching event within the scanned window)") {
+		t.Errorf("output missing unknown Last GC line:\n%s", out)
+	}
+}
+
 func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
 	h := storeHealthFromInputs("/c", 50_000_000, 221, true, time.Time{}, "")
 	var buf bytes.Buffer
@@ -201,7 +233,7 @@ func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 5})
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
 
-	h := collectStoreHealth("/c", store, ep)
+	h := collectStoreHealth("/c", store, ep, 0)
 	if h == nil {
 		t.Fatal("collectStoreHealth returned nil")
 	}

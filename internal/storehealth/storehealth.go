@@ -115,31 +115,65 @@ func WalkSize(path string) int64 {
 	return total
 }
 
-// lastMaintenanceScanWindow bounds how far back LastMaintenance's first pass
-// walks the event log. At 8 MB (≈10 000 events of typical size), that pass is
-// O(window) rather than O(log size), keeping the common case — a maintenance
-// event within recent history — cheap. When the windowed pass finds nothing,
-// LastMaintenance falls back to an unbounded scan (which also walks rotated
-// .gz archives) so a genuinely-recent event that lies just past the window,
-// or one already rotated out of the active file, is still found. The
-// unbounded fallback only pays its O(size) cost in the true never-ran case
-// (#4418's target) or the rare event-past-window case — not on every
-// event-bearing city.
-const lastMaintenanceScanWindow = 8 * 1024 * 1024
+// StatusUnknown marks a LastMaintenance result that could not be
+// determined from the scanned window: a matching event may exist earlier
+// in the active log (past the window floor) or in a rotated .gz archive
+// that the windowed tail scan never reads. It is distinct from "" (no
+// event exists anywhere — only ever returned via the unbounded List path,
+// for providers that do not implement [events.TailProvider]) and from
+// "success"/"failed" (a matching event was actually found). Callers must
+// not render StatusUnknown as "never ran" — see #4418/#4427 review: a
+// bounded probe that reports a confident zero is worse than one that
+// admits it does not know.
+const StatusUnknown = "unknown"
 
-// LastMaintenance returns the timestamp and status ("success" or
-// "failed") of the most-recent store-maintenance event in provider.
-// Zero time and empty status when no events, provider is nil, or the
-// provider returns an error.
+// minScanWindow floors [ScanWindow]'s result at the size #4427 originally
+// shipped, so a very short maintenance interval never shrinks the window
+// below a size that is already cheap to scan.
+const minScanWindow = 8 * 1024 * 1024
+
+// busyCityDailyRotationBytes matches events.defaultRotationMaxSize
+// (internal/events/recorder.go): the events log rotates at 256 MiB, sized
+// so a busy city rotates roughly once per day. ListTail only ever reads
+// the active (post-rotation) file, so it can never usefully see more than
+// one rotation's worth of bytes — a window larger than this buys nothing.
+const busyCityDailyRotationBytes = 256 * 1024 * 1024
+
+// ScanWindow returns the LastMaintenance windowed-scan bound for a
+// maintenance loop with the given cadence: enough of the active log's
+// tail to cover interval at busyCityDailyRotationBytes/day of throughput,
+// floored at minScanWindow and capped at busyCityDailyRotationBytes since
+// ListTail cannot see past the active file regardless of window size.
+// interval <= 0 falls back to the 168h (weekly) maintenance default.
+func ScanWindow(interval time.Duration) int64 {
+	if interval <= 0 {
+		interval = 168 * time.Hour
+	}
+	days := interval.Hours() / 24
+	window := int64(days * float64(busyCityDailyRotationBytes))
+	if window < minScanWindow {
+		window = minScanWindow
+	}
+	if window > busyCityDailyRotationBytes {
+		window = busyCityDailyRotationBytes
+	}
+	return window
+}
+
+// LastMaintenance returns the timestamp and status ("success", "failed",
+// or [StatusUnknown]) of the most-recent store-maintenance event in
+// provider. Zero time and empty status when provider is nil.
 //
-// When ep implements [events.TailProvider], LastMaintenance first tries a
-// backward scan bounded to the last lastMaintenanceScanWindow bytes of the
-// log. If that windowed scan finds no matching event, it falls back to an
-// unbounded List (which also walks rotated .gz archives) rather than
-// concluding maintenance never ran — a recent event can lie just past the
-// window, or have already rotated out of the active file that ListTail
-// reads.
-func LastMaintenance(ep events.Provider) (time.Time, string) {
+// When ep implements [events.TailProvider], LastMaintenance scans only the
+// trailing window bytes of the log (see [ScanWindow]) — never an unbounded
+// scan. A windowed miss reports StatusUnknown rather than "never ran",
+// because a miss cannot distinguish "no matching event" from "the event is
+// past the window floor or in a rotated .gz archive the tail scan does not
+// read." Only providers without ListTail (the exec provider and
+// transientCityEventProvider, neither production caller implements
+// TailProvider) run the unbounded List and can therefore return a
+// definitive "never ran" ("").
+func LastMaintenance(ep events.Provider, window int64) (time.Time, string) {
 	if ep == nil {
 		return time.Time{}, ""
 	}
@@ -147,6 +181,7 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 	var (
 		latestTs     time.Time
 		latestStatus string
+		sawUnknown   bool
 	)
 	for _, spec := range []struct {
 		typ    string
@@ -158,15 +193,19 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		var evts []events.Event
 		var err error
 		if hasTail {
-			evts, err = tp.ListTail(events.Filter{Type: spec.typ, WindowBytes: lastMaintenanceScanWindow}, 1)
-			if err == nil && len(evts) == 0 {
-				evts, err = ep.List(events.Filter{Type: spec.typ})
+			evts, err = tp.ListTail(events.Filter{Type: spec.typ, WindowBytes: window}, 1)
+			if err != nil {
+				continue
+			}
+			if len(evts) == 0 {
+				sawUnknown = true
+				continue
 			}
 		} else {
 			evts, err = ep.List(events.Filter{Type: spec.typ})
-		}
-		if err != nil {
-			continue
+			if err != nil {
+				continue
+			}
 		}
 		for _, e := range evts {
 			if e.Ts.After(latestTs) {
@@ -175,7 +214,13 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 			}
 		}
 	}
-	return latestTs, latestStatus
+	if !latestTs.IsZero() {
+		return latestTs, latestStatus
+	}
+	if sawUnknown {
+		return time.Time{}, StatusUnknown
+	}
+	return time.Time{}, ""
 }
 
 const bytesPerMB = 1_000_000

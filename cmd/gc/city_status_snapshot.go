@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -142,14 +143,18 @@ func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Prov
 	return p
 }
 
-func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) *StoreHealth {
+func buildCityStoreHealth(cityPath string, store beads.Store, cfg *config.City, stderr io.Writer) *StoreHealth {
 	ep := openStoreHealthEvents(cityPath, stderr)
 	defer func() {
 		if closer, ok := ep.(io.Closer); ok {
 			_ = closer.Close()
 		}
 	}()
-	return collectStoreHealth(cityPath, store, ep)
+	var interval time.Duration
+	if cfg != nil {
+		interval = cfg.Maintenance.Dolt.IntervalOrDefault()
+	}
+	return collectStoreHealth(cityPath, store, ep, interval)
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
@@ -178,7 +183,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
-		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, stderr)
+		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, cfg, stderr)
 	}
 	if cfg == nil {
 		return snapshot

@@ -214,8 +214,12 @@ func TestWalkSizeSumsFiles(t *testing.T) {
 	}
 }
 
+// testWindow is a stand-in ScanWindow value for tests that don't care about
+// the interval-derived sizing, only about LastMaintenance's own behavior.
+const testWindow = 8 * 1024 * 1024
+
 func TestLastMaintenanceNilProvider(t *testing.T) {
-	ts, status := LastMaintenance(nil)
+	ts, status := LastMaintenance(nil, testWindow)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(nil) = (%v,%q), want (zero,\"\")", ts, status)
 	}
@@ -232,7 +236,7 @@ func TestLastMaintenanceReturnsLatestAcrossTypes(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
 	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
 
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(ep, testWindow)
 	if !ts.Equal(newer) {
 		t.Fatalf("ts = %v, want %v", ts, newer)
 	}
@@ -249,7 +253,7 @@ func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t1, Payload: payload})
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: t2, Payload: payload})
 
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(ep, testWindow)
 	if !ts.Equal(t2) {
 		t.Fatalf("ts = %v, want %v", ts, t2)
 	}
@@ -258,11 +262,29 @@ func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 	}
 }
 
-func TestLastMaintenanceNoEvents(t *testing.T) {
+// TestLastMaintenanceNoEventsReportsUnknown covers the never-ran case for a
+// TailProvider-backed provider (events.Fake implements ListTail): a windowed
+// miss cannot distinguish "no event exists" from "the event is outside the
+// window", so it must report StatusUnknown, never "" ("never ran"). Only the
+// non-tail fallback path (TestLastMaintenanceNonTailNoEventsReportsNeverRan)
+// can make the stronger claim.
+func TestLastMaintenanceNoEventsReportsUnknown(t *testing.T) {
 	ep := events.NewFake()
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(ep, testWindow)
+	if !ts.IsZero() || status != StatusUnknown {
+		t.Fatalf("LastMaintenance(empty tail provider) = (%v,%q), want (zero,%q)", ts, status, StatusUnknown)
+	}
+}
+
+// TestLastMaintenanceNonTailNoEventsReportsNeverRan covers the one path that
+// can still report a definitive "never ran": a provider without ListTail
+// runs the unbounded List, which is a true full scan, so an empty result is
+// conclusive.
+func TestLastMaintenanceNonTailNoEventsReportsNeverRan(t *testing.T) {
+	ep := &nonTailProvider{inner: events.NewFake()}
+	ts, status := LastMaintenance(ep, testWindow)
 	if !ts.IsZero() || status != "" {
-		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
+		t.Fatalf("LastMaintenance(empty non-tail provider) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
 
@@ -303,7 +325,7 @@ func TestLastMaintenanceNonTailFallbackReturnsNewest(t *testing.T) {
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: newest, Payload: payload})
 	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: middle, Payload: payload})
 
-	ts, status := LastMaintenance(ep)
+	ts, status := LastMaintenance(ep, testWindow)
 	if !ts.Equal(newest) {
 		t.Fatalf("ts = %v, want %v (newest of 3 events on non-tail fallback path)", ts, newest)
 	}
@@ -318,15 +340,19 @@ type tailCallRecord struct {
 	limit  int
 }
 
-// spyTailProvider is a Provider+TailProvider that records every ListTail call
-// and delegates to an inner Fake for actual event results.
+// spyTailProvider is a Provider+TailProvider that records every ListTail and
+// List call and delegates to an inner Fake for actual event results.
 type spyTailProvider struct {
-	inner *events.Fake
-	calls []tailCallRecord
+	inner     *events.Fake
+	calls     []tailCallRecord
+	listCalls int
 }
 
-func (s *spyTailProvider) Record(e events.Event)                        { s.inner.Record(e) }
-func (s *spyTailProvider) List(f events.Filter) ([]events.Event, error) { return s.inner.List(f) }
+func (s *spyTailProvider) Record(e events.Event) { s.inner.Record(e) }
+func (s *spyTailProvider) List(f events.Filter) ([]events.Event, error) {
+	s.listCalls++
+	return s.inner.List(f)
+}
 
 func (s *spyTailProvider) ListTail(f events.Filter, limit int) ([]events.Event, error) {
 	s.calls = append(s.calls, tailCallRecord{filter: f, limit: limit})
@@ -345,14 +371,14 @@ func (s *spyTailProvider) Close() error { return s.inner.Close() }
 // fails. Without the WindowBytes value, the bound is silently absent.
 func TestLastMaintenanceUsesWindowedTailScan(t *testing.T) {
 	spy := &spyTailProvider{inner: events.NewFake()}
-	LastMaintenance(spy)
+	LastMaintenance(spy, testWindow)
 
 	if len(spy.calls) != 2 {
 		t.Fatalf("expected 2 ListTail calls (one per maintenance type), got %d", len(spy.calls))
 	}
 	for i, call := range spy.calls {
-		if call.filter.WindowBytes != lastMaintenanceScanWindow {
-			t.Errorf("call[%d]: WindowBytes=%d, want %d", i, call.filter.WindowBytes, lastMaintenanceScanWindow)
+		if call.filter.WindowBytes != testWindow {
+			t.Errorf("call[%d]: WindowBytes=%d, want %d", i, call.filter.WindowBytes, testWindow)
 		}
 		if call.limit != 1 {
 			t.Errorf("call[%d]: limit=%d, want 1", i, call.limit)
@@ -360,15 +386,39 @@ func TestLastMaintenanceUsesWindowedTailScan(t *testing.T) {
 	}
 }
 
-// TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded verifies
-// end-to-end that when the bounded tail scan finds nothing, LastMaintenance
-// falls back to an unbounded scan rather than reporting "never ran" — a
-// maintenance event placed before the scan window is still found.
+// TestLastMaintenanceNeverRanDoesNotTriggerUnboundedScan asserts on provider
+// call shape (never on wall time, which would flake): when the windowed tail
+// scan finds nothing for a TailProvider, LastMaintenance must NOT fall back
+// to an unbounded List call at all — the old windowed-then-unbounded-on-miss
+// shape (option (a), rejected in the #4427 review) restored the full O(size)
+// cost on exactly the never-ran city #4418 was filed against. A miss must
+// resolve to StatusUnknown with zero extra List calls.
+func TestLastMaintenanceNeverRanDoesNotTriggerUnboundedScan(t *testing.T) {
+	spy := &spyTailProvider{inner: events.NewFake()}
+	ts, status := LastMaintenance(spy, testWindow)
+
+	if !ts.IsZero() || status != StatusUnknown {
+		t.Fatalf("LastMaintenance = (%v,%q), want (zero,%q)", ts, status, StatusUnknown)
+	}
+	if spy.listCalls != 0 {
+		t.Fatalf("List called %d times on a windowed miss, want 0 (no unbounded fallback)", spy.listCalls)
+	}
+	if len(spy.calls) != 2 {
+		t.Fatalf("expected 2 ListTail calls (one per maintenance type), got %d", len(spy.calls))
+	}
+}
+
+// TestLastMaintenanceBoundedScan_EventBeforeWindowReportsUnknown verifies
+// end-to-end that when the bounded tail scan finds nothing because the
+// matching event lies before the window floor, LastMaintenance reports
+// StatusUnknown rather than falling back to an unbounded scan or claiming
+// "never ran" — a maintenance event placed before the scan window is real
+// but the windowed probe cannot see it and must say so honestly.
 //
-// Failing case without the fallback: the windowed ListTail stops at the
-// window floor, finds nothing, and LastMaintenance returns (zero, "") even
-// though the event exists earlier in the same file.
-func TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded(t *testing.T) {
+// This test previously asserted the opposite (unbounded-fallback-recovers-
+// the-event) under the rejected option (a) shape; the assertion flipped
+// when that shape was replaced with the ruled tri-state design.
+func TestLastMaintenanceBoundedScan_EventBeforeWindowReportsUnknown(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
 
@@ -391,13 +441,13 @@ func TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded(t *testi
 	}
 	f.Write(append(lineBytes, '\n')) //nolint:errcheck
 
-	// Fill with noise events until the file exceeds lastMaintenanceScanWindow,
-	// pushing the maintenance event before the window floor.
+	// Fill with noise events until the file exceeds testWindow, pushing the
+	// maintenance event before the window floor.
 	noiseBase, _ := json.Marshal(events.Event{Seq: 2, Ts: time.Date(2026, 4, 1, 12, 0, 1, 0, time.UTC), Type: "gc.session.started"})
 	noiseBase = append(noiseBase, '\n')
 	noiseLine := noiseBase
 	written := int64(len(lineBytes) + 1)
-	for written <= lastMaintenanceScanWindow+int64(len(noiseLine))*10 {
+	for written <= testWindow+int64(len(noiseLine))*10 {
 		f.Write(noiseLine) //nolint:errcheck
 		written += int64(len(noiseLine))
 	}
@@ -411,11 +461,38 @@ func TestLastMaintenanceBoundedScan_EventBeforeWindowFallsBackUnbounded(t *testi
 	}
 	defer ep.Close() //nolint:errcheck
 
-	ts, status := LastMaintenance(ep)
-	if !ts.Equal(maintenanceEvent.Ts) {
-		t.Errorf("ts = %v, want %v (unbounded fallback should recover the event before the window)", ts, maintenanceEvent.Ts)
+	ts, status := LastMaintenance(ep, testWindow)
+	if !ts.IsZero() {
+		t.Errorf("ts = %v, want zero (event before window floor must not be reported as found)", ts)
 	}
-	if status != "success" {
-		t.Errorf("status = %q, want success", status)
+	if status != StatusUnknown {
+		t.Errorf("status = %q, want %q", status, StatusUnknown)
+	}
+}
+
+// TestScanWindow pins the interval->window derivation: floored at
+// minScanWindow, capped at busyCityDailyRotationBytes (ListTail can never
+// usefully see more than one active-file rotation regardless of interval),
+// and scaling with interval in between.
+func TestScanWindow(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval time.Duration
+		want     int64
+	}{
+		{"zero uses weekly default", 0, busyCityDailyRotationBytes},
+		{"negative uses weekly default", -time.Hour, busyCityDailyRotationBytes},
+		{"thirty minutes floors at minScanWindow", 30 * time.Minute, minScanWindow},
+		{"one day", 24 * time.Hour, busyCityDailyRotationBytes},
+		{"one week caps at busyCityDailyRotationBytes", 168 * time.Hour, busyCityDailyRotationBytes},
+		{"one year caps at busyCityDailyRotationBytes", 365 * 24 * time.Hour, busyCityDailyRotationBytes},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ScanWindow(c.interval)
+			if got != c.want {
+				t.Fatalf("ScanWindow(%v) = %d, want %d", c.interval, got, c.want)
+			}
+		})
 	}
 }

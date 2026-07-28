@@ -24,8 +24,10 @@ const statusStoreHealthTimeout = time.Second
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. rowsMeasured distinguishes a real liveRows count from a
 // count that failed or timed out — see storehealth.Compute. LastGCAt is
-// serialized as RFC3339 UTC when present; when the maintenance log is
-// empty, LastGCAt and LastGCStatus are omitted (json:"omitempty").
+// serialized as RFC3339 UTC when a definite timestamp is known. LastGCStatus
+// is serialized whenever it is non-empty, including storehealth.StatusUnknown,
+// which carries no timestamp — both fields are omitted only when the
+// maintenance log is genuinely empty (json:"omitempty").
 func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsMeasured bool, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
 	h := storehealth.Compute(cityPath, sizeBytes, liveRows, rowsMeasured, lastGCAt, lastGCStatus)
 	out := &StoreHealth{
@@ -39,6 +41,8 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsM
 	}
 	if !h.LastGCAt.IsZero() {
 		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
+	}
+	if h.LastGCStatus != "" {
 		out.LastGCStatus = h.LastGCStatus
 	}
 	return out
@@ -48,10 +52,15 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsM
 // maintenance event via ep, returning a populated *StoreHealth.
 // liveRowCount provides the live row count and whether it was actually
 // measured; callers without a store pass nil and the count is unmeasured.
-func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
+// maintenanceInterval and rotationCapBytes size the LastMaintenance scan
+// window (see storehealth.ScanWindow); pass 0 for maintenanceInterval to get
+// the 168h default, and 0 for rotationCapBytes when the effective
+// events-rotation max_size_bytes is unknown or rotation is disabled (falls
+// back to storehealth's hardcoded default).
+func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider, maintenanceInterval time.Duration, rotationCapBytes int64) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows, measured := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	lastAt, lastStatus := storehealth.LastMaintenance(ep, storehealth.ScanWindow(maintenanceInterval, rotationCapBytes))
 	return storeHealthFromInputs(cityPath, size, rows, measured, lastAt, lastStatus)
 }
 
@@ -134,8 +143,11 @@ func renderStoreHealthBlock(w io.Writer, h *StoreHealth) {
 		}
 		fmt.Fprintf(w, "  Ratio:       %.1f MB/row  (threshold %.1f MB/row)%s\n", h.RatioMB, h.ThresholdMB, suffix) //nolint:errcheck // best-effort stdout
 	}
-	if h.LastGCAt != "" {
+	switch {
+	case h.LastGCAt != "":
 		fmt.Fprintf(w, "  Last GC:     %s (%s)\n", h.LastGCAt, h.LastGCStatus) //nolint:errcheck // best-effort stdout
+	case h.LastGCStatus == storehealth.StatusUnknown:
+		fmt.Fprintln(w, "  Last GC:     unknown (no matching event within the scanned window)") //nolint:errcheck // best-effort stdout
 	}
 }
 

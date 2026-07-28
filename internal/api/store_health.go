@@ -87,7 +87,11 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
+	var interval time.Duration
+	if cfg := s.state.Config(); cfg != nil {
+		interval = cfg.Maintenance.Dolt.IntervalOrDefault()
+	}
+	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider(), storehealth.ScanWindow(interval))
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, so rows here is always a
 	// real measurement.
@@ -96,7 +100,10 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 }
 
 // statusStoreHealthFromDomain adapts storehealth.Health to the wire
-// type StatusStoreHealth, serializing LastGCAt to RFC3339 UTC.
+// type StatusStoreHealth, serializing LastGCAt to RFC3339 UTC when a
+// definite timestamp is known. LastGCStatus is serialized whenever it is
+// non-empty, including storehealth.StatusUnknown, which carries no
+// timestamp.
 func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	out := &StatusStoreHealth{
 		Path:        h.Path,
@@ -108,6 +115,8 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	}
 	if !h.LastGCAt.IsZero() {
 		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
+	}
+	if h.LastGCStatus != "" {
 		out.LastGCStatus = h.LastGCStatus
 	}
 	return out

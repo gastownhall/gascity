@@ -265,8 +265,8 @@ type StatusStoreHealth struct {
 	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads."`
 	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
-	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
-	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`
+	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run, when known."`
+	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run: 'success', 'failed', or 'unknown' (no matching event within the scanned window — distinct from no event ever having run; last_gc_at is absent in the unknown case)."`
 }
 
 // Session types moved to huma_types_sessions.go.
