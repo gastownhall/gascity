@@ -85,6 +85,12 @@ type AwakeWorkBead struct {
 	Assignee string
 	Status   string // "open", "in_progress"
 	Ready    bool   // true for open work only after readiness/blocker filtering
+	// Blocked is true when an in_progress bead carries an open
+	// ready-blocking dependency or gate (bd's IsBlocked projection). It is
+	// meaningless for open work, whose blocker state is already folded into
+	// Ready. Zero value is false, so every existing in_progress caller that
+	// does not populate it keeps today's unconditional-wake behavior.
+	Blocked bool
 }
 
 // AwakeDecision is the output for a single session.
@@ -702,7 +708,7 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
 	switch bead.Status {
 	case "in_progress":
-		return true
+		return !bead.Blocked
 	case "open":
 		return bead.Ready
 	default:

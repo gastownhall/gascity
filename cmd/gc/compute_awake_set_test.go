@@ -1321,6 +1321,26 @@ func TestRegression_PolecatWithInProgressWork_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "polecat-mc-p1")
 }
 
+// TestRegression_PolecatWithBlockedInProgressWork_DoesNotWake covers the
+// WakeWork/hook disagreement: an in_progress bead that carries an open
+// ready-blocking dependency or gate is not dispatchable by the hook (see
+// upstream #4726, which taught the hook's crash-recovery tier to skip it),
+// but ComputeAwakeSet fired assigned-work demand from the bead's mere
+// presence, regardless of blocked state. That mismatch re-wakes the session
+// every reconcile tick while the hook returns no_work every cycle.
+func TestRegression_PolecatWithBlockedInProgressWork_DoesNotWake(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
+		Now:              now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
+}
+
 func TestRegression_SessionWithOpenWorkByBeadID_StaysAwake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
