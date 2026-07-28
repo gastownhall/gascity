@@ -555,7 +555,7 @@ func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
 	}
 
 	for _, method := range []string{"IsRunning", "IsAttached", "GetLastActivity", "GetMeta"} {
-		if n := fake.Fake.CountCalls(method, "myrig--worker"); n != 0 {
+		if n := fake.CountCalls(method, "myrig--worker"); n != 0 {
 			t.Errorf("%s calls = %d, want 0 (batch path should bypass per-session-name methods)", method, n)
 		}
 	}
