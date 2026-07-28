@@ -1288,3 +1288,34 @@ func TestEnsureSessionAliasAvailable_SelfOwnerExceptionRefusesUnqualifiedHolders
 		})
 	}
 }
+
+// A closed, ephemeral, pool-managed session slot that reserved a configured
+// named identity's bare session_name (because it was materialized through the
+// pool path rather than the named-session path) must not permanently squat
+// that name. wasConfiguredNamedSession(b) is false for such a bead — no
+// configured_named_session flag, no configured_named_identity — so the
+// existing closed-bead release exception in
+// ensureSessionNameAvailableForSelfAndOwner never fires for it.
+func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesConfiguredName(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":   "loial",
+			"pool_managed":   "true",
+			"session_origin": "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(retired pool slot): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close(retired pool slot): %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "loial", "gc-999", ""); err != nil {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(retired pool slot holding configured name) = %v, want nil", err)
+	}
+}
