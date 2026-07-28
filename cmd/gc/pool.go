@@ -290,6 +290,14 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.DependsOn = make([]string, len(src.DependsOn))
 		copy(dst.DependsOn, src.DependsOn)
 	}
+	if len(src.RouteLabel) > 0 {
+		dst.RouteLabel = make([]string, len(src.RouteLabel))
+		copy(dst.RouteLabel, src.RouteLabel)
+	}
+	if len(src.RouteLabelAny) > 0 {
+		dst.RouteLabelAny = make([]string, len(src.RouteLabelAny))
+		copy(dst.RouteLabelAny, src.RouteLabelAny)
+	}
 	if len(src.Args) > 0 {
 		dst.Args = make([]string, len(src.Args))
 		copy(dst.Args, src.Args)

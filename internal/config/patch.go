@@ -152,6 +152,12 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// RouteLabel overrides the agent's route_label list (AND semantics).
+	// See Agent.RouteLabel.
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny overrides the agent's route_label_any list (OR
+	// semantics). See Agent.RouteLabelAny.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
@@ -593,6 +599,12 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	if len(p.RouteLabel) > 0 {
+		a.RouteLabel = append([]string(nil), p.RouteLabel...)
+	}
+	if len(p.RouteLabelAny) > 0 {
+		a.RouteLabelAny = append([]string(nil), p.RouteLabelAny...)
 	}
 	// OptionDefaults: additive merge (patch keys win).
 	if len(p.OptionDefaults) > 0 {

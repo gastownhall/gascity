@@ -787,6 +787,12 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// RouteLabel overrides the agent's route_label list (AND semantics).
+	// See Agent.RouteLabel.
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny overrides the agent's route_label_any list (OR
+	// semantics). See Agent.RouteLabelAny.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3221,6 +3227,21 @@ type Agent struct {
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// RouteLabel narrows the routed-pool tier (tier 3 of the default
+	// WorkQuery, and the whole of EffectivePoolDemandQuery) to beads
+	// carrying ALL of the given labels — AND semantics, mirroring
+	// `bd ready --label`. Unlike WorkQuery, RouteLabel narrows the shared
+	// routed-pool predicate in place rather than replacing the multi-tier
+	// discovery contract, so the claim path (EffectiveWorkQuery) and the
+	// demand path (EffectivePoolDemandQuery) narrow identically and cannot
+	// diverge. Mutually exclusive with a raw WorkQuery or ScaleCheck
+	// override on the same agent (see ValidateAgents).
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny narrows the routed-pool tier to beads carrying AT LEAST
+	// ONE of the given labels — OR semantics, mirroring
+	// `bd ready --label-any`. Combines with RouteLabel (AND) when both are
+	// set. See RouteLabel for the shared claim/demand narrowing this feeds.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
@@ -3441,6 +3462,8 @@ func (a Agent) Clone() Agent {
 	out.AppendFragments = append([]string(nil), a.AppendFragments...)
 	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
 	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.RouteLabel = append([]string(nil), a.RouteLabel...)
+	out.RouteLabelAny = append([]string(nil), a.RouteLabelAny...)
 	out.SharedSkills = append([]string(nil), a.SharedSkills...)
 	out.SharedMCP = append([]string(nil), a.SharedMCP...)
 	out.Env = deepCopyStringMap(a.Env)
@@ -4003,6 +4026,13 @@ func ValidateAgents(agents []Agent) error {
 			*a.MaxActiveSessions >= 0 && *a.MinActiveSessions > *a.MaxActiveSessions {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
+		}
+		// RouteLabel/RouteLabelAny narrow the shared routed-pool predicate in
+		// place; a raw WorkQuery or ScaleCheck override replaces it wholesale.
+		// Combining both leaves it ambiguous which mechanism governs, so this
+		// is a hard load-time error rather than a silent precedence rule.
+		if (len(a.RouteLabel) > 0 || len(a.RouteLabelAny) > 0) && (a.WorkQuery != "" || a.ScaleCheck != "") {
+			return fmt.Errorf("agent %q: route_label/route_label_any cannot be combined with a raw work_query or scale_check override — choose one mechanism", a.QualifiedName())
 		}
 	}
 

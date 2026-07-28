@@ -2832,6 +2832,8 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MaxActiveSessions:       ov.MaxActiveSessions,
 		MinActiveSessions:       ov.MinActiveSessions,
 		ScaleCheck:              ov.ScaleCheck,
+		RouteLabel:              ov.RouteLabel,
+		RouteLabelAny:           ov.RouteLabelAny,
 		OptionDefaults:          ov.OptionDefaults,
 	}
 }

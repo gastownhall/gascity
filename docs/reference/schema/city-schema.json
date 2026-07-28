@@ -227,6 +227,20 @@
           "type": "string",
           "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
+        "route_label": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabel narrows the routed-pool tier (tier 3 of the default\nWorkQuery, and the whole of EffectivePoolDemandQuery) to beads\ncarrying ALL of the given labels — AND semantics, mirroring\n`bd ready --label`. Unlike WorkQuery, RouteLabel narrows the shared\nrouted-pool predicate in place rather than replacing the multi-tier\ndiscovery contract, so the claim path (EffectiveWorkQuery) and the\ndemand path (EffectivePoolDemandQuery) narrow identically and cannot\ndiverge. Mutually exclusive with a raw WorkQuery or ScaleCheck\noverride on the same agent (see ValidateAgents)."
+        },
+        "route_label_any": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabelAny narrows the routed-pool tier to beads carrying AT LEAST\nONE of the given labels — OR semantics, mirroring\n`bd ready --label-any`. Combines with RouteLabel (AND) when both are\nset. See RouteLabel for the shared claim/demand narrowing this feeds."
+        },
         "sling_query": {
           "type": "string",
           "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
@@ -687,6 +701,20 @@
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
         },
+        "route_label": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabel overrides the agent's route_label list (AND semantics).\nSee Agent.RouteLabel."
+        },
+        "route_label_any": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabelAny overrides the agent's route_label_any list (OR\nsemantics). See Agent.RouteLabelAny."
+        },
         "option_defaults": {
           "additionalProperties": {
             "type": "string"
@@ -967,6 +995,20 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "route_label": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabel overrides the agent's route_label list (AND semantics).\nSee Agent.RouteLabel."
+        },
+        "route_label_any": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "RouteLabelAny overrides the agent's route_label_any list (OR\nsemantics). See Agent.RouteLabelAny."
         },
         "option_defaults": {
           "additionalProperties": {

@@ -377,6 +377,24 @@
               "null"
             ]
           },
+          "RouteLabel": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "RouteLabelAny": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "ScaleCheck": {
             "type": [
               "string",
@@ -548,6 +566,8 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "RouteLabel",
+          "RouteLabelAny",
           "OptionDefaults"
         ],
         "type": "object"

@@ -95,6 +95,8 @@ export type AgentPatch = {
     PromptTemplate: string | null;
     Provider: string | null;
     ResumeCommand: string | null;
+    RouteLabel: Array<string> | null;
+    RouteLabelAny: Array<string> | null;
     ScaleCheck: string | null;
     Scope: string | null;
     Session: string | null;

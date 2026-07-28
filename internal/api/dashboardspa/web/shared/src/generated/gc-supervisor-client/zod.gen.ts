@@ -1055,6 +1055,8 @@ export const zAgentPatch = z.object({
     PromptTemplate: z.string().nullable(),
     Provider: z.string().nullable(),
     ResumeCommand: z.string().nullable(),
+    RouteLabel: z.array(z.string()).nullable(),
+    RouteLabelAny: z.array(z.string()).nullable(),
     ScaleCheck: z.string().nullable(),
     Scope: z.string().nullable(),
     Session: z.string().nullable(),

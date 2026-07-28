@@ -977,6 +977,8 @@ type AgentPatch struct {
 	PromptTemplate          *string           `json:"PromptTemplate"`
 	Provider                *string           `json:"Provider"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
+	RouteLabel              *[]string         `json:"RouteLabel"`
+	RouteLabelAny           *[]string         `json:"RouteLabelAny"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
 	Scope                   *string           `json:"Scope"`
 	Session                 *string           `json:"Session"`

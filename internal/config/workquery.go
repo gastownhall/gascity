@@ -38,8 +38,38 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
-func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+// routeLabelFilter narrows the routed-pool-demand predicate — Tier 3 of
+// EffectiveWorkQuery and the whole of EffectivePoolDemandQuery — by bead
+// label. Both tiers consume the same filter, so an agent's claim and demand
+// predicates are read from the same fields and cannot diverge (ga-ut74jh).
+// label mirrors `bd ready --label` (AND: must have ALL); labelAny mirrors
+// `bd ready --label-any` (OR: must have AT LEAST ONE).
+type routeLabelFilter struct {
+	label    []string
+	labelAny []string
+}
+
+// shellArgs renders the filter as a bd ready flag fragment. Multiple values
+// are comma-joined into a single flag occurrence, matching bd's own
+// pflag.StringSlice parsing for --label/--label-any. Each joined value is
+// shell-quoted so a label containing shell metacharacters is carried as
+// inert data rather than executable syntax (NFR-01). An empty filter
+// renders to "", so an agent that sets neither RouteLabel nor
+// RouteLabelAny produces byte-identical shell output to before this field
+// existed (NFR-03).
+func (f routeLabelFilter) shellArgs() string {
+	var b strings.Builder
+	if len(f.label) > 0 {
+		b.WriteString(" --label=" + shellquote.Quote(strings.Join(f.label, ",")))
+	}
+	if len(f.labelAny) > 0 {
+		b.WriteString(" --label-any=" + shellquote.Quote(strings.Join(f.labelAny, ",")))
+	}
+	return b.String()
+}
+
+func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool, filter routeLabelFilter) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + filter.shellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -50,8 +80,8 @@ func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string
 // visible once a root carries gc.routed_to. This retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool, filter routeLabelFilter) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + filter.shellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -107,13 +137,13 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
-func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
+func poolDemandFirstRowFunctionScript(includeEphemeralReady bool, filter routeLabelFilter) string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
+		`r=$(` + routedReadyTierCommand(includeEphemeralReady, filter) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady, filter) + ` 2>/dev/null); ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
@@ -123,14 +153,14 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 		`}; `
 }
 
-func routedReadyTierCommand(includeEphemeralReady bool) string {
+func routedReadyTierCommand(includeEphemeralReady bool, filter routeLabelFilter) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path asks bd for the oldest candidates.
 	// The tier is widened past a single row (limit=20, not limit=1) so a
 	// self-blocked head (is_blocked / status==blocked) has Ready routed work
 	// behind it to fall through to instead of idle-exiting; the hook layer
 	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady, filter) + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -144,10 +174,10 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 // masquerade as "no demand", which would silently stop the pool from spawning.
 // The && chain ensures any non-zero bd exit short-circuits the whole expression
 // (TestEffectiveScaleCheckUsesReadyOnly).
-func poolDemandCountShell(target string, includeEphemeralReady bool) string {
+func poolDemandCountShell(target string, includeEphemeralReady bool, filter routeLabelFilter) string {
 	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady, filter) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady, filter) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
@@ -300,16 +330,16 @@ func poolDemandOriginGateScript() string {
 		`esac; `
 }
 
-func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady)
+func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int, filter routeLabelFilter) string {
+	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady, filter)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(includeEphemeralReady, len(targets)), "--"}
+func routedPoolWorkQueryCommand(includeEphemeralReady bool, filter routeLabelFilter, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(includeEphemeralReady, len(targets), filter), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -415,19 +445,20 @@ func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
 }
 
 func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
+	filter := routeLabelFilter{label: a.RouteLabel, labelAny: a.RouteLabelAny}
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+			poolDemandFirstRowFunctionScript(includeEphemeralReady, filter) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+		poolDemandFirstRowFunctionScript(includeEphemeralReady, filter) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -492,12 +523,13 @@ func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
 }
 
 func buildRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
+	filter := routeLabelFilter{label: a.RouteLabel, labelAny: a.RouteLabelAny}
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(includeEphemeralReady, target)
+		return routedPoolWorkQueryCommand(includeEphemeralReady, filter, target)
 	}
-	return routedPoolWorkQueryCommand(includeEphemeralReady, target, legacyTarget)
+	return routedPoolWorkQueryCommand(includeEphemeralReady, filter, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -529,12 +561,42 @@ func (a *Agent) EffectiveSlingQuery() string {
 // DefaultSlingQuery returns the built-in metadata-routing sling query for
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
+//
+// The command literal must stay inside a single return expression. The bd
+// boundary guard (internal/beads.TestNoBdExecOutsideBeads) exempts returned
+// config templates from the "no bd exec outside internal/beads" invariant by
+// matching a `return ` prefix; binding the literal to a local first reads to
+// the guard as a command assembled for exec and fails CI. Optional arguments
+// are therefore built separately and concatenated into the return. Making the
+// guard structural rather than syntactic is tracked as ga-1sjtbh.
 func (a *Agent) DefaultSlingQuery() string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
+	labelArg := ""
+	if label := a.slingClaimLabel(); label != "" {
+		labelArg = " --add-label=" + shellquote.Quote(label)
+	}
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route + labelArg
+}
+
+// slingClaimLabel returns the single label DefaultSlingQuery must stamp on a
+// slung bead so it satisfies this agent's label-gated work_query tiers.
+// RouteLabel (AND semantics) takes precedence: a bead must carry it to be
+// claimable, so its first entry is necessary. RouteLabelAny (OR semantics)
+// needs only one member satisfied, so its first entry is sufficient. Empty
+// when the agent is not label-gated at all — routing alone already suffices
+// for it, and stamping a label here would be a regression for the 82 routed
+// gascity beads with no RouteLabel/RouteLabelAny today.
+func (a *Agent) slingClaimLabel() string {
+	if len(a.RouteLabel) > 0 {
+		return a.RouteLabel[0]
+	}
+	if len(a.RouteLabelAny) > 0 {
+		return a.RouteLabelAny[0]
+	}
+	return ""
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the
@@ -564,8 +626,9 @@ func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
 }
 
 func buildPoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
+	filter := routeLabelFilter{label: a.RouteLabel, labelAny: a.RouteLabelAny}
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, includeEphemeralReady)
+	return poolDemandCountShell(target, includeEphemeralReady, filter)
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.

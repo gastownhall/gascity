@@ -32,14 +32,14 @@ func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+			poolDemandFirstRowFunctionScript(includeEphemeralReady, routeLabelFilter{}) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+		poolDemandFirstRowFunctionScript(includeEphemeralReady, routeLabelFilter{}) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -75,9 +75,9 @@ func oldEffectiveRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(includeEphemeralReady, target)
+		return routedPoolWorkQueryCommand(includeEphemeralReady, routeLabelFilter{}, target)
 	}
-	return routedPoolWorkQueryCommand(includeEphemeralReady, target, legacyTarget)
+	return routedPoolWorkQueryCommand(includeEphemeralReady, routeLabelFilter{}, target, legacyTarget)
 }
 
 func oldEffectivePoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
@@ -85,7 +85,7 @@ func oldEffectivePoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, includeEphemeralReady)
+	return poolDemandCountShell(target, includeEphemeralReady, routeLabelFilter{})
 }
 
 func oldEffectiveOnDeath(a *Agent, includeEphemeralInProgress bool) string {

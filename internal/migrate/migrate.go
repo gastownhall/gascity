@@ -85,6 +85,8 @@ type agentFile struct {
 	OnBoot                 string            `toml:"on_boot,omitempty"`
 	OnDeath                string            `toml:"on_death,omitempty"`
 	WorkQuery              string            `toml:"work_query,omitempty"`
+	RouteLabel             []string          `toml:"route_label,omitempty"`
+	RouteLabelAny          []string          `toml:"route_label_any,omitempty"`
 	SlingQuery             string            `toml:"sling_query,omitempty"`
 	IdleTimeout            string            `toml:"idle_timeout,omitempty"`
 	MaxSessionAge          string            `toml:"max_session_age,omitempty"`
@@ -940,6 +942,8 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		OnBoot:                 agent.OnBoot,
 		OnDeath:                agent.OnDeath,
 		WorkQuery:              agent.WorkQuery,
+		RouteLabel:             agent.RouteLabel,
+		RouteLabelAny:          agent.RouteLabelAny,
 		SlingQuery:             agent.SlingQuery,
 		IdleTimeout:            agent.IdleTimeout,
 		MaxSessionAge:          agent.MaxSessionAge,
@@ -992,6 +996,8 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.OnBoot == "" &&
 		cfg.OnDeath == "" &&
 		cfg.WorkQuery == "" &&
+		len(cfg.RouteLabel) == 0 &&
+		len(cfg.RouteLabelAny) == 0 &&
 		cfg.SlingQuery == "" &&
 		cfg.IdleTimeout == "" &&
 		cfg.MaxSessionAge == "" &&

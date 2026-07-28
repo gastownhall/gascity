@@ -829,6 +829,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		MinActiveSessions:            intPtr(1),
 		ScaleCheck:                   "echo 3",
 		WorkQuery:                    "bd ready",
+		RouteLabel:                   []string{"route-a"},
+		RouteLabelAny:                []string{"route-b"},
 		SlingQuery:                   "bd update {}",
 		IdleTimeout:                  "15m",
 		MaxSessionAge:                "5h",

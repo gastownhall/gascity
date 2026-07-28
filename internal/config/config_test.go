@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func strPtr(s string) *string { return &s }
@@ -2157,6 +2158,70 @@ func TestEffectiveSlingQueryCustom(t *testing.T) {
 	}
 }
 
+// TestEffectiveSlingQueryRouteLabelStampsClaimLabel covers ga-18johz: a
+// label-gated agent's claim work_query (narrowed by RouteLabel, ga-0av489)
+// cannot claim a bead that DefaultSlingQuery only routed via gc.routed_to.
+// RouteLabel also takes precedence over RouteLabelAny when both are set —
+// only one claim label is stamped, not every candidate.
+func TestEffectiveSlingQueryRouteLabelStampsClaimLabel(t *testing.T) {
+	a := Agent{Name: "worker", RouteLabel: []string{"ready-to-build", "reviewed"}, RouteLabelAny: []string{"urgent"}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote("ready-to-build")
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveSlingQueryNoRouteLabelEmitsNoLabelStamp is the regression
+// guard for the 82 routed gascity beads whose target agent is not
+// label-gated: routing alone is already sufficient for them, so sling
+// output must stay byte-identical to before RouteLabel existed.
+func TestEffectiveSlingQueryNoRouteLabelEmitsNoLabelStamp(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=mayor"
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "--add-label") {
+		t.Errorf("EffectiveSlingQuery() = %q, non-label-gated agent must not emit a label stamp", got)
+	}
+}
+
+// TestEffectiveSlingQueryRouteLabelAnyStampsFirstEntry covers an
+// OR-gated agent (RouteLabel unset): the claim label stamped is the
+// first RouteLabelAny entry, matching the "first entry" rule used for
+// RouteLabel.
+func TestEffectiveSlingQueryRouteLabelAnyStampsFirstEntry(t *testing.T) {
+	a := Agent{Name: "worker", RouteLabelAny: []string{"needs-review", "needs-triage"}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote("needs-review")
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveSlingQueryRouteLabelShellInjectionSafety guards NFR-01: a
+// label value containing shell metacharacters must reach the emitted bd
+// command as a single POSIX-single-quoted token (via shellquote.Quote),
+// never interpolated raw where the shell could parse it as syntax. Single
+// quoting doesn't strip the dangerous substring — it brackets it inertly —
+// so the safety property under test is "matches shellquote.Quote's own
+// escaping exactly," not "the substring is absent."
+func TestEffectiveSlingQueryRouteLabelShellInjectionSafety(t *testing.T) {
+	const malicious = "it's; rm -rf /"
+	a := Agent{Name: "worker", RouteLabel: []string{malicious}}
+	got := a.EffectiveSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=worker --add-label=" + shellquote.Quote(malicious)
+	if got != want {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+	const wantEscaped = `--add-label='it'\''s; rm -rf /'`
+	if !strings.Contains(got, wantEscaped) {
+		t.Fatalf("EffectiveSlingQuery() = %q, want it to contain properly escaped %q", got, wantEscaped)
+	}
+}
+
 func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	// Pool instance with PoolName set — work query uses PoolName for gc.routed_to.
 	a := Agent{
@@ -2752,11 +2817,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=20", false, routeLabelFilter{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false)
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", false, routeLabelFilter{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2765,11 +2830,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", false)
+			countPredicate := bdReadyPoolDemandShell("--limit 0", false, routeLabelFilter{})
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false)
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", false, routeLabelFilter{})
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}
