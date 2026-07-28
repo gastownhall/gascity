@@ -771,7 +771,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 // own (primary) store loses its claim race and is dropped from the working set,
 // a later federated store that errors must stay a best-effort skip. The claim
 // must drain as "no work" rather than surface that federated store's error as a
-// fatal claim failure (the bug: firstStoreWithWork keyed "own store" on slice
+// fatal claim failure (the bug: bestStoreWithWork keyed "own store" on slice
 // position, so the federated store became index 0 after the primary was removed
 // and wedged the hook).
 func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {

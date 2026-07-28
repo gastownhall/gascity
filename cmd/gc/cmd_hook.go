@@ -406,7 +406,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// returns empty and the spawned session exits with nothing to do. The rig
 	// store goes first (as the primary entry, not a best-effort federated
 	// extra) so a rig-store work-query timeout still surfaces to the reconciler
-	// via firstStoreWithWork's emit-on-timeout contract — the agent's
+	// via bestStoreWithWork's emit-on-timeout contract — the agent's
 	// (work-less) city-scoped env stays as a best-effort secondary. This
 	// extends the #2877 city-scoped cross-store delivery to rig-scoped agents.
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
@@ -435,7 +435,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -635,7 +635,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
+		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
