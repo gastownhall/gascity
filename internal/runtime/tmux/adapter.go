@@ -935,6 +935,12 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 	return nil
 }
 
+// runSetupCommand executes one setup command host-side (GC_DIR cwd, env merge,
+// bounded output tails folded into failures), adding the tmux-specific
+// GC_TMUX_SOCKET so session_setup scripts can use "tmux -L $GC_TMUX_SOCKET" to
+// reach the correct server. When setupMaxTimeout is set the deadline is
+// activity-aware (timeout bounds output silence, setupMaxTimeout bounds total
+// runtime) via execgrace; otherwise a fixed wall-clock timeout applies.
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget

@@ -417,7 +417,7 @@ func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
 		sessionName: "worker-session",
 		transport:   "acp",
 		cfg:         &config.City{},
-	})
+	}, nil)
 	if called {
 		t.Fatal("startNudgePoller invoked for ACP session in legacy mode; sidecar ACP pollers cannot deliver without owning the connection")
 	}
@@ -437,7 +437,7 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 		cityPath:    t.TempDir(),
 		sessionName: "worker-session",
 		cfg:         supervisorCfg(),
-	})
+	}, nil)
 	if called {
 		t.Fatal("startNudgePoller invoked in supervisor mode; supervisor dispatcher would race with the per-session poller")
 	}
@@ -446,7 +446,7 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 		cityPath:    t.TempDir(),
 		sessionName: "worker-session",
 		cfg:         &config.City{},
-	})
+	}, nil)
 	if !called {
 		t.Fatal("startNudgePoller not invoked in legacy mode")
 	}

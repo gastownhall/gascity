@@ -24,6 +24,9 @@ const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 //
 //	tmux, subprocess → eligible. Scope root on the host; agent reads
 //	                   files from that host filesystem.
+//	herdr            → eligible. Agents are panes of a local herdr
+//	                   session-server — host processes reading the
+//	                   same host filesystem as tmux panes.
 //	""               → eligible (workspace default is tmux).
 //	herdr            → eligible. Agents run on the host with the same
 //	                   filesystem view as tmux, so scope-root files are
@@ -63,6 +66,9 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 //
 //	tmux  → eligible. PreStart runs on the host via tmux/adapter.go
 //	        runPreStart before the tmux session is created.
+//	herdr → eligible. PreStart runs on the host via herdr/provider.go
+//	        runPreStart before the agent is spawned (same shared
+//	        runtime.RunSetupCommand semantics as tmux).
 //	""    → eligible (workspace default maps to tmux).
 //	herdr → eligible. PreStart runs on the host via the herdr
 //	        provider's runPreStart before the agent is created

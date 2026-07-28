@@ -36,6 +36,10 @@ const (
 	// ToDisplayMetadataKey stores the human-readable recipient captured when
 	// the message was created.
 	ToDisplayMetadataKey = "mail.to_display"
+	// DedupKeyMetadataKey stores the caller-supplied dedup key on messages
+	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
+	// orders, maintenance loops) use it to suppress duplicate alerts.
+	DedupKeyMetadataKey = "mail.dedup_key"
 	// ReadMetadataKey mirrors the "read" label as a queryable metadata flag
 	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
 	// sweeps query it directly (the label-based query is recipient-scoped).
@@ -80,6 +84,29 @@ type HandoffIntent struct {
 type ArchiveResult struct {
 	ID  string
 	Err error
+}
+
+// DedupSender is an optional [Provider] capability: send-time suppression of
+// duplicate notifications. Repeating notifiers (cooldown orders, maintenance
+// loops) re-detect the same condition every interval; a provider implementing
+// DedupSender lets them emit "at most one live copy" per notification stream
+// instead of one message per interval. The dedup horizon is deliberately the
+// message's own lifetime: archiving a message deletes its bead, so an
+// archived notification leaves nothing to dedup against and the stream may
+// re-alert — callers that want a longer re-alert cadence keep their own
+// last-sent state. Providers that cannot query their own message history
+// simply don't implement the interface and callers fall back to Send.
+type DedupSender interface {
+	// SendDeduped creates a message unless a live (un-archived) message
+	// with the same dedup key addressed to the same recipient already
+	// exists. Key identifies the notification stream (callers embed
+	// whatever distinguishes streams — order name, database, bead ID) and
+	// is matched together with the recipient, so senders must pass the
+	// same canonical recipient address on every send of a stream. When
+	// suppressed it returns the pre-existing message and suppressed=true;
+	// otherwise the newly created message, stamped with key under
+	// [DedupKeyMetadataKey].
+	SendDeduped(from, to, subject, body, key string) (msg Message, suppressed bool, err error)
 }
 
 // Provider is the internal interface for mail backends and the canonical

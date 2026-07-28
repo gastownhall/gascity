@@ -2454,6 +2454,17 @@ type DaemonConfig struct {
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
+	// SessionPatrolInterval stretches the patrol-driven session-management
+	// phases (death detection, corpse sweeps, bead-driven session reconcile)
+	// to this interval while the session provider streams session events
+	// (runtime.SessionEventProvider): events poke targeted reconciles in
+	// real time, so the patrol re-scan is demoted to a safety net. Ignored
+	// — session phases run on every patrol tick, today's behavior — when
+	// empty (the default), when the provider has no event stream (tmux),
+	// while the stream is not established, or when the value is not longer
+	// than patrol_interval. Event pokes, slings, and config reloads always
+	// run the session phases regardless. Duration string (e.g., "5m", "30m").
+	SessionPatrolInterval string `toml:"session_patrol_interval,omitempty"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
 	// the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.
 	MaxRestarts *int `toml:"max_restarts,omitempty" jsonschema:"default=5"`
@@ -2685,6 +2696,20 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	return durationOr(d.PatrolInterval, 30*time.Second)
+}
+
+// SessionPatrolIntervalDuration returns the stretched session-phase patrol
+// interval as a time.Duration. Returns 0 (stretching disabled — session
+// phases run on every patrol tick) on empty, unparseable, or negative input.
+func (d *DaemonConfig) SessionPatrolIntervalDuration() time.Duration {
+	if d.SessionPatrolInterval == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(d.SessionPatrolInterval)
+	if err != nil || dur < 0 {
+		return 0
+	}
+	return dur
 }
 
 // TickDebounceDuration returns the tick-debounce window as a

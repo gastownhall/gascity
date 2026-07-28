@@ -1064,7 +1064,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
 }
@@ -1150,7 +1150,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return nil
 }
@@ -1457,8 +1457,16 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
+		return
+	}
+	// Event-capable providers retire the sidecar class entirely: the
+	// supervisor-hosted nudge event dispatcher owns queued delivery for them
+	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
+	// it. Callers without a resolved provider pass nil and keep today's
+	// spawn behavior.
+	if providerRetiresNudgePollers(sp) {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning

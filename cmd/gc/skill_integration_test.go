@@ -35,6 +35,7 @@ func TestIsStage2EligibleSession(t *testing.T) {
 		{"exec prefix ineligible", "exec:./run.sh", "", false},
 		{"fake ineligible", "fake", "", false},
 		{"tmux + acp agent → ineligible", "tmux", "acp", false},
+		{"herdr + acp agent → ineligible", "herdr", "acp", false},
 	}
 	for _, c := range cases {
 		c := c
@@ -47,6 +48,42 @@ func TestIsStage2EligibleSession(t *testing.T) {
 					c.cityProvider, c.agentSession, got, c.wantEligible)
 			}
 		})
+	}
+}
+
+func TestCanStage1Materialize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		cityProvider string
+		agentSession string
+		wantEligible bool
+	}{
+		{"default empty → tmux (eligible)", "", "", true},
+		{"tmux eligible", "tmux", "", true},
+		// Stage 1 only needs the agent's runtime to SEE the host
+		// filesystem: subprocess and herdr both run agents as local
+		// host processes.
+		{"subprocess eligible (host filesystem visible)", "subprocess", "", true},
+		{"herdr eligible (host filesystem visible)", "herdr", "", true},
+		{"k8s ineligible", "k8s", "", false},
+		{"acp city ineligible", "acp", "", false},
+		{"hybrid ineligible", "hybrid", "", false},
+		{"herdr + acp agent → ineligible", "herdr", "acp", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			agent := &config.Agent{Session: c.agentSession}
+			if got := canStage1Materialize(c.cityProvider, agent); got != c.wantEligible {
+				t.Fatalf("canStage1Materialize(%q, %q) = %v, want %v",
+					c.cityProvider, c.agentSession, got, c.wantEligible)
+			}
+		})
+	}
+	if canStage1Materialize("tmux", nil) {
+		t.Error("nil agent must be ineligible")
 	}
 }
 

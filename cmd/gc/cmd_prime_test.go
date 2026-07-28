@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type primeHookFailWriter struct {
@@ -580,6 +581,100 @@ prompt_template = "prompts/worker.md"
 			}
 			if got := strings.Contains(out, "[gastown] worker"); got != tc.wantBeacon {
 				t.Fatalf("stdout = %q, beacon present = %v, want %v", out, got, tc.wantBeacon)
+			}
+		})
+	}
+}
+
+// Tests that replace the startNudgePoller package seam must stay serial; do
+// not add t.Parallel here.
+func TestDoPrimeWithHook_StaleContinuationEpochRedeliversPrompt(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	prevPoller := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prevPoller })
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	seededSessionID, err := session.NewStore(beads.SessionStore{Store: store}).CreateSession(session.CreateSpec{
+		Title:     "worker",
+		AgentName: "worker",
+		Metadata: map[string]string{
+			"session_name":       "gastown--worker",
+			"continuation_epoch": "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		paneEpoch        string
+		sessionID        string // defaults to the seeded session bead
+		wantPromptInHook bool
+	}{
+		{name: "pane epoch behind bead redelivers", paneEpoch: "2", wantPromptInHook: true},
+		{name: "pane epoch matches bead suppresses", paneEpoch: "3", wantPromptInHook: false},
+		{name: "pane epoch ahead of bead suppresses", paneEpoch: "4", wantPromptInHook: false},
+		{name: "missing pane epoch suppresses", paneEpoch: "", wantPromptInHook: false},
+		{name: "unparsable pane epoch suppresses", paneEpoch: "junk", wantPromptInHook: false},
+		{name: "missing session bead suppresses", paneEpoch: "2", sessionID: "sess-missing", wantPromptInHook: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withPrimeHookStdin(t)
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			sessionID := tc.sessionID
+			if sessionID == "" {
+				sessionID = seededSessionID
+			}
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv("GC_CONTINUATION_EPOCH", tc.paneEpoch)
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_SOURCE", "startup")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			t.Setenv(startupPromptDeliveredEnv, "1")
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			out := stdout.String()
+			if got := strings.Contains(out, promptContent); got != tc.wantPromptInHook {
+				t.Fatalf("stdout = %q, prompt present = %v, want %v", out, got, tc.wantPromptInHook)
+			}
+			if !strings.Contains(out, "[gastown] worker") {
+				t.Fatalf("stdout = %q, want hook beacon", out)
 			}
 		})
 	}

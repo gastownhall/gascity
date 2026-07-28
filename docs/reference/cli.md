@@ -2398,6 +2398,13 @@ Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
+Use --dedup &lt;key&gt; for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key to the same recipient is still live
+(un-archived). Suppression exits 0. Once the recipient archives the
+message the stream may alert again — senders that want a longer re-alert
+cadence keep their own last-sent state.
+
 ```
 gc mail send [<to>] [<body>] [flags]
 ```
@@ -2412,11 +2419,13 @@ gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
 gc mail send polecat "Priority task" --notify
 gc mail send --all "Status update: tests passing"
+gc mail send mayor -s "disk warning" --dedup "disk-warn:hq"
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--dedup` | string |  | suppress the send while a live message with this dedup key to the same recipient exists |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
