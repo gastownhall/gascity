@@ -295,7 +295,10 @@ type attachmentDecision struct {
 // fail-closed idempotent state rather than clear it and risk minting a
 // duplicate attachment.
 func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (attachmentDecision, error) {
-	if opts.OnFormula == "" {
+	// Both formula-backed routes reach the same attach path, so the
+	// routed-raw override has to apply to a target's default_sling_formula
+	// as well as an explicit --on.
+	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
 	}
 	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
@@ -518,7 +521,13 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.Store, mResult.RootID, replacedSnapshot); rollbackErr != nil {
 					return wfResult, errors.Join(wfErr, rollbackErr)
 				}
+				return wfResult, wfErr
 			}
+			// The convoy-first branch deliberately passes an empty
+			// sourceBeadID (the source is tracked through the input convoy,
+			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
+			// never covers it. Stamp the work bead here instead.
+			restampWorkBeadRouting(deps, beadID, a, &wfResult)
 			return wfResult, wfErr
 		})
 	}
@@ -712,6 +721,29 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 }
 
+// restampWorkBeadRouting stamps gc.routed_to on the work bead a graph workflow
+// was attached to. gc.routed_to on the WORK bead is what the claim path reads;
+// the cooked workflow root carries the graph-routing metadata instead, so an
+// attach that routes only the root leaves the work bead looking unrouted to
+// anything reading gc.routed_to directly. Failures are reported as metadata
+// errors rather than failing the launch: by this point the workflow is already
+// running, and unwinding it over a routing restamp would be worse than a
+// surfaced warning.
+func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" || deps.Store == nil || result == nil {
+		return
+	}
+	target := strings.TrimSpace(agentutil.RoutedToIdentity(&a))
+	if target == "" {
+		return
+	}
+	if err := deps.Store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, target); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("setting %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
+	}
+}
+
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
 func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
 	var result SlingResult
@@ -742,6 +774,7 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
+		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 	if deps.Notify != nil {

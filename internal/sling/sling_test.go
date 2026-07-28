@@ -2506,6 +2506,12 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	if len(members) != 1 || members[0].ID != source.ID {
 		t.Fatalf("members = %+v, want source %s", members, source.ID)
 	}
+	// The work bead's gc.routed_to is the single source of truth the pool
+	// claim path reads. A convoy-first graph.v2 attach must restamp it on
+	// the source bead, not only route the cooked workflow root.
+	if got := sourceAfter.Metadata[beadmeta.RoutedToMetadataKey]; got != "mayor" {
+		t.Fatalf("source gc.routed_to = %q, want mayor", got)
+	}
 }
 
 func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) {

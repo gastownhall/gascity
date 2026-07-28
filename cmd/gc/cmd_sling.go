@@ -1790,6 +1790,13 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
 			}
+			// A formula attach routes more than the work bead: the cooked
+			// wisp/workflow root is routed to the same agent. Without this
+			// line the preview shows only the plain-routing effect, so a
+			// reader cannot anticipate the second routed bead.
+			if opts.OnFormula != "" || (!opts.NoFormula && a.EffectiveDefaultSlingFormula() != "") {
+				w("  A wisp/workflow root is also cooked and routed to the agent.")
+			}
 		}
 		w("")
 	}

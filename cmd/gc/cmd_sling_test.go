@@ -6378,6 +6378,9 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
+	if !strings.Contains(out, "A wisp/workflow root is also cooked and routed to the agent.") {
+		t.Errorf("stdout missing wisp-root disclosure: %s", out)
+	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
 	}
