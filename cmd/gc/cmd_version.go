@@ -17,9 +17,9 @@ var (
 	commit                   = "unknown"
 	date                     = "unknown"
 	goPseudoVersionSuffixRes = []*regexp.Regexp{
-		regexp.MustCompile(`^(.*)\.0\.\d{14}-[0-9a-f]{12,}$`),
-		regexp.MustCompile(`^(.*)-0\.\d{14}-[0-9a-f]{12,}$`),
-		regexp.MustCompile(`^(.*)-\d{14}-[0-9a-f]{12,}$`),
+		regexp.MustCompile(`^(.*)\.0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
+		regexp.MustCompile(`^(.*)-0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
+		regexp.MustCompile(`^(.*)-\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
 	}
 )
 
@@ -69,9 +69,9 @@ func normalizeVersion(v string) string {
 	if v == "" || v == "(devel)" {
 		return "dev"
 	}
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i]
-	}
+	// Strip +incompatible only (Go v2+ module compat sentinel for repos without a /vN import path).
+	// Preserve all other build metadata (e.g. +ra.1 marks a locally-patched release).
+	v = strings.TrimSuffix(v, "+incompatible")
 	for _, re := range goPseudoVersionSuffixRes {
 		if m := re.FindStringSubmatch(v); len(m) == 2 {
 			v = m[1]
