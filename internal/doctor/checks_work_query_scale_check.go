@@ -48,12 +48,22 @@ func (c *ScaleCheckWorkQueryCorrespondenceCheck) Run(_ *CheckContext) *CheckResu
 			continue
 		}
 		missing, set := "scale_check", "work_query"
+		var remedy string
 		if hasScaleCheck {
 			missing, set = "work_query", "scale_check"
+		} else {
+			// Only the work_query-only direction has an established safe
+			// remedy. Narrowing scale_check to match a raw work_query
+			// override closes the divergence the WRONG way: demand goes
+			// label-narrowed and routed-but-unlabelled beads become
+			// silently stranded instead of noisily churning. The sanctioned
+			// fix widens claim instead — delete the raw override and use
+			// route_label/route_label_any (ga-atvk13). See ga-f57vc7.
+			remedy = "; remove the raw work_query override and use route_label/route_label_any instead (ga-atvk13) rather than adding a matching scale_check"
 		}
 		details = append(details, fmt.Sprintf(
-			"agent %q overrides %s but not %s: the reconciler's spawn decision (scale_check) and the worker's claim decision (work_query) can silently diverge — see engdocs/architecture/dispatch.md \"scale_check ↔ work_query correspondence\" (Invariant 11)",
-			a.QualifiedName(), set, missing,
+			"agent %q overrides %s but not %s: the reconciler's spawn decision (scale_check) and the worker's claim decision (work_query) can silently diverge — see engdocs/architecture/dispatch.md \"scale_check ↔ work_query correspondence\" (Invariant 11)%s",
+			a.QualifiedName(), set, missing, remedy,
 		))
 	}
 
