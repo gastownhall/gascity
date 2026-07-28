@@ -1144,3 +1144,59 @@ func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.
 	}
 	<-acquired
 }
+
+// An open, asleep, drained configured-named-session bead squats the canonical
+// alias forever in front of the LIVE pool-managed session for the same
+// identity. The session_name-match branch of ensureSessionAliasAvailable has
+// no self-owner exception, unlike the agent_name branch below it, so it
+// unconditionally blocks the live session's claim to its own canonical alias.
+// This is the root diagnosed in #2885 ("singleton pool canonical alias
+// squatted forever by asleep (non-closed) predecessor"), Fix Candidate A:
+// skip a superseded, non-running predecessor for the SAME canonical identity
+// when the requester is that identity's live holder.
+func TestEnsureSessionAliasAvailable_DrainedNamedPredecessorBlocksLiveSelfOwnerClaim(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "perrin",
+			"session_origin":            "named",
+			"configured_named_session":  "true",
+			"configured_named_identity": "perrin",
+			"state":                     "asleep",
+			"sleep_reason":              "drained",
+		},
+	}); err != nil {
+		t.Fatalf("Create(drained named holder): %v", err)
+	}
+
+	live, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "perrin-gc-live1",
+			"agent_name":   "perrin",
+			"template":     "perrin",
+			"pool_managed": "true",
+			"state":        "awake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(live typed session): %v", err)
+	}
+
+	// The live session, claiming its own canonical alias, is not blocked by
+	// its own drained predecessor.
+	if err := ensureSessionAliasAvailable(store, nil, "perrin", live.ID, "perrin"); err != nil {
+		t.Fatalf("ensureSessionAliasAvailable(live self-owner vs drained predecessor) = %v, want nil", err)
+	}
+
+	// A third party (different selfOwner) must still be refused the alias:
+	// the drained bead still legitimately reserves the identity against
+	// anyone who is not that identity's own live holder.
+	if err := ensureSessionAliasAvailable(store, nil, "perrin", "gc-stranger", "siuan"); !errors.Is(err, ErrSessionAliasExists) {
+		t.Fatalf("ensureSessionAliasAvailable(different owner vs drained predecessor) = %v, want ErrSessionAliasExists", err)
+	}
+}
