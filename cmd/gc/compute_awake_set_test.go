@@ -921,6 +921,31 @@ func TestDrained_PinnedStaysAsleepUntilUndrained(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
+// TestDrained_ResetPendingStaysAsleep reproduces the wake/drain oscillation
+// (production P1): a wake_mode=fresh session that drain-acks while it only
+// has blocked assigned work gets state=drained + continuation_reset_pending=
+// true from AcknowledgeDrainPatch (internal/session/lifecycle_transition.go).
+// continuation_reset_pending alone must NOT re-desire a drained session — that
+// reopens it every reconcile tick (~30-60s), forever, each cycle paying for a
+// full fresh model boot. The pin arm already guards Drained; the reset-pending
+// arm did not. An assigned-but-blocked (open, not Ready) work bead is included
+// to prove the assigned-work path isn't what's keeping this asleep — it is
+// legitimately blocked, matching the production precondition.
+func TestDrained_ResetPendingStaysAsleep(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat",
+				State: "drained", Drained: true, ContinuationResetPending: true,
+			},
+		},
+		WorkBeads: []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-1", Status: "open", Ready: false}},
+		Now:       now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
 // ---------------------------------------------------------------------------
 // Hold
 // ---------------------------------------------------------------------------
