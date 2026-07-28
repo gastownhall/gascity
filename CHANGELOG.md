@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ACP activity is now available across process boundaries.** ACP
+  `session/update` timestamps are published through an atomic, coalesced
+  sidecar, allowing a process other than the session owner to report
+  `last_active`. Sidecar I/O runs off the JSON-RPC dispatch loop, and transient
+  publication failures are reported and retried. ACP now declares the matching
+  activity capability, enabling timed idle policies and the existing opt-in
+  `[session] progress_stall_timeout` policy. The declaration also engages two
+  paths that are on by default for ACP: a configured named ACP session whose
+  config has drifted is no longer deferred as `activity_unknown`, so a
+  config-drift tick can now reset it once its last observed activity is older
+  than the two-minute named-session activity threshold; and nudge delivery now
+  applies the configured quiescence window to ACP instead of taking the
+  deliver-without-an-activity-signal fast path. Activity age records only the last
+  observed protocol update; it does not by itself diagnose why updates stopped
+  or prove that a session is dead. `progress_stall_timeout` remains disabled by
+  default.
+
 ## [1.4.0] - 2026-07-24
 
 ### Upgrading Notes
