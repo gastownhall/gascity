@@ -793,6 +793,17 @@ func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
 	}
 }
 
+// WithClock supplies the time source the Manager stamps lifecycle timestamps
+// from (e.g. pending_create_started_at). A nil clock retains the immutable
+// production wall clock.
+func WithClock(clk clock.Clock) ManagerOption {
+	return func(m *Manager) {
+		if clk != nil {
+			m.clk = clk
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
@@ -1128,7 +1139,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
-		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
+		meta["pending_create_started_at"] = pendingCreateStartedAt(m.now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
