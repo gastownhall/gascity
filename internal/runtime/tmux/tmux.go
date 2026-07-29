@@ -243,6 +243,12 @@ type Tmux struct {
 	// agentSlice wraps pane commands in a transient systemd user scope when
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
+
+	// serverSocketObserver observes a named socket only after tmux reports
+	// ErrNoServer during the new-session preflight. Nil selects the production
+	// observer; tests inject a deterministic observation without opening a
+	// socket.
+	serverSocketObserver func(context.Context, string) error
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -351,8 +357,7 @@ func wrapError(err error, stderr string, args []string) error {
 //   - nil when SocketName is empty (default-server case is out of scope) or
 //     when the server replies (alive — including the expected "session not
 //     found" for the bogus probe target).
-//   - nil with ErrNoServer semantics absorbed (no server bound is safe; tmux
-//     will create a fresh server cleanly).
+//   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -373,9 +378,18 @@ func (t *Tmux) probeServerAlive() error {
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {
-		// No server bound (stale socket or never existed). Safe — tmux will
-		// unlink any stale socket and bind a fresh server.
-		return nil
+		observer := t.serverSocketObserver
+		if observer == nil {
+			observer = observeNamedSocket
+		}
+		path := namedSocketPath(t.cfg.SocketName)
+		observationErr := observer(ctx, path)
+		if observationErr == nil {
+			return nil
+		}
+		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
+		// must not retry a guarded no-server result as an ordinary absence.
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
