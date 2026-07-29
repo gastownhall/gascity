@@ -348,6 +348,55 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 	return tr
 }
 
+// buildAssignedWorkDeferTracker creates an assignedWorkDeferTracker from the
+// config, registering a consecutive-defer limit override for every agent
+// that has assigned_work_defer_limit set. Unlike buildIdleTracker /
+// buildMaxSessionAgeTracker, this always returns a non-nil tracker: the
+// backstop (ga-nllza6) must stay live even when no agent configures an
+// override, falling back to defaultAssignedWorkDeferLimit for any session
+// with no direct or template registration. Mirrors buildIdleTracker's
+// registration-loop shape so the set of session names registered matches
+// what the reconciler observes.
+func buildAssignedWorkDeferTracker(cfg *config.City, cityName string, sp runtime.Provider) assignedWorkDeferTracker {
+	tr := newAssignedWorkDeferTracker()
+	st := cfg.Workspace.SessionTemplate
+	for _, a := range cfg.Agents {
+		if a.AssignedWorkDeferLimit == nil {
+			continue
+		}
+		limit := *a.AssignedWorkDeferLimit
+		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
+		if named != nil {
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setLimit(namedSessionName, limit)
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
+			}
+			if !a.SupportsInstanceExpansion() {
+				continue
+			}
+		}
+		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
+				tr.setLimit(sn, limit)
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setLimitForTemplate(template, limit)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
+			}
+			continue
+		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		tr.setLimit(sn, limit)
+	}
+	return tr
+}
+
 func lifecycleTemplateFallbackKey(a config.Agent) string {
 	return a.QualifiedName()
 }

@@ -550,6 +550,12 @@ func TestE1PreLeafBooleanHelpSemantics(t *testing.T) {
 }
 
 func TestE1PreLeafBooleanHelpNoScopeEager(t *testing.T) {
+	t.Skip("ga-klo4gz: this test's purpose is exercising ambient cwd-based city " +
+		"resolution (resolveContextFromDir step 10) to distinguish the ambient " +
+		"city's commands from an explicitly-selected one, which is now " +
+		"unconditionally refused inside test binaries; an explicit override " +
+		"would make it a no-op test rather than a fix")
+
 	cityA, _, _ := setupE1PreLeafHelpFixture(t)
 	oldWD, err := os.Getwd()
 	if err != nil {

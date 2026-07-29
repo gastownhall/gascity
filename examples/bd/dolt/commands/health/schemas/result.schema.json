@@ -83,6 +83,25 @@
         "additionalProperties": true
       }
     },
+    "quarantine": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["db", "reason", "age_sec"],
+        "properties": {
+          "db": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "age_sec": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "processes": {
       "type": "object",
       "required": ["zombie_count", "zombie_pids"],

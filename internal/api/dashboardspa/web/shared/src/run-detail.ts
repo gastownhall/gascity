@@ -47,8 +47,20 @@ export type RunIteration = { kind: 'base' } | { kind: 'loop'; value: number };
 
 export type RunAttempt = { kind: 'untracked' } | { kind: 'attempt'; value: number };
 
+/**
+ * Per-instance session attachment. On the `attached` arm `link` and
+ * `streamable` are optional because the read-only public projection (the
+ * "public floor") redacts them: when a session id can't be exposed it emits
+ * `{ kind: 'attached' }` with no link at all. The in-repo Go marshaler
+ * (runproj.sessionState) always emits both fields and never produces a
+ * link-less `attached`, so this optionality models the external redacted shape
+ * only — but the shared contract must express it so every consumer is forced to
+ * guard the absent-link case production already produces, instead of compiling
+ * an unsafe `attached.link` dereference that reintroduces the render crash. See
+ * SessionTranscript in RunNodeSessionPanel for the guard.
+ */
 export type RunSessionAttachment =
-  | { kind: 'attached'; link: RunSessionLink; streamable: boolean }
+  | { kind: 'attached'; link?: RunSessionLink; streamable?: boolean }
   | { kind: 'none'; reason: 'not_started' | 'session_unresolved' };
 
 export interface RunExecutionInstance {
