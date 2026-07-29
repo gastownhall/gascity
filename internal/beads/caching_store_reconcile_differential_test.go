@@ -75,18 +75,19 @@ func (in snapshotInputs) quiescent(st storeState) bool {
 // It captures every field the seam writes; the field-coverage census
 // (TestMergeOracleFieldCoverage) proves this list stays exhaustive.
 type mergeEndState struct {
-	beads        map[string]Bead
-	deps         map[string][]Dep
-	depsComplete bool
-	dirty        map[string]struct{}
-	beadSeq      map[string]uint64
-	localBeadAt  map[string]time.Time
-	deletedSeq   map[string]uint64
-	state        cacheState
-	lastFreshAt  time.Time
-	mutationSeq  uint64
-	primeErr     string
-	syncFailures int
+	beads          map[string]Bead
+	deps           map[string][]Dep
+	depsComplete   bool
+	dirty          map[string]struct{}
+	beadSeq        map[string]uint64
+	localBeadAt    map[string]time.Time
+	deletedSeq     map[string]uint64
+	state          cacheState
+	lastFreshAt    time.Time
+	mutationSeq    uint64
+	primeErr       string
+	syncFailures   int
+	circuitTripped bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -281,6 +282,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		mutationSeq:          c.mutationSeq,
 		primeErr:             primeErr,
 		syncFailures:         c.syncFailures,
+		circuitTripped:       c.circuitTripped,
 		statsAdds:            c.stats.Adds,
 		statsRemoves:         c.stats.Removes,
 		statsUpdates:         c.stats.Updates,
