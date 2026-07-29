@@ -655,11 +655,16 @@ conflicting live workflow from the same source is an error.`,
 				if isGraphFormula {
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
+					var syntheticInputConvoyID string
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
+						// PrepareInvocation may have minted a synthetic input convoy for a
+						// bare bead target; capture it so a post-prepare failure below can
+						// close it instead of stranding an open claim-attracting bead.
+						syntheticInputConvoyID = inv.InputConvoy
 						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
@@ -723,6 +728,10 @@ conflicting live workflow from the same source is an error.`,
 						return ensureFormulaCookAttachDep(store, attach, result.RootID)
 					})
 					if err != nil {
+						// A post-prepare failure discards the invocation; close the
+						// synthetic input convoy it minted (the success path threads the
+						// convoy into the started workflow, so err == nil never reaches here).
+						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {

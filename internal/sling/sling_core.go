@@ -491,7 +491,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title: opts.Title,
 			Vars:  formulaVars,
 		}); err != nil {
-			closeSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
@@ -528,7 +528,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// the started-workflow path returns nil error). Close the pour's
 			// own artifact so repeated failures do not accumulate open
 			// claim-attracting convoys.
-			closeSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 		}
 		return lockedResult, lockedErr
 	}

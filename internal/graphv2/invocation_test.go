@@ -1055,3 +1055,60 @@ func TestCreateSingleItemInputConvoyClosesConvoyOnTrackFailure(t *testing.T) {
 		t.Fatalf("open synthetic convoys after failed pour = %d, want 0 (ids: %v)", len(open), open)
 	}
 }
+
+// depListFailingStore mints and tracks convoys normally but fails every
+// DepList, simulating the cross-store membership read anomaly that makes
+// ResolveLegacyIssueAlias fail after PrepareInvocation has already minted the
+// synthetic input convoy.
+type depListFailingStore struct {
+	beads.Store
+}
+
+func (s depListFailingStore) DepList(_, _ string) ([]beads.Dep, error) {
+	return nil, fmt.Errorf("cross-store membership read failed")
+}
+
+func TestPrepareInvocationClosesSyntheticConvoyOnLegacyAliasFailure(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "legacy.formula.toml", `
+formula = "legacy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+[vars.issue]
+description = "legacy work bead"
+required = true
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{issue}}"
+`)
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	// DepAdd (convoy tracking) still succeeds, so NormalizeInputConvoy mints the
+	// synthetic convoy; the later DepList inside ResolveLegacyIssueAlias fails.
+	store := depListFailingStore{Store: mem}
+
+	_, err = PrepareInvocation(context.Background(), store, "legacy", []string{dir}, target.ID, nil)
+	if err == nil {
+		t.Fatal("PrepareInvocation succeeded, want legacy alias resolution failure")
+	}
+	if !strings.Contains(err.Error(), "resolving deprecated issue alias") {
+		t.Fatalf("error = %q, want deprecated issue alias failure", err)
+	}
+	// The synthetic convoy minted for the bead target before the alias failure
+	// must not survive as an open claim-attracting bead.
+	open, err := mem.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open synthetic convoys after failed pour = %d, want 0 (ids: %v)", len(open), open)
+	}
+}

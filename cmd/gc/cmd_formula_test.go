@@ -1130,3 +1130,84 @@ title = "Do work for {{convoy_id}}"
 		t.Fatalf("WorkflowIDs = %+v, want [%s]", conflictErr.WorkflowIDs, legacyRoot.ID)
 	}
 }
+
+func TestFormulaCookAttachGraphV2ClosesSyntheticConvoyOnPostPrepareFailure(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work for {{convoy_id}}"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	// A live legacy source workflow makes the locked cook body return a
+	// ConflictError from ListLiveRoots — a deterministic failure that lands
+	// *after* PrepareInvocation has already minted a synthetic input convoy for
+	// the bare bead target. Without cleanup that convoy leaks as an open
+	// claim-attracting bead.
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": source.ID,
+		},
+	}); err != nil {
+		t.Fatalf("create legacy root: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-work", "--attach", source.ID, "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("formula cook succeeded, want post-prepare conflict failure\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+
+	// List(Type:"convoy") returns only non-terminal beads, so a closed synthetic
+	// convoy drops out; any that remains is a leaked open claim magnet.
+	open, err := store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("list convoys: %v", err)
+	}
+	for _, c := range open {
+		if c.Metadata["gc.synthetic"] == "true" {
+			t.Fatalf("synthetic input convoy %s left open after post-prepare failure (status=%q); want it closed", c.ID, c.Status)
+		}
+	}
+}
