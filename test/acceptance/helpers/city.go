@@ -330,6 +330,13 @@ func (c *City) GC(args ...string) (string, error) {
 	return RunGC(c.Env, c.Dir, args...)
 }
 
+// GCStdout runs a gc command and returns only stdout. Prefer this over GC
+// when parsing output positionally.
+func (c *City) GCStdout(args ...string) (string, error) {
+	stdout, _, err := RunGCStreams(c.Env, c.Dir, args...)
+	return stdout, err
+}
+
 func parseKeyValues(s string) map[string]string {
 	m := make(map[string]string)
 	for _, line := range strings.Split(s, "\n") {
