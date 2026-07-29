@@ -2473,3 +2473,20 @@ func runRegistryPublishGit(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func TestWriteRegistryPublishSubmittedPinsRegistryURL(t *testing.T) {
+	// The requests command resolves its registry independently, so the printed
+	// handoff must pin the effective publish base URL or a follow-up can query
+	// the wrong Registry.
+	var buf bytes.Buffer
+	writeRegistryPublishSubmitted(&buf, "https://registry.example.com", registryPublishSubmitted{
+		ID:               "prq_x",
+		Status:           "pending_review",
+		RequestedName:    "demo-pack",
+		RequestedVersion: "1.2.0",
+	})
+	want := "Next: gc pack registry requests --registry-url https://registry.example.com prq_x"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("handoff missing %q:\n%s", want, buf.String())
+	}
+}
