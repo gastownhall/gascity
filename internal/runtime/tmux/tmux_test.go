@@ -205,6 +205,57 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 	})
 }
 
+// TestNewSessionSucceedsOnDrainedLiveServer covers gc's normal drained state:
+// exit-empty is off, so killing the last session leaves the server alive with
+// zero sessions and the socket still bound. tmux answers the preflight probe
+// with "no current target" — the server DID answer, so new-session attaches
+// rather than unlinking and rebinding, and creation must succeed.
+func TestNewSessionSucceedsOnDrainedLiveServer(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-drained-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		_ = tm.KillServer()
+		_ = os.Remove(socketPath)
+	})
+
+	first := fmt.Sprintf("gc-drained-first-%d", time.Now().UnixNano())
+	if err := tm.NewSession(first, ""); err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	if err := tm.SetExitEmpty(false); err != nil {
+		t.Fatalf("SetExitEmpty(false): %v", err)
+	}
+	if err := tm.KillSession(first); err != nil {
+		t.Fatalf("kill last session: %v", err)
+	}
+
+	sessions, err := tm.ListSessions()
+	if err != nil {
+		t.Fatalf("list sessions after drain: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions after drain = %v, want none", sessions)
+	}
+	if _, err := os.Lstat(socketPath); err != nil {
+		t.Fatalf("socket %q missing after drain: %v", socketPath, err)
+	}
+
+	second := fmt.Sprintf("gc-drained-second-%d", time.Now().UnixNano())
+	if err := tm.NewSession(second, ""); err != nil {
+		t.Fatalf("NewSession on drained live server: %v", err)
+	}
+	has, err := tm.HasSession(second)
+	if err != nil || !has {
+		t.Fatalf("session created on drained server present = %t, err = %v", has, err)
+	}
+}
+
 func ensureTestSocketSession(t *testing.T, tm *Tmux) {
 	t.Helper()
 

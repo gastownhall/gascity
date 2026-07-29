@@ -154,6 +154,12 @@ var (
 	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
 
+// ErrNoCurrentTarget is tmux's reply when the server IS alive but holds no
+// sessions (exit-empty off — gc's configured default). It wraps ErrNoServer so
+// existing idempotent-teardown callers are unchanged; only the new-session
+// preflight distinguishes it.
+var ErrNoCurrentTarget = fmt.Errorf("%w: no current target", ErrNoServer)
+
 const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
@@ -325,9 +331,13 @@ func wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// Detect specific error types
+	if strings.Contains(stderr, "no current target") {
+		// The server answered — it is simply holding zero sessions. Wraps
+		// ErrNoServer so idempotent-teardown callers are unaffected.
+		return ErrNoCurrentTarget
+	}
 	if strings.Contains(stderr, "no server running") ||
 		strings.Contains(stderr, "error connecting to") ||
-		strings.Contains(stderr, "no current target") ||
 		strings.Contains(stderr, "server exited unexpectedly") {
 		return ErrNoServer
 	}
@@ -357,6 +367,9 @@ func wrapError(err error, stderr string, args []string) error {
 //   - nil when SocketName is empty (default-server case is out of scope) or
 //     when the server replies (alive — including the expected "session not
 //     found" for the bogus probe target).
+//   - nil when tmux reports "no current target" (ErrNoCurrentTarget): the
+//     server answered and is alive with zero sessions, so new-session attaches
+//     rather than unlinking and rebinding.
 //   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
@@ -375,6 +388,11 @@ func (t *Tmux) probeServerAlive() error {
 	}
 	if errors.Is(err, ErrSessionNotFound) {
 		// Healthy server, just doesn't have the probe session. Safe.
+		return nil
+	}
+	if errors.Is(err, ErrNoCurrentTarget) {
+		// The server answered: it is alive with zero sessions, so new-session
+		// attaches rather than unlinking and rebinding. Never a stale socket.
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {

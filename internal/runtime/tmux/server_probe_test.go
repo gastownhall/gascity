@@ -325,6 +325,30 @@ func TestProbeServerAliveUnknownProtocolDoesNotObserveSocket(t *testing.T) {
 	}
 }
 
+// TestProbeServerAliveAcceptsEmptyLiveServer pins the drained-server case:
+// tmux answers "no current target" when the server is alive but holds zero
+// sessions (gc's normal state, because ConfigureServer sets exit-empty off).
+// The server answered, so new-session attaches rather than unlink+rebind —
+// the preflight must proceed without observing the socket at all.
+func TestProbeServerAliveAcceptsEmptyLiveServer(t *testing.T) {
+	observerCalls := 0
+	tm := &Tmux{
+		cfg:  Config{SocketName: "gc-test"},
+		exec: &fakeExecutor{err: ErrNoCurrentTarget},
+		serverSocketObserver: func(context.Context, string) error {
+			observerCalls++
+			return errors.New("observer must not run")
+		},
+	}
+
+	if err := tm.probeServerAlive(); err != nil {
+		t.Fatalf("probeServerAlive: %v", err)
+	}
+	if observerCalls != 0 {
+		t.Fatalf("observer calls = %d, want 0", observerCalls)
+	}
+}
+
 func TestNamedSocketPathUsesTMUXTMPDIRAndIgnoresTMPDIR(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", "/tmux-private")
 	t.Setenv("TMPDIR", "/must-not-be-used")
