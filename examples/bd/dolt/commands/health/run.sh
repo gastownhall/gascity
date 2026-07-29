@@ -123,7 +123,6 @@ human_duration() {
   else printf '%ds' "$_sec"; fi
 }
 
-
 # Find dolt PID by port for local managed servers. External Dolt endpoints do
 # not listen on 127.0.0.1, so do not let the local TCP precheck suppress the
 # real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT. is_local_dolt_host is provided by
@@ -383,6 +382,12 @@ if [ -d "$quarantine_dir" ]; then
   for marker in "$quarantine_dir"/*; do
     [ -f "$marker" ] || continue
     q_db=$(basename "$marker")
+    # compact/run.sh writes transient files into this same directory:
+    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
+    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
+    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
+    # and a spurious exit 2.
+    case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
     # Anchor each key to column 1 with index()==1 — the same reader idiom
     # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
     # key (8 and 12 = key length + 1).
@@ -590,9 +595,10 @@ JSONEOF
   echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
     [ -z "$q_db" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
-    # reason is free text from the marker; escape backslash then quote.
+    # db and reason both come from the filesystem; escape backslash then quote.
+    q_db_esc=$(printf '%s' "$q_db" | sed 's/\\/\\\\/g; s/"/\\"/g')
     q_reason_esc=$(printf '%s' "$q_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db" "$q_reason_esc" "$q_age_sec"
+    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db_esc" "$q_reason_esc" "$q_age_sec"
   done
   cat <<JSONEOF
 

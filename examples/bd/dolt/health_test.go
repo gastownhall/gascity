@@ -2030,6 +2030,28 @@ func writeQuarantineMarker(t *testing.T, cityPath, db, reason, createdAt string)
 	}
 }
 
+// writeQuarantineTransients drops the two transient siblings compact/run.sh
+// leaves in the quarantine directory alongside real markers: the mktemp
+// `<db>.probe.XXXXXX` write test that ensure_compact_marker_writable performs
+// on every flatten (empty), and the `<db>.tmp.XXXXXX` staging file
+// write_compact_marker fills before its atomic rename (full marker body).
+// Neither is a marker; health must ignore both.
+func writeQuarantineTransients(t *testing.T, cityPath, db string) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, db+".probe.AbC123"), nil, 0o644); err != nil {
+		t.Fatalf("write probe sibling: %v", err)
+	}
+	body := fmt.Sprintf("db=%s\nreason=staging write in flight\ncreated_at=%s\n",
+		db, time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	if err := os.WriteFile(filepath.Join(dir, db+".tmp.XyZ789"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write tmp sibling: %v", err)
+	}
+}
+
 // TestHealthScriptSurfacesQuarantineInJSON pins gascity#3729: an active
 // compaction quarantine marker blocks auto-GC indefinitely but was invisible
 // to `gc dolt health`. The JSON report must carry a `quarantine` array naming
@@ -2046,6 +2068,9 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 	}
 	created := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04:05Z")
 	writeQuarantineMarker(t, cityPath, "hq", "post-flatten row count decreased", created)
+	// A concurrent compaction leaves transient siblings in this same
+	// directory; only the real marker may appear in the report.
+	writeQuarantineTransients(t, cityPath, "hq")
 
 	// No live server: lsof/nc/dolt fail so the bounded probe is skipped and the
 	// filesystem-only quarantine scan is exercised in isolation. JSON mode
@@ -2165,6 +2190,24 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 		}
 		if strings.Contains(string(out), "Compaction quarantine") {
 			t.Errorf("unexpected quarantine section with no marker:\n%s", out)
+		}
+	})
+
+	// ensure_compact_marker_writable runs its mktemp probe on EVERY flatten,
+	// so a healthy city with an in-flight compaction routinely has a
+	// `<db>.probe.XXXXXX` sitting in the quarantine directory with no real
+	// marker beside it. Treating it as a marker would alarm operators (and
+	// flip the exit code to 2) during ordinary compaction.
+	t.Run("transient siblings only exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		writeQuarantineTransients(t, cityPath, "hq")
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero for transient compact siblings: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("transient compact siblings reported as quarantine:\n%s", out)
 		}
 	})
 }
