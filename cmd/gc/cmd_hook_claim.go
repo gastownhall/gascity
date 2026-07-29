@@ -166,10 +166,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
+	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
 	}
 
+	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
+	if readyResult.terminal {
+		return readyResult
+	}
 	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
 }
 
@@ -201,6 +205,77 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
 	}
+}
+
+// claimFirstReadyHookAssignment atomically promotes the first open candidate
+// already assigned to this session. Continuation preassignment deliberately
+// leaves later group members open, so a resumed session must still run the
+// store's idempotent claim mutation before it reports the bead as workable.
+func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.ID) == "" ||
+			hookClaimCandidateIsMessage(candidate) ||
+			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
+			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
+			continue
+		}
+		if ctx.Err() != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: ready assignment %s claim deadline exhausted: %v\n", candidate.ID, ctx.Err()) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		// Use the bead's current own-identity assignee as the claim actor.
+		// BEADS_ACTOR may be represented by the runtime name, session bead id,
+		// or alias; bd's idempotent --claim path requires the actor to match the
+		// existing assignee exactly.
+		claimActor := strings.TrimSpace(candidate.Assignee)
+		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		if err != nil {
+			if ok {
+				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stderr, "gc hook --claim: promoting ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
+			}
+			// This session already owns the bead. Do not skip it and claim
+			// unrelated fresh work after an operational mutation failure.
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		if !ok {
+			reportHookClaimRejected(candidate, claimed, opts, ops)
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(claimed.Status), "in_progress") ||
+			strings.TrimSpace(claimed.Assignee) != claimActor {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"gc hook --claim: ready assignment %s claim readback remained status=%q assignee=%q; want in_progress owned by this session\n",
+				candidate.ID,
+				claimed.Status,
+				claimed.Assignee,
+			)
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		result := hookClaimJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       hookClaimCommandName,
+			Action:        "work",
+			Reason:        "ready_assignment",
+			BeadID:        claimed.ID,
+			Assignee:      claimed.Assignee,
+			Route:         hookClaimRoute(claimed),
+		}
+		if result.BeadID == "" {
+			result.BeadID = candidate.ID
+		}
+		if result.Assignee == "" {
+			result.Assignee = claimActor
+		}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
+	}
+	return hookClaimResult{}
 }
 
 // claimFirstEligibleHookCandidate claims the first unassigned, route-matched
@@ -252,13 +327,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
-		if len(candidate.Metadata) > 0 {
-			// bd update --claim can return a partial metadata projection. Retain
-			// candidate fields while preferring values returned by the mutation.
-			metadata := maps.Clone(candidate.Metadata)
-			maps.Copy(metadata, claimed.Metadata)
-			claimed.Metadata = metadata
-		}
+		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -281,6 +350,19 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
 
+// mergeHookClaimCandidateMetadata retains work-query metadata when bd update
+// --claim returns only a partial projection, while preferring canonical values
+// returned by the mutation.
+func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
+	if len(candidate.Metadata) == 0 {
+		return claimed
+	}
+	metadata := maps.Clone(candidate.Metadata)
+	maps.Copy(metadata, claimed.Metadata)
+	claimed.Metadata = metadata
+	return claimed
+}
+
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
 // fresh claim: it has an id, is currently unassigned, and matches one of this
 // session's route targets.
@@ -301,7 +383,7 @@ func reportHookClaimRejected(candidate, claimed beads.Bead, opts hookClaimOption
 	ops.EmitClaimRejected(candidate.ID, existing, opts.Assignee)
 }
 
-func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
+func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
 		if hookClaimCandidateIsMessage(candidate) {
 			continue
@@ -321,25 +403,6 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 			return result, candidate, true
 		}
 	}
-	for _, candidate := range candidates {
-		if hookClaimCandidateIsMessage(candidate) {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(candidate.Status), "open") &&
-			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
-			result := hookClaimJSONResult{
-				SchemaVersion: "1",
-				OK:            true,
-				Command:       hookClaimCommandName,
-				Action:        "work",
-				Reason:        "ready_assignment",
-				BeadID:        candidate.ID,
-				Assignee:      candidate.Assignee,
-				Route:         hookClaimRoute(candidate),
-			}
-			return result, candidate, true
-		}
-	}
 	return hookClaimJSONResult{}, beads.Bead{}, false
 }
 
@@ -347,7 +410,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 // bead (issue_type="message"). Mail is read, not claimed as work: a message
 // bead addressed to this session's identity has the same
 // assignee-matches-identity shape as a real existing/ready assignment, so
-// without this check it was returned by hookClaimExistingOrAssigned as work
+// without this check it was returned by the existing/ready-assignment paths as work
 // ahead of any real routed work waiting in the same batch (#4419) -- not by
 // race, by construction, since this function runs before
 // claimFirstEligibleHookCandidate ever sees the routed candidates.
