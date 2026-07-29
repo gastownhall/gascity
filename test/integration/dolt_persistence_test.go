@@ -24,7 +24,8 @@ import (
 // Dolt persistence reproducer suite.
 //
 // These tests reproduce the destructive auto-import behavior reported in
-// gastownhall/gascity issues #2079, #2080, #2081, #2093, #2094, and #2131.
+// gastownhall/gascity issues #2079, #2080, #2093, #2131, and the persistence
+// portion of #2094.
 // The persistence failure reduced to one mechanism in affected bd versions:
 // server-mode, non-read-only bd subprocesses could auto-import
 // .beads/issues.jsonl into Dolt as a blanket overwrite, with no merge or
@@ -36,6 +37,15 @@ import (
 // automatic JSONL export disabled, then asserts that authoritative Dolt state
 // still contains the earlier write. They fail against bd versions with the
 // destructive startup import bug and pass once that import path is guarded.
+
+// bdPersistenceOptInEnv gates this suite. It only passes against a bd that
+// carries the startup-import guard (gastownhall/beads@1cf8337); against an
+// unguarded bd it reproduces the destructive import and fails by design. CI
+// still exercises unguarded builds — deps.env pins BD_PREV_VERSION=v1.0.4 for
+// the cross-version contract matrix — so the suite stays opt-in rather than
+// auto-enumerated into the rest-full shards. Flip this on in the same change
+// that raises every bd pin the shards use past 1cf8337.
+const bdPersistenceOptInEnv = "GC_INTEGRATION_BD_PERSISTENCE"
 
 var doltPersistenceWorkspaceCounter atomic.Int64
 
@@ -321,12 +331,14 @@ func dumpDoltPersistenceState(ws *doltPersistenceWorkspace, beadID string) strin
 
 	jsonlPath := filepath.Join(ws.dir, ".beads", "issues.jsonl")
 	if data, err := os.ReadFile(jsonlPath); err == nil {
+		found := false
 		for _, line := range strings.Split(string(data), "\n") {
 			if strings.Contains(line, beadID) {
+				found = true
 				fmt.Fprintf(&buf, "jsonl line: %s\n", line)
 			}
 		}
-		if buf.Len() == 0 {
+		if !found {
 			fmt.Fprintf(&buf, "jsonl had no line for %s (file size=%d)\n", beadID, len(data))
 		}
 	} else {
@@ -335,12 +347,16 @@ func dumpDoltPersistenceState(ws *doltPersistenceWorkspace, beadID string) strin
 	return buf.String()
 }
 
-// withDoltPersistenceFixture runs fn against a fresh workspace sharing one
-// Dolt server across all subtests of a top-level Test. Centralizing
-// fixture wiring keeps each subtest focused on the write sequence.
+// withDoltPersistenceFixture runs fn against a fresh workspace with its own
+// Dolt server: every top-level test in this suite gets an independent
+// workspace and Dolt cold start, so no state leaks between them. Centralizing
+// fixture wiring keeps each test focused on the write sequence.
 func withDoltPersistenceFixture(t *testing.T, fn func(ws *doltPersistenceWorkspace)) {
 	t.Helper()
 	requireDoltIntegration(t)
+	if strings.TrimSpace(os.Getenv(bdPersistenceOptInEnv)) != "1" {
+		t.Skipf("%s!=1; requires bd >= gastownhall/beads@1cf8337", bdPersistenceOptInEnv)
+	}
 	env := newIsolatedToolEnv(t, true)
 
 	doltDataDir := filepath.Join(t.TempDir(), "dolt")
@@ -612,7 +628,7 @@ func TestDoltPersistence_InProgressStatusSurvivesSubsequentBdWrite(t *testing.T)
 			t.Fatalf("get after decoy: %v", err)
 		}
 		if got.Status != "in_progress" {
-			t.Errorf("status on %s = %q, want %q after unrelated bd write (#2081)\n%s",
+			t.Errorf("status on %s = %q, want %q after unrelated bd write\n%s",
 				target.ID, got.Status, "in_progress", dumpDoltPersistenceState(ws, target.ID))
 		}
 	})
@@ -765,6 +781,21 @@ func TestDoltPersistence_ConcurrentMetadataWriteBurstTimingVisibility(t *testing
 		for i, err := range errs {
 			if err != nil {
 				t.Errorf("worker %02d SetMetadata failed: %v", i, err)
+			}
+		}
+
+		// Error-freedom is not persistence: a destructive import that clobbered
+		// 24 of 25 rows returns nil from every SetMetadata. Assert the final
+		// state each worker wrote is the state Dolt still holds.
+		for i := 0; i < workers; i++ {
+			got, err := ws.store.Get(beadsByWorker[i].ID)
+			if err != nil {
+				t.Errorf("worker %02d get after burst: %v", i, err)
+				continue
+			}
+			if want := fmt.Sprintf("%02d", i); got.Metadata["timing_worker"] != want {
+				t.Errorf("worker %02d timing_worker = %q, want %q\n%s",
+					i, got.Metadata["timing_worker"], want, dumpDoltPersistenceState(ws, beadsByWorker[i].ID))
 			}
 		}
 	})
