@@ -4968,10 +4968,10 @@ type StatusSessionCountsDetail struct {
 
 // StatusStoreHealth defines model for StatusStoreHealth.
 type StatusStoreHealth struct {
-	// LastGcAt RFC3339 timestamp of last maintenance run.
+	// LastGcAt RFC3339 timestamp of last maintenance run, when known.
 	LastGcAt *string `json:"last_gc_at,omitempty"`
 
-	// LastGcStatus Status of last maintenance run ('success' or 'failed').
+	// LastGcStatus Status of last maintenance run: 'success', 'failed', or 'unknown' (no matching event within the scanned window — distinct from no event ever having run; last_gc_at is absent in the unknown case).
 	LastGcStatus *string `json:"last_gc_status,omitempty"`
 
 	// LiveRows Retained bead row count used as the denominator, including open and closed beads.

@@ -11336,11 +11336,11 @@
         "additionalProperties": false,
         "properties": {
           "last_gc_at": {
-            "description": "RFC3339 timestamp of last maintenance run.",
+            "description": "RFC3339 timestamp of last maintenance run, when known.",
             "type": "string"
           },
           "last_gc_status": {
-            "description": "Status of last maintenance run ('success' or 'failed').",
+            "description": "Status of last maintenance run: 'success', 'failed', or 'unknown' (no matching event within the scanned window — distinct from no event ever having run; last_gc_at is absent in the unknown case).",
             "type": "string"
           },
           "live_rows": {
