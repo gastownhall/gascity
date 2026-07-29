@@ -394,6 +394,14 @@ func reconcilerDrainAckMatchesSessionInfo(info sessions.Info, sp runtime.Provide
 	return reason, true
 }
 
+func isAgentSourcedDrainAck(sp runtime.Provider, name string) bool {
+	if sp == nil || name == "" {
+		return false
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	return err == nil && source == drainAckSourceAgentValue
+}
+
 func staleReconcilerDrainAck(session beads.Bead, sp runtime.Provider, name string) bool {
 	if sp == nil || name == "" {
 		return false
