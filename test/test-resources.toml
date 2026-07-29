@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 535
-baseline_files = 164
+baseline_calls = 542
+baseline_files = 163
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 427
+baseline_calls = 421
 baseline_files = 156
 reported_calls = 447
 reported_files = 157
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 396
-baseline_files = 113
+baseline_calls = 403
+baseline_files = 112
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,7 +64,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 288
+baseline_calls = 282
 baseline_files = 111
 reported_calls = 295
 reported_files = 114
@@ -77,8 +77,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4323
-baseline_files = 202
+baseline_calls = 128
+baseline_files = 13
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -90,8 +90,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 285
-baseline_files = 43
+baseline_calls = 174
+baseline_files = 16
 reported_calls = 98
 reported_files = 13
 owner_bead = "ga-80po0c.2.3"
@@ -103,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 57
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -333,8 +333,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 391
-baseline_files = 110
+baseline_calls = 398
+baseline_files = 109
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -346,7 +346,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 288
+baseline_calls = 282
 baseline_files = 111
 reported_calls = 287
 reported_files = 113
@@ -359,8 +359,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4317
-baseline_files = 202
+baseline_calls = 122
+baseline_files = 13
 reported_calls = 4348
 reported_files = 200
 owner_bead = "ga-80po0c.2.1"
@@ -372,8 +372,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 285
-baseline_files = 43
+baseline_calls = 174
+baseline_files = 16
 reported_calls = 284
 reported_files = 43
 owner_bead = "ga-80po0c.2.1"
@@ -385,7 +385,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 57
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 75
 reported_files = 25

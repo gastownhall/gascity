@@ -8,6 +8,11 @@ set -euo pipefail
 readonly job_memory_kib=$((4 * 1024 * 1024))
 readonly max_auto_jobs=16
 readonly unknown_memory_jobs=3
+# Floor for the load-aware reduction below, and also the machine-size
+# threshold under which load-awareness is skipped entirely: a host with only
+# a couple cores has no meaningful headroom to trade away, so on machines at
+# or under 2x this floor the raw cpu/memory budget stands unchanged.
+readonly min_auto_jobs=2
 
 fail() {
   echo "test-local-job-count: $*" >&2
@@ -133,6 +138,19 @@ detect_memory_kib() {
   printf '%s\n' "$best"
 }
 
+detect_loadavg() {
+  if [[ -n "${GC_TEST_LOCAL_LOADAVG:-}" ]]; then
+    [[ "$GC_TEST_LOCAL_LOADAVG" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
+      fail "GC_TEST_LOCAL_LOADAVG must be a non-negative number"
+    printf '%s\n' "$GC_TEST_LOCAL_LOADAVG"
+    return
+  fi
+
+  local loadavg_file="/proc/loadavg"
+  [[ -r "$loadavg_file" ]] || return 1
+  awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
+}
+
 cpus="$(detect_cpus)"
 memory_kib="$(detect_memory_kib || true)"
 jobs="$cpus"
@@ -147,6 +165,22 @@ if [[ -n "$memory_kib" ]]; then
   fi
 elif [[ "$jobs" -gt "$unknown_memory_jobs" ]]; then
   jobs="$unknown_memory_jobs"
+fi
+
+# A small machine has no meaningful headroom to trade away for load
+# awareness — skip it outright and let the raw cpu/memory budget stand.
+if [[ "$cpus" -gt $((min_auto_jobs * 2)) ]]; then
+  loadavg="$(detect_loadavg || true)"
+  if [[ -n "$loadavg" ]]; then
+    load_int="${loadavg%%.*}"
+    load_jobs=$((cpus - load_int))
+    if [[ "$load_jobs" -lt "$min_auto_jobs" ]]; then
+      load_jobs="$min_auto_jobs"
+    fi
+    if [[ "$load_jobs" -lt "$jobs" ]]; then
+      jobs="$load_jobs"
+    fi
+  fi
 fi
 
 if [[ "$jobs" -gt "$max_auto_jobs" ]]; then

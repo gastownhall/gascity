@@ -45,10 +45,10 @@ gc bd show <id>                           # Show bead details
 ## Claiming and updating
 
 ```
-gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress)
+gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress) — races in a multi-agent city; prefer `gc hook --claim` there
 gc bd update <id> --status in_progress    # Update status
-gc bd update <id> --label <key>=<value>   # Add/update labels
-gc bd update <id> --note "progress..."    # Add a note
+gc bd update <id> --add-label <key>=<value>  # Add/update labels
+gc bd update <id> --append-notes "progress..."  # Append a note (does not replace existing notes)
 ```
 
 ## Closing work
@@ -61,6 +61,6 @@ gc bd close <id> --reason "done"          # Close with reason
 ## Hooks
 
 ```
-gc hook show <agent>                   # Show what's on an agent's hook
-gc agent claim <agent> <id>            # Put a bead on an agent's hook
+gc hook [agent]                        # Show routed work for an agent (defaults to $GC_AGENT)
+gc hook --claim                        # Atomically claim one routed work item onto this agent's hook
 ```

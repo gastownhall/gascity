@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -682,13 +683,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
-	if a == nil {
-		return ""
-	}
-	if target := strings.TrimSpace(a.PoolName); target != "" {
-		return target
-	}
-	return a.QualifiedName()
+	return agentutil.RoutedToIdentity(a)
 }
 
 func firstNonEmptyHookValue(values ...string) string {

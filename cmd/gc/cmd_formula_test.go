@@ -772,6 +772,7 @@ title = "Do work for {{convoy_id}}"
 		t.Fatalf("write formula: %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	store, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -876,7 +877,7 @@ title = "Do work"
 	// review, quad341): the "cmd/gc+untagged" scope only counts *_test.go call
 	// sites beneath cmd/gc, so routing through internal/formulatest keeps the
 	// env/cwd baselines flat with no policy change.
-	formulatest.SetupHermeticCookEnv(t, cityDir)
+	formulatest.SetupHermeticCookEnv(t, cityDir, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaCookCmd(&stdout, &stderr)
@@ -949,8 +950,10 @@ title = "Do work"
 	// Select the rig scope via cwd (enclosing-rig resolution in
 	// resolveFormulaScope), which reads the rig from city.toml's [[rigs]] — no
 	// site-registry registration needed, unlike the --rig flag path. The helper
-	// chdirs into the rig dir; resolveCity walks up to the city.toml.
-	formulatest.SetupHermeticCookEnv(t, rigDir)
+	// chdirs into the rig dir while pointing GC_CITY_PATH at cityDir directly,
+	// so the enclosing-rig cwd lookup still sees the rig dir while city
+	// resolution itself no longer depends on an ambient upward walk.
+	formulatest.SetupHermeticCookEnv(t, rigDir, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newFormulaCookCmd(&stdout, &stderr)
@@ -1019,6 +1022,7 @@ title = "Do work for {{convoy_id}}"
 		}
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	store, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1086,6 +1090,7 @@ title = "Do work for {{convoy_id}}"
 		t.Fatalf("write formula: %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	store, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)

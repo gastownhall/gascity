@@ -171,9 +171,67 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
+}
+
+// inProgressBlockedByEnrichmentScript hardens the in_progress "crash recovery"
+// work-query tier against re-serving a bead that cannot progress.
+//
+// `bd list --status in_progress` does no readiness computation: unlike
+// `bd ready` it emits neither blocked_by nor is_blocked. That makes the
+// defensive hook-side filter (filterUnreadyHookCandidates ->
+// isDepBlockedHookCandidate) a structural no-op for this tier, because an
+// absent blocked_by is correctly read as "not blocked". A step that is
+// in_progress + assigned but held by an open gate or an unclosed blocking
+// dependency is therefore re-served on every hook tick, forever.
+//
+// `bd ready` cannot be substituted here: it excludes in_progress by design,
+// so it would return nothing and defeat crash recovery entirely. Instead we
+// read the candidate's own dependency rows and attach the blocked_by array
+// the rest of the pipeline already knows how to interpret. When the candidate
+// is blocked we skip it and fall through to the ready-gated tier, so a session
+// holding one blocked step can still be served its other ready assigned work.
+//
+// Only ready-blocking dependency types are considered, matching
+// beads.IsReadyBlockingDependencyType; parent-child and tracks edges never
+// block readiness. Status interpretation is left to the shared Go filter:
+// any non-closed blocker counts.
+//
+// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
+// degrades to the stock behavior of serving the candidate unchanged, never to
+// dropping it, so a malformed or log-prefixed bd stdout can never disable
+// crash recovery.
+func inProgressBlockedByEnrichmentScript(shellVar string) string {
+	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
+		`.dependency_type == "conditional-blocks") | {id, status}]`
+	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+
+	const enrichJQ = `map(. + {blocked_by: $bb})`
+
+	v := `$` + shellVar
+	// The enriched payload lands in a scratch var derived from shellVar so the
+	// candidate itself is never clobbered: if jq fails (non-JSON or
+	// log-prefixed `bd list` stdout) the original is served unchanged.
+	enrichedVar := shellVar + `_enriched`
+	e := `$` + enrichedVar
+	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`bb="[]"; ` +
+		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
+		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); ` +
+		`[ -z "$bb" ] && bb="[]"; ` +
+		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
+		`[ -z "$nblocked" ] && nblocked=0; ` +
+		`if [ "$nblocked" = "0" ]; then ` +
+		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`printf "%s" "` + v + `" && exit 0; ` +
+		`fi; `
 }
 
 func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
@@ -197,7 +255,9 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `
@@ -470,7 +530,11 @@ func (a *Agent) EffectiveSlingQuery() string {
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
 func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + a.QualifiedName()
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the

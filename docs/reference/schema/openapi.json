@@ -168,6 +168,13 @@
               "null"
             ]
           },
+          "AssignedWorkDeferLimit": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -520,6 +527,7 @@
           "IdleTimeout",
           "MaxSessionAge",
           "MaxSessionAgeJitter",
+          "AssignedWorkDeferLimit",
           "SleepAfterIdle",
           "InstallAgentHooks",
           "Skills",
@@ -2215,6 +2223,7 @@
               "urn:gascity:error:not-implemented",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
+              "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",
@@ -2262,6 +2271,7 @@
               "urn:gascity:error:not-implemented",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
+              "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
               "urn:gascity:error:provider-not-found",

@@ -1,12 +1,12 @@
 package resourcecensus
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +15,12 @@ import (
 	"testing/fstest"
 	"time"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked resource ledger block
+// from test/test-resources.toml when set. Run:
+//
+//	go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked resource ledger block from test/test-resources.toml")
 
 func TestScanUsesImportIdentityAndParsedBuildConstraints(t *testing.T) {
 	t.Parallel()
@@ -851,20 +857,20 @@ func (localTesting) Chdir(string) {}
 func skipSlowCmdGCTest(t *testpkg.T, reason string) {}
 
 func TestResources(t *testpkg.T) {
-	((t)).Setenv("KEY", "value")
-	t.Chdir("testing-dir")
+	((t)).Setenv("KEY", "does not count")
+	t.Chdir("does-not-count")
 	((operating).Setenv)("DIRECT", "value")
 	operating.Unsetenv("DIRECT")
 	operating.Clearenv()
 	operating.Chdir("elsewhere")
 	((skipSlowCmdGCTest))(t, "process-backed")
 	func(inner *testpkg.T) {
-		inner.Setenv("INNER", "value")
-		inner.Chdir("inner-dir")
+		inner.Setenv("INNER", "does not count")
+		inner.Chdir("does-not-count")
 	}(t)
 	func(tb testpkg.TB) {
-		tb.Setenv("TB", "value")
-		tb.Chdir("tb-dir")
+		tb.Setenv("TB", "does not count")
+		tb.Chdir("does-not-count")
 	}(t)
 	func(value testpkg.T) {
 		value.Setenv("VALUE", "does not count")
@@ -901,18 +907,45 @@ func TestResources(t *testpkg.T) {
 		t.Fatalf("ScanFS: %v", err)
 	}
 
-	assertCount(t, got, ScopeAll, ResourceEnvironment, 18, 3)
-	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 12, 2)
-	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 6, 1)
-	assertCount(t, got, ScopeAll, ResourceCWD, 12, 3)
-	assertCount(t, got, ScopeUntagged, ResourceCWD, 8, 2)
-	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 4, 1)
+	assertCount(t, got, ScopeAll, ResourceEnvironment, 9, 3)
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 6, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceEnvironment, 3, 1)
+	assertCount(t, got, ScopeAll, ResourceCWD, 3, 3)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 2, 2)
+	assertCount(t, got, ScopeCmdGCUntagged, ResourceCWD, 1, 1)
 	assertCount(t, got, ScopeAll, ResourceSlowProcessGate, 5, 3)
 	assertCount(t, got, ScopeUntagged, ResourceSlowProcessGate, 4, 2)
 	assertCount(t, got, ScopeCmdGCUntagged, ResourceSlowProcessGate, 2, 1)
 }
 
-func TestScanRecognizesOnlyExactTestingParameterTypes(t *testing.T) {
+func TestScanExcludesTestingReceiverSetenvChdirFromEnvironmentAndCWD(t *testing.T) {
+	t.Parallel()
+
+	source := `package sample
+
+import (
+	operating "os"
+	testpkg "testing"
+)
+
+func exercise(t *testpkg.T) {
+	t.Setenv("KEY", "value")
+	operating.Setenv("KEY", "value")
+	t.Chdir("work")
+	operating.Chdir("work")
+}
+`
+	got, err := ScanFS(fstest.MapFS{
+		"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
+	})
+	if err != nil {
+		t.Fatalf("ScanFS: %v", err)
+	}
+	assertCount(t, got, ScopeUntagged, ResourceEnvironment, 1, 1)
+	assertCount(t, got, ScopeUntagged, ResourceCWD, 1, 1)
+}
+
+func TestTestingParameterObjectsRecognizesOnlyExactTypes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -935,14 +968,19 @@ func exercise(t %s) {
 	t.Chdir("work")
 }
 `, tt.parameter)
-			got, err := ScanFS(fstest.MapFS{
-				"sample/resources_test.go": &fstest.MapFile{Data: []byte(source)},
-			})
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, "sample/resources_test.go", source, parser.SkipObjectResolution)
 			if err != nil {
-				t.Fatalf("ScanFS: %v", err)
+				t.Fatalf("ParseFile: %v", err)
 			}
-			assertCount(t, got, ScopeUntagged, ResourceEnvironment, tt.want, tt.want)
-			assertCount(t, got, ScopeUntagged, ResourceCWD, tt.want, tt.want)
+			bindings := resolveBindings(fileSet, file, newEmptyPackageImporter(), "resourcecensus.local/test")
+			objects, err := testingParameterObjects(file, bindings)
+			if err != nil {
+				t.Fatalf("testingParameterObjects: %v", err)
+			}
+			if got := len(objects); got != tt.want {
+				t.Fatalf("recognized testing parameters = %d, want %d", got, tt.want)
+			}
 		})
 	}
 }
@@ -1298,6 +1336,21 @@ func TestResource() {
 `)},
 	})
 	requireErrorContains(t, err, `resource candidate qualifier "missing" has no lexical binding`)
+}
+
+func TestCheckTestingReceiverBindingFailsClosedForUnboundReceiver(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"Setenv", "Chdir"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			receiver := ast.NewIdent("missing")
+			call := &ast.CallExpr{Fun: &ast.SelectorExpr{X: receiver, Sel: ast.NewIdent(method)}}
+			err := checkTestingReceiverBinding(call, bindingInfo{}, method)
+			requireErrorContains(t, err, `testing resource receiver "missing" has no lexical binding`)
+		})
+	}
 }
 
 func TestImportedCallFailsClosedWhenPackageBindingIsUnusable(t *testing.T) {
@@ -2231,6 +2284,75 @@ func TestCheckedMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
 	}
 }
 
+func TestReplaceMarkdownBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	document := "# Title\n\nintro text\n\n" + markdownBegin + "\nstale content\n" + markdownEnd + "\n\ntrailing text\n"
+	replacement := markdownBegin + "\nfresh content\n" + markdownEnd
+
+	updated, err := ReplaceMarkdownBlock(document, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	want := "# Title\n\nintro text\n\n" + replacement + "\n\ntrailing text\n"
+	if updated != want {
+		t.Fatalf("ReplaceMarkdownBlock mismatch\n--- got ---\n%s\n--- want ---\n%s", updated, want)
+	}
+
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != replacement {
+		t.Fatalf("round-trip mismatch\n--- got ---\n%s\n--- want ---\n%s", block, replacement)
+	}
+}
+
+func TestGeneratedLedgerBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	ledger := Ledger{
+		Version: 2,
+		AuditBaseline: []Baseline{
+			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
+		},
+		Debt: []Baseline{
+			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+		},
+	}
+	generated := RenderMarkdown(ledger)
+	document := "# TESTING\n\nsome preamble\n\n" + markdownBegin + "\nold, stale table\n" + markdownEnd + "\n\nmore docs below\n"
+
+	updated, err := ReplaceMarkdownBlock(document, generated)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != generated {
+		t.Fatalf("generated ledger block did not round-trip\n--- got ---\n%s\n--- want ---\n%s", block, generated)
+	}
+	if !strings.HasPrefix(updated, "# TESTING\n\nsome preamble\n\n") || !strings.HasSuffix(updated, "\n\nmore docs below\n") {
+		t.Fatalf("ReplaceMarkdownBlock altered content outside the marker pair:\n%s", updated)
+	}
+}
+
+func TestReplaceMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{
+		"no markers",
+		markdownEnd + "\n" + markdownBegin,
+		markdownBegin + "\n" + markdownEnd + "\n" + markdownBegin,
+	} {
+		if _, err := ReplaceMarkdownBlock(document, markdownBegin+markdownEnd); err == nil {
+			t.Fatalf("ReplaceMarkdownBlock(%q) unexpectedly succeeded", document)
+		}
+	}
+}
+
 func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	root := repositoryRoot(t)
 	ledger, err := LoadLedger(filepath.Join(root, "test", "test-resources.toml"))
@@ -2245,16 +2367,32 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 		t.Fatalf("resource ledger drift:\n%v", err)
 	}
 
-	doc, err := fs.ReadFile(os.DirFS(root), "TESTING.md")
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatalf("read TESTING.md: %v", err)
 	}
+	want := RenderMarkdown(ledger)
+
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), want)
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
+	}
+
 	got, err := CheckedMarkdownBlock(string(doc))
 	if err != nil {
-		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, RenderMarkdown(ledger))
+		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, want)
 	}
-	if want := RenderMarkdown(ledger); got != want {
-		t.Fatalf("TESTING.md resource ledger block is stale\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	if got != want {
+		t.Fatalf("TESTING.md resource ledger block is stale; run `go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update` to regenerate it, then review the diff\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 

@@ -228,6 +228,8 @@ type packRegistryShowJSONResult struct {
 	SchemaVersion string                    `json:"schema_version"`
 	Registry      string                    `json:"registry"`
 	Name          string                    `json:"name"`
+	Tier          string                    `json:"tier"`
+	Publisher     string                    `json:"publisher"`
 	Description   string                    `json:"description"`
 	Source        string                    `json:"source"`
 	SourceKind    string                    `json:"source_kind"`
@@ -238,6 +240,8 @@ type packRegistryShowJSONResult struct {
 type packRegistryPackJSON struct {
 	Registry    string `json:"registry"`
 	Name        string `json:"name"`
+	Tier        string `json:"tier"`
+	Publisher   string `json:"publisher"`
 	Description string `json:"description"`
 	Source      string `json:"source"`
 	SourceKind  string `json:"source_kind"`
@@ -519,6 +523,8 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 			jsonResults = append(jsonResults, packRegistryPackJSON{
 				Registry:    result.registry,
 				Name:        result.pack.Name,
+				Tier:        result.pack.Tier,
+				Publisher:   result.pack.Publisher,
 				Description: result.pack.Description,
 				Source:      result.pack.Source,
 				SourceKind:  result.pack.SourceKind,
@@ -548,9 +554,9 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 		fmt.Fprintln(stdout, "No registry packs found.") //nolint:errcheck
 		return 0
 	}
-	fmt.Fprintln(stdout, "Registry  Name                  Latest        Description") //nolint:errcheck
+	fmt.Fprintln(stdout, "Registry  Name                  Latest        Tier       Publisher             Description") //nolint:errcheck
 	for _, result := range results {
-		fmt.Fprintf(stdout, "%-9s %-21s %-13s %s\n", result.registry, result.pack.Name, latestVersion(result.pack), result.pack.Description) //nolint:errcheck
+		fmt.Fprintf(stdout, "%-9s %-21s %-13s %-10s %-21s %s\n", result.registry, result.pack.Name, latestVersion(result.pack), result.pack.Tier, result.pack.Publisher, result.pack.Description) //nolint:errcheck
 	}
 	if truncated {
 		fmt.Fprintf(stderr, "warning: results truncated to %d; use --all to show all\n", limit) //nolint:errcheck
@@ -628,6 +634,8 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 			SchemaVersion: "1",
 			Registry:      match.registry,
 			Name:          match.pack.Name,
+			Tier:          match.pack.Tier,
+			Publisher:     match.pack.Publisher,
 			Description:   match.pack.Description,
 			Source:        match.pack.Source,
 			SourceKind:    match.pack.SourceKind,
@@ -640,6 +648,8 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		return 0
 	}
 	fmt.Fprintf(stdout, "Pack:        %s:%s\n", match.registry, match.pack.Name) //nolint:errcheck
+	fmt.Fprintf(stdout, "Tier:        %s\n", match.pack.Tier)                    //nolint:errcheck
+	fmt.Fprintf(stdout, "Publisher:   %s\n", match.pack.Publisher)               //nolint:errcheck
 	fmt.Fprintf(stdout, "Description: %s\n", match.pack.Description)             //nolint:errcheck
 	fmt.Fprintf(stdout, "Source:      %s\n", match.pack.Source)                  //nolint:errcheck
 	fmt.Fprintf(stdout, "Source kind: %s\n", match.pack.SourceKind)              //nolint:errcheck
@@ -669,6 +679,43 @@ func importCommandSuggestions(pack packregistry.CatalogPack, latest string) (str
 	floating := append([]string{"gc"}, append(base, ">="+latest)...)
 	exact := append([]string{"gc"}, append(base, latest)...)
 	return shellquote.Join(floating), shellquote.Join(exact)
+}
+
+// cachedRegistryPackSource resolves a registry pack name to its published
+// import source using only the on-disk registry caches — no fetch, no config
+// write. It backs rig.Deps.ResolveRegistryPack, which runs on every `gc rig
+// add`, so a scoped `--include owner/pack` must not turn rig add into a
+// network operation (registry-sfn).
+//
+// An unreadable registry config, a missing or invalid cache, and an unknown
+// name all report ok=false, leaving the include token to path handling. So
+// does a name published by more than one configured registry with differing
+// sources: `gc pack registry show` refuses to guess between registries, and
+// canonicalization has no channel to ask the user, so it leaves the token
+// alone rather than silently picking a winner.
+func cachedRegistryPackSource(name string) (string, bool) {
+	home := gchome.Default()
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return "", false
+	}
+	source := ""
+	for _, reg := range cfg.Registries {
+		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		if err != nil {
+			continue
+		}
+		for _, pack := range catalog.Packs {
+			if pack.Name != name || pack.Source == "" {
+				continue
+			}
+			if source != "" && source != pack.Source {
+				return "", false
+			}
+			source = pack.Source
+		}
+	}
+	return source, source != ""
 }
 
 func readPackRegistryCatalogForCommand(ctx context.Context, home string, reg packregistry.Registry, refreshMissing bool) (packregistry.Catalog, error) {

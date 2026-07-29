@@ -82,6 +82,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonPending
 	case string(TraceReasonAssignedWork):
 		reason = TraceReasonAssignedWork
+	case string(TraceReasonAssignedWorkExhausted):
+		reason = TraceReasonAssignedWorkExhausted
 	default:
 		reason = TraceReasonCode(dec.TraceReason)
 	}
@@ -98,6 +100,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredPending
 	case string(TraceOutcomeDeferredBusy):
 		outcome = TraceOutcomeDeferredBusy
+	case string(TraceOutcomeStopDeferExhausted):
+		outcome = TraceOutcomeStopDeferExhausted
 	default:
 		outcome = TraceOutcomeCode(dec.TraceOutcome)
 	}
@@ -1095,7 +1099,12 @@ func wakeDemandOverridesSleepSuppression(
 	if eval.HasAssignedWork {
 		return true
 	}
-	hasDemand := poolDesired[template] > 0
+	// Routed demand wakes the canonical alias holder. Alias suppression
+	// deliberately drops the standby's poolDesired to zero, so the pool count
+	// alone cannot carry the signal here — without this the holder stays
+	// asleep under a configured non-interactive sleep policy and the routed
+	// work never gets picked up.
+	hasDemand := poolDesired[template] > 0 || decision.Reason == "routed-demand"
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
@@ -1192,7 +1201,7 @@ func reconcileSessionBeadsAtPath(
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	return reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
-		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 		startOptions...,
 	)
 }
@@ -1215,6 +1224,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	gate *providerHealthGate,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
+	namedRoutedDemand map[string]bool,
 	storeQueryPartial bool,
 	workSet map[string]bool,
 	cityName string,
@@ -1231,7 +1241,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	// reconcileSessionBeadsAtPath builds them from raw beads for tests).
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, rows, snapshot, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
-		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
+		poolDesired, namedSessionDemand, namedRoutedDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 		startOptions...,
 	)
 }
@@ -1271,7 +1281,7 @@ func reconcileSessionBeadsTraced(
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
-		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
+		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
 }
@@ -1294,6 +1304,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	gate *providerHealthGate,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
+	namedRoutedDemand map[string]bool,
 	storeQueryPartial bool,
 	workSet map[string]bool,
 	cityName string,
@@ -1351,6 +1362,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
+	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
 	asyncStopTracker := reconcileOpts.asyncStopTracker
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
@@ -1832,7 +1844,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, sessFront, clk, startupTimeout, !storeQueryPartial)
+			if healErr != nil {
+				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+				continue
+			}
 			traceHealClearedPendingCreateLeaseInfo(
 				trace,
 				infoByID[id],
@@ -2386,12 +2402,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// store/health queries so they run only for the rare already-stalled
 		// session. Set the restart_requested marker and let the block below
 		// perform the fresh-restart handoff.
-		if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && alive && sessionActivityReportable(sp, name) {
+		claimlessThreshold := cfg.Session.ProgressStallTimeoutDuration()
+		claimHolderThreshold := cfg.Session.ClaimHolderStallTimeoutDuration()
+		if gateThreshold := minPositiveDuration(claimlessThreshold, claimHolderThreshold); gateThreshold > 0 && alive && sessionActivityReportable(sp, name) {
 			lastActivity, lastActivityErr := sp.GetLastActivity(name)
 			if lastActivityErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
-			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
+			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
 				if !exempt {
@@ -2409,16 +2427,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				// Min-floor idle workers are legitimately unclaimed: they hold no
 				// bead because they are waiting for routed work to arrive, not
-				// because they parked on an error. Exempt them before the
-				// I/O-bound claim and provider-health checks so those queries
-				// are skipped entirely for floor workers every reconcile tick.
+				// because they parked on an error. That exemption applies only to
+				// the claim-less recycler: a city that opts into claim-holder
+				// recovery must still look up a floor worker's claim before it can
+				// decide whether it is really idle.
+				floorExempt := false
 				if !exempt && cfg != nil {
 					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
 						minFloor := cfgAgent.EffectiveMinActiveSessions()
 						if minFloor > 0 {
 							openInPool := openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)
 							if isMinFloorIdleWorker(minFloor, openInPool) {
-								exempt = true
+								floorExempt = true
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonMinFloorIdleWorker, TraceOutcomeExempt, tp.TemplateName, name, traceRecordPayload{
 										"pool_min":  minFloor,
@@ -2430,7 +2450,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				holdsClaim := false
-				if !exempt {
+				claimKnown := true
+				if !exempt && (!floorExempt || claimHolderThreshold > 0) {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, infoByID[id], cfg)
 					if err != nil {
 						// Fail safe: an unreadable claim check must not recycle a
@@ -2439,20 +2460,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// claim-check error rather than assume the session is idle).
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before progress-stall recycle for %s: %v\n", name, err) //nolint:errcheck
 						holdsClaim = true
+						claimKnown = false
 					} else {
 						holdsClaim = has
 					}
 				}
 				providerHealthy := true
-				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
+				if !exempt && (!floorExempt || holdsClaim) && tp.ResolvedProvider != nil {
 					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
 					// (provider RED) takes precedence: never recycle a session whose
-					// provider is red. Fail-open — absent/stale registry → healthy.
+					// provider is red. Evaluate this for claim-holders too so they are
+					// never restarted into a known-dead provider. Fail-open — an
+					// absent/stale registry is treated as healthy.
 					if h, present := phSnap.check(tp.ResolvedProvider.Name); present {
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -2462,7 +2486,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// restart). The base is coherent here (the zombie fold synced
 					// infoByID and every intervening mutating block `continue`s).
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
-					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
+					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
+				}
+				if claimKnown && sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+					// A confirmed holder can wedge mid-work on a provider condition it
+					// will not self-clear. This remains opt-in and uses a separate,
+					// more conservative timeout because it interrupts in-progress work.
+					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
+					fmt.Fprintf(stderr, "session reconciler: %s claim-holder-stalled (holds a claim but no progress for >%s, provider healthy, last activity %s); requesting fresh restart\n", name, claimHolderThreshold, lastActivity.UTC().Format(time.RFC3339)) //nolint:errcheck
 				}
 			}
 		}
@@ -2589,7 +2620,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, sessFront, clk, startupTimeout, true)
+		if healErr != nil {
+			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
+			continue
+		}
 		traceHealClearedPendingCreateLeaseInfo(
 			trace,
 			infoByID[id],
@@ -3163,8 +3198,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Pass the agent template so the tracker can fall back to a per-template
 		// timeout for pool sessions whose bead-derived runtime names are not
 		// registered directly. sessionpkg.DecideIdleTimeout owns the decision
-		// ladder; this block gathers the facts it asks for and executes the
-		// outcome.
+		// ladder (blocker, then pending interaction, then assigned work, then
+		// stop); this block gathers the facts it asks for and executes the
+		// outcome. The assigned-work gather uses the Awake (not Open) variant
+		// so this ladder's notion of assigned work matches ComputeAwakeSet's
+		// assigned-work wake exemption exactly — using Open here would defer
+		// idle-kills ComputeAwakeSet does not itself hold the session awake
+		// for, trading the kill/wake treadmill (ga-3ox7rk) for the opposite
+		// mismatch.
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
 				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
@@ -3173,12 +3214,48 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
-			for dec.Action == sessionpkg.TimerActionGatherPending {
-				facts.Pending = sessionpkg.PendingNo
-				if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
-					facts.Pending = sessionpkg.PendingYes
+			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
+				if dec.Action == sessionpkg.TimerActionGatherPending {
+					facts.Pending = sessionpkg.PendingNo
+					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+						facts.Pending = sessionpkg.PendingYes
+					}
+				} else {
+					hasWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+					if assignedErr != nil {
+						// Fail closed: treat error as "has work" so a transient
+						// store blip doesn't idle-kill a session that may still
+						// hold in-flight work. Mirrors the max-age gather above.
+						fmt.Fprintf(stderr, "session reconciler: checking assigned work for idle-timeout %s: %v\n", name, assignedErr) //nolint:errcheck // best-effort stderr
+						hasWork = true
+					}
+					facts.AssignedWork = sessionpkg.AssignedWorkNone
+					if hasWork {
+						facts.AssignedWork = sessionpkg.AssignedWorkHas
+					}
 				}
 				dec = sessionpkg.DecideIdleTimeout(facts)
+			}
+			// Consecutive same-bead assigned-work defer backstop (ga-nllza6):
+			// DecideIdleTimeout stays a pure decider, so the reconciler tracks
+			// the streak itself, keyed by session name + the session's current
+			// anchor bead. A streak longer than the configured limit overrides
+			// the ordinary AssignedWorkHas defer with a forced stop under its
+			// own distinct trace/sleep reason (assigned_work_exhausted), so a
+			// session wedged re-deferring on the same bead every tick
+			// eventually gets killed instead of running forever. Any other
+			// outcome (blocker/pending defer, ordinary idle stop, or no
+			// trigger) resets the streak so it never bleeds into an unrelated
+			// later defer run.
+			if assignedWorkDeferTr != nil {
+				if dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonAssignedWork) {
+					anchorBeadID := strings.TrimSpace(infoByID[id].CurrentlyProcessingBeadID)
+					if assignedWorkDeferTr.recordDefer(name, tp.TemplateName, anchorBeadID) {
+						dec = sessionpkg.DecideAssignedWorkExhausted()
+					}
+				} else {
+					assignedWorkDeferTr.reset(name)
+				}
 			}
 			switch dec.Action {
 			case sessionpkg.TimerActionDefer:
@@ -3304,7 +3381,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
 	awakeInput := buildAwakeInputFromReconciler(
-		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, workSet, readyWaitSet,
+		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)

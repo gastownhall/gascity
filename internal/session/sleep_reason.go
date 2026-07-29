@@ -34,6 +34,7 @@ const (
 	SleepReasonQuarantine            SleepReason = "quarantine"
 	SleepReasonContextChurn          SleepReason = "context-churn"
 	SleepReasonMaxSessionAge         SleepReason = "max-session-age"
+	SleepReasonAssignedWorkExhausted SleepReason = "assigned-work-exhausted"
 )
 
 // IsDeliberateSleepReason reports whether a sleep_reason records an

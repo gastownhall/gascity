@@ -76,6 +76,10 @@ var (
 	// is running; the client may retry — distinct from a terminal "already exists"
 	// wrong-state conflict.
 	OperationInProgress = Register(ProblemType{Code: "operation-in-progress", Status: http.StatusConflict, Title: "Operation In Progress"})
+	// PackCredentialRequired means a pack's git source needs an org-scoped
+	// credential before the import can proceed. Clients may connect or rotate
+	// access, wait for credential propagation, and retry the same import.
+	PackCredentialRequired = Register(ProblemType{Code: "pack-credential-required", Status: http.StatusConflict, Title: "Pack Credential Required"})
 
 	// Authorization / capability.
 	Forbidden      = Register(ProblemType{Code: "forbidden", Status: http.StatusForbidden, Title: "Forbidden"})

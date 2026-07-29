@@ -128,8 +128,8 @@ func TestValidateReviewedHermeticBodiesRejectsDirectKnownResources(t *testing.T)
 	}{
 		{name: "subprocess", imports: `"os/exec"`, body: `_ = exec.Command("worker")`, resource: ResourceSubprocess},
 		{name: "fixed sleep", imports: `"time"`, body: `time.Sleep(0)`, resource: ResourceFixedSleep},
-		{name: "environment", body: `t.Setenv("KEY", "value")`, resource: ResourceEnvironment},
-		{name: "cwd", body: `t.Chdir("work")`, resource: ResourceCWD},
+		{name: "environment", imports: `"os"`, body: `_ = os.Setenv("KEY", "value")`, resource: ResourceEnvironment},
+		{name: "cwd", imports: `"os"`, body: `_ = os.Chdir("work")`, resource: ResourceCWD},
 		{
 			name:         "slow process gate",
 			declarations: `func skipSlowCmdGCTest(t *testing.T, reason string) {}`,

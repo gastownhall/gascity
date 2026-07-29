@@ -32,12 +32,11 @@ type hermeticSourceIndex struct {
 }
 
 type hermeticFile struct {
-	source         parsedFile
-	index          int
-	bindings       bindingInfo
-	testingObjects map[types.Object]bool
-	resolved       bool
-	resolveErr     error
+	source     parsedFile
+	index      int
+	bindings   bindingInfo
+	resolved   bool
+	resolveErr error
 }
 
 type hermeticFunction struct {
@@ -358,13 +357,11 @@ func (a *hermeticAnalyzer) resolveFile(file *hermeticFile) error {
 	bindings.packageDeclarations = a.packageDeclarations[file.source.groupKey()]
 	bindings.packageFunctions = a.packageFunctions[file.source.groupKey()]
 	bindings.unresolvedImportQualifiers = unresolvedDefaultImportQualifiers(file.source.file)
-	testingObjects, err := testingParameterObjects(file.source.file, bindings)
-	if err != nil {
+	if _, err := testingParameterObjects(file.source.file, bindings); err != nil {
 		file.resolveErr = fmt.Errorf("scanning testing parameters in %s: %w", file.source.name, err)
 		return file.resolveErr
 	}
 	file.bindings = bindings
-	file.testingObjects = testingObjects
 	return nil
 }
 
@@ -490,7 +487,7 @@ func (a *hermeticAnalyzer) analyzeFunction(key packageKey, function *hermeticFun
 			return false
 		}
 		if call, ok := node.(*ast.CallExpr); ok {
-			matched, err := matchedResourcesForCall(call, key, function.file.bindings, function.file.testingObjects, a.slowHelpers[key])
+			matched, err := matchedResourcesForCall(call, key, function.file.bindings, a.slowHelpers[key])
 			if err != nil {
 				inspectErr = fmt.Errorf("%s: %w", function.file.source.name, err)
 				return false
@@ -596,7 +593,7 @@ func nonValueIdentifier(identifier *ast.Ident, parent ast.Node) bool {
 
 // matchedResourcesForCall is the single mapping from a syntax-owned call to
 // the resource identities recognized by both the census and hermetic review.
-func matchedResourcesForCall(call *ast.CallExpr, key packageKey, bindings bindingInfo, testingObjects map[types.Object]bool, slowHelperObject types.Object) ([]Resource, error) {
+func matchedResourcesForCall(call *ast.CallExpr, key packageKey, bindings bindingInfo, slowHelperObject types.Object) ([]Resource, error) {
 	var resources []Resource
 	appendImported := func(resource Resource, importPath string, names ...string) error {
 		matched, err := isImportedCall(call, bindings, importPath, names...)
@@ -683,19 +680,15 @@ func matchedResourcesForCall(call *ast.CallExpr, key packageKey, bindings bindin
 	if err := appendImported(ResourceCWD, "os", "Chdir"); err != nil {
 		return nil, err
 	}
-	matched, err = isTestingCall(call, bindings, testingObjects, "Setenv")
-	if err != nil {
+	// A testing.T/TB Setenv/Chdir auto-restores at test end, unlike os.Setenv/
+	// os.Chdir, so it is excluded here; checkTestingReceiverBinding's fail-closed
+	// error (an unbound receiver identifier) still applies and must still
+	// propagate.
+	if err := checkTestingReceiverBinding(call, bindings, "Setenv"); err != nil {
 		return nil, err
 	}
-	if matched {
-		resources = append(resources, ResourceEnvironment)
-	}
-	matched, err = isTestingCall(call, bindings, testingObjects, "Chdir")
-	if err != nil {
+	if err := checkTestingReceiverBinding(call, bindings, "Chdir"); err != nil {
 		return nil, err
-	}
-	if matched {
-		resources = append(resources, ResourceCWD)
 	}
 	if isSlowHelperCall(call, bindings, slowHelperObject) {
 		resources = append(resources, ResourceSlowProcessGate)

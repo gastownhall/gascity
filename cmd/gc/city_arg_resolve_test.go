@@ -787,3 +787,59 @@ func TestResolveExplicitCityPathEnvNameBestEffortOnCorruptRegistry(t *testing.T)
 		t.Fatalf("resolveExplicitCityPathEnv() = (%q, true) on a corrupt registry; want (\"\", false) best-effort fall-through", got)
 	}
 }
+
+// Regression (ga-klo4gz): resolveContextFromDir's step 10 (the ambient
+// upward walk via findCity) must never resolve inside a test binary, even
+// when a real city.toml sits above cwd. Silent ambient discovery is exactly
+// what let TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior/default
+// bleed a live host city into an unrelated test's result. This test itself
+// runs as a real *.test binary, so isTestBinary() is unconditionally true
+// here and the guard is exercised directly rather than mocked.
+func TestResolveContextFromDirRefusesAmbientWalkUpInTestBinary(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	ambient := t.TempDir()
+	mkTestCity(t, ambient) // real city.toml above cwd
+	nested := filepath.Join(ambient, "sub", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	ctx, err := resolveContextFromDir()
+	if err == nil {
+		t.Fatalf("resolveContextFromDir() = %+v, nil; want an error refusing the ambient walk-up to %q in a test binary", ctx, ambient)
+	}
+	for _, want := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name the override env var %q", err.Error(), want)
+		}
+	}
+}
+
+// Regression (ga-klo4gz, "guard-false-fail" — first reported ga-klo4gz.3,
+// mail gm-wisp-0d6monc): callers like cmd_events.go/cmd_sling.go/
+// resolveLocalCityForRigFallback use isCityDiscoveryNotFound to treat "no
+// city" as an expected, soft condition rather than a hard error. The step
+// 10 test-binary guard above must produce an error that satisfies this
+// same check, or every one of those callers starts hard-failing inside
+// test binaries instead of falling through the way they do in production.
+func TestIsCityDiscoveryNotFoundRecognizesTestBinaryGuardRefusal(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	ambient := t.TempDir()
+	mkTestCity(t, ambient)
+	nested := filepath.Join(ambient, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	_, err := resolveContextFromDir()
+	if err == nil {
+		t.Fatal("resolveContextFromDir() = nil error; want the test-binary ambient-walk refusal")
+	}
+	if !isCityDiscoveryNotFound(err) {
+		t.Errorf("isCityDiscoveryNotFound(%v) = false, want true — the guard's refusal must read as city-not-found so callers that special-case it don't hard-fail", err)
+	}
+}

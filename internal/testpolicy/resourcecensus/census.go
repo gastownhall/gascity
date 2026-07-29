@@ -123,8 +123,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   535,
-			BaselineFiles:   164,
+			BaselineCalls:   542,
+			BaselineFiles:   163,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,7 +136,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   427,
+			BaselineCalls:   421,
 			BaselineFiles:   156,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -164,8 +164,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   396,
-			BaselineFiles:   113,
+			BaselineCalls:   403,
+			BaselineFiles:   112,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -177,7 +177,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
+			BaselineCalls:   282,
 			BaselineFiles:   111,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -190,8 +190,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4323,
-			BaselineFiles:   202,
+			BaselineCalls:   128,
+			BaselineFiles:   13,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -203,8 +203,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   285,
-			BaselineFiles:   43,
+			BaselineCalls:   174,
+			BaselineFiles:   16,
 			ReportedCalls:   98,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -216,7 +216,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -442,8 +442,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   391,
-			BaselineFiles:   110,
+			BaselineCalls:   398,
+			BaselineFiles:   109,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -455,7 +455,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
+			BaselineCalls:   282,
 			BaselineFiles:   111,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
@@ -468,8 +468,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4317,
-			BaselineFiles:   202,
+			BaselineCalls:   122,
+			BaselineFiles:   13,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -481,8 +481,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceCWD,
-			BaselineCalls:   285,
-			BaselineFiles:   43,
+			BaselineCalls:   174,
+			BaselineFiles:   16,
 			ReportedCalls:   284,
 			ReportedFiles:   43,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -494,7 +494,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
@@ -948,8 +948,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		},
 	}
 	for _, source := range sources {
-		testingObjects, err := testingParameterObjects(source.file, source.bindings)
-		if err != nil {
+		if _, err := testingParameterObjects(source.file, source.bindings); err != nil {
 			return Census{}, fmt.Errorf("scanning testing parameters in %s: %w", source.name, err)
 		}
 		for _, declaration := range source.file.Decls {
@@ -967,7 +966,7 @@ func scanFiles(sourceFS fs.FS, names []string, hermeticPackages map[packageKey]s
 		}
 
 		for _, candidate := range source.calls {
-			resources, err := matchedResourcesForCall(candidate.call, source.groupKey(), source.bindings, testingObjects, slowHelpers[source.groupKey()])
+			resources, err := matchedResourcesForCall(candidate.call, source.groupKey(), source.bindings, slowHelpers[source.groupKey()])
 			if err != nil {
 				return Census{}, fmt.Errorf("scanning resource calls in %s: %w", source.name, err)
 			}
@@ -1445,6 +1444,10 @@ func hasSlowHelperDeclarationCandidate(file *ast.File) bool {
 	return false
 }
 
+// testingParameterObjects is retained for its fail-closed error: both call
+// sites discard the returned set and keep the call only so an unresolvable
+// `*testing.T`/`testing.TB` parameter aborts the scan. Do not delete it as an
+// unused value.
 func testingParameterObjects(file *ast.File, bindings bindingInfo) (map[types.Object]bool, error) {
 	objects := make(map[types.Object]bool)
 	var inspectErr error
@@ -1572,26 +1575,28 @@ func isImportedType(expression ast.Expr, bindings bindingInfo, importPath, typeN
 	return isImportedQualifier(identifier, bindings, importPath)
 }
 
-func isTestingCall(call *ast.CallExpr, bindings bindingInfo, testingObjects map[types.Object]bool, method string) (bool, error) {
+// checkTestingReceiverBinding fails closed when a Setenv/Chdir call's receiver
+// identifier cannot be resolved lexically, so an ambiguous call is never
+// silently miscounted (or silently ignored) by matchedResourcesForCall.
+func checkTestingReceiverBinding(call *ast.CallExpr, bindings bindingInfo, method string) error {
 	selector, ok := unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok || selector.Sel.Name != method {
-		return false, nil
+		return nil
 	}
 	identifier, ok := unparen(selector.X).(*ast.Ident)
 	if !ok {
-		return false, nil
+		return nil
 	}
-	object := bindings.uses[identifier]
-	if object == nil {
-		if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
-			return false, nil
-		}
-		if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
-			return false, nil
-		}
-		return false, fmt.Errorf("testing resource receiver %q has no lexical binding", identifier.Name)
+	if object := bindings.uses[identifier]; object != nil {
+		return nil
 	}
-	return testingObjects[object], nil
+	if _, declared := bindings.packageDeclarations[identifier.Name]; declared {
+		return nil
+	}
+	if _, imported := bindings.unresolvedImportQualifiers[identifier.Name]; imported {
+		return nil
+	}
+	return fmt.Errorf("testing resource receiver %q has no lexical binding", identifier.Name)
 }
 
 func isSlowHelperDeclaration(function *ast.FuncDecl, bindings bindingInfo) (bool, error) {
@@ -2047,14 +2052,34 @@ const (
 
 // CheckedMarkdownBlock returns the single generated inventory block.
 func CheckedMarkdownBlock(document string) (string, error) {
-	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
-		return "", errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
 	}
-	start := strings.Index(document, markdownBegin)
-	end := strings.Index(document, markdownEnd)
+	return document[start:end], nil
+}
+
+// ReplaceMarkdownBlock returns document with its single checked test resource
+// ledger block replaced by replacement. Content outside the marker pair is
+// preserved byte-for-byte. Pass RenderMarkdown's output as replacement to
+// regenerate the block from a Ledger.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+func markdownBlockSpan(document string) (start, end int, err error) {
+	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	}
+	start = strings.Index(document, markdownBegin)
+	end = strings.Index(document, markdownEnd)
 	if end < start {
-		return "", errors.New("TESTING.md resource ledger end marker precedes begin marker")
+		return 0, 0, errors.New("TESTING.md resource ledger end marker precedes begin marker")
 	}
 	end += len(markdownEnd)
-	return document[start:end], nil
+	return start, end, nil
 }

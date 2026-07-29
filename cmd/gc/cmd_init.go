@@ -333,14 +333,16 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
-		Long: `Create a new Gas City workspace in the given directory (or cwd).
+		Long: `Create a new Gas City workspace in the given directory. With no path, the
+current directory is used only when stdin is an interactive terminal;
+otherwise pass an explicit path ("." for the current directory).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, and
 pins the builtin pack imports (resolved from the user-global pack cache).
-Use --template with --default-provider to create a city non-interactively,
-or --file to initialize from an existing TOML config file.
+Use --template with --default-provider and an explicit path to create a city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -473,7 +475,7 @@ func initTargetPath(args []string) (string, error) {
 	if len(args) > 0 {
 		return filepath.Abs(args[0])
 	}
-	return os.Getwd()
+	return resolveImplicitCWD()
 }
 
 // cmdInit initializes a new city at the given path (or cwd if no path given).
@@ -481,11 +483,11 @@ func initTargetPath(args []string) (string, error) {
 // Creates the runtime scaffold and city.toml. If the bead provider is "bd", also
 // runs bd init.
 func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer) int {
-	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, false, false)
+	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, stdout, stderr, false)
 }
 
-func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, skipProviderReadiness, false, false)
 }
 
 func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
@@ -518,7 +520,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1104,7 +1106,7 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1736,7 +1738,7 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -14,12 +13,10 @@ import (
 
 // Output caps and concurrency, mirroring the BFF's exec-core.ts contract.
 const (
-	maxBytes        = 100 << 10 // default per-call stdout cap (100 KB)
-	maxRunDiffBytes = 512 << 10 // larger cap for run diffs (512 KB)
-	maxConcurrent   = 4         // simultaneous subprocesses
+	maxBytes      = 100 << 10 // default per-call stdout cap (100 KB)
+	maxConcurrent = 4         // simultaneous subprocesses
 
 	gitLogTimeout   = 10 * time.Second
-	runGitTimeout   = 5 * time.Second
 	bdDoctorTimeout = 15 * time.Second
 	gitLogRecentN   = "200"
 )
@@ -219,49 +216,6 @@ func isValidHostPath(p string) bool {
 	return true
 }
 
-// isPathUnderRoot reports whether cwd equals root or is nested under it,
-// matching on path-segment boundaries so "/a/gascity" admits "/a/gascity/x"
-// but not the sibling "/a/gascity-evil".
-func isPathUnderRoot(cwd, root string) bool {
-	root = strings.TrimSuffix(root, "/")
-	return cwd == root || strings.HasPrefix(cwd, root+"/")
-}
-
-// isValidRunCwd validates a run cwd before it is handed to `git -C <cwd>`. It is
-// FAIL-CLOSED: the cwd must pass the lexical shape check AND its real path (via
-// EvalSymlinks) must sit at or under one allowedRoots entry's real path. An
-// empty allowedRoots denies every cwd, so a caller must always supply at least
-// one sanctioned root (the resolved city directory). Resolving symlinks on both
-// sides closes the escape where a symlink under an allowed root points outside
-// it (git -C follows the directory symlink).
-func isValidRunCwd(cwd string, allowedRoots []string) bool {
-	if !isValidHostPath(cwd) || len(allowedRoots) == 0 {
-		return false
-	}
-	realCwd, err := filepath.EvalSymlinks(filepath.Clean(cwd))
-	if err != nil {
-		return false
-	}
-	for _, root := range allowedRoots {
-		realRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
-		if err != nil {
-			continue
-		}
-		if isPathUnderRoot(realCwd, realRoot) {
-			return true
-		}
-	}
-	return false
-}
-
-// runReviewablePaths restricts run-diff git reads to reviewable files,
-// excluding control-plane dirs (.beads/.gc). Ported from run-diff-policy.ts.
-var runReviewablePaths = []string{
-	"--", ":/",
-	":(exclude,top).beads", ":(exclude,top).beads/**",
-	":(exclude,top).gc", ":(exclude,top).gc/**",
-}
-
 const gitPretty = "--pretty=format:%H%x09%h%x09%an%x09%aI%x09%D%x09%s"
 
 // gitHardeningArgs are prepended (before the subcommand) to every git
@@ -303,110 +257,6 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 		return nil, validationErr("unknown git view")
 	}
 	return r.run(ctx, "git", gitArgs(gitRepoPath(), args...), gitLogTimeout, maxBytes)
-}
-
-// runGitViews is the hardcoded enum of per-run git reads for formula run-detail
-// diffs (RUN_GIT_VIEWS in exec.ts).
-var runGitViews = map[string][]string{
-	"root":                {"rev-parse", "--show-toplevel"},
-	"upstream":            {"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"},
-	"merge-base-upstream": {"merge-base", "HEAD", "@{upstream}"},
-}
-
-func runGitArgsWithPaths(base ...string) []string {
-	return append(base, runReviewablePaths...)
-}
-
-var baseRevisionRE = regexp.MustCompile(`(?i)^[0-9a-f]{40,64}$`)
-
-// execRunGit runs a whitelisted per-run git read in cwd (validated against
-// allowedRoots). The "diff-head"/"name-status-head" views carry the reviewable
-// path filter; the larger diff cap applies to the unified diff.
-func (r *execRunner) execRunGit(ctx context.Context, cwd, view string, allowedRoots []string) (*execResult, error) {
-	if !isValidRunCwd(cwd, allowedRoots) {
-		return nil, validationErr("invalid run cwd")
-	}
-	var args []string
-	outCap := maxBytes
-	switch view {
-	case "status":
-		args = runGitArgsWithPaths("status", "--porcelain=v1", "--untracked-files=all")
-	case "diff-head":
-		args = runGitArgsWithPaths("diff", "--no-ext-diff", "--no-color", "HEAD")
-		outCap = maxRunDiffBytes
-	case "name-status-head":
-		args = runGitArgsWithPaths("diff", "--name-status", "--no-ext-diff", "--no-color", "HEAD")
-	default:
-		v, ok := runGitViews[view]
-		if !ok {
-			return nil, validationErr("unknown run git view")
-		}
-		args = v
-	}
-	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, outCap)
-}
-
-// execRunGitDiffFrom runs `git diff <baseRevision>` over reviewable paths.
-func (r *execRunner) execRunGitDiffFrom(ctx context.Context, cwd, baseRevision string, allowedRoots []string) (*execResult, error) {
-	if !isValidRunCwd(cwd, allowedRoots) || !baseRevisionRE.MatchString(baseRevision) {
-		return nil, validationErr("invalid run git diff args")
-	}
-	diffArgs := append([]string{"diff", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
-	return r.run(ctx, "git", gitArgs(cwd, diffArgs...), runGitTimeout, maxRunDiffBytes)
-}
-
-// execRunGitNameStatusFrom runs `git diff --name-status <baseRevision>`.
-func (r *execRunner) execRunGitNameStatusFrom(ctx context.Context, cwd, baseRevision string, allowedRoots []string) (*execResult, error) {
-	if !isValidRunCwd(cwd, allowedRoots) || !baseRevisionRE.MatchString(baseRevision) {
-		return nil, validationErr("invalid run git name-status args")
-	}
-	nameStatusArgs := append([]string{"diff", "--name-status", "--no-ext-diff", "--no-color", baseRevision}, runReviewablePaths...)
-	return r.run(ctx, "git", gitArgs(cwd, nameStatusArgs...), runGitTimeout, maxBytes)
-}
-
-// execRunGitUntracked lists untracked, non-ignored files under the reviewable
-// pathspec, NUL-separated and unquoted (-z + core.quotePath=false) so paths
-// with spaces or non-ASCII bytes parse cleanly. The reviewable pathspec keeps
-// the control-plane dirs (.beads/.gc) out at the git layer; the caller
-// re-checks each path with isReviewableRunDiffPath. This is the listing half of
-// the BFF's untracked path, which the original Go port had omitted.
-func (r *execRunner) execRunGitUntracked(ctx context.Context, cwd string, allowedRoots []string) (*execResult, error) {
-	if !isValidRunCwd(cwd, allowedRoots) {
-		return nil, validationErr("invalid run cwd")
-	}
-	args := append([]string{"-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"}, runReviewablePaths...)
-	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, maxBytes)
-}
-
-// execRunGitNewFileDiff synthesizes a new-file unified diff for one untracked
-// file via `git diff --no-index -- /dev/null <relPath>`, producing the
-// `diff --git a/<path> b/<path>` + `new file mode` block the SPA's diff viewer
-// renders. relPath comes from execRunGitUntracked (relative, under cwd) and is
-// re-validated here as a defensive shape check. --no-index exits 1 when the two
-// inputs differ (always, vs an empty /dev/null), so exit 0 and 1 are both
-// success; any other code is a real failure the caller skips.
-func (r *execRunner) execRunGitNewFileDiff(ctx context.Context, cwd, relPath string, allowedRoots []string) (*execResult, error) {
-	if !isValidRunCwd(cwd, allowedRoots) || !isValidUntrackedRelPath(relPath) {
-		return nil, validationErr("invalid run git new-file diff args")
-	}
-	args := []string{"diff", "--no-ext-diff", "--no-color", "--no-index", "--", "/dev/null", relPath}
-	return r.run(ctx, "git", gitArgs(cwd, args...), runGitTimeout, maxRunDiffBytes)
-}
-
-// isValidUntrackedRelPath validates a git-listed untracked path before it is
-// passed to `git diff --no-index`. The path is git's own output (relative, under
-// cwd), but it is re-checked defensively: non-empty, relative, NUL-free, and
-// with no ".." traversal segment.
-func isValidUntrackedRelPath(p string) bool {
-	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) {
-		return false
-	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == ".." {
-			return false
-		}
-	}
-	return true
 }
 
 // execBdDoctor runs a read-only `bd doctor` health probe of a rig's embedded

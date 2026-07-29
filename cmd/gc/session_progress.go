@@ -72,3 +72,32 @@ func sessionProgressStalled(threshold time.Duration, holdsClaim, providerHealthy
 	}
 	return now.Sub(lastProgress) > threshold
 }
+
+// sessionClaimHolderStalled reports whether a confirmed claim-holder has made
+// no provider-reported progress long enough to require a fresh restart. It is
+// deliberately separate from sessionProgressStalled: claim-less sessions are
+// safe to recycle sooner, while recycling a holder risks interrupting work.
+// Unknown activity, provider failure, and protected sessions always suppress
+// the recycle.
+func sessionClaimHolderStalled(threshold time.Duration, holdsClaim, providerHealthy, exempt bool, lastProgress, now time.Time) bool {
+	if threshold <= 0 || !holdsClaim || !providerHealthy || exempt || lastProgress.IsZero() {
+		return false
+	}
+	return now.Sub(lastProgress) > threshold
+}
+
+// minPositiveDuration returns the smaller positive duration, or zero when both
+// are disabled. It lets the reconciler defer its more expensive checks until
+// either stall policy could apply.
+func minPositiveDuration(first, second time.Duration) time.Duration {
+	switch {
+	case first <= 0:
+		return second
+	case second <= 0:
+		return first
+	case first < second:
+		return first
+	default:
+		return second
+	}
+}

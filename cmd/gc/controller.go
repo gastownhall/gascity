@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1338,6 +1339,21 @@ func runController(
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
+
+	// One-time startup hygiene: release stale runtime name claims held by
+	// closed configured named-session beads so on-demand respawn is not blocked
+	// by pre-fix legacy entries inherited across a restart (ga-n2d Gap C).
+	// Best-effort — a sweep failure must never block startup, and the lazy
+	// reclaim path still releases such claims when the configured identity
+	// reclaims its name.
+	if cs.cityBeadStore != nil {
+		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		} else if released > 0 {
+			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	cs.startBeadEventWatcher(ctx)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)

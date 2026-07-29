@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2000,8 +2001,20 @@ case "$*" in
   *) printf '[]' ;;
 esac
 `)
-	if strings.TrimSpace(out) != `[{"id":"assigned-in-progress","ephemeral":true}]` {
+	// The row is compared field-wise rather than byte-wise: the in_progress
+	// tier now attaches a blocked_by array (empty here — the fake bd reports
+	// no dependencies) so the hook-side unready filter can see readiness state
+	// that `bd list` does not compute. What matters is that unblocked assigned
+	// work is still surfaced for crash recovery.
+	var gotRows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRows); err != nil {
+		t.Fatalf("EffectiveAssignedInProgressQuery() output is not JSON: %v (%q)", err, out)
+	}
+	if len(gotRows) != 1 || gotRows[0]["id"] != "assigned-in-progress" {
 		t.Fatalf("EffectiveAssignedInProgressQuery() output = %q, want assigned in-progress work", out)
+	}
+	if _, ok := gotRows[0]["blocked_by"]; !ok {
+		t.Errorf("EffectiveAssignedInProgressQuery() row missing blocked_by: %q", out)
 	}
 }
 
@@ -2348,6 +2361,9 @@ esac
 }
 
 func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
+	// Pool instance: the stamped gc.routed_to must be the collapsed PoolName
+	// (template identity), not the raw per-instance QualifiedName() — matching
+	// the PoolName-first idiom in poolDemandTarget/effectiveOnDeath/effectiveOnBoot.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -2355,9 +2371,20 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSlingQueryPoolNameCollapse(t *testing.T) {
+	// Same PoolName-collapse idiom, asserted directly against DefaultSlingQuery()
+	// rather than through the EffectiveSlingQuery() wrapper.
+	a := Agent{Name: "dog-1", Dir: "hello-world", PoolName: "hello-world/dog"}
+	got := a.DefaultSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
+	if got != want {
+		t.Errorf("DefaultSlingQuery() = %q, want %q", got, want)
 	}
 }
 
@@ -3653,6 +3680,56 @@ func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
 	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
 	if d.AutoReapClosedBeadWorktreesEnabled() {
 		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if !d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	want := time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	if got != want {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want %v (default)", got, want)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitValue(t *testing.T) {
+	v := 30
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 30*time.Minute {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitZeroDisables(t *testing.T) {
+	v := 0
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 0 {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 0 (quarantine disabled)", got)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -714,6 +715,12 @@ func resolveContextFromDir() (resolvedContext, error) {
 	}
 
 	// Step 10: Walk up from cwd looking for city.toml.
+	if isTestBinary() {
+		return resolvedContext{}, fmt.Errorf(
+			"not in a city directory (ambient upward discovery from %q is refused in "+
+				"test binaries; set GC_CITY, GC_CITY_PATH, or GC_CITY_ROOT to an explicit "+
+				"synthetic city)", cwd)
+	}
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
@@ -1480,13 +1487,17 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
-	scopeRoot = filepath.Clean(scopeRoot)
 	// Resolve symlinks so a city reached through a linked path (e.g. ~/gc ->
 	// /real/city) yields the same scope root as the real path. Without this the
 	// native-store identity gate sees an unregistered scope and rejects it
 	// ("database project_id could not be confirmed"), silently degrading to the
 	// bd-subprocess fallback.
-	if resolved, err := filepath.EvalSymlinks(scopeRoot); err == nil {
+	//
+	// Normalize through pathutil, not bare EvalSymlinks: pathutil also collapses
+	// the darwin /private alias. Resolving without that collapse maps an
+	// already-canonical /var city path to a /private/var scope root, so the
+	// scope no longer matches the city it was derived from.
+	if resolved := pathutil.NormalizePathForCompare(scopeRoot); resolved != "" {
 		scopeRoot = resolved
 	}
 	return scopeRoot

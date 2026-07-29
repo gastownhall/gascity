@@ -424,6 +424,13 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		return nil
 	}
 	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
+		// The backing may have rejected, partially committed, or fully committed
+		// the batch before returning an error. Fence the cached pre-write row
+		// until an ordinary read installs backing truth.
+		c.mu.Lock()
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+		c.mu.Unlock()
 		return err
 	}
 
@@ -464,6 +471,20 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 		c.notifyChange("bead.updated", updated)
 	}
 	return nil
+}
+
+// SetLocalString delegates directly to the backing store. Clone-local data
+// is never cached or notified: it isn't part of Bead.Metadata, so there is
+// no cached Bead field to keep in sync, and (unlike SetMetadata) writing it
+// never invokes bd's subprocess/hook path, so there is no idempotence check
+// to save a redundant call.
+func (c *CachingStore) SetLocalString(id, key, value string) error {
+	return c.backing.SetLocalString(id, key, value)
+}
+
+// GetLocalString delegates directly to the backing store. See SetLocalString.
+func (c *CachingStore) GetLocalString(id, key string) (string, error) {
+	return c.backing.GetLocalString(id, key)
 }
 
 func (c *CachingStore) refreshBeadAfterWrite(id, op string) (Bead, bool) {

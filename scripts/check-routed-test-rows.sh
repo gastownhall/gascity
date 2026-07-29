@@ -113,7 +113,7 @@ if (( violations > 0 )); then
     echo "---"
     echo "Six-row matrix violations: $violations"
     echo "A matrix test file MUST contain all six rows and be listed in scripts/routed-test-rows.manifest."
-    echo "See docs/plans/ga-h6w-read-path-api-routing.md."
+    echo "See the six-row matrix definition in this script's header comment (bead ga-h6w)."
     exit 1
 fi
 

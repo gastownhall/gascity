@@ -4903,8 +4903,19 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 	lastProviderName := "fake"
 	start := time.Now()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
-	if elapsed := time.Since(start); elapsed >= reloadOrderDrainTimeout {
-		t.Fatalf("reload drain took %s after tick context cancellation, want less than %s", elapsed, reloadOrderDrainTimeout)
+	// errs[0] below is the precise proof that the cancellation short-circuit
+	// fired: blockingOrderDispatcher.drain records ctx.Err() synchronously at
+	// entry, before its select, so it reads context.Canceled regardless of
+	// which select arm later wins. elapsed is not a latency SLO here -- that
+	// claim belongs to reloadOrderDrainTimeout's own test,
+	// TestCityRuntimeReloadDrainBoundedByTimeout. It spans the whole
+	// reloadConfig call (config read, order rescan, drain), not just the
+	// drain select, so a tight bound fails on unrelated I/O contention
+	// without proving anything errs[0] doesn't already prove on its own; it
+	// stays only as a hang detector against the short-circuit regressing into
+	// blocking indefinitely.
+	if elapsed := time.Since(start); elapsed > hangBudget {
+		t.Fatalf("reload drain took %s after tick context cancellation, want it to return well inside the hang budget", elapsed)
 	}
 	errs := od.drainContextErrors()
 	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
@@ -4946,7 +4957,13 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 	elapsed := time.Since(start)
-	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+500*time.Millisecond {
+	// elapsed is the subject under test (it proves reloadConfig actually
+	// bounds its wait on od.release rather than hanging on it forever), so
+	// this stays an explicit deadline rather than a hangBudget wait. The
+	// upper bound carries a generous tail to absorb CI scheduler jitter on
+	// top of the real reloadOrderDrainTimeout floor; the lower bound has no
+	// slop since contention only ever slows this down, never speeds it up.
+	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+3*time.Second {
 		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
 	}
 	close(od.release)
@@ -5829,12 +5846,7 @@ func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after panic+cancel")
-	}
+	awaitClose(t, done, "run returning after startup panic + cancel")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want >= 2 (startup panic + startup-poke recovery)", buildCalls.Load())
@@ -5895,12 +5907,7 @@ func TestCityRuntimeRun_RetriesStartupAfterRecoveredPanicBeforeStarted(t *testin
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after startup retry")
-	}
+	awaitClose(t, done, "run returning after startup retry")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want startup retry after recovered panic", buildCalls.Load())
@@ -5987,12 +5994,7 @@ func TestCityRuntimeRun_ConvergenceStartupErrorDoesNotBlockStarted(t *testing.T)
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return after convergence startup list error")
-	}
+	awaitClose(t, done, "run returning after convergence startup list error")
 	if !started.Load() {
 		t.Fatal("OnStarted was not called after non-panic convergence startup error")
 	}
@@ -6044,25 +6046,13 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 		close(done)
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if scope := cr.convScope(""); scope != nil && scope.adapter.indexReady.Load() {
-			cancel()
-			break
-		}
-		select {
-		case <-deadline:
-			cancel()
-			t.Fatal("convergence active index was not populated after retry")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	awaitCond(t, func() bool {
+		scope := cr.convScope("")
+		return scope != nil && scope.adapter.indexReady.Load()
+	}, "convergence active index population")
+	cancel()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run did not stop after convergence retry test cancellation")
-	}
+	awaitClose(t, done, "run stopping after convergence retry cancellation")
 	if !store.panicked.Load() {
 		t.Fatal("test store did not inject convergence startup panic")
 	}

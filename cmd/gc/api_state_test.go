@@ -477,7 +477,13 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		t.Fatalf("stale runtime update did not hide alpha/helper; agents = %+v", got.Agents)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// hangBudget, not a short fixed deadline: nothing in this test asserts how
+	// long WaitForAgentVisibility takes, only that it eventually returns nil
+	// once the fresh runtime update lands below. The 100ms window right after
+	// this IS a negative assertion ("must not resolve before the fresh update
+	// lands") and must not be migrated -- see cmd/gc/hangbudget_test.go's
+	// carve-out doc comment.
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	waitErr := make(chan error, 1)
 	go func() {
@@ -3518,11 +3524,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 		close(returned)
 	}()
 
-	select {
-	case <-ep.latestCalled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("event watcher did not establish an initial cursor")
-	}
+	awaitClose(t, ep.latestCalled, "event watcher establishing an initial cursor")
 	select {
 	case <-returned:
 		t.Fatal("newControllerState returned before the initial event cursor was established")
@@ -3533,11 +3535,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	}
 
 	close(ep.allowLatest)
-	select {
-	case <-returned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("newControllerState did not return after the initial event cursor was established")
-	}
+	awaitClose(t, returned, "newControllerState returning after the initial event cursor was established")
 }
 
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {

@@ -174,7 +174,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		NoConvoy: opts.NoConvoy,
 	})
 	if check.Idempotent {
-		needsAttach, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
+		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
 		case probeErr != nil:
 			// The attachment probe failed, so we cannot prove the routed bead
@@ -184,11 +184,21 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
 				"could not verify molecule attachment for %s; treating --on as an idempotent no-op: %v",
 				opts.BeadOrFormula, probeErr))
-		case needsAttach:
+		case decision.NeedsAttach:
 			// The bead is routed to the target but carries no molecule — an
 			// earlier plain sling routed it raw. Do not treat --on as an
 			// idempotent no-op; fall through so the formula attaches.
 			check.Idempotent = false
+		case decision.SkippedForClaim:
+			// Another worker already claimed this bead and no molecule is
+			// attached. Idempotency is preserved deliberately (do not re-attach
+			// onto in-progress work), but say so explicitly: without this
+			// warning the CLI prints only the generic "already routed" message,
+			// giving no signal that the requested --on formula was never
+			// attached or that --force would override the skip.
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"bead %s is claimed by %s with no molecule attached; --on %s was skipped to avoid re-attaching onto in-progress work — rerun with --force to attach it anyway",
+				opts.BeadOrFormula, decision.Assignee, opts.OnFormula))
 		}
 	}
 	if !check.Idempotent {
@@ -253,6 +263,22 @@ func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
 }
 
+// attachmentDecision is the result of onFormulaNeedsAttachment: whether an
+// --on formula attach should proceed on an otherwise-idempotent routed bead,
+// and, when it should not, why -- so the caller can distinguish "nothing to
+// do" (a molecule is already attached) from "skipped because another worker
+// owns this bead" (SkippedForClaim), which needs its own warning rather than
+// silently folding into the generic idempotent no-op.
+type attachmentDecision struct {
+	NeedsAttach bool
+	// SkippedForClaim is true when the bead has no molecule but is already
+	// claimed (Assignee set), so the attach was intentionally skipped rather
+	// than performed. Only meaningful when NeedsAttach is false.
+	SkippedForClaim bool
+	// Assignee is the claiming identity when SkippedForClaim is true.
+	Assignee string
+}
+
 // onFormulaNeedsAttachment reports whether this is an --on sling whose target
 // bead the caller has already determined reads Idempotent (gc.routed_to ==
 // target, or pool-labeled) but that has no attached molecule yet. The
@@ -264,29 +290,35 @@ func shouldCheckBeadState(opts SlingOpts) bool {
 // molecule; a stale one is burned).
 //
 // The returned error is non-nil only when the molecule-attachment probe could
-// not complete. In that case the result is (false, err): the caller cannot
-// prove the bead is unmoleculed, so it must preserve the fail-closed idempotent
-// state rather than clear it and risk minting a duplicate attachment.
-func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (bool, error) {
+// not complete. In that case the result is (attachmentDecision{}, err): the
+// caller cannot prove the bead is unmoleculed, so it must preserve the
+// fail-closed idempotent state rather than clear it and risk minting a
+// duplicate attachment.
+func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (attachmentDecision, error) {
 	if opts.OnFormula == "" {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
 	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
 	if err != nil {
-		return false, err
+		return attachmentDecision{}, err
 	}
 	if hasMolecule {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
 	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
 	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
 	// has already claimed it (assignee set), leave it idempotent rather than
-	// re-attaching a formula onto work in progress.
+	// re-attaching a formula onto work in progress -- but report the claim so the
+	// caller can warn that the attach was skipped, distinctly from "already done".
 	bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store)
 	if !ok {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
-	return strings.TrimSpace(bead.Assignee) == "", nil
+	assignee := strings.TrimSpace(bead.Assignee)
+	if assignee == "" {
+		return attachmentDecision{NeedsAttach: true}, nil
+	}
+	return attachmentDecision{SkippedForClaim: true, Assignee: assignee}, nil
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
@@ -573,7 +605,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 		req := RouteRequest{
 			BeadID:  beadID,
-			Target:  a.QualifiedName(),
+			Target:  agentutil.RoutedToIdentity(&a),
 			WorkDir: rigDir,
 			Env:     slingEnv,
 			Force:   opts.Force,

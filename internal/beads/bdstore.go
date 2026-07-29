@@ -320,6 +320,8 @@ type BdStore struct {
 	// mode plus the once-per-store degrade latch, under its own mutex
 	// (disjoint from condWriteMu's capability state; no nesting).
 	condWritesStamp
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
 const (
@@ -348,13 +350,27 @@ func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStor
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
-	s := &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	s := &BdStore{
+		dir:          dir,
+		runner:       runner,
+		idPrefix:     normalizeIDPrefix(idPrefix),
+		localStrings: newLocalSidecar(bdLocalSidecarPath(dir)),
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
 		}
 	}
 	return s
+}
+
+// bdLocalSidecarPath returns the path of the clone-local sidecar file for a
+// BdStore rooted at dir, or "" (in-memory-only) if dir is unset.
+func bdLocalSidecarPath(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, ".beads", "local-strings.json")
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -1551,6 +1567,29 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than routed through the bd subprocess: unlike
+// SetMetadata, this never invokes bd and so never touches Dolt sync or bd's
+// on_update hook. Does not validate that id refers to an existing bead — see
+// the interface doc comment for why.
+func (s *BdStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *BdStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
+}
+
 // Tx executes fn against a staged BdStore transaction. BdStore reads each bead
 // on first touch, applies callback writes to that snapshot, and reasserts the
 // staged fields when fn returns; concurrent edits to the same bead fields made
@@ -2189,6 +2228,9 @@ func (s *BdStore) Delete(id string) error {
 			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
 	}
 	return nil
 }
