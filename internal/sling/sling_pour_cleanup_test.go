@@ -54,7 +54,7 @@ func TestCloseSyntheticInputConvoy(t *testing.T) {
 		}
 	})
 
-	t.Run("tolerates missing beads and nil store", func(t *testing.T) {
+	t.Run("tolerates missing beads and nil store", func(_ *testing.T) {
 		closeSyntheticInputConvoy(nil, "c-1", "t-1")
 		closeSyntheticInputConvoy(beads.NewMemStore(), "c-absent", "t-1")
 	})

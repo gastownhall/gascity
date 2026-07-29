@@ -1029,7 +1029,7 @@ type depAddFailingStore struct {
 	beads.Store
 }
 
-func (s depAddFailingStore) DepAdd(fromID, toID, depType string) error {
+func (s depAddFailingStore) DepAdd(fromID, _, _ string) error {
 	return fmt.Errorf("resolving issue ID %s: no issue found matching %q", fromID, fromID)
 }
 
