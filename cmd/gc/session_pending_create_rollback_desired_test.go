@@ -15,14 +15,19 @@ import (
 // (~2229) — the path that matters for a session that is supposed to be running,
 // which is the shape a wedged never-started create would take.
 //
-// Harness fidelity note (load-bearing for both tests): session.Manager.
-// CreateSession stamps pending_create_started_at from the real wall clock
+// Harness fidelity note: session.Manager.CreateSession stamps
+// pending_create_started_at from the real wall clock
 // (internal/session/manager.go:1131) rather than an injected clock, while the
 // reconciler runs on clock.Fake. A harness-minted intent therefore carries a
 // lease anchor pinned to real "now", so its never-started lease can never expire
-// against the fake clock and the rollback safety net silently never fires. Both
-// tests re-anchor pending_create_started_at onto the fake clock so the rollback
-// is exercised the way production sees it.
+// against the fake clock and the rollback safety net silently never fires. All
+// three tests below re-anchor pending_create_started_at onto the fake clock, but
+// it is only load-bearing for
+// TestDesiredQuarantinedPendingCreateRollsBackAfterLeaseExpiry — that is the one
+// test that actually reaches the 10m lease floor (verified: deleting its
+// re-anchor fails it). The other two release the claim at the first tick via the
+// failed-create rollback and never reach the lease; the re-anchor there is
+// defensive.
 
 // runDesiredPendingCreateTicks reconciles up to ticks one-minute steps and
 // returns the tick at which the pending-create claim was released, or -1.
@@ -48,7 +53,11 @@ func runDesiredPendingCreateTicks(t *testing.T, h *sessionChaosHarness, ticks in
 // TestDesiredPendingCreateRollsBackWhenStartKeepsFailing pins that a desired
 // never-started create whose provider Start never succeeds does not retain its
 // pending_create_claim. Without this, the bead holds its alias and a capacity
-// slot (BaseStateStartPending counts against cap) with no live runtime.
+// slot (BaseStateStartPending counts against cap) with no live runtime. The
+// observed mechanism is the failed-create rollback at the first tick
+// (status=closed, state=failed-create), not the never-started lease — this test
+// pins that the claim does not persist on the desired branch, not lease-floor
+// timing.
 func TestDesiredPendingCreateRollsBackWhenStartKeepsFailing(t *testing.T) {
 	h := newSessionChaosHarness(t, 20260729)
 	h.createSessionIntent()
@@ -113,8 +122,9 @@ func TestDesiredQuarantinedPendingCreateRollsBackAfterLeaseExpiry(t *testing.T) 
 // TestDesiredCreatingPendingCreateReleasesClaim covers the exact input the
 // claim-gated projection branch keys on (lifecycle_projection.go:761):
 // state=creating + pending_create_claim=true + last_woke_at="". That branch
-// returns start-requested with no age bound, so the claim's release here must
-// come from the reconciler's lease floor rather than the projection.
+// returns start-requested and the projection places no age bound on this shape,
+// so the release must come from the reconciler; in this scenario the
+// failed-create rollback gets there first (tick 1), ahead of the 10m lease.
 func TestDesiredCreatingPendingCreateReleasesClaim(t *testing.T) {
 	h := newSessionChaosHarness(t, 20260730)
 	h.createSessionIntent()
