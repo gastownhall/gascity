@@ -15,19 +15,10 @@ import (
 // (~2229) — the path that matters for a session that is supposed to be running,
 // which is the shape a wedged never-started create would take.
 //
-// Harness fidelity note: session.Manager.CreateSession stamps
-// pending_create_started_at from the real wall clock
-// (internal/session/manager.go:1131) rather than an injected clock, while the
-// reconciler runs on clock.Fake. A harness-minted intent therefore carries a
-// lease anchor pinned to real "now", so its never-started lease can never expire
-// against the fake clock and the rollback safety net silently never fires. All
-// three tests below re-anchor pending_create_started_at onto the fake clock, but
-// it is only load-bearing for
-// TestDesiredQuarantinedPendingCreateRollsBackAfterLeaseExpiry — that is the one
-// test that actually reaches the 10m lease floor (verified: deleting its
-// re-anchor fails it). The other two release the claim at the first tick via the
-// failed-create rollback and never reach the lease; the re-anchor there is
-// defensive.
+// newSessionChaosHarness wires the Manager with the harness's own clock.Fake
+// (session_lifecycle_chaos_test.go), so a harness-minted intent's
+// pending_create_started_at anchors on the same clock the reconciler reads —
+// no manual re-anchoring needed.
 
 // runDesiredPendingCreateTicks reconciles up to ticks one-minute steps and
 // returns the tick at which the pending-create claim was released, or -1.
@@ -63,11 +54,6 @@ func TestDesiredPendingCreateRollsBackWhenStartKeepsFailing(t *testing.T) {
 	h.createSessionIntent()
 	h.assertCreatingIntent()
 
-	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
-		"pending_create_started_at": h.env.clk.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("re-anchor pending-create lease: %v", err)
-	}
 	h.env.sp.StartErrors[h.sessionName] = errors.New("provider start failure")
 
 	if at := runDesiredPendingCreateTicks(t, h, 30); at < 0 {
@@ -95,10 +81,9 @@ func TestDesiredQuarantinedPendingCreateRollsBackAfterLeaseExpiry(t *testing.T) 
 
 	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
 		// Quarantine outlives the never-started lease timeout by a wide margin.
-		"quarantined_until":         h.env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		"pending_create_started_at": h.env.clk.Now().UTC().Format(time.RFC3339),
+		"quarantined_until": h.env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	}); err != nil {
-		t.Fatalf("seed quarantine + lease anchor: %v", err)
+		t.Fatalf("seed quarantine: %v", err)
 	}
 	// Healing must come from the rollback, never from a successful start.
 	h.env.sp.StartErrors[h.sessionName] = errors.New("provider start failure")
@@ -130,10 +115,9 @@ func TestDesiredCreatingPendingCreateReleasesClaim(t *testing.T) {
 	h.createSessionIntent()
 
 	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
-		"state":                     string(sessionpkg.StateCreating),
-		"pending_create_claim":      "true",
-		"last_woke_at":              "",
-		"pending_create_started_at": h.env.clk.Now().UTC().Format(time.RFC3339),
+		"state":                string(sessionpkg.StateCreating),
+		"pending_create_claim": "true",
+		"last_woke_at":         "",
 	}); err != nil {
 		t.Fatalf("seed creating shape: %v", err)
 	}
