@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // gc doctor is a read-only diagnostic, but its beads checks shell out to bd,
@@ -42,6 +44,32 @@ func doctorShouldStopManagedDolt(cityIsLive, wasRunning, nowRunning bool) bool {
 	return nowRunning
 }
 
+// doctorManagedDoltDeps are the impure managed-dolt operations the guard needs.
+// They are injected so release's stop wiring — resolve the port, probe the
+// server, re-check liveness, stop — is testable without a live dolt server.
+// The pure doctorShouldStopManagedDolt cannot cover that wiring: a mutant that
+// dead-coded the real stop call left every table-test green, i.e. the guard
+// would silently leak every server doctor started (#4685) with no test failing
+// (gastownhall/gascity#4827 review finding 1).
+type doctorManagedDoltDeps struct {
+	resolvePort func(cityPath string) (string, managedDoltPortResolution)
+	probe       func(cityPath, host, port string) (managedDoltProbeReport, error)
+	liveNow     func(cityPath string) bool
+	stop        func(cityPath, port string) (managedDoltStopReport, error)
+}
+
+// defaultDoctorManagedDoltDeps wires the guard to the real managed-dolt helpers.
+func defaultDoctorManagedDoltDeps() doctorManagedDoltDeps {
+	return doctorManagedDoltDeps{
+		resolvePort: resolveManagedDoltPort,
+		probe:       probeManagedDolt,
+		liveNow: func(cityPath string) bool {
+			return doctor.IsControllerRunning(cityPath) || supervisorAliveHook() != 0
+		},
+		stop: stopManagedDoltProcess,
+	}
+}
+
 // doctorManagedDoltGuard captures managed-dolt state before doctor's checks so
 // release can undo a start that doctor itself caused.
 //
@@ -54,39 +82,56 @@ type doctorManagedDoltGuard struct {
 	cityIsLive bool
 	wasRunning bool
 	// armed is false whenever we could not establish a trustworthy "before"
-	// picture (no city path, live city, probe error). An unarmed guard never
-	// stops anything — failing closed keeps a diagnostic from killing a server
-	// it cannot prove it started.
+	// picture (no city path, live city, port-resolution or probe error). An
+	// unarmed guard never stops anything — failing closed keeps a diagnostic
+	// from killing a server it cannot prove it started.
 	armed bool
+	deps  doctorManagedDoltDeps
 }
 
-// newDoctorManagedDoltGuard snapshots managed-dolt state for cityPath.
+// newDoctorManagedDoltGuard snapshots managed-dolt state for cityPath using the
+// real managed-dolt helpers.
 //
 // cityIsLive should be true when a controller or supervisor is running.
 func newDoctorManagedDoltGuard(cityPath string, cityIsLive bool) *doctorManagedDoltGuard {
+	return newDoctorManagedDoltGuardWithDeps(cityPath, cityIsLive, defaultDoctorManagedDoltDeps())
+}
+
+// newDoctorManagedDoltGuardWithDeps is newDoctorManagedDoltGuard with injectable
+// dependencies, so the snapshot and release paths can be exercised without a
+// live dolt server.
+func newDoctorManagedDoltGuardWithDeps(cityPath string, cityIsLive bool, deps doctorManagedDoltDeps) *doctorManagedDoltGuard {
 	guard := &doctorManagedDoltGuard{
 		cityPath:   cityPath,
 		cityIsLive: cityIsLive,
+		deps:       deps,
 	}
 	if cityIsLive || strings.TrimSpace(cityPath) == "" {
 		return guard
 	}
 	guard.armed = true
 
-	port := strings.TrimSpace(currentManagedDoltPort(cityPath))
-	if port == "" {
-		// Nothing published means nothing running that we could later mistake
-		// for a server someone else owns; wasRunning stays false.
-		return guard
-	}
-	report, err := probeManagedDolt(cityPath, defaultManagedDoltBindHost, port)
-	if err != nil {
-		// A port exists but we cannot read its state — fail closed rather than
-		// risk stopping a server that was already up.
+	port, resolution := deps.resolvePort(cityPath)
+	switch resolution {
+	case managedDoltPortError:
+		// Presence is genuinely unknown (a transient read/parse error). Fail
+		// closed: an unknown "before" picture must never be read as "nothing
+		// running" and then let release stop a server someone else owns
+		// (gastownhall/gascity#4827 review finding 3).
 		guard.armed = false
-		return guard
+	case managedDoltPortFound:
+		report, err := deps.probe(cityPath, defaultManagedDoltBindHost, strings.TrimSpace(port))
+		if err != nil {
+			// A port resolved but its live state could not be read — fail closed
+			// rather than risk stopping a server that was already up.
+			guard.armed = false
+			return guard
+		}
+		guard.wasRunning = report.Running
+	default: // managedDoltPortAbsent
+		// Nothing published: wasRunning stays false and the guard stays armed so
+		// a server doctor's own checks start is still stopped on the way out.
 	}
-	guard.wasRunning = report.Running
 	return guard
 }
 
@@ -99,18 +144,30 @@ func (g *doctorManagedDoltGuard) release(stderr io.Writer) {
 	if g == nil || !g.armed {
 		return
 	}
-	port := strings.TrimSpace(currentManagedDoltPort(g.cityPath))
+	port, resolution := g.deps.resolvePort(g.cityPath)
+	if resolution != managedDoltPortFound {
+		// Nothing to stop, or presence could not be trusted — fail closed.
+		return
+	}
+	port = strings.TrimSpace(port)
 	if port == "" {
 		return
 	}
-	report, err := probeManagedDolt(g.cityPath, defaultManagedDoltBindHost, port)
+	report, err := g.deps.probe(g.cityPath, defaultManagedDoltBindHost, port)
 	if err != nil {
 		return
 	}
-	if !doctorShouldStopManagedDolt(g.cityIsLive, g.wasRunning, report.Running) {
+	// Re-check liveness immediately before the stop decision: a city that went
+	// live mid-run (gc start racing doctor) owns its server now, even though the
+	// entry snapshot saw it stopped (gastownhall/gascity#4827 review finding 2 —
+	// the cityIsLive TOCTOU). This narrows the window; fully closing it needs an
+	// ownership lease (tracked as a linked follow-up), so treat it as defense in
+	// depth, not a complete fix.
+	cityIsLive := g.cityIsLive || g.deps.liveNow(g.cityPath)
+	if !doctorShouldStopManagedDolt(cityIsLive, g.wasRunning, report.Running) {
 		return
 	}
-	if _, stopErr := stopManagedDoltProcess(g.cityPath, port); stopErr != nil {
+	if _, stopErr := g.deps.stop(g.cityPath, port); stopErr != nil {
 		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 			"gc doctor: started a managed dolt server on port %s for its checks but could not stop it: %v\n",
 			port, stopErr)

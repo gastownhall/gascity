@@ -1374,27 +1374,66 @@ func managedDoltStatePath(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
 }
 
-func currentManagedDoltPort(cityPath string) string {
+// managedDoltPortResolution classifies the outcome of resolving a city's
+// published managed dolt port, so a caller that must fail closed (doctor's stop
+// guard) can tell a genuinely-stopped city apart from a transient read/parse
+// error it must not act on.
+type managedDoltPortResolution int
+
+const (
+	// managedDoltPortAbsent: the city publishes no managed dolt server.
+	managedDoltPortAbsent managedDoltPortResolution = iota
+	// managedDoltPortFound: a valid, owned, live server is published; the
+	// returned port is its listener.
+	managedDoltPortFound
+	// managedDoltPortError: presence could not be determined because the
+	// ownership probe, the state-file read, or the JSON parse failed. Callers
+	// that stop servers must treat this as "do not touch."
+	managedDoltPortError
+)
+
+// resolveManagedDoltPort resolves cityPath's published managed dolt port with an
+// explicit found/absent/error outcome. A stopped city (nothing owned or nothing
+// published) is absent, not an error; only a probe/read/parse failure that
+// leaves presence genuinely unknown is an error.
+func resolveManagedDoltPort(cityPath string) (string, managedDoltPortResolution) {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
 		log.Printf("gc: managed dolt ownership probe failed for %s: %v", cityPath, err)
-		return ""
+		return "", managedDoltPortError
 	}
 	if !owned {
-		return ""
+		return "", managedDoltPortAbsent
 	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
-		return ""
+		if errors.Is(err, os.ErrNotExist) {
+			// The city owns its lifecycle but has published nothing yet:
+			// genuinely stopped, not an error.
+			return "", managedDoltPortAbsent
+		}
+		return "", managedDoltPortError
 	}
 	var state doltRuntimeState
 	if json.Unmarshal(data, &state) != nil {
-		return ""
+		return "", managedDoltPortError
 	}
 	if !validDoltRuntimeState(state, cityPath) {
+		// A state file that does not describe a live, owned server (stopped,
+		// dead PID, unreachable, or unowned) means nothing is running now.
+		return "", managedDoltPortAbsent
+	}
+	return strconv.Itoa(state.Port), managedDoltPortFound
+}
+
+// currentManagedDoltPort is the port-or-empty projection of resolveManagedDoltPort
+// for callers that do not distinguish absent from error.
+func currentManagedDoltPort(cityPath string) string {
+	port, resolution := resolveManagedDoltPort(cityPath)
+	if resolution != managedDoltPortFound {
 		return ""
 	}
-	return strconv.Itoa(state.Port)
+	return port
 }
 
 func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
