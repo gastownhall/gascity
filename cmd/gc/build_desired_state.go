@@ -41,16 +41,17 @@ type storeScopedBeadKey struct {
 
 // ContinuationClaimCandidate is a ready graph-v2 successor that may need a
 // bounded claim nudge after its current pool session completed the preceding
-// step but did not start another turn. All fields are exact, durable
-// provenance: StoreRef is canonical (city:<name> or rig:<name>), RootBeadID
-// was verified against that physical store, and Assignee is the bead's
-// persisted preassignment. Session identity resolution deliberately happens
-// later against the post-reconcile session snapshot.
+// step but did not start another turn. All fields are exact provenance:
+// StoreRef is canonical (city:<name> or rig:<name>), RootBeadID was verified
+// through Store, and Assignee is the bead's persisted preassignment. Store is
+// retained for immediate pre-delivery revalidation; session identity
+// resolution happens later against the post-reconcile session snapshot.
 type ContinuationClaimCandidate struct {
 	WorkBeadID string
 	RootBeadID string
 	StoreRef   string
 	Assignee   string
+	Store      beads.Store
 }
 
 // DesiredStateResult bundles the desired session state with the scale_check
@@ -126,6 +127,9 @@ type DesiredStateResult struct {
 	// ReadyAssigned used by the post-reconcile continuation-claim backstop.
 	// It is empty on any assigned-work partial read.
 	ContinuationClaimCandidates []ContinuationClaimCandidate
+	// ContinuationClaimQueryPartial preserves existing pacing markers when an
+	// exact candidate/root read was incomplete or internally contradictory.
+	ContinuationClaimQueryPartial bool
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -980,8 +984,9 @@ func buildDesiredStateWithSessionBeads(
 	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolScaleCheckPartialTemplates, namedScaleCheckPartialTemplates, stderr)
 
 	var continuationClaimCandidates []ContinuationClaimCandidate
+	continuationClaimQueryPartial := storePartial
 	if !storePartial {
-		continuationClaimCandidates = selectReadyContinuationClaimCandidates(
+		continuationClaimCandidates, continuationClaimQueryPartial = selectReadyContinuationClaimCandidates(
 			cityName,
 			assignedWorkBeads,
 			assignedWorkStores,
@@ -1004,6 +1009,7 @@ func buildDesiredStateWithSessionBeads(
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
+		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
 		NamedSessionDemand:                 namedWorkReady,
 		NamedSessionRoutedDemand:           namedRoutedDemand,
 		StoreQueryPartial:                  storePartial,
@@ -4346,9 +4352,10 @@ func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 // a live graph-v2 root in the exact physical store described by
 // gc.root_store_ref.
 //
-// The aligned slices and ReadyAssigned map are all required. Any mismatch,
-// non-canonical provenance, root read failure, duplicate disagreement, or
-// partial caller snapshot fails closed by omitting the candidate. Identity and
+// The slices must remain aligned and candidate rows must have an exact
+// ReadyAssigned entry. Any alignment failure, root read failure, or duplicate
+// disagreement is returned as a partial snapshot so callers preserve pacing
+// markers. Definite ineligibility simply omits that row. Identity and
 // exactly-one-per-session checks are intentionally deferred until after
 // reconciliation, when the current raw session snapshot is available.
 func selectReadyContinuationClaimCandidates(
@@ -4357,82 +4364,160 @@ func selectReadyContinuationClaimCandidates(
 	workStores []beads.Store,
 	workStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
-) []ContinuationClaimCandidate {
-	if len(work) == 0 ||
-		len(work) != len(workStores) ||
-		len(work) != len(workStoreRefs) ||
-		len(readyAssigned) == 0 {
-		return nil
+) ([]ContinuationClaimCandidate, bool) {
+	if len(work) != len(workStores) || len(work) != len(workStoreRefs) {
+		return nil, true
+	}
+	if len(work) == 0 {
+		return nil, false
 	}
 
-	type scopedCandidate struct {
-		candidate ContinuationClaimCandidate
-		valid     bool
-	}
-	byScope := make(map[storeScopedBeadKey]scopedCandidate)
+	// Group before eligibility filtering. Otherwise a valid copy can survive
+	// beside a same-scope copy whose metadata or root read disagrees.
+	groups := make(map[storeScopedBeadKey][]int)
 	order := make([]storeScopedBeadKey, 0, len(work))
+	partial := false
 	for i, bead := range work {
-		if strings.TrimSpace(bead.ID) == "" ||
-			!strings.EqualFold(strings.TrimSpace(bead.Status), "open") ||
-			!strings.EqualFold(strings.TrimSpace(bead.Type), "task") ||
-			strings.TrimSpace(bead.Assignee) == "" {
+		id := strings.TrimSpace(bead.ID)
+		if id == "" {
 			continue
 		}
-		snapshotKey := storeScopedBeadKey{StoreRef: workStoreRefs[i], ID: bead.ID}
-		if !readyAssigned[snapshotKey] {
-			continue
-		}
-		if strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey]) == "" ||
-			strings.TrimSpace(bead.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
-			continue
-		}
-
-		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-		rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
-		actualStoreRef, ok := canonicalContinuationClaimStoreRef(cityName, workStoreRefs[i])
-		if !ok || rootID == "" || rootStoreRef == "" || rootStoreRef != actualStoreRef || workStores[i] == nil {
-			continue
-		}
-		root, err := workStores[i].Get(rootID)
-		if err != nil ||
-			strings.TrimSpace(root.ID) != rootID ||
-			!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
-			!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
-			strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != actualStoreRef ||
-			strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-			strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-			strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != strings.TrimSpace(bead.Assignee) {
-			continue
-		}
-
-		key := storeScopedBeadKey{StoreRef: actualStoreRef, ID: bead.ID}
-		candidate := ContinuationClaimCandidate{
-			WorkBeadID: strings.TrimSpace(bead.ID),
-			RootBeadID: rootID,
-			StoreRef:   actualStoreRef,
-			Assignee:   strings.TrimSpace(bead.Assignee),
-		}
-		if prior, exists := byScope[key]; exists {
-			// Identical duplicates can arise when a store's broad open pass and
-			// Ready pass both surface one row. A divergent duplicate is an
-			// ambiguous snapshot and suppresses that scoped candidate.
-			if prior.candidate != candidate {
-				prior.valid = false
-				byScope[key] = prior
+		storeRef, ok := canonicalContinuationClaimStoreRef(cityName, workStoreRefs[i])
+		if !ok {
+			if continuationRowCouldBeCandidate(bead, workStoreRefs[i], readyAssigned) {
+				partial = true
 			}
 			continue
 		}
-		byScope[key] = scopedCandidate{candidate: candidate, valid: true}
-		order = append(order, key)
+		key := storeScopedBeadKey{StoreRef: storeRef, ID: id}
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
 	}
 
 	result := make([]ContinuationClaimCandidate, 0, len(order))
 	for _, key := range order {
-		if entry := byScope[key]; entry.valid {
-			result = append(result, entry.candidate)
+		var (
+			valid  []ContinuationClaimCandidate
+			absent bool
+			hold   bool
+		)
+		for _, i := range groups[key] {
+			candidate, resolution := evaluateReadyContinuationClaimCandidate(
+				work[i],
+				workStores[i],
+				workStoreRefs[i],
+				key.StoreRef,
+				readyAssigned,
+			)
+			switch resolution {
+			case continuationCandidateAbsent:
+				absent = true
+			case continuationCandidateHold:
+				hold = true
+			case continuationCandidateValid:
+				valid = append(valid, candidate)
+			}
 		}
+		if hold {
+			partial = true
+			continue
+		}
+		if len(valid) == 0 {
+			continue
+		}
+		if absent {
+			partial = true
+			continue
+		}
+		first := valid[0]
+		identical := true
+		for _, candidate := range valid[1:] {
+			if !sameContinuationClaimCandidate(first, candidate) {
+				identical = false
+				break
+			}
+		}
+		if !identical {
+			partial = true
+			continue
+		}
+		result = append(result, first)
 	}
-	return result
+	return result, partial
+}
+
+type continuationCandidateResolution int
+
+const (
+	continuationCandidateAbsent continuationCandidateResolution = iota
+	continuationCandidateHold
+	continuationCandidateValid
+)
+
+func continuationRowCouldBeCandidate(
+	bead beads.Bead,
+	storeRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) bool {
+	id := strings.TrimSpace(bead.ID)
+	return id != "" &&
+		id == bead.ID &&
+		strings.EqualFold(strings.TrimSpace(bead.Status), "open") &&
+		strings.EqualFold(strings.TrimSpace(bead.Type), "task") &&
+		strings.TrimSpace(bead.Assignee) != "" &&
+		readyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: id}] &&
+		strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionAffinityMetadataKey]) == "require"
+}
+
+func evaluateReadyContinuationClaimCandidate(
+	bead beads.Bead,
+	store beads.Store,
+	rawStoreRef string,
+	canonicalStoreRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) (ContinuationClaimCandidate, continuationCandidateResolution) {
+	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if rootID == "" || rootStoreRef == "" || rootStoreRef != canonicalStoreRef {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+	if store == nil {
+		return ContinuationClaimCandidate{}, continuationCandidateHold
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		return ContinuationClaimCandidate{}, continuationCandidateHold
+	}
+	if root.ID != rootID ||
+		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
+		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
+		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != strings.TrimSpace(bead.Assignee) {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+	return ContinuationClaimCandidate{
+		WorkBeadID: strings.TrimSpace(bead.ID),
+		RootBeadID: rootID,
+		StoreRef:   canonicalStoreRef,
+		Assignee:   strings.TrimSpace(bead.Assignee),
+		Store:      store,
+	}, continuationCandidateValid
+}
+
+func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
+	return a.WorkBeadID == b.WorkBeadID &&
+		a.RootBeadID == b.RootBeadID &&
+		a.StoreRef == b.StoreRef &&
+		a.Assignee == b.Assignee
 }
 
 // canonicalContinuationClaimStoreRef turns the aligned assigned-work shorthand

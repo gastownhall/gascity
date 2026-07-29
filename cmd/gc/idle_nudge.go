@@ -19,7 +19,7 @@ import (
 // is precisely why that one re-nudge-stormed on every restart (test-5il).
 const (
 	idleClaimNudgeTriggerKey = "idle_claim_nudge_trigger" // trigger bead id last acted on
-	idleClaimNudgeCountKey   = "idle_claim_nudge_count"   // nudges delivered for that trigger
+	idleClaimNudgeCountKey   = "idle_claim_nudge_count"   // delivery attempts reserved for that trigger
 	idleClaimNudgeAtKey      = "idle_claim_nudge_at"      // RFC3339 of last attempt / first observation
 )
 
@@ -72,9 +72,8 @@ const (
 //
 // This is a thin predicate wrapper (poolClaimBackstop) over the shared
 // grace→nudge→backoff→give-up engine in nudge_backstop.go; the pacing,
-// looping, and delivery mechanics live there so a second predicate (e.g. for
-// named/direct startup kickoff) can reuse them without duplicating this state
-// machine.
+// looping, and delivery mechanics live there so continuation delivery can
+// reuse them without duplicating this state machine.
 func nudgeStalledPoolClaims(
 	sp runtime.Provider,
 	cfg *config.City,
@@ -110,21 +109,23 @@ func nudgeStalledPoolClaims(
 // running gc hook --claim again, this persisted backstop re-delivers the
 // configured claim nudge after the shared grace window.
 //
-// Candidate qualification already proved ready/open state and exact graph
-// root/store provenance in build_desired_state.go. This final lane re-resolves
-// the candidate's assignee against CURRENT session identities and requires
-// exactly one candidate for one running pool session. Any identity conflict or
-// multi-candidate state is silent and write-free.
+// Candidate qualification proves ready/open state and exact graph root/store
+// provenance in build_desired_state.go. This final lane re-resolves the
+// candidate's assignee against CURRENT session identities, requires exactly
+// one candidate for one running pool session, and re-reads the step and root
+// immediately before reserving delivery. Any incomplete or ambiguous evidence
+// is silent and write-free.
 func nudgeStalledPoolContinuations(
 	sp runtime.Provider,
 	cfg *config.City,
 	store beads.Store,
 	sessionBeads []beads.Bead,
 	candidates []ContinuationClaimCandidate,
+	snapshotPartial bool,
 	now time.Time,
 	stdout io.Writer,
 ) {
-	if sp == nil || cfg == nil || store == nil {
+	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return
 	}
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
@@ -166,14 +167,22 @@ func (p poolContinuationBackstop) governs(s beads.Bead) bool {
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
 }
 
-func (p poolContinuationBackstop) outstanding(s beads.Bead, _ map[string]beads.Bead, _ string) (backstopTarget, bool) {
+func (p poolContinuationBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, _ string) (backstopTarget, backstopResolution) {
+	if p.candidates.holdBySessionID[s.ID] {
+		return backstopTarget{}, backstopResolutionHold
+	}
 	generation := strings.TrimSpace(s.Metadata["generation"])
 	if generation == "" {
-		return backstopTarget{}, false
+		return backstopTarget{}, backstopResolutionHold
 	}
 	candidates := p.candidates.bySessionID[s.ID]
-	if len(candidates) != 1 {
-		return backstopTarget{}, false
+	switch len(candidates) {
+	case 0:
+		return backstopTarget{}, backstopResolutionClear
+	case 1:
+		// Continue below.
+	default:
+		return backstopTarget{}, backstopResolutionHold
 	}
 	candidate := candidates[0]
 	return backstopTarget{
@@ -181,7 +190,9 @@ func (p poolContinuationBackstop) outstanding(s beads.Bead, _ map[string]beads.B
 		RootID:     candidate.RootBeadID,
 		StoreRef:   candidate.StoreRef,
 		Generation: generation,
-	}, true
+		Assignee:   candidate.Assignee,
+		Store:      candidate.Store,
+	}, backstopResolutionOutstanding
 }
 
 func (p poolContinuationBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
@@ -196,12 +207,44 @@ func (p poolContinuationBackstop) content(s beads.Bead) string {
 	return claimNudgeFor(p.cfg, s)
 }
 
+func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopResolution {
+	if target.Store == nil {
+		return backstopResolutionHold
+	}
+	current, err := target.Store.Get(target.ID)
+	if err != nil || current.ID != target.ID {
+		return backstopResolutionHold
+	}
+	if !strings.EqualFold(strings.TrimSpace(current.Status), "open") ||
+		!strings.EqualFold(strings.TrimSpace(current.Type), "task") ||
+		strings.TrimSpace(current.Assignee) != target.Assignee ||
+		strings.TrimSpace(current.Metadata[beadmeta.RootBeadIDMetadataKey]) != target.RootID ||
+		strings.TrimSpace(current.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
+		strings.TrimSpace(current.Metadata[beadmeta.ContinuationGroupMetadataKey]) == "" ||
+		strings.TrimSpace(current.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
+		return backstopResolutionClear
+	}
+	root, err := target.Store.Get(target.RootID)
+	if err != nil || root.ID != target.RootID {
+		return backstopResolutionHold
+	}
+	if !strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
+		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
+		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != target.Assignee {
+		return backstopResolutionClear
+	}
+	return backstopResolutionOutstanding
+}
+
 func (p poolContinuationBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
 	writeContinuationClaimMarker(store, s, target, 0, now, stdout)
 }
 
-func (p poolContinuationBackstop) record(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) {
-	writeContinuationClaimMarker(store, s, target, attempts, now, stdout)
+func (p poolContinuationBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
+	return writeContinuationClaimMarker(store, s, target, attempts, now, stdout)
 }
 
 func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
@@ -212,12 +255,15 @@ func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout
 }
 
 type poolContinuationCandidateSnapshot struct {
-	bySessionID map[string][]ContinuationClaimCandidate
+	bySessionID     map[string][]ContinuationClaimCandidate
+	holdBySessionID map[string]bool
 }
 
-type currentSessionIdentityOwner struct {
-	sessionID string
-	ambiguous bool
+type continuationCandidateIdentity struct {
+	WorkBeadID string
+	RootBeadID string
+	StoreRef   string
+	Assignee   string
 }
 
 func newPoolContinuationCandidateSnapshot(
@@ -225,13 +271,14 @@ func newPoolContinuationCandidateSnapshot(
 	candidates []ContinuationClaimCandidate,
 ) poolContinuationCandidateSnapshot {
 	snapshot := poolContinuationCandidateSnapshot{
-		bySessionID: make(map[string][]ContinuationClaimCandidate),
+		bySessionID:     make(map[string][]ContinuationClaimCandidate),
+		holdBySessionID: make(map[string]bool),
 	}
 	if len(sessionBeads) == 0 || len(candidates) == 0 {
 		return snapshot
 	}
 
-	identityOwners := make(map[string]currentSessionIdentityOwner)
+	identityOwners := make(map[string]map[string]struct{})
 	for _, sessionBead := range sessionBeads {
 		if strings.EqualFold(strings.TrimSpace(sessionBead.Status), "closed") ||
 			!isSessionBead(sessionBead) ||
@@ -239,37 +286,54 @@ func newPoolContinuationCandidateSnapshot(
 			continue
 		}
 		for _, identity := range currentSessionAssigneeIdentities(sessionBead) {
-			owner, exists := identityOwners[identity]
-			switch {
-			case !exists:
-				identityOwners[identity] = currentSessionIdentityOwner{sessionID: sessionBead.ID}
-			case owner.sessionID != sessionBead.ID:
-				owner.ambiguous = true
-				identityOwners[identity] = owner
+			if identityOwners[identity] == nil {
+				identityOwners[identity] = make(map[string]struct{})
 			}
+			identityOwners[identity][sessionBead.ID] = struct{}{}
 		}
 	}
 
-	seen := make(map[string]map[ContinuationClaimCandidate]struct{})
+	seen := make(map[string]map[continuationCandidateIdentity]struct{})
 	for _, candidate := range candidates {
 		assignee := strings.TrimSpace(candidate.Assignee)
-		owner, ok := identityOwners[assignee]
-		if !ok || owner.ambiguous || owner.sessionID == "" {
+		owners := identityOwners[assignee]
+		if len(owners) == 0 {
 			continue
+		}
+		if len(owners) != 1 {
+			for sessionID := range owners {
+				snapshot.holdBySessionID[sessionID] = true
+			}
+			continue
+		}
+		sessionID := ""
+		for owner := range owners {
+			sessionID = owner
 		}
 		if strings.TrimSpace(candidate.WorkBeadID) == "" ||
 			strings.TrimSpace(candidate.RootBeadID) == "" ||
-			strings.TrimSpace(candidate.StoreRef) == "" {
+			strings.TrimSpace(candidate.StoreRef) == "" ||
+			candidate.Store == nil {
+			snapshot.holdBySessionID[sessionID] = true
 			continue
 		}
-		if seen[owner.sessionID] == nil {
-			seen[owner.sessionID] = make(map[ContinuationClaimCandidate]struct{})
+		identity := continuationCandidateIdentity{
+			WorkBeadID: candidate.WorkBeadID,
+			RootBeadID: candidate.RootBeadID,
+			StoreRef:   candidate.StoreRef,
+			Assignee:   candidate.Assignee,
 		}
-		if _, duplicate := seen[owner.sessionID][candidate]; duplicate {
+		if seen[sessionID] == nil {
+			seen[sessionID] = make(map[continuationCandidateIdentity]struct{})
+		}
+		if _, duplicate := seen[sessionID][identity]; duplicate {
 			continue
 		}
-		seen[owner.sessionID][candidate] = struct{}{}
-		snapshot.bySessionID[owner.sessionID] = append(snapshot.bySessionID[owner.sessionID], candidate)
+		seen[sessionID][identity] = struct{}{}
+		snapshot.bySessionID[sessionID] = append(snapshot.bySessionID[sessionID], candidate)
+		if len(snapshot.bySessionID[sessionID]) > 1 {
+			snapshot.holdBySessionID[sessionID] = true
+		}
 	}
 	return snapshot
 }
@@ -312,16 +376,16 @@ func (p poolClaimBackstop) governs(s beads.Bead) bool {
 // The engine's ID-keyed map is ignored: resolution goes through the
 // store-scoped snapshot so a slot bound to a rig bead is matched against that
 // rig's copy, not a same-ID bead in another store.
-func (p poolClaimBackstop) outstanding(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, bool) {
+func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
 	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if triggerID == "" {
-		return backstopTarget{}, false
+		return backstopTarget{}, backstopResolutionClear
 	}
 	w, ok := p.work.lookup(triggerID, s.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
 	if !ok || !isUnclaimedTrigger(w, sessName) {
-		return backstopTarget{}, false
+		return backstopTarget{}, backstopResolutionClear
 	}
-	return backstopTarget{ID: triggerID}, true
+	return backstopTarget{ID: triggerID}, backstopResolutionOutstanding
 }
 
 func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
@@ -333,12 +397,16 @@ func (p poolClaimBackstop) content(s beads.Bead) string {
 	return claimNudgeFor(p.cfg, s)
 }
 
+func (p poolClaimBackstop) revalidate(_ backstopTarget) backstopResolution {
+	return backstopResolutionOutstanding
+}
+
 func (p poolClaimBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
 	writeIdleClaimMarker(store, s, target.ID, 0, now, stdout)
 }
 
-func (p poolClaimBackstop) record(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) {
-	writeIdleClaimMarker(store, s, target.ID, attempts, now, stdout)
+func (p poolClaimBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
+	return writeIdleClaimMarker(store, s, target.ID, attempts, now, stdout)
 }
 
 // exhausted is a deliberate no-op: manual re-nudge remains the pool escape
@@ -439,7 +507,7 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 // writeIdleClaimMarker persists the backstop state machine onto the session
 // bead and mirrors it into the in-memory snapshot so the rest of this tick
 // reads the just-written values.
-func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, attempts int, now time.Time, stdout io.Writer) {
+func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, attempts int, now time.Time, stdout io.Writer) bool {
 	kvs := map[string]string{
 		idleClaimNudgeTriggerKey: triggerID,
 		idleClaimNudgeCountKey:   strconv.Itoa(attempts),
@@ -447,7 +515,7 @@ func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, at
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	if s.Metadata == nil {
 		s.Metadata = make(map[string]string, len(kvs))
@@ -455,6 +523,7 @@ func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, at
 	for k, v := range kvs {
 		s.Metadata[k] = v
 	}
+	return true
 }
 
 // clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
@@ -487,7 +556,7 @@ func writeContinuationClaimMarker(
 	attempts int,
 	now time.Time,
 	stdout io.Writer,
-) {
+) bool {
 	kvs := map[string]string{
 		continuationClaimNudgeWorkKey:       target.ID,
 		continuationClaimNudgeRootKey:       target.RootID,
@@ -498,7 +567,7 @@ func writeContinuationClaimMarker(
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "continuation-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	if s.Metadata == nil {
 		s.Metadata = make(map[string]string, len(kvs))
@@ -506,6 +575,7 @@ func writeContinuationClaimMarker(
 	for key, value := range kvs {
 		s.Metadata[key] = value
 	}
+	return true
 }
 
 func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {

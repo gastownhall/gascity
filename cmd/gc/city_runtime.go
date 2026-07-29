@@ -2435,17 +2435,18 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
 		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
-		if !result.StoreQueryPartial && !result.SessionQueryPartial {
-			nudgeStalledPoolContinuations(
-				cr.sp,
-				cr.cfg,
-				sessStore,
-				stalledPoolBeads,
-				result.ContinuationClaimCandidates,
-				time.Now(),
-				cr.stdout,
-			)
-		}
+		nudgeStalledPoolContinuations(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.ContinuationClaimCandidates,
+			result.StoreQueryPartial ||
+				result.SessionQueryPartial ||
+				result.ContinuationClaimQueryPartial,
+			time.Now(),
+			cr.stdout,
+		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
