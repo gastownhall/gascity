@@ -4837,11 +4837,11 @@ export type StatusSessionCountsDetail = {
 
 export type StatusStoreHealth = {
     /**
-     * RFC3339 timestamp of last maintenance run.
+     * RFC3339 timestamp of last maintenance run, when known.
      */
     last_gc_at?: string;
     /**
-     * Status of last maintenance run ('success' or 'failed').
+     * Status of last maintenance run: 'success', 'failed', or 'unknown' (no matching event within the scanned window — distinct from no event ever having run; last_gc_at is absent in the unknown case).
      */
     last_gc_status?: string;
     /**
