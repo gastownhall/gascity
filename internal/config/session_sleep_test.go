@@ -231,6 +231,52 @@ func TestValidateNamedSessions_RejectsAlwaysWithSleepAfterIdle(t *testing.T) {
 	}
 }
 
+func TestValidateNamedSessions_WarnsAlwaysWithFreshWakeMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		wakeMode string
+		wantWarn bool
+	}{
+		{name: "always fresh", mode: "always", wakeMode: "fresh", wantWarn: true},
+		{name: "always resume", mode: "always", wakeMode: "resume"},
+		{name: "on demand fresh", mode: "on_demand", wakeMode: "fresh"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &City{
+				Workspace: Workspace{Name: "test-city"},
+				Agents: []Agent{{
+					Name:     "watchdog",
+					WakeMode: tt.wakeMode,
+				}},
+				NamedSessions: []NamedSession{{
+					Template: "watchdog",
+					Mode:     tt.mode,
+				}},
+			}
+
+			warnings, err := ValidateNamedSessions(cfg)
+			if err != nil {
+				t.Fatalf("ValidateNamedSessions() error = %v, want nil", err)
+			}
+			if tt.wantWarn {
+				if len(warnings) != 1 {
+					t.Fatalf("ValidateNamedSessions() warnings = %v, want exactly one", warnings)
+				}
+				if !strings.Contains(warnings[0], `mode "always"`) ||
+					!strings.Contains(warnings[0], `wake_mode "fresh"`) {
+					t.Fatalf("warning = %q, want always/fresh configuration named", warnings[0])
+				}
+				return
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("ValidateNamedSessions() warnings = %v, want none", warnings)
+			}
+		})
+	}
+}
+
 func TestValidateNamedSessions_RejectsAliasSessionNameCollision(t *testing.T) {
 	cfg := &City{
 		Workspace: Workspace{

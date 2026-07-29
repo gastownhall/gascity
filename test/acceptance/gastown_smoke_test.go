@@ -56,6 +56,15 @@ func TestGastownSmoke(t *testing.T) {
 			}
 		}
 
+		// The bundled gastown pack currently runs mayor, deacon, and boot as
+		// always+fresh, which the named-configured-sessions design says should
+		// warn. When the pack pin moves per that design, shrink this list.
+		expectedWarningConditions := []string{
+			`named_session "gastown.mayor"`,
+			`named_session "gastown.deacon"`,
+			`named_session "gastown.boot"`,
+		}
+		foundExpectedWarnings := make(map[string]bool, len(expectedWarningConditions))
 		var unexpectedWarnings []string
 		var foundGlobalFragmentsWarning bool
 		for _, warning := range prov.Warnings {
@@ -64,11 +73,26 @@ func TestGastownSmoke(t *testing.T) {
 					foundGlobalFragmentsWarning = true
 				}
 			} else {
-				unexpectedWarnings = append(unexpectedWarnings, warning)
+				foundExpected := false
+				for _, condition := range expectedWarningConditions {
+					if strings.Contains(warning, condition) && !foundExpectedWarnings[condition] {
+						foundExpectedWarnings[condition] = true
+						foundExpected = true
+						break
+					}
+				}
+				if !foundExpected {
+					unexpectedWarnings = append(unexpectedWarnings, warning)
+				}
 			}
 		}
 		if len(unexpectedWarnings) > 0 {
 			t.Errorf("unexpected provenance warnings: %v", unexpectedWarnings)
+		}
+		for _, condition := range expectedWarningConditions {
+			if !foundExpectedWarnings[condition] {
+				t.Errorf("expected provenance warning containing %q", condition)
+			}
 		}
 		if !foundGlobalFragmentsWarning {
 			t.Error("expected gastown workspace.global_fragments deprecation warning")
