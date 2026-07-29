@@ -2404,7 +2404,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
-	// their assigned or ready-routed trigger bead. Runs for every runtime, not
+	// either their assigned/ready-routed trigger bead or the one ready graph-v2
+	// successor preassigned after a completed step. Runs for every runtime, not
 	// just herdr.
 	// tmux's relaunch/respawn path only heals a session that DIED; it does
 	// nothing for a session that is alive but idle at its prompt on a trigger
@@ -2434,6 +2435,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
 		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		if !result.StoreQueryPartial && !result.SessionQueryPartial {
+			nudgeStalledPoolContinuations(
+				cr.sp,
+				cr.cfg,
+				sessStore,
+				stalledPoolBeads,
+				result.ContinuationClaimCandidates,
+				time.Now(),
+				cr.stdout,
+			)
+		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }

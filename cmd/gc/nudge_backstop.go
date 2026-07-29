@@ -16,39 +16,50 @@ import (
 // nudge content, and persisted-metadata shape; the engine drives only the
 // shared timing decision and the actual runtime.Provider.Nudge delivery.
 //
-// poolClaimBackstop (idle_nudge.go) is the first predicate. A second, for
-// named/direct startup kickoff, is tracked as a separate bead rather than
-// built here — this engine exists because two concrete predicates are now
-// in scope, not speculatively ahead of them.
+// poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
+// predicates: initial trigger delivery and later graph-v2 successor delivery.
 type backstopPredicate interface {
 	// governs reports whether this predicate applies to the session bead at
 	// all.
 	governs(s beads.Bead) bool
 
-	// outstandingID resolves the id of the work item sessName is waiting on.
-	// ok is false when nothing is outstanding, in which case clear is
-	// invoked to wipe any persisted state.
-	outstandingID(s beads.Bead, work map[string]beads.Bead, sessName string) (id string, ok bool)
+	// outstanding resolves the work item sessName is waiting on. ok is false
+	// when nothing is outstanding, in which case clear is invoked to wipe any
+	// persisted state.
+	outstanding(s beads.Bead, work map[string]beads.Bead, sessName string) (target backstopTarget, ok bool)
 
-	// state reads the persisted pacing state for id. same is false when id
-	// is an assignment not yet observed, in which case the engine calls
+	// state reads the persisted pacing state for target. same is false when
+	// target is an assignment not yet observed, in which case the engine calls
 	// observe to (re)start the grace clock instead of consulting attempts.
-	state(s beads.Bead, id string) (same bool, attempts int, last time.Time)
+	state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time)
 
 	// content resolves the text to nudge with, or "" to skip silently.
 	content(s beads.Bead) string
 
 	// observe persists the start of a new assignment's grace window.
-	observe(store beads.Store, s *beads.Bead, id string, now time.Time, stdout io.Writer)
+	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
 
 	// record persists a delivered nudge attempt.
-	record(store beads.Store, s *beads.Bead, id string, attempts int, now time.Time, stdout io.Writer)
+	record(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer)
 
 	// exhausted is invoked once attempts reach the shared max attempts.
 	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding.
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
+}
+
+// backstopTarget is the durable identity of one outstanding delivery target.
+// ID is the human-facing work bead. RootID, StoreRef, and Generation are
+// optional provenance fields: the initial pool-claim predicate needs only ID,
+// while continuation claims persist all four so same-ID rows in independent
+// stores, recycled graph roots, and recycled pool generations never share
+// pacing state.
+type backstopTarget struct {
+	ID         string
+	RootID     string
+	StoreRef   string
+	Generation string
 }
 
 // backstopAction is the shared timing engine's verdict for one session on one
@@ -118,18 +129,18 @@ func runNudgeBackstop(
 			continue
 		}
 
-		id, ok := pred.outstandingID(*s, workByID, sessName)
+		target, ok := pred.outstanding(*s, workByID, sessName)
 		if !ok {
 			pred.clear(store, s, stdout)
 			continue
 		}
 
-		same, attempts, last := pred.state(*s, id)
+		same, attempts, last := pred.state(*s, target)
 		if !same {
 			// First observation of this assignment: start the grace clock,
 			// don't nudge yet — a normal claim/confirmation almost always
 			// lands within the grace window.
-			pred.observe(store, s, id, now, stdout)
+			pred.observe(store, s, target, now, stdout)
 			continue
 		}
 
@@ -148,8 +159,8 @@ func runNudgeBackstop(
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
 				continue
 			}
-			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, id, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
-			pred.record(store, s, id, attempts+1, now, stdout)
+			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+			pred.record(store, s, target, attempts+1, now, stdout)
 		}
 	}
 }

@@ -23,6 +23,19 @@ const (
 	idleClaimNudgeAtKey      = "idle_claim_nudge_at"      // RFC3339 of last attempt / first observation
 )
 
+// Session-bead metadata keys for the post-step continuation-claim backstop.
+// Work, root, store, and pool generation are persisted separately so a
+// recycled graph root, same-ID bead in another store, or recycled session
+// process always starts a fresh grace window.
+const (
+	continuationClaimNudgeWorkKey       = "continuation_claim_nudge_work"
+	continuationClaimNudgeRootKey       = "continuation_claim_nudge_root"
+	continuationClaimNudgeStoreRefKey   = "continuation_claim_nudge_store_ref"
+	continuationClaimNudgeGenerationKey = "continuation_claim_nudge_generation"
+	continuationClaimNudgeCountKey      = "continuation_claim_nudge_count"
+	continuationClaimNudgeAtKey         = "continuation_claim_nudge_at"
+)
+
 // Backstop pacing. Deliberately slow: this only rescues a pool slot that was
 // handed work but never began it, so a couple of minutes of latency is fine and
 // keeps the backstop nowhere near anything that could read as churn.
@@ -90,12 +103,201 @@ func nudgeStalledPoolClaims(
 	})
 }
 
+// nudgeStalledPoolContinuations is the later-stage complement to the
+// hook-claim continuation nudge: after a pool worker completes one graph-v2
+// step, the control dispatcher can make exactly one preassigned successor
+// ready without a new root claim. If the provider ends its turn instead of
+// running gc hook --claim again, this persisted backstop re-delivers the
+// configured claim nudge after the shared grace window.
+//
+// Candidate qualification already proved ready/open state and exact graph
+// root/store provenance in build_desired_state.go. This final lane re-resolves
+// the candidate's assignee against CURRENT session identities and requires
+// exactly one candidate for one running pool session. Any identity conflict or
+// multi-candidate state is silent and write-free.
+func nudgeStalledPoolContinuations(
+	sp runtime.Provider,
+	cfg *config.City,
+	store beads.Store,
+	sessionBeads []beads.Bead,
+	candidates []ContinuationClaimCandidate,
+	now time.Time,
+	stdout io.Writer,
+) {
+	if sp == nil || cfg == nil || store == nil {
+		return
+	}
+	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+		return
+	}
+	runNudgeBackstop(
+		sp,
+		store,
+		sessionBeads,
+		nil,
+		now,
+		stdout,
+		"continuation-claim-nudge",
+		poolContinuationBackstop{
+			cfg:        cfg,
+			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
+		},
+	)
+}
+
 // poolClaimBackstop is the backstopPredicate for pool-managed slots: it
 // re-delivers the claim nudge to a slot whose assigned trigger bead is still
 // unclaimed. See nudgeStalledPoolClaims for the full rationale and scope.
 type poolClaimBackstop struct {
 	cfg  *config.City
 	work idleClaimWorkSnapshot
+}
+
+// poolContinuationBackstop is the backstopPredicate for a graph-v2 successor
+// preassigned to a live pool session after that session completed the preceding
+// step. The snapshot is keyed by the session bead's durable ID, not by a
+// mutable alias or runtime name.
+type poolContinuationBackstop struct {
+	cfg        *config.City
+	candidates poolContinuationCandidateSnapshot
+}
+
+func (p poolContinuationBackstop) governs(s beads.Bead) bool {
+	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+}
+
+func (p poolContinuationBackstop) outstanding(s beads.Bead, _ map[string]beads.Bead, _ string) (backstopTarget, bool) {
+	generation := strings.TrimSpace(s.Metadata["generation"])
+	if generation == "" {
+		return backstopTarget{}, false
+	}
+	candidates := p.candidates.bySessionID[s.ID]
+	if len(candidates) != 1 {
+		return backstopTarget{}, false
+	}
+	candidate := candidates[0]
+	return backstopTarget{
+		ID:         candidate.WorkBeadID,
+		RootID:     candidate.RootBeadID,
+		StoreRef:   candidate.StoreRef,
+		Generation: generation,
+	}, true
+}
+
+func (p poolContinuationBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
+	same = strings.TrimSpace(s.Metadata[continuationClaimNudgeWorkKey]) == target.ID &&
+		strings.TrimSpace(s.Metadata[continuationClaimNudgeRootKey]) == target.RootID &&
+		strings.TrimSpace(s.Metadata[continuationClaimNudgeStoreRefKey]) == target.StoreRef &&
+		strings.TrimSpace(s.Metadata[continuationClaimNudgeGenerationKey]) == target.Generation
+	return same, atoiOr0(s.Metadata[continuationClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[continuationClaimNudgeAtKey])
+}
+
+func (p poolContinuationBackstop) content(s beads.Bead) string {
+	return claimNudgeFor(p.cfg, s)
+}
+
+func (p poolContinuationBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	writeContinuationClaimMarker(store, s, target, 0, now, stdout)
+}
+
+func (p poolContinuationBackstop) record(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) {
+	writeContinuationClaimMarker(store, s, target, attempts, now, stdout)
+}
+
+func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
+}
+
+func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	clearContinuationClaimMarker(store, s, stdout)
+}
+
+type poolContinuationCandidateSnapshot struct {
+	bySessionID map[string][]ContinuationClaimCandidate
+}
+
+type currentSessionIdentityOwner struct {
+	sessionID string
+	ambiguous bool
+}
+
+func newPoolContinuationCandidateSnapshot(
+	sessionBeads []beads.Bead,
+	candidates []ContinuationClaimCandidate,
+) poolContinuationCandidateSnapshot {
+	snapshot := poolContinuationCandidateSnapshot{
+		bySessionID: make(map[string][]ContinuationClaimCandidate),
+	}
+	if len(sessionBeads) == 0 || len(candidates) == 0 {
+		return snapshot
+	}
+
+	identityOwners := make(map[string]currentSessionIdentityOwner)
+	for _, sessionBead := range sessionBeads {
+		if strings.EqualFold(strings.TrimSpace(sessionBead.Status), "closed") ||
+			!isSessionBead(sessionBead) ||
+			strings.TrimSpace(sessionBead.ID) == "" {
+			continue
+		}
+		for _, identity := range currentSessionAssigneeIdentities(sessionBead) {
+			owner, exists := identityOwners[identity]
+			switch {
+			case !exists:
+				identityOwners[identity] = currentSessionIdentityOwner{sessionID: sessionBead.ID}
+			case owner.sessionID != sessionBead.ID:
+				owner.ambiguous = true
+				identityOwners[identity] = owner
+			}
+		}
+	}
+
+	seen := make(map[string]map[ContinuationClaimCandidate]struct{})
+	for _, candidate := range candidates {
+		assignee := strings.TrimSpace(candidate.Assignee)
+		owner, ok := identityOwners[assignee]
+		if !ok || owner.ambiguous || owner.sessionID == "" {
+			continue
+		}
+		if strings.TrimSpace(candidate.WorkBeadID) == "" ||
+			strings.TrimSpace(candidate.RootBeadID) == "" ||
+			strings.TrimSpace(candidate.StoreRef) == "" {
+			continue
+		}
+		if seen[owner.sessionID] == nil {
+			seen[owner.sessionID] = make(map[ContinuationClaimCandidate]struct{})
+		}
+		if _, duplicate := seen[owner.sessionID][candidate]; duplicate {
+			continue
+		}
+		seen[owner.sessionID][candidate] = struct{}{}
+		snapshot.bySessionID[owner.sessionID] = append(snapshot.bySessionID[owner.sessionID], candidate)
+	}
+	return snapshot
+}
+
+// currentSessionAssigneeIdentities excludes alias_history deliberately. A
+// historical alias is useful for orphan recovery but is not a CURRENT identity
+// that may authorize a new claim nudge.
+func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
+	values := []string{
+		sessionBead.ID,
+		sessionBead.Metadata["session_name"],
+		sessionBead.Metadata["configured_named_identity"],
+		sessionBead.Metadata["alias"],
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
@@ -110,33 +312,33 @@ func (p poolClaimBackstop) governs(s beads.Bead) bool {
 // The engine's ID-keyed map is ignored: resolution goes through the
 // store-scoped snapshot so a slot bound to a rig bead is matched against that
 // rig's copy, not a same-ID bead in another store.
-func (p poolClaimBackstop) outstandingID(s beads.Bead, _ map[string]beads.Bead, sessName string) (string, bool) {
+func (p poolClaimBackstop) outstanding(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, bool) {
 	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if triggerID == "" {
-		return "", false
+		return backstopTarget{}, false
 	}
 	w, ok := p.work.lookup(triggerID, s.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
 	if !ok || !isUnclaimedTrigger(w, sessName) {
-		return "", false
+		return backstopTarget{}, false
 	}
-	return triggerID, true
+	return backstopTarget{ID: triggerID}, true
 }
 
-func (p poolClaimBackstop) state(s beads.Bead, id string) (same bool, attempts int, last time.Time) {
+func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	marked := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
-	return marked == id, atoiOr0(s.Metadata[idleClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
+	return marked == target.ID, atoiOr0(s.Metadata[idleClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
 }
 
 func (p poolClaimBackstop) content(s beads.Bead) string {
 	return claimNudgeFor(p.cfg, s)
 }
 
-func (p poolClaimBackstop) observe(store beads.Store, s *beads.Bead, id string, now time.Time, stdout io.Writer) {
-	writeIdleClaimMarker(store, s, id, 0, now, stdout)
+func (p poolClaimBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	writeIdleClaimMarker(store, s, target.ID, 0, now, stdout)
 }
 
-func (p poolClaimBackstop) record(store beads.Store, s *beads.Bead, id string, attempts int, now time.Time, stdout io.Writer) {
-	writeIdleClaimMarker(store, s, id, attempts, now, stdout)
+func (p poolClaimBackstop) record(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) {
+	writeIdleClaimMarker(store, s, target.ID, attempts, now, stdout)
 }
 
 // exhausted is a deliberate no-op: manual re-nudge remains the pool escape
@@ -275,6 +477,60 @@ func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	}
 	for k := range kvs {
 		delete(s.Metadata, k)
+	}
+}
+
+func writeContinuationClaimMarker(
+	store beads.Store,
+	s *beads.Bead,
+	target backstopTarget,
+	attempts int,
+	now time.Time,
+	stdout io.Writer,
+) {
+	kvs := map[string]string{
+		continuationClaimNudgeWorkKey:       target.ID,
+		continuationClaimNudgeRootKey:       target.RootID,
+		continuationClaimNudgeStoreRefKey:   target.StoreRef,
+		continuationClaimNudgeGenerationKey: target.Generation,
+		continuationClaimNudgeCountKey:      strconv.Itoa(attempts),
+		continuationClaimNudgeAtKey:         now.UTC().Format(time.RFC3339),
+	}
+	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
+		fmt.Fprintf(stdout, "continuation-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
+		return
+	}
+	if s.Metadata == nil {
+		s.Metadata = make(map[string]string, len(kvs))
+	}
+	for key, value := range kvs {
+		s.Metadata[key] = value
+	}
+}
+
+func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	if s.Metadata[continuationClaimNudgeWorkKey] == "" &&
+		s.Metadata[continuationClaimNudgeRootKey] == "" &&
+		s.Metadata[continuationClaimNudgeStoreRefKey] == "" &&
+		s.Metadata[continuationClaimNudgeGenerationKey] == "" &&
+		s.Metadata[continuationClaimNudgeCountKey] == "" &&
+		s.Metadata[continuationClaimNudgeAtKey] == "" {
+		return
+	}
+	kvs := map[string]string{
+		continuationClaimNudgeWorkKey:       "",
+		continuationClaimNudgeRootKey:       "",
+		continuationClaimNudgeStoreRefKey:   "",
+		continuationClaimNudgeGenerationKey: "",
+		continuationClaimNudgeCountKey:      "",
+		continuationClaimNudgeAtKey:         "",
+	}
+	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
+		fmt.Fprintf(stdout, "continuation-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
+		return
+	}
+	for key := range kvs {
+		delete(s.Metadata, key)
 	}
 }
 
