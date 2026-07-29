@@ -75,7 +75,9 @@ func TestGastownSmoke(t *testing.T) {
 			} else {
 				foundExpected := false
 				for _, condition := range expectedWarningConditions {
-					if strings.Contains(warning, condition) && !foundExpectedWarnings[condition] {
+					if strings.Contains(warning, condition) &&
+						config.IsAlwaysFreshWakeModeWarning(warning) &&
+						!foundExpectedWarnings[condition] {
 						foundExpectedWarnings[condition] = true
 						foundExpected = true
 						break
