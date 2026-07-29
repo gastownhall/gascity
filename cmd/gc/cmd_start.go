@@ -884,7 +884,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp, err := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
