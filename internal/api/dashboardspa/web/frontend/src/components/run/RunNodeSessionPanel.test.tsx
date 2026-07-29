@@ -3,9 +3,28 @@ import type {
   RunDisplayNode,
   RunExecutionInstance,
   RunNodeStatus,
+  RunSessionAttachment,
 } from 'gas-city-dashboard-shared';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as SessionReads from '../../supervisor/sessionReads';
 import { RunNodeSessionPanel } from './RunNodeSessionPanel';
+
+const mockFetchSupervisorSessionTranscript = vi.hoisted(() => vi.fn());
+
+vi.mock('../../supervisor/sessionReads', async (importOriginal) => {
+  const actual = await importOriginal<typeof SessionReads>();
+  return {
+    ...actual,
+    fetchSupervisorSessionTranscript: mockFetchSupervisorSessionTranscript,
+  };
+});
+
+beforeEach(() => {
+  mockFetchSupervisorSessionTranscript.mockReset();
+  // Leave the transcript fetch pending so the panel stays in its loading state
+  // ("Fetching transcript.") instead of resolving into ready/error copy.
+  mockFetchSupervisorSessionTranscript.mockReturnValue(new Promise(() => {}));
+});
 
 afterEach(() => cleanup());
 
@@ -144,6 +163,39 @@ function node(status: RunNodeStatus, reason: 'not_started' | 'session_unresolved
         label: 'base',
         status,
         session: { kind: 'none', reason },
+        currentIteration: true,
+        historical: false,
+      },
+    ],
+    controlBadges: [],
+  };
+}
+
+function attachedNode(session: RunSessionAttachment): RunDisplayNode {
+  return {
+    id: 'review',
+    semanticNodeId: 'review',
+    title: 'Review',
+    kind: 'step',
+    constructKind: 'step',
+    status: 'active',
+    currentBeadId: 'review',
+    scope: { kind: 'run' },
+    visibleInGraph: true,
+    historicalOnly: false,
+    iterationSummary: { kind: 'single' },
+    attemptSummary: { kind: 'none' },
+    visibleExecutionInstanceId: 'review-exec',
+    executionInstances: [
+      {
+        id: 'review-exec',
+        semanticNodeId: 'review',
+        beadId: 'review-bead',
+        iteration: { kind: 'base' },
+        attempt: { kind: 'untracked' },
+        label: 'base',
+        status: 'active',
+        session,
         currentIteration: true,
         historical: false,
       },
