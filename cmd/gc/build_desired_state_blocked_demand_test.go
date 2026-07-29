@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestCollectOpenUnassignedRoutedWorkExcludesBlocked covers gc-ft31x, the
@@ -33,7 +36,10 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _ := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	if partial {
+		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
+	}
 
 	got := make(map[string]bool, len(work))
 	for _, b := range work {
@@ -44,6 +50,71 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	if got["BLK-1"] {
 		t.Errorf("blocked routed bead BLK-1 counted as spawn demand: %v — a Live read must exclude it (gc-ft31x)", ids(work))
+	}
+}
+
+// liveOpenListErrorStore fails the LIVE open List — the exact read
+// collectOpenUnassignedRoutedWork uses via listOpenForControllerDemandLive — and
+// delegates every other read to the embedded store, modeling a transient
+// backing-store outage on the controller-demand path.
+type liveOpenListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s liveOpenListErrorStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live && q.Status == "open" {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage covers gc-ft31x's
+// fail-open-to-zero edge: a failed live demand read must be reported partial, not
+// swallowed into an empty route set. collectOpenUnassignedRoutedWork feeds only
+// openControlDispatcherDemand, so a swallowed outage reads as zero
+// control-dispatcher demand and buildDesiredStateWithSessionBeads drains a live
+// dispatcher. The partial flag is what lets the caller retain it instead.
+func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T) {
+	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+
+	if !partial {
+		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")
+	}
+	if len(work) != 0 {
+		t.Errorf("collectOpenUnassignedRoutedWork returned %v on a hard outage, want no beads", ids(work))
+	}
+}
+
+// TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage is the
+// end-to-end gc-ft31x guarantee: when the unassigned-routed live read fails, the
+// deterministic control-dispatcher template is marked partial so
+// retainScaleCheckPartialPoolDesired preserves the running dispatcher this tick
+// rather than draining it on a transient outage.
+func TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage(t *testing.T) {
+	cityPath := t.TempDir()
+	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			StartCommand:      "gc convoy control --serve",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	dispatcher := config.ControlDispatcherAgentName
+
+	got := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	if !got.PoolScaleCheckPartialTemplates[dispatcher] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want control-dispatcher template %q marked partial on a routed-demand outage (gc-ft31x)", got.PoolScaleCheckPartialTemplates, dispatcher)
+	}
+	if !got.ScaleCheckPartialTemplates[dispatcher] {
+		t.Fatalf("ScaleCheckPartialTemplates = %v, want control-dispatcher template %q marked partial on a routed-demand outage (gc-ft31x)", got.ScaleCheckPartialTemplates, dispatcher)
 	}
 }
 
