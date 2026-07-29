@@ -2930,7 +2930,7 @@ gc pack registry remove <registry-name> [flags]
 
 Show recent publish requests you submitted to Registry, or one request with its feedback comments.
 
-This command is read-only. Use a personal Registry token; run \"gc pack registry login\" if you have not logged in yet.
+This command is read-only. Use a personal Registry token; run "gc pack registry login" if you have not logged in yet.
 
 ```
 gc pack registry requests [request-id] [flags]

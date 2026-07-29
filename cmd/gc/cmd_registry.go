@@ -917,7 +917,10 @@ func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result regi
 	} else if result.ValidationError != "" {
 		fmt.Fprintf(stdout, "Message: %s\n", result.ValidationError) //nolint:errcheck
 	}
-	fmt.Fprintf(stdout, "Next: gc pack registry requests %s\n", result.ID) //nolint:errcheck
+	// Pin the effective publish base URL: the requests command resolves its
+	// registry independently (flag/env/stored default/hosted default), so an
+	// unqualified handoff can query a different Registry than the publish used.
+	fmt.Fprintf(stdout, "Next: gc pack registry requests --registry-url %s %s\n", baseURL, result.ID) //nolint:errcheck
 }
 
 // registryPublishValidationRejectedStatuses lists publish-request statuses that
