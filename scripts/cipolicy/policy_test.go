@@ -646,7 +646,7 @@ func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 // keyed on github.ref. Because cancel-in-progress is false for push, a
 // fast-follow commit does not kill the running job — it queues behind it as
 // pending, and GitHub cancels whatever run was *already* pending in that
-// group. So an intermediate commit can be cancelled before it ever starts and
+// group. So an intermediate commit can be canceled before it ever starts and
 // never receives a pass/fail verdict. Push events must key off
 // github.sha so each commit gets its own group, while pull_request behavior
 // (grouped by PR number, cancel-in-progress) stays unchanged.
