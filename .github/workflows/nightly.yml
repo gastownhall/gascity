@@ -146,3 +146,53 @@ jobs:
 
       - name: Audit dated waivers in strict mode
         run: scripts/waiver-clock-audit
+
+  # ga-hd99jq D5: consumers must read this job's conclusion, never the
+  # workflow-level conclusion -- GitHub still reports Nightly as successful
+  # even when a scheduled job silently fails, so this always-run aggregate
+  # is the only signal the red-streak monitor can trust.
+  nightly-summary:
+    name: Nightly summary
+    needs:
+      - tier-b
+      - tier-c
+      - integration-sqlite-coordstore
+      - bundled-pack-pins
+      - waiver-clock
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate nightly job results
+        env:
+          TIER_B_RESULT: ${{ needs.tier-b.result }}
+          TIER_C_RESULT: ${{ needs.tier-c.result }}
+          INTEGRATION_SQLITE_COORDSTORE_RESULT: ${{ needs.integration-sqlite-coordstore.result }}
+          BUNDLED_PACK_PINS_RESULT: ${{ needs.bundled-pack-pins.result }}
+          WAIVER_CLOCK_RESULT: ${{ needs.waiver-clock.result }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          results = {
+              "tier-b": os.environ.get("TIER_B_RESULT", "missing"),
+              "tier-c": os.environ.get("TIER_C_RESULT", "missing"),
+              "integration-sqlite-coordstore": os.environ.get("INTEGRATION_SQLITE_COORDSTORE_RESULT", "missing"),
+              "bundled-pack-pins": os.environ.get("BUNDLED_PACK_PINS_RESULT", "missing"),
+              "waiver-clock": os.environ.get("WAIVER_CLOCK_RESULT", "missing"),
+          }
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("## Nightly summary\n\n")
+              handle.write("| Job | Result |\n| --- | --- |\n")
+              for job, result in results.items():
+                  handle.write(f"| {job} | {result} |\n")
+
+          failed = {job: result for job, result in results.items() if result != "success"}
+          if failed:
+              for job, result in failed.items():
+                  print(f"{job}: {result}", file=sys.stderr)
+              sys.exit(1)
+          PY
