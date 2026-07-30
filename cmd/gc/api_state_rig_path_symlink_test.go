@@ -1,9 +1,7 @@
 package main
 
-// Reproducer for the symlinked-city CreateRig rejection (adjacent defect found
-// while investigating ga-xbilek). Drop this into cmd/gc/ and run:
-//
-//	go test ./cmd/gc/ -run TestAssertRigPathWithinCity -v
+// Regression coverage for the symlinked-city CreateRig rejection (adjacent
+// defect found while investigating ga-xbilek).
 //
 // It needs no macOS and no GOTMPDIR emulation — it creates its own symlink.
 
@@ -13,19 +11,19 @@ import (
 	"testing"
 )
 
-// TestAssertRigPathWithinCityRejectsResolvedTargetUnderRawCity shows that
-// controllerState.CreateRig rejects a rig living INSIDE the city with
-// "rig path %s escapes the city root" whenever the city is reached through a
+// TestAssertRigPathWithinCityAcceptsResolvedTargetUnderSymlinkedCity pins that a
+// rig living INSIDE the city validates even when the city is reached through a
 // symlinked ancestor (e.g. ~/gc -> /data/gc, the exact case
 // resolveStoreScopeRoot's own comment says it supports).
 //
-// CreateRig (api_state.go:1788) sets r.Path = resolveStoreScopeRoot(...), which
-// normalizes through pathutil and therefore RESOLVES the symlink. It then calls
-// assertRigPathWithinCity(cs.cityPath, r.Path) (api_state.go:1796) where
-// cs.cityPath is still the UNRESOLVED form. The lexical first pass
-// (relWithinCity, api_state.go:1740) compares those two mismatched forms and
-// reports an escape.
-func TestAssertRigPathWithinCityRejectsResolvedTargetUnderRawCity(t *testing.T) {
+// controllerState.CreateRig sets r.Path = resolveStoreScopeRoot(...), which
+// normalizes through pathutil and therefore RESOLVES the symlink, then calls
+// assertRigPathWithinCity(cs.cityPath, r.Path) with cs.cityPath still in its
+// UNRESOLVED form. assertRigPathWithinCity normalizes both operands before the
+// lexical relWithinCity pass, so those two forms no longer disagree and an
+// in-city rig is not reported as an escape. The independent symlink-aware pass
+// that follows is unchanged, so a genuine escape must still fail both checks.
+func TestAssertRigPathWithinCityAcceptsResolvedTargetUnderSymlinkedCity(t *testing.T) {
 	root := t.TempDir()
 	realDir := filepath.Join(root, "real")
 	if err := os.MkdirAll(realDir, 0o755); err != nil {
