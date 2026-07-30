@@ -640,3 +640,27 @@ func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 		t.Fatalf("error = %v, want integration-shards context", err)
 	}
 }
+
+// TestPushRunsGetPerCommitConcurrencyGroup guards against the push-events
+// concurrency bug: today every push to a branch shares one concurrency group
+// keyed on github.ref, so a fast-follow commit to main cancels the
+// in-progress CI run for the commit before it. Push events must key off
+// github.sha so each commit gets its own group, while pull_request behavior
+// (grouped by PR number, cancel-in-progress) stays unchanged.
+func TestPushRunsGetPerCommitConcurrencyGroup(t *testing.T) {
+	docs := loadPolicyDocuments(t)
+	concurrency, ok := docs.ci["concurrency"].(map[string]any)
+	if !ok {
+		t.Fatal("ci.yml concurrency is not a mapping")
+	}
+
+	const wantGroup = "ci-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || (github.event.pull_request.number || github.ref || github.run_id) }}"
+	if got := concurrency["group"]; got != wantGroup {
+		t.Fatalf("concurrency.group = %q, want %q (push events must get a unique group per commit SHA)", got, wantGroup)
+	}
+
+	const wantCancel = "${{ github.event_name == 'pull_request' }}"
+	if got := concurrency["cancel-in-progress"]; got != wantCancel {
+		t.Fatalf("concurrency.cancel-in-progress = %q, want %q (pull_request behavior must stay unchanged)", got, wantCancel)
+	}
+}
