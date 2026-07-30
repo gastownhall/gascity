@@ -588,8 +588,10 @@ jobs:
         run: make test-integration-review-formulas
 
   # Aggregate summary so a single check reports Mac parity status on the
-  # PR. Gated on the same trigger set as the parity jobs so it doesn't
-  # post a misleading green check on PRs that never ran Mac at all. The
+  # PR. This job always runs (bare `always()`) and reads the gate job's
+  # own result/outputs: it fails closed if the gate did not succeed, and
+  # reports "Not run: <reason>" when the gate decided no tier applies —
+  # so an all-skipped run can never appear green (fleet rule D5). The
   # best-effort jobs keep their failures visible here via job outputs that
   # capture the real step outcome — needs.<job>.result masks it as success
   # because the failing steps are continue-on-error.
