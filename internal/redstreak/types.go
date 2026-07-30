@@ -34,6 +34,8 @@ type Evaluation struct {
 	Monitor              string
 	LatestRunID          int64
 	LatestRunURL         string
+	FirstRunID           int64
+	FirstRunURL          string
 	AggregateConclusion  string
 	ConsecutiveFailures  int
 	ConsecutiveSuccesses int
