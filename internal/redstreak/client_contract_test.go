@@ -2,42 +2,54 @@ package redstreak
 
 import (
 	"context"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// roundTripperFunc adapts a function to http.RoundTripper so tests can fake
+// GitHub API responses without a real HTTP listener.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func jsonResponse(statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
+
 func TestClientListRunsRequestsConfiguredScheduledWorkflow(t *testing.T) {
 	var sawRequest bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawRequest = true
-		if r.URL.Path != "/repos/gastownhall/gascity/actions/workflows/nightly.yml/runs" {
-			t.Errorf("path = %q, want Nightly workflow runs endpoint", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("event"); got != "schedule" {
-			t.Errorf("event query = %q, want schedule", got)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("Authorization = %q, want bearer token", got)
-		}
-		if got := r.Header.Get("X-GitHub-Api-Version"); got != "2022-11-28" {
-			t.Errorf("X-GitHub-Api-Version = %q", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"workflow_runs":[{
-			"id":501,
-			"event":"schedule",
-			"conclusion":"success",
-			"run_started_at":"2026-07-30T01:00:00Z",
-			"html_url":"https://example.test/runs/501"
-		}]}`))
+	client := NewClient("test-token", WithEndpoint("http://redstreak.test"), WithHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			sawRequest = true
+			if r.URL.Path != "/repos/gastownhall/gascity/actions/workflows/nightly.yml/runs" {
+				t.Errorf("path = %q, want Nightly workflow runs endpoint", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("event"); got != "schedule" {
+				t.Errorf("event query = %q, want schedule", got)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+				t.Errorf("Authorization = %q, want bearer token", got)
+			}
+			if got := r.Header.Get("X-GitHub-Api-Version"); got != "2022-11-28" {
+				t.Errorf("X-GitHub-Api-Version = %q", got)
+			}
+			return jsonResponse(http.StatusOK, `{"workflow_runs":[{
+				"id":501,
+				"event":"schedule",
+				"conclusion":"success",
+				"run_started_at":"2026-07-30T01:00:00Z",
+				"html_url":"https://example.test/runs/501"
+			}]}`), nil
+		}),
 	}))
-	t.Cleanup(server.Close)
-
-	client := NewClient("test-token", WithEndpoint(server.URL), WithHTTPClient(server.Client()))
 	monitor := config.GitHubRunMonitor{
 		Owner:        "gastownhall",
 		Repo:         "gascity",
@@ -57,19 +69,17 @@ func TestClientListRunsRequestsConfiguredScheduledWorkflow(t *testing.T) {
 }
 
 func TestClientListJobsReadsTheAggregateJobsOwnConclusion(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/gastownhall/gascity/actions/runs/501/jobs" {
-			t.Errorf("path = %q, want run jobs endpoint", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jobs":[
-			{"name":"Tier B acceptance tests","conclusion":"success"},
-			{"name":"Nightly summary","conclusion":"failure"}
-		]}`))
+	client := NewClient("test-token", WithEndpoint("http://redstreak.test"), WithHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/repos/gastownhall/gascity/actions/runs/501/jobs" {
+				t.Errorf("path = %q, want run jobs endpoint", r.URL.Path)
+			}
+			return jsonResponse(http.StatusOK, `{"jobs":[
+				{"name":"Tier B acceptance tests","conclusion":"success"},
+				{"name":"Nightly summary","conclusion":"failure"}
+			]}`), nil
+		}),
 	}))
-	t.Cleanup(server.Close)
-
-	client := NewClient("test-token", WithEndpoint(server.URL), WithHTTPClient(server.Client()))
 	monitor := config.GitHubRunMonitor{
 		Owner: "gastownhall",
 		Repo:  "gascity",
@@ -107,13 +117,11 @@ func TestClientRejectsMalformedAPIDataAndCommandFailure(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.statusCode)
-				_, _ = w.Write([]byte(tc.body))
+			client := NewClient("test-token", WithEndpoint("http://redstreak.test"), WithHTTPClient(&http.Client{
+				Transport: roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+					return jsonResponse(tc.statusCode, tc.body), nil
+				}),
 			}))
-			t.Cleanup(server.Close)
-
-			client := NewClient("test-token", WithEndpoint(server.URL), WithHTTPClient(server.Client()))
 			_, err := client.ListRuns(context.Background(), config.GitHubRunMonitor{
 				Owner:        "gastownhall",
 				Repo:         "gascity",
