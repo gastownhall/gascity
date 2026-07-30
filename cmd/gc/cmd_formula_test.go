@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +52,7 @@ func TestResolveFormulaScope_RigFlagWins(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "my-project"
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestResolveFormulaScope_CwdInsideRig(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = ""
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestResolveFormulaScope_CityScopeWhenNoRig(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = ""
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestResolveFormulaScope_UnknownRigErrors(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "ghost"
 
-	_, err := resolveFormulaScope(cfg, cityPath)
+	_, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for unknown rig, got nil")
 	}
@@ -166,7 +167,7 @@ func TestResolveFormulaScope_UnboundRigErrors(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "unbound"
 
-	_, err := resolveFormulaScope(cfg, cityPath)
+	_, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err == nil {
 		t.Fatal("expected error for unbound rig, got nil")
 	}
@@ -223,6 +224,21 @@ func TestRigFormulaVarsForScope(t *testing.T) {
 			t.Errorf("rigFormulaVarsForScope = %v, want empty (no rig context)", vars)
 		}
 	})
+
+	t.Run("GC_RIG env populates FormulaVars when cwd outside rig", func(t *testing.T) {
+		prev := rigFlag
+		t.Cleanup(func() { rigFlag = prev })
+		rigFlag = ""
+		t.Setenv("GC_RIG", "mo")
+
+		// cwd outside both cityPath and rigPath, simulating a pool/polecat
+		// worktree under .gc/worktrees/ where cwd resolution fails.
+		t.Chdir(t.TempDir())
+		vars := rigFormulaVarsForScope(cfg, cityPath)
+		if got := vars["test_command"]; got != "make test-fast" {
+			t.Errorf("rigFormulaVarsForScope()[test_command] = %q, want %q", got, "make test-fast")
+		}
+	})
 }
 
 // TestResolveFormulaScope_RigFallsBackToCityLayers covers the case where a
@@ -243,7 +259,7 @@ func TestResolveFormulaScope_RigFallsBackToCityLayers(t *testing.T) {
 	t.Cleanup(func() { rigFlag = prev })
 	rigFlag = "bare-rig"
 
-	scope, err := resolveFormulaScope(cfg, cityPath)
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
 	if err != nil {
 		t.Fatalf("resolveFormulaScope: %v", err)
 	}
@@ -253,6 +269,130 @@ func TestResolveFormulaScope_RigFallsBackToCityLayers(t *testing.T) {
 	want := []string{"/city/formulas"}
 	if !reflect.DeepEqual(scope.searchPaths, want) {
 		t.Errorf("searchPaths = %v, want %v (city fallback)", scope.searchPaths, want)
+	}
+}
+
+// TestResolveFormulaScope_GCRIGEnvRoutesWhenCwdOutsideRig covers the bug
+// where `gc formula cook`/`show` ignored GC_RIG env (set by the controller
+// on every rig agent) and fell back to city scope when cwd resolution
+// failed — which it always does for pool/polecat worktrees living under
+// .gc/worktrees/<pack>/<agent>/, since those are not inside the registered
+// rig.Path. This mirrors resolveBdScopeTarget's GC_RIG tier (cmd_bd.go),
+// which already closed the identical gap for `gc bd`. See gastownhall/gascity
+// ga-fstubn.
+func TestResolveFormulaScope_GCRIGEnvRoutesWhenCwdOutsideRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "my-project")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "my-project", Path: rigPath}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+			Rigs: map[string][]string{
+				"my-project": {"/city/formulas", "/rigs/my-project/formulas"},
+			},
+		},
+	}
+
+	// cwd is deliberately outside both cityPath and rigPath, simulating a
+	// pool/polecat worktree under .gc/worktrees/ — resolveRigForDir cannot
+	// resolve this to any rig.
+	t.Chdir(t.TempDir())
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+	t.Setenv("GC_RIG", "my-project")
+
+	var stderr bytes.Buffer
+	scope, err := resolveFormulaScope(cfg, cityPath, &stderr)
+	if err != nil {
+		t.Fatalf("resolveFormulaScope: %v", err)
+	}
+	if scope.storeRoot != rigPath {
+		t.Errorf("storeRoot = %q, want %q", scope.storeRoot, rigPath)
+	}
+	if scope.rig != "my-project" {
+		t.Errorf("rig = %q, want %q", scope.rig, "my-project")
+	}
+	want := []string{"/city/formulas", "/rigs/my-project/formulas"}
+	if !reflect.DeepEqual(scope.searchPaths, want) {
+		t.Errorf("searchPaths = %v, want %v", scope.searchPaths, want)
+	}
+	// A GC_RIG that names a bound rig is honored silently, matching
+	// resolveBdScopeTarget's behavior.
+	if warn := stderr.String(); warn != "" {
+		t.Errorf("expected no warning for a valid GC_RIG, got %q", warn)
+	}
+}
+
+// TestResolveFormulaScope_RigFlagOverridesGCRIGEnv verifies --rig still wins
+// over GC_RIG env, matching resolveBdScopeTarget's priority order.
+func TestResolveFormulaScope_RigFlagOverridesGCRIGEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "my-project")
+	otherPath := filepath.Join(cityPath, "other-rig")
+	for _, p := range []string{rigPath, otherPath} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "my-project", Path: rigPath},
+			{Name: "other-rig", Path: otherPath},
+		},
+	}
+
+	t.Chdir(t.TempDir())
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = "my-project"
+	t.Setenv("GC_RIG", "other-rig")
+
+	scope, err := resolveFormulaScope(cfg, cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveFormulaScope: %v", err)
+	}
+	if scope.storeRoot != rigPath {
+		t.Errorf("storeRoot = %q, want %q (--rig must win over GC_RIG)", scope.storeRoot, rigPath)
+	}
+}
+
+// TestResolveFormulaScope_UnknownGCRIGEnvFallsThroughAndWarns matches
+// resolveBdScopeTarget's behavior: an unresolvable GC_RIG does not error
+// (unlike an identical --rig value), it falls through to cwd/city — but the
+// discard is not silent, so a stale or typo'd GC_RIG doesn't redirect
+// scope with no diagnostic.
+func TestResolveFormulaScope_UnknownGCRIGEnvFallsThroughAndWarns(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "real", Path: filepath.Join(cityPath, "real")}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{"/city/formulas"},
+		},
+	}
+
+	t.Chdir(t.TempDir())
+	prev := rigFlag
+	t.Cleanup(func() { rigFlag = prev })
+	rigFlag = ""
+	t.Setenv("GC_RIG", "nonexistent-rig")
+
+	var stderr bytes.Buffer
+	scope, err := resolveFormulaScope(cfg, cityPath, &stderr)
+	if err != nil {
+		t.Fatalf("resolveFormulaScope: %v", err)
+	}
+	if scope.storeRoot != cityPath {
+		t.Errorf("storeRoot = %q, want %q (city fallback)", scope.storeRoot, cityPath)
+	}
+	warn := stderr.String()
+	if !strings.Contains(warn, "GC_RIG") || !strings.Contains(warn, "nonexistent-rig") {
+		t.Errorf("expected a warning naming the discarded GC_RIG value, got %q", warn)
 	}
 }
 
