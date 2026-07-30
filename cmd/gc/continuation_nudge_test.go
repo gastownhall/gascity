@@ -446,12 +446,17 @@ func continuationNudgeCfg() *config.City {
 	}}}
 }
 
-func validContinuationCandidate(id, assignee string) ContinuationClaimCandidate {
+func continuationCandidateBeads(id, assignee string) (beads.Bead, beads.Bead) {
 	root := continuationRoot("rig:fixture")
 	root.Metadata[beadmeta.SessionNameMetadataKey] = assignee
 	step := continuationStep(root.ID, "rig:fixture")
 	step.ID = id
 	step.Assignee = assignee
+	return root, step
+}
+
+func validContinuationCandidate(id, assignee string) ContinuationClaimCandidate {
+	root, step := continuationCandidateBeads(id, assignee)
 	workStore := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
 	return ContinuationClaimCandidate{
 		WorkBeadID: id,
@@ -868,6 +873,139 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 			t.Fatalf("metadata writes = %d, want 0 while revalidation is incomplete", store.metadataWrites)
 		}
 		session = mustGetTestBead(t, backing, session.ID)
+		if got := session.Metadata[continuationClaimNudgeCountKey]; got != "1" {
+			t.Fatalf("persisted attempt count = %q, want preserved 1", got)
+		}
+	})
+}
+
+func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testing.T) {
+	const sessionName = "session-a"
+	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+
+	for _, tt := range []struct {
+		name       string
+		mutateID   string
+		liveStatus string
+	}{
+		{name: "successor claimed outside cache", mutateID: "step-a", liveStatus: "in_progress"},
+		{name: "root closed outside cache", mutateID: "root-a", liveStatus: "closed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, step := continuationCandidateBeads("step-a", sessionName)
+			workBacking := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+			cache := beads.NewCachingStoreForTest(workBacking, nil)
+			if err := cache.PrimeActive(); err != nil {
+				t.Fatalf("prime work cache: %v", err)
+			}
+			candidate := ContinuationClaimCandidate{
+				WorkBeadID: step.ID,
+				RootBeadID: root.ID,
+				StoreRef:   "rig:fixture",
+				Assignee:   sessionName,
+				Store:      cache,
+			}
+
+			cachedBefore, err := cache.Get(tt.mutateID)
+			if err != nil {
+				t.Fatalf("cached Get before external transition: %v", err)
+			}
+			status := tt.liveStatus
+			if err := workBacking.Update(tt.mutateID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatalf("mutate live backing: %v", err)
+			}
+			cachedAfter, err := cache.Get(tt.mutateID)
+			if err != nil {
+				t.Fatalf("cached Get after external transition: %v", err)
+			}
+			if cachedAfter.Status != cachedBefore.Status {
+				t.Fatalf("cache unexpectedly refreshed status = %q, want stale %q", cachedAfter.Status, cachedBefore.Status)
+			}
+			liveAfter, err := beads.HandlesFor(cache).Live.Get(tt.mutateID)
+			if err != nil {
+				t.Fatalf("live Get after external transition: %v", err)
+			}
+			if liveAfter.Status != tt.liveStatus {
+				t.Fatalf("live status = %q, want %q", liveAfter.Status, tt.liveStatus)
+			}
+
+			sp := continuationRunningFake(t, sessionName)
+			session := continuationPoolSession("session-bead-a", sessionName)
+			sessionBacking := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			seedContinuationMarker(t, sessionBacking, session, candidate, 0, now.Add(-idleClaimNudgeGrace-time.Second))
+			session = mustGetTestBead(t, sessionBacking, session.ID)
+			sessionStore := &continuationMetadataCountingStore{Store: sessionBacking}
+
+			nudgeStalledPoolContinuations(
+				sp,
+				continuationNudgeCfg(),
+				sessionStore,
+				[]beads.Bead{session},
+				[]ContinuationClaimCandidate{candidate},
+				false,
+				now,
+				&bytes.Buffer{},
+			)
+			if got := sp.CountCalls("Nudge", sessionName); got != 0 {
+				t.Fatalf("Nudge calls = %d, want 0 after authoritative live transition", got)
+			}
+			if sessionStore.metadataWrites != 1 {
+				t.Fatalf("metadata writes = %d, want one stale-marker clear", sessionStore.metadataWrites)
+			}
+			session = mustGetTestBead(t, sessionBacking, session.ID)
+			if got := session.Metadata[continuationClaimNudgeWorkKey]; got != "" {
+				t.Fatalf("work marker = %q, want cleared after authoritative live transition", got)
+			}
+		})
+	}
+
+	t.Run("live root read error holds stale marker", func(t *testing.T) {
+		root, step := continuationCandidateBeads("step-a", sessionName)
+		workBacking := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+		failingBacking := &continuationGetErrorStore{Store: workBacking}
+		cache := beads.NewCachingStoreForTest(failingBacking, nil)
+		if err := cache.PrimeActive(); err != nil {
+			t.Fatalf("prime work cache: %v", err)
+		}
+		if _, err := cache.Get(root.ID); err != nil {
+			t.Fatalf("prime cached root read: %v", err)
+		}
+		failingBacking.failID = root.ID
+		if _, err := cache.Get(root.ID); err != nil {
+			t.Fatalf("plain cached root Get unexpectedly reached live failure: %v", err)
+		}
+		candidate := ContinuationClaimCandidate{
+			WorkBeadID: step.ID,
+			RootBeadID: root.ID,
+			StoreRef:   "rig:fixture",
+			Assignee:   sessionName,
+			Store:      cache,
+		}
+
+		sp := continuationRunningFake(t, sessionName)
+		session := continuationPoolSession("session-bead-a", sessionName)
+		sessionBacking := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+		seedContinuationMarker(t, sessionBacking, session, candidate, 1, now.Add(-idleClaimNudgeBackoff-time.Second))
+		session = mustGetTestBead(t, sessionBacking, session.ID)
+		sessionStore := &continuationMetadataCountingStore{Store: sessionBacking}
+
+		nudgeStalledPoolContinuations(
+			sp,
+			continuationNudgeCfg(),
+			sessionStore,
+			[]beads.Bead{session},
+			[]ContinuationClaimCandidate{candidate},
+			false,
+			now,
+			&bytes.Buffer{},
+		)
+		if got := sp.CountCalls("Nudge", sessionName); got != 0 {
+			t.Fatalf("Nudge calls = %d, want 0 on authoritative root read failure", got)
+		}
+		if sessionStore.metadataWrites != 0 {
+			t.Fatalf("metadata writes = %d, want 0 while authoritative root read is incomplete", sessionStore.metadataWrites)
+		}
+		session = mustGetTestBead(t, sessionBacking, session.ID)
 		if got := session.Metadata[continuationClaimNudgeCountKey]; got != "1" {
 			t.Fatalf("persisted attempt count = %q, want preserved 1", got)
 		}

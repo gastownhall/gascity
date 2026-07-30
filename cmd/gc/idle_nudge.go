@@ -211,7 +211,16 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if target.Store == nil {
 		return backstopResolutionHold
 	}
-	current, err := target.Store.Get(target.ID)
+	// Assigned-work snapshots normally carry a CachingStore. A plain Get can
+	// therefore return the pre-claim row after another process has already
+	// claimed it. Both revalidation reads must use the exact store scope's
+	// authoritative live handle or this last-moment guard can deliver a stale
+	// continuation nudge.
+	live := beads.HandlesFor(target.Store).Live
+	if live == nil {
+		return backstopResolutionHold
+	}
+	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
@@ -224,7 +233,7 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(current.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
 		return backstopResolutionClear
 	}
-	root, err := target.Store.Get(target.RootID)
+	root, err := live.Get(target.RootID)
 	if err != nil || root.ID != target.RootID {
 		return backstopResolutionHold
 	}
