@@ -115,14 +115,33 @@ func WalkSize(path string) int64 {
 	return total
 }
 
+// lastMaintenanceScanWindowBytes bounds the TailProvider fast path in
+// LastMaintenance: a rare/optional event type (store maintenance may never
+// have run) forces a full-file backward walk otherwise, at the same cost as
+// an unfiltered forward scan (#4418). "Not found within the window" is a
+// valid, already-representable result — Health.LastGCAt is omitempty and
+// the status line simply omits "Last GC:" — so this trades a theoretical
+// miss on a maintenance event older than the window for bounded latency on
+// every call. 8 MiB comfortably covers many thousands of events at the
+// measured ~800 bytes/event average, while capping the worst case (a log
+// that has never emitted a matching event) to a small fraction of a full
+// scan.
+const lastMaintenanceScanWindowBytes = 8 * 1024 * 1024
+
 // LastMaintenance returns the timestamp and status ("success" or
 // "failed") of the most-recent store-maintenance event in provider.
 // Zero time and empty status when no events, provider is nil, or the
 // provider returns an error.
+//
+// When provider implements [events.TailProvider], this uses the bounded
+// backward-tail scan instead of the unbounded forward List — see
+// lastMaintenanceScanWindowBytes. Providers without a tail fast path (e.g.
+// an exec-script provider) fall back to the original unbounded List call.
 func LastMaintenance(ep events.Provider) (time.Time, string) {
 	if ep == nil {
 		return time.Time{}, ""
 	}
+	tp, hasTail := ep.(events.TailProvider)
 	var (
 		latestTs     time.Time
 		latestStatus string
@@ -134,7 +153,15 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		{events.StoreMaintenanceDone, "success"},
 		{events.StoreMaintenanceFailed, "failed"},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		var (
+			evts []events.Event
+			err  error
+		)
+		if hasTail {
+			evts, err = tp.ListTail(events.Filter{Type: spec.typ, MaxScanBytes: lastMaintenanceScanWindowBytes}, 1)
+		} else {
+			evts, err = ep.List(events.Filter{Type: spec.typ})
+		}
 		if err != nil {
 			continue
 		}

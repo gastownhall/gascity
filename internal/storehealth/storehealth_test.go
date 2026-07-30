@@ -258,3 +258,71 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
+
+// recordingProvider wraps a Fake and counts List vs ListTail calls, so tests
+// can assert which path LastMaintenance actually took rather than only
+// inferring it from the result.
+type recordingProvider struct {
+	*events.Fake
+	listCalls     int
+	listTailCalls int
+}
+
+func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *recordingProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	return r.Fake.ListTail(filter, limit)
+}
+
+// providerWithoutTail implements events.Provider but deliberately omits
+// ListTail, so LastMaintenance must fall back to the unbounded List path
+// rather than a type assertion panicking or silently returning nothing.
+type providerWithoutTail struct {
+	*events.Fake
+}
+
+func (p *providerWithoutTail) List(filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(filter)
+}
+
+// TestLastMaintenanceUsesTailProviderFastPath is the regression for #4418:
+// when the provider implements events.TailProvider, LastMaintenance must
+// call ListTail (the bounded backward scan) instead of the unbounded List,
+// which on a large event log with a rare Type filter costs a full-file scan
+// for what is ultimately a cosmetic status field.
+func TestLastMaintenanceUsesTailProviderFastPath(t *testing.T) {
+	rp := &recordingProvider{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 3})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	rp.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
+
+	gotTs, gotStatus := LastMaintenance(rp)
+	if !gotTs.Equal(ts) || gotStatus != "success" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,success)", gotTs, gotStatus, ts)
+	}
+	if rp.listTailCalls == 0 {
+		t.Fatalf("listTailCalls = 0, want > 0 (LastMaintenance should prefer the TailProvider fast path)")
+	}
+	if rp.listCalls != 0 {
+		t.Fatalf("listCalls = %d, want 0 (fast path should not also fall back to List)", rp.listCalls)
+	}
+}
+
+// TestLastMaintenanceFallsBackWithoutTailProvider guards the fallback: a
+// provider that does not implement events.TailProvider (e.g. an exec-script
+// provider) must still get a correct answer via the existing List path.
+func TestLastMaintenanceFallsBackWithoutTailProvider(t *testing.T) {
+	pwt := &providerWithoutTail{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	pwt.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: ts, Payload: payload})
+
+	gotTs, gotStatus := LastMaintenance(pwt)
+	if !gotTs.Equal(ts) || gotStatus != "failed" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,failed)", gotTs, gotStatus, ts)
+	}
+}

@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is invisible to it regardless of name, while vendor/testdata (tracked or
   not) stay excluded as before. (gascity#4479)
 
+- **`gc status` no longer pays a full event-log scan for a cosmetic field.**
+  `storehealth.LastMaintenance` now prefers the `TailProvider` backward-scan
+  fast path over an unbounded forward `List` when the provider supports it,
+  and a new `Filter.MaxScanBytes` bounds that backward scan so a rare or
+  never-emitted event type (the common case: a city that has never run store
+  maintenance) can no longer force a full-file walk just to populate the
+  `Last GC:` status line. Previously this cost two full scans of
+  `events.jsonl` on every `gc status` call, dominating latency on large event
+  logs and surfacing as a spurious "runtime status probe timed out" warning.
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report
