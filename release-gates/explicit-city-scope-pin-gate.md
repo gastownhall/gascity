@@ -1,4 +1,4 @@
-# Release gate: explicit `--city` formula scope pin
+# Release gate: explicit formula city-scope pin
 
 - Deploy bead: `ga-vcj2vo`
 - Build bead: `ga-61cxkw`
