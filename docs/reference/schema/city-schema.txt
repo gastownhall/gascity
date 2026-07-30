@@ -1617,6 +1617,13 @@
           },
           "type": "array",
           "description": "PRMonitors declares GitHub pull-request readiness monitors."
+        },
+        "run_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubRunMonitor"
+          },
+          "type": "array",
+          "description": "RunMonitors declares scheduled GitHub Actions red-streak monitors."
         }
       },
       "additionalProperties": false,
@@ -1772,6 +1779,74 @@
         "name"
       ],
       "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
+    },
+    "GitHubRunMonitor": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the stable monitor identity used by patches and diagnostics."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner is the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo is the GitHub repository name."
+        },
+        "workflow_file": {
+          "type": "string",
+          "description": "WorkflowFile is the workflow file name (e.g. \"nightly.yml\") whose runs\nare polled."
+        },
+        "aggregate_job": {
+          "type": "string",
+          "description": "AggregateJob is the job name within the workflow whose own conclusion\nis treated as the authoritative pass/fail verdict for the run."
+        },
+        "activated_after": {
+          "type": "string",
+          "description": "ActivatedAfter is an RFC3339 timestamp; runs started at or before this\nboundary are ignored so pre-enrollment history cannot trip the streak."
+        },
+        "threshold": {
+          "type": "integer",
+          "description": "Threshold is the number of consecutive red aggregate runs required\nbefore an episode bead is created. Zero/unset defaults to 3."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the Gas City rig that owns episode beads for this monitor."
+        },
+        "route": {
+          "type": "string",
+          "description": "Route is the operator-supplied route target for episode beads."
+        },
+        "priority": {
+          "type": "string",
+          "description": "Priority is the episode bead priority. Empty defaults to \"P1\"."
+        },
+        "event": {
+          "type": "string",
+          "description": "Event is the workflow trigger event to filter runs by (e.g.\n\"schedule\"). Empty defaults to \"schedule\"."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify lists session or mail recipients for episode notifications."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "owner",
+        "repo",
+        "workflow_file",
+        "aggregate_job",
+        "activated_after",
+        "rig",
+        "route"
+      ],
+      "description": "GitHubRunMonitor declares a scheduled GitHub Actions workflow to watch for consecutive red (failing) runs of a designated aggregate job."
     },
     "Import": {
       "properties": {

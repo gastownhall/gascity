@@ -1817,6 +1817,7 @@ gc github
 | Subcommand | Description |
 |------------|-------------|
 | [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+| [gc github runs](#gc-github-runs) | GitHub Actions scheduled-run red-streak monitor commands |
 
 ## gc github pr
 
@@ -1850,6 +1851,38 @@ gc github pr backfill [monitor-name] [flags]
 | `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
 | `--json` | bool |  | emit JSON |
 | `--timeout` | duration | `45s` | GitHub query timeout |
+
+## gc github runs
+
+GitHub Actions scheduled-run red-streak monitor commands
+
+```
+gc github runs
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc github runs evaluate](#gc-github-runs-evaluate) | Evaluate configured GitHub Actions red-streak monitors |
+
+## gc github runs evaluate
+
+Evaluate configured GitHub Actions scheduled-run red-streak monitors.
+
+The command reads [[github.run_monitor]] entries from the resolved city
+configuration, polls each monitor's workflow run history from GitHub, and
+maintains a durable episode bead per monitor once its aggregate job reaches
+the configured consecutive-red threshold. Recovery is recorded but never
+auto-closes an episode; a human must review and close it. By default all
+configured monitors are evaluated; pass --monitor to evaluate just one.
+
+```
+gc github runs evaluate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | evaluate and report without mutating any episode bead |
+| `--monitor` | string |  | evaluate only the named monitor (default: all configured monitors) |
 
 ## gc graph
 

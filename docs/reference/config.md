@@ -432,6 +432,7 @@ GitHubConfig groups GitHub-facing repository monitor declarations.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `pr_monitor` | []GitHubPRMonitor |  |  | PRMonitors declares GitHub pull-request readiness monitors. |
+| `run_monitor` | []GitHubRunMonitor |  |  | RunMonitors declares scheduled GitHub Actions red-streak monitors. |
 
 ## GitHubPRMonitor
 
@@ -471,6 +472,25 @@ GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name.
 | `webhook_secret_key` | string |  |  | WebhookSecretKey overrides the stable webhook secret key. |
 | `poll_interval` | string |  |  | PollInterval overrides the optional polling cadence. |
 | `merge_queue` | string |  |  | MergeQueuePolicy overrides merge-queue signal handling. Enum: `ignore`, `observe`, `repair` |
+
+## GitHubRunMonitor
+
+GitHubRunMonitor declares a scheduled GitHub Actions workflow to watch for consecutive red (failing) runs of a designated aggregate job.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the stable monitor identity used by patches and diagnostics. |
+| `owner` | string | **yes** |  | Owner is the GitHub repository owner or organization. |
+| `repo` | string | **yes** |  | Repo is the GitHub repository name. |
+| `workflow_file` | string | **yes** |  | WorkflowFile is the workflow file name (e.g. "nightly.yml") whose runs are polled. |
+| `aggregate_job` | string | **yes** |  | AggregateJob is the job name within the workflow whose own conclusion is treated as the authoritative pass/fail verdict for the run. |
+| `activated_after` | string | **yes** |  | ActivatedAfter is an RFC3339 timestamp; runs started at or before this boundary are ignored so pre-enrollment history cannot trip the streak. |
+| `threshold` | integer |  |  | Threshold is the number of consecutive red aggregate runs required before an episode bead is created. Zero/unset defaults to 3. |
+| `rig` | string | **yes** |  | Rig is the Gas City rig that owns episode beads for this monitor. |
+| `route` | string | **yes** |  | Route is the operator-supplied route target for episode beads. |
+| `priority` | string |  |  | Priority is the episode bead priority. Empty defaults to "P1". |
+| `event` | string |  |  | Event is the workflow trigger event to filter runs by (e.g. "schedule"). Empty defaults to "schedule". |
+| `notify` | []string |  |  | Notify lists session or mail recipients for episode notifications. |
 
 ## Import
 

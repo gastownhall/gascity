@@ -33,6 +33,10 @@ linters:
   settings:
     misspell:
       locale: US
+      ignore-rules:
+        # GitHub Actions API's real `conclusion` value (REST API docs,
+        # github/rest-api-description#1634) — not a typo of "canceled".
+        - cancelled
 
   exclusions:
     rules:
