@@ -98,7 +98,15 @@ const (
 	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
 	// acceptance_bd_contract tag and bd binary the preceding step already
 	// resolved onto PATH. No new job, trigger or permission.
-	expectedCIExecutionHash     = "5a2eedb5eb5a94b471b9a8d4383ebab75b57006b697479ba359abf1e3c27800e"
+	//
+	// Bumped again (ga-tniyjy): the workflow concurrency group keys push events
+	// on github.sha instead of github.ref. Under a shared per-ref group GitHub
+	// cancels the run already pending when a newer push queues, so an
+	// intermediate main commit could be canceled before it started and never
+	// get a verdict. Reviewed delta: the concurrency.group expression only;
+	// pull_request grouping and cancel-in-progress are unchanged. No new job,
+	// step, trigger or permission.
+	expectedCIExecutionHash     = "fbe7e8e06d460bf30eafa34a8d8c5419455bc9093faa10a7f453c350b3915e2f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
