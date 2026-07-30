@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -1716,8 +1717,12 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // than a 500.
 func assertRigPathWithinCity(cityPath, resolved string) error {
 	// Lexical check first: rejects "../" escapes and absolute paths that resolve
-	// to a sibling/parent of the city.
-	if err := relWithinCity(cityPath, resolved); err != nil {
+	// to a sibling/parent of the city. Normalize both sides so a symlinked city
+	// ancestor (cityPath raw, resolved already resolveStoreScopeRoot-resolved)
+	// doesn't register as a false-positive escape.
+	normalizedCity := pathutil.NormalizePathForCompare(cityPath)
+	normalizedTarget := pathutil.NormalizePathForCompare(resolved)
+	if err := relWithinCity(normalizedCity, normalizedTarget); err != nil {
 		return err
 	}
 	// Symlink-aware check: a "../"-free lexical path can still escape through a

@@ -95,6 +95,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -1099,11 +1100,11 @@ type formulaScope struct {
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula
-// invocation should run. Priority: --rig flag > GC_RIG env > enclosing rig
-// from cwd > city. The GC_RIG tier mirrors resolveBdScopeTarget (cmd_bd.go):
-// the controller sets GC_RIG reliably, while cwd detection fails for
-// pool/polecat worktrees under .gc/worktrees/, which are not inside the
-// registered rig.Path.
+// invocation should run. Priority: --rig flag > explicit --city flag >
+// GC_RIG env > enclosing rig from cwd > city. The GC_RIG tier mirrors
+// resolveBdScopeTarget (cmd_bd.go): the controller sets GC_RIG reliably,
+// while cwd detection fails for pool/polecat worktrees under
+// .gc/worktrees/, which are not inside the registered rig.Path.
 func resolveFormulaScope(cfg *config.City, cityPath string, stderr io.Writer) (formulaScope, error) {
 	if name := strings.TrimSpace(rigFlag); name != "" {
 		rig, ok := rigByName(cfg, name)
@@ -1114,6 +1115,16 @@ func resolveFormulaScope(cfg *config.City, cityPath string, stderr io.Writer) (f
 			return formulaScope{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
 		}
 		return rigFormulaScope(cfg, cityPath, rig), nil
+	}
+
+	// An explicit --city pins city scope, symmetric with explicit --rig: a
+	// deliberate city scope must never be silently downgraded to a rig store
+	// by GC_RIG env or cwd auto-detection below. GC_RIG is ambient on every
+	// controller-spawned agent, so without this pin `gc --city X formula
+	// cook` lands on a rig store. (gastownhall/gascity#3410 did the same for
+	// `gc bd`.)
+	if strings.TrimSpace(cityFlag) != "" {
+		return formulaScope{storeRoot: cityPath, searchPaths: cfg.FormulaLayers.City}, nil
 	}
 
 	gcRigDiscarded := ""
@@ -1163,10 +1174,10 @@ func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaS
 }
 
 // rigFormulaVarsForScope returns rig-scoped formula var defaults for the
-// active scope (honoring --rig, GC_RIG env, and cwd — same priority as
-// resolveFormulaScope). Returns an empty map when no rig context is active
-// so callers can treat the result as read-only annotations without nil
-// checks. No stderr warning here for a discarded GC_RIG: this is always
+// active scope (honoring --rig, explicit --city, GC_RIG env, and cwd — same
+// priority as resolveFormulaScope). Returns an empty map when no rig context
+// is active so callers can treat the result as read-only annotations without
+// nil checks. No stderr warning here for a discarded GC_RIG: this is always
 // called alongside resolveFormulaScope (see newFormulaShowCmd), which
 // already warns once for the same condition.
 func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string {
@@ -1177,6 +1188,11 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 		if rig, ok := rigByName(cfg, name); ok {
 			return cloneStringMap(rig.FormulaVars)
 		}
+		return map[string]string{}
+	}
+	// Symmetric with resolveFormulaScope: an explicit --city pins city scope,
+	// which has no rig-scoped formula vars.
+	if strings.TrimSpace(cityFlag) != "" {
 		return map[string]string{}
 	}
 	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
