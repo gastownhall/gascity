@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +18,11 @@ const (
 	psZombieTimeout  = 100 * time.Millisecond
 	childEnumTimeout = 1 * time.Second
 )
+
+// psCmdlineTimeout bounds the portable argv probe. Callers run on reconciler
+// ticks, so a hung ps must not stall them; a timeout yields no argv, which the
+// identity check treats as "cannot confirm" and rejects.
+const psCmdlineTimeout = time.Second
 
 // Alive reports whether a PID exists and is not a zombie.
 func Alive(pid int) bool {
@@ -103,17 +107,23 @@ func AliveWithStartTime(pid int, startTime string) bool {
 }
 
 // AliveWithCmdline reports whether a PID exists, is not a zombie, and its
-// command line satisfies match. On platforms without /proc cmdline support it
-// falls back to Alive so callers preserve existing non-Linux behavior.
+// command line satisfies match.
+//
+// It used to return true unconditionally off Linux, because Cmdline read only
+// /proc. That turned an identity check into a bare existence check on those
+// hosts: callers use this to decide whether the PID in a pidfile is still THEIR
+// process, so a recycled PID owned by an unrelated live process passed the
+// check, and the caller skipped work it should have done. Cmdline is portable
+// now, so the platform branch is gone.
+//
+// An unreadable argv yields false — never a match. Callers treat "not my
+// process" as "do the work", which is the recoverable direction.
 func AliveWithCmdline(pid int, match func([]string) bool) bool {
 	if !Alive(pid) {
 		return false
 	}
 	if match == nil {
 		return false
-	}
-	if runtime.GOOS != "linux" {
-		return true
 	}
 	argv, err := Cmdline(pid)
 	if err != nil {
@@ -162,13 +172,15 @@ func ArgvHasFlagValue(argv []string, flag, value string) bool {
 	return false
 }
 
-// Cmdline returns a PID's command line from /proc, normalized through
-// NormalizeArgv. It returns an error on hosts without /proc cmdline support
-// or when the process record is unreadable.
+// Cmdline returns a PID's command line, normalized through NormalizeArgv.
+// It reads /proc/<pid>/cmdline where available and otherwise falls back to ps,
+// which is how the rest of this repo already reads another process's argv
+// (see the ps -o args= call sites in cmd/gc and internal/runtime/tmux).
+// It returns an error when no mechanism can read the process record.
 func Cmdline(pid int) ([]string, error) {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
-		return nil, err
+		return psCmdline(pid)
 	}
 	trimmed := strings.TrimRight(string(data), "\x00")
 	if trimmed == "" {
@@ -240,6 +252,30 @@ func ChildPIDs(parent int) ([]int, error) {
 		}
 	}
 	return children, nil
+}
+
+// psCmdline reads a PID's argv with ps, for hosts without /proc.
+//
+// One accepted limitation: ps renders argv as a single space-joined string, so
+// an argument containing a space is split into two. The matchers in this package
+// compare flags and their values (ArgvContainsSequence, ArgvHasFlagValue), and
+// the identifiers they match on — session names, targets — do not contain
+// spaces. Reading argv exactly on darwin needs KERN_PROCARGS2 via cgo, which is
+// not worth it for that gap. A mis-split argv fails the match, and failing the
+// match is the safe direction for every caller.
+func psCmdline(pid int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), psCmdlineTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return nil, fmt.Errorf("reading argv for pid %d via ps: %w", pid, err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no argv reported for pid %d", pid)
+	}
+	return NormalizeArgv(fields), nil
 }
 
 func psReportsZombie(pid int) bool {
