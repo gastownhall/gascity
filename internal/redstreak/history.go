@@ -43,6 +43,8 @@ func EvaluateHistory(monitor config.GitHubRunMonitor, runs []ObservedRun) (Evalu
 	}
 	eval.LatestRunID = filtered[0].ID
 	eval.LatestRunURL = filtered[0].URL
+	eval.FirstRunID = filtered[len(filtered)-1].ID
+	eval.FirstRunURL = filtered[len(filtered)-1].URL
 
 	for idx, run := range filtered {
 		conclusion, matches := resolveAggregateConclusion(monitor.AggregateJob, run.Jobs)

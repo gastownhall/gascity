@@ -216,7 +216,8 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
-              "storage-preflight"
+              "storage-preflight",
+              "github-runs-evaluate"
             ]
           },
           "event_id": {

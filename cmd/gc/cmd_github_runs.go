@@ -276,6 +276,8 @@ func redStreakMetadata(monitor config.GitHubRunMonitor, eval redstreak.Evaluatio
 		"redstreak.aggregate_conclusion": eval.AggregateConclusion,
 		"redstreak.recovery_ready":       strconv.FormatBool(eval.ConsecutiveSuccesses >= monitor.ThresholdOrDefault()),
 		"redstreak.data_contract_error":  strconv.FormatBool(eval.DataContractError),
+		"redstreak.first_run_id":         strconv.FormatInt(eval.FirstRunID, 10),
+		"redstreak.first_run_url":        eval.FirstRunURL,
 	}
 	if eval.ConsecutiveSuccesses > 0 {
 		metadata["redstreak.recovery_seen_at"] = eval.EvaluatedAt.Format(time.RFC3339)
@@ -295,7 +297,7 @@ func createRedStreakEpisode(store beads.Store, monitor config.GitHubRunMonitor, 
 		Type:        "task",
 		Priority:    &priority,
 		Description: redStreakEpisodeDescription(monitor, eval),
-		Labels:      []string{"github", "ci", "red-streak", "actions"},
+		Labels:      []string{"ci-nightly-red-streak"},
 		Metadata:    metadata,
 	})
 }
@@ -334,6 +336,9 @@ func redStreakEpisodeDescription(monitor config.GitHubRunMonitor, eval redstreak
 	fmt.Fprintf(&b, "Workflow: %s\n", monitor.WorkflowFile)
 	if eval.LatestRunURL != "" {
 		fmt.Fprintf(&b, "Latest run: %s\n", eval.LatestRunURL)
+	}
+	if eval.FirstRunID != 0 && eval.FirstRunURL != "" {
+		fmt.Fprintf(&b, "First run: %s\n", eval.FirstRunURL)
 	}
 	if eval.AggregateConclusion != "" {
 		fmt.Fprintf(&b, "Aggregate conclusion: %s\n", eval.AggregateConclusion)
