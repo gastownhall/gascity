@@ -369,8 +369,12 @@ const (
 	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
 	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
 	// (the first patched Dolt release for the eMudhra CA distrust):
-	// the workflow DOLT_VERSION env value only.
-	expectedNightlyExecutionHash = "56ab9f58ed4e8b418c22d7890cd3372de3f276bdf37956322e2f1a69911205e4"
+	// the workflow DOLT_VERSION env value only. Then (ga-hd99jq D5) one new
+	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
+	// needs every other Nightly job, one python3 step fed by a dedicated
+	// needs.<job>.result env var per dependency that fails closed on anything
+	// but "success"; no new trigger, permission or secret.
+	expectedNightlyExecutionHash = "7aa707551fc590457598e0d57d607fc4d6d683d2d3fc10945b95564a9837c9cc"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
