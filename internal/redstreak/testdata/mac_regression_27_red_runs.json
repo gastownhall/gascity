@@ -1,0 +1,32 @@
+{
+  "description": "Synthetic reconstruction of the documented 2026-07-03 through 2026-07-29 Mac Regression streak: 23 failed and 4 cancelled workflows, all with a failed aggregate job.",
+  "runs": [
+    {"id": 1, "started_at": "2026-07-03T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 2, "started_at": "2026-07-04T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 3, "started_at": "2026-07-05T03:17:00Z", "event": "schedule", "workflow_conclusion": "cancelled", "aggregate_conclusion": "failure"},
+    {"id": 4, "started_at": "2026-07-06T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 5, "started_at": "2026-07-07T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 6, "started_at": "2026-07-08T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 7, "started_at": "2026-07-09T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 8, "started_at": "2026-07-10T03:17:00Z", "event": "schedule", "workflow_conclusion": "cancelled", "aggregate_conclusion": "failure"},
+    {"id": 9, "started_at": "2026-07-11T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 10, "started_at": "2026-07-12T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 11, "started_at": "2026-07-13T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 12, "started_at": "2026-07-14T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 13, "started_at": "2026-07-15T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 14, "started_at": "2026-07-16T03:17:00Z", "event": "schedule", "workflow_conclusion": "cancelled", "aggregate_conclusion": "failure"},
+    {"id": 15, "started_at": "2026-07-17T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 16, "started_at": "2026-07-18T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 17, "started_at": "2026-07-19T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 18, "started_at": "2026-07-20T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 19, "started_at": "2026-07-21T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 20, "started_at": "2026-07-22T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 21, "started_at": "2026-07-23T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 22, "started_at": "2026-07-24T03:17:00Z", "event": "schedule", "workflow_conclusion": "cancelled", "aggregate_conclusion": "failure"},
+    {"id": 23, "started_at": "2026-07-25T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 24, "started_at": "2026-07-26T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 25, "started_at": "2026-07-27T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 26, "started_at": "2026-07-28T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"},
+    {"id": 27, "started_at": "2026-07-29T03:17:00Z", "event": "schedule", "workflow_conclusion": "failure", "aggregate_conclusion": "failure"}
+  ]
+}

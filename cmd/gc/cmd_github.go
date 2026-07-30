@@ -103,6 +103,7 @@ func newGitHubCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newGitHubPRCmd(stdout, stderr))
+	cmd.AddCommand(newGitHubRunsCmd(stdout, stderr))
 	return cmd
 }
 

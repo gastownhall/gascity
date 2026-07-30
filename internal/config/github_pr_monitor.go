@@ -17,6 +17,8 @@ const defaultGitHubRepairWorkflow = "mol-polecat-work"
 type GitHubConfig struct {
 	// PRMonitors declares GitHub pull-request readiness monitors.
 	PRMonitors []GitHubPRMonitor `toml:"pr_monitor,omitempty"`
+	// RunMonitors declares scheduled GitHub Actions red-streak monitors.
+	RunMonitors []GitHubRunMonitor `toml:"run_monitor,omitempty"`
 }
 
 // GitHubPRMonitor declares how one repository/base-branch set is monitored
