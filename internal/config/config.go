@@ -4648,6 +4648,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {
 		return nil, err
 	}
+	if err := ValidateGitHubRunMonitors(cfg); err != nil {
+		return nil, err
+	}
 	if err := ValidateDoltConfig(cfg, path); err != nil {
 		return nil, err
 	}

@@ -1,6 +1,16 @@
 package config
 
-import "errors"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+const (
+	defaultGitHubRunMonitorThreshold = 3
+	defaultGitHubRunMonitorPriority  = "P1"
+	defaultGitHubRunMonitorEvent     = "schedule"
+)
 
 // GitHubRunMonitor declares a scheduled GitHub Actions workflow to watch for
 // consecutive red (failing) runs of a designated aggregate job.
@@ -39,24 +49,101 @@ type GitHubRunMonitor struct {
 // ThresholdOrDefault returns the configured consecutive-red threshold, or
 // the default when unset.
 func (m GitHubRunMonitor) ThresholdOrDefault() int {
-	return 0
+	if m.Threshold > 0 {
+		return m.Threshold
+	}
+	return defaultGitHubRunMonitorThreshold
 }
 
 // PriorityOrDefault returns the configured episode priority, or the default
 // when unset.
 func (m GitHubRunMonitor) PriorityOrDefault() string {
-	return ""
+	if priority := strings.TrimSpace(m.Priority); priority != "" {
+		return priority
+	}
+	return defaultGitHubRunMonitorPriority
 }
 
 // EventOrDefault returns the configured trigger event to filter runs by, or
 // the default when unset.
 func (m GitHubRunMonitor) EventOrDefault() string {
-	return ""
+	if event := strings.TrimSpace(m.Event); event != "" {
+		return event
+	}
+	return defaultGitHubRunMonitorEvent
 }
 
 // ValidateGitHubRunMonitors checks GitHub scheduled-run red-streak monitor
 // declarations.
 func ValidateGitHubRunMonitors(cfg *City) error {
-	_ = cfg
-	return errors.New("not implemented")
+	if cfg == nil || len(cfg.GitHub.RunMonitors) == 0 {
+		return nil
+	}
+
+	rigs := make(map[string]bool, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		rigs[rig.Name] = true
+	}
+
+	seenNames := make(map[string]int, len(cfg.GitHub.RunMonitors))
+	seenRepoWorkflow := make(map[string]string, len(cfg.GitHub.RunMonitors))
+	for i, monitor := range cfg.GitHub.RunMonitors {
+		ctx := fmt.Sprintf("github.run_monitor[%d]", i)
+		name := strings.TrimSpace(monitor.Name)
+		if name == "" {
+			return fmt.Errorf("%s: name is required", ctx)
+		}
+		if prev, ok := seenNames[name]; ok {
+			return fmt.Errorf("%s %q: duplicate name also used by github.run_monitor[%d]", ctx, name, prev)
+		}
+		seenNames[name] = i
+
+		owner := strings.TrimSpace(monitor.Owner)
+		if owner == "" {
+			return fmt.Errorf("%s %q: owner is required", ctx, name)
+		}
+		repo := strings.TrimSpace(monitor.Repo)
+		if repo == "" {
+			return fmt.Errorf("%s %q: repo is required", ctx, name)
+		}
+		workflowFile := strings.TrimSpace(monitor.WorkflowFile)
+		if workflowFile == "" {
+			return fmt.Errorf("%s %q: workflow_file is required", ctx, name)
+		}
+		if strings.TrimSpace(monitor.AggregateJob) == "" {
+			return fmt.Errorf("%s %q: aggregate_job is required", ctx, name)
+		}
+		activatedAfter := strings.TrimSpace(monitor.ActivatedAfter)
+		if activatedAfter == "" {
+			return fmt.Errorf("%s %q: activated_after is required", ctx, name)
+		}
+		if _, err := time.Parse(time.RFC3339, activatedAfter); err != nil {
+			return fmt.Errorf("%s %q: activated_after must be RFC3339: %w", ctx, name, err)
+		}
+		if monitor.Threshold < 0 {
+			return fmt.Errorf("%s %q: threshold must be at least 1", ctx, name)
+		}
+		rig := strings.TrimSpace(monitor.Rig)
+		if rig == "" {
+			return fmt.Errorf("%s %q: rig is required", ctx, name)
+		}
+		if !rigs[rig] {
+			return fmt.Errorf("%s %q: rig %q is not declared", ctx, name, rig)
+		}
+		if strings.TrimSpace(monitor.Route) == "" {
+			return fmt.Errorf("%s %q: route is required", ctx, name)
+		}
+		for _, recipient := range monitor.Notify {
+			if strings.TrimSpace(recipient) == "" {
+				return fmt.Errorf("%s %q: notify contains an empty recipient", ctx, name)
+			}
+		}
+
+		repoWorkflowKey := strings.ToLower(owner) + "/" + strings.ToLower(repo) + "@" + strings.ToLower(workflowFile)
+		if prev, ok := seenRepoWorkflow[repoWorkflowKey]; ok {
+			return fmt.Errorf("%s %q: duplicate repo/workflow %s also monitored by %q", ctx, name, repoWorkflowKey, prev)
+		}
+		seenRepoWorkflow[repoWorkflowKey] = name
+	}
+	return nil
 }
