@@ -1093,6 +1093,10 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// ownership after patches have had a chance to adjust declarations.
 	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
 
+	// GitHub run monitors: concatenate. Validation rejects duplicate
+	// repo/workflow ownership the same way PR monitors do.
+	base.GitHub.RunMonitors = append(base.GitHub.RunMonitors, fragment.GitHub.RunMonitors...)
+
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
 
