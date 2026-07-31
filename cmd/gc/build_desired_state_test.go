@@ -7430,6 +7430,106 @@ func TestBuildDesiredState_OnDemandNamedSession_ScaleCheckZeroDoesNotMaterialize
 	}
 }
 
+func TestBuildDesiredState_OnDemandNamedSession_ColdCustomScaleCheckWakesOnRoutedDemand(t *testing.T) {
+	// FR-S0.1 cold-wake bootstrap (ga-d5au8t): a named-session-backing pool
+	// with a custom scale_check that is cold (zero running sessions, min=0)
+	// must still wake from generic gc.routed_to demand it cannot see while
+	// asleep, exactly like the already-correct generic (non-named) cold
+	// custom-scale_check pool branch (build_desired_state.go:588-593). Before
+	// the fix, the cold-wake probe targets for this named+custom-scale_check
+	// +cold combination were appended only to
+	// defaultNamedScaleTargets, which feeds defaultNamedSessionDemand -- a
+	// function that by design never populates real demand from routed_to
+	// (named sessions wake only via direct Assignee=<identity> matches). So
+	// the routed bead below was stranded forever: scale_check reports 0, and
+	// nothing else ever woke the pool to re-evaluate it.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title: "queued dog job",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 0",
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dog",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.ScaleCheckCounts["dog"] != 1 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 1 (cold-wake probe should surface routed demand the custom scale_check can't see while asleep)", dsResult.ScaleCheckCounts["dog"])
+	}
+	dogCount := 0
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "dog" {
+			dogCount++
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("cold-wake probe materialized configured named identity: %+v", tp)
+			}
+		}
+	}
+	if dogCount != 1 {
+		t.Fatalf("dog ephemeral desired count = %d, want 1 (cold-wake probe should spawn exactly one ephemeral session, clamped, not zero and not name-N phantoms)", dogCount)
+	}
+}
+
+func TestBuildDesiredState_AlwaysNamedSession_ColdCustomScaleCheckDoesNotAddPoolDemand(t *testing.T) {
+	// Pins the namedSessionMode != "always" guard added in PR #4749: an
+	// always-mode named session with a custom scale_check must not receive
+	// the cold-wake probe that on-demand named sessions get. None of the
+	// existing "always" tests reach this guard because none of them
+	// configure a custom scale_check.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title: "queued dog job",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 0",
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dog",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.ScaleCheckCounts["dog"] != 0 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (always-mode guard should suppress the cold-wake probe)", dsResult.ScaleCheckCounts["dog"])
+	}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "dog" && tp.ConfiguredNamedIdentity == "" {
+			t.Fatalf("cold-wake probe materialized an unconfigured dog-N phantom beside the always-on named session: %+v", tp)
+		}
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuery(t *testing.T) {
 	// work_query is session-local introspection in Phase 1 and must not drive
 	// controller-side named materialization.

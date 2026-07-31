@@ -1239,13 +1239,16 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	const projectID = "gc-rig-worktree-consistency-test"
 	setupQueries := append(seedDatabaseProjectIDQueries(projectID),
 		"CALL DOLT_ADD('.')",
 		"CALL DOLT_COMMIT('-m', 'test: seed rig worktree identity', '--author', 'gascity-test <test@gascity.local>')")
-	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "fe"), setupQueries...)
+	feRepoDir := filepath.Join(t.TempDir(), "fe")
+	_, port, _, cleanupDolt := startPasswordedDoltServer(t, feRepoDir, setupQueries...)
 	defer cleanupDolt()
+	// Cover the fe server's own repo root (the actual live-process dir, not
+	// just cityPath) and the relocated dolt identity HOME (ga-7dgcg6).
+	requireNoLeakedDoltAfterForPaths(t, cityPath, feRepoDir, os.Getenv("HOME"))
 
 	for _, scope := range []struct {
 		name     string
