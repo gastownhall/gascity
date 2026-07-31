@@ -161,3 +161,88 @@ func TestApplyNestedCaps_WakeKnownIdentityRanksBeforeNew(t *testing.T) {
 		t.Errorf("accepted tier = %q, want wake-known-identity — must rank before new at same priority", result[0].Requests[0].Tier)
 	}
 }
+
+// TestComputePoolDesiredStates_FreshWakeSkipsAsleepResume verifies the
+// wake_mode="fresh" guard for stale asleep pool sessions
+// (gastownhall/gascity#4849).
+//
+// Before the guard, computePoolDesiredStates emitted a Tier:"resume" request for
+// any assigned work bead whose assignee resolved to a non-closed session bead —
+// without consulting the agent's wake_mode or the session's asleep-ness. So a
+// wake_mode="fresh" pool agent with a stale asleep session (left over from before
+// a city stop) was told to resume that dead session; at runtime the resume runs
+// the session's pre_start hook, which hangs and is killed on the resume deadline,
+// so the pool never materializes a live member (every reconcile re-attempts the
+// same doomed resume).
+//
+// The table pins the discriminating branches: a fresh-wake agent must SKIP the
+// asleep resume and start a clean session (Tier:"new" via the min floor); a
+// default/resume-wake agent must STILL resume the asleep session (the guard must
+// not over-fire); and a fresh-wake agent must still resume a LIVE session (the
+// guard is asleep-specific, not a blanket fresh-agent block).
+func TestComputePoolDesiredStates_FreshWakeSkipsAsleepResume(t *testing.T) {
+	const sessionID = "sess-1"
+	cases := []struct {
+		name          string
+		wakeMode      string
+		sessionState  string
+		wantTier      string
+		wantSessionID string // resume target; "" when a fresh (min-fill) session is expected
+	}{
+		{
+			name:          "fresh wake skips asleep resume and starts fresh",
+			wakeMode:      "fresh",
+			sessionState:  "asleep",
+			wantTier:      "new",
+			wantSessionID: "",
+		},
+		{
+			name:          "resume wake still resumes asleep session",
+			wakeMode:      "", // unset → EffectiveWakeMode defaults to "resume"
+			sessionState:  "asleep",
+			wantTier:      "resume",
+			wantSessionID: sessionID,
+		},
+		{
+			name:          "fresh wake still resumes a live session",
+			wakeMode:      "fresh",
+			sessionState:  "active",
+			wantTier:      "resume",
+			wantSessionID: sessionID,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := poolAgent("claude", "", intPtr(5), 1)
+			agent.WakeMode = tc.wakeMode
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			sessions := []beads.Bead{poolSessionBeadWithState(sessionID, tc.sessionState, "")}
+			work := []beads.Bead{workBead("w1", "claude", sessionID, "in_progress", 2)}
+
+			result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+			if len(result) != 1 {
+				t.Fatalf("len(result) = %d, want 1: %#v", len(result), result)
+			}
+			reqs := result[0].Requests
+			if len(reqs) != 1 {
+				t.Fatalf("requests = %d, want 1: %#v", len(reqs), reqs)
+			}
+			if reqs[0].Tier != tc.wantTier {
+				t.Errorf("tier = %q, want %q", reqs[0].Tier, tc.wantTier)
+			}
+			if reqs[0].SessionBeadID != tc.wantSessionID {
+				t.Errorf("SessionBeadID = %q, want %q", reqs[0].SessionBeadID, tc.wantSessionID)
+			}
+			// The doomed-resume regression: a fresh-wake agent must never carry a
+			// resume for the stale asleep session.
+			if tc.wakeMode == "fresh" && tc.sessionState == "asleep" {
+				for _, r := range reqs {
+					if r.Tier == "resume" && r.SessionBeadID == sessionID {
+						t.Errorf("fresh-wake agent resumed stale asleep session %s: %#v", sessionID, r)
+					}
+				}
+			}
+		})
+	}
+}

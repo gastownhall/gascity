@@ -123,6 +123,11 @@ func computePoolDesiredStates(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
+	// asleepSessionBeadIDs marks non-closed sessions whose runtime state is
+	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
+	// wake_mode="fresh" agent must not resume one of these stale rows — see the
+	// resume-tier guard below.
+	asleepSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -139,6 +144,9 @@ func computePoolDesiredStates(
 		}
 		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
+		}
+		if sb.State == sessionpkg.StateAsleep {
+			asleepSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -193,6 +201,18 @@ func computePoolDesiredStates(
 				// instance — which would create two desired sessions for the
 				// same agent even when max_active_sessions=1.
 				if namedSessionBeadIDs[sessionBeadID] {
+					continue
+				}
+				// A wake_mode="fresh" pool agent must not resume a stale
+				// *asleep* session left over from before a restart: resuming
+				// runs the dead session's pre_start hook, which hangs and is
+				// killed on the resume deadline, so the pool never materializes
+				// a live member (every reconcile re-attempts the same doomed
+				// resume). Skip the resume and let the scale_check / min-fill
+				// path start a clean session. A live (non-asleep) session still
+				// resumes; agents with unset or wake_mode="resume" are
+				// unaffected. (gastownhall/gascity#4849)
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
