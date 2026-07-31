@@ -1,0 +1,286 @@
+package cityinference
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// Acked is one acknowledged contribution as the checkpoint holds it.
+//
+// Digest is the payload digest of what the server accepted. It is what makes a
+// changed replay detectable at all: without it, a re-offer with a different
+// model or outcome is indistinguishable from a retry.
+type Acked struct {
+	InferenceTeamID string `json:"inference_team_id"`
+	Digest          string `json:"digest"`
+}
+
+// State is one City source's inference checkpoint. It is keyed by stable source
+// identity — derived inference ID plus observation ID — and never by anything
+// that changes across a restart or a credential rotation.
+type State struct {
+	Epoch    uint64           `json:"epoch"`
+	SourceID string           `json:"source_id"`
+	Accepted map[string]Acked `json:"accepted"`
+}
+
+// Store persists checkpoints across restarts. It is an interface because the
+// durable implementation is City's business; the adapter only needs load and
+// save to be atomic with respect to each other.
+type Store interface {
+	Load(ctx context.Context, key string) (State, bool, error)
+	Save(ctx context.Context, key string, st State) error
+}
+
+// MemoryStore is an in-process Store. It is safe for concurrent use and is what
+// tests and a single-shot export run on.
+type MemoryStore struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+// NewMemoryStore returns an empty in-process Store.
+func NewMemoryStore() *MemoryStore { return &MemoryStore{m: map[string][]byte{}} }
+
+// Load implements Store.
+func (s *MemoryStore) Load(_ context.Context, key string) (State, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, ok := s.m[key]
+	if !ok {
+		return State{}, false, nil
+	}
+	var st State
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return State{}, false, fmt.Errorf("cityinference: decode checkpoint %q: %w", key, err)
+	}
+	return st, true, nil
+}
+
+// Save implements Store. It round-trips through JSON so a caller cannot hold a
+// reference into stored state and mutate it behind the producer's back.
+func (s *MemoryStore) Save(_ context.Context, key string, st State) error {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("cityinference: encode checkpoint %q: %w", key, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = map[string][]byte{}
+	}
+	s.m[key] = raw
+	return nil
+}
+
+// Uploaded reports one accepted upload.
+type Uploaded struct {
+	ExternalInferenceID string
+	ObservationID       string
+	InferenceTeamID     string
+}
+
+// Result reports what one push did. It is returned even on error, so a caller
+// that stops on a refusal still learns how far it got.
+type Result struct {
+	Uploaded []Uploaded
+	Accepted int
+	Skipped  int
+}
+
+// Producer maps City invocations onto neutral inference records and advances a
+// checkpoint only over records the server acknowledged.
+type Producer struct {
+	API    API
+	Mapper Mapper
+	Store  Store
+
+	// Disabled is the rollback switch. A disabled producer issues no request
+	// and touches no checkpoint; acknowledged records stay exactly as the
+	// server accepted them and every other producer keeps running.
+	Disabled bool
+}
+
+// NewProducer validates its wiring up front: a producer missing a store would
+// look like it worked and silently re-upload the world on restart.
+func NewProducer(api API, mapper Mapper, store Store) (*Producer, error) {
+	if api == nil {
+		return nil, errors.New("cityinference: API is required")
+	}
+	if store == nil {
+		return nil, errors.New("cityinference: Store is required")
+	}
+	if mapper.Source.SourceID == "" || mapper.Source.Kind == "" {
+		return nil, errors.New("cityinference: source identity is required")
+	}
+	if mapper.Source.Tenant == "" {
+		return nil, errors.New("cityinference: enrolled tenant is required")
+	}
+	if mapper.Source.Epoch == 0 {
+		return nil, errors.New("cityinference: source epoch is required and is never guessed")
+	}
+	return &Producer{API: api, Mapper: mapper, Store: store}, nil
+}
+
+// CheckpointKey is the durable key of this source's inference checkpoint. It
+// carries no credential and no host, so a rotation or a redeploy resumes the
+// same checkpoint rather than starting a second one.
+func CheckpointKey(source Source) string {
+	return source.Kind + "/" + source.SourceID + "/inference"
+}
+
+// Push uploads a batch of City invocations, skipping what the checkpoint
+// already holds and stopping on the first refusal.
+//
+// Order within the batch carries no meaning — this domain asserts none — so a
+// caller may re-offer a batch in any order and get the same outcome.
+func (p *Producer) Push(ctx context.Context, invocations []CityInvocation) (Result, error) {
+	var res Result
+	if p.Disabled {
+		return res, ErrDisabled
+	}
+	key := CheckpointKey(p.Mapper.Source)
+	st, ok, err := p.Store.Load(ctx, key)
+	if err != nil {
+		return res, err
+	}
+	if !ok {
+		st = State{Epoch: p.Mapper.Source.Epoch, SourceID: p.Mapper.Source.SourceID}
+	}
+	if st.Accepted == nil {
+		st.Accepted = map[string]Acked{}
+	}
+	if st.Epoch != p.Mapper.Source.Epoch {
+		// An epoch change is a declared reset, and a reset re-keys identity. It
+		// is not something a restart may infer, so the producer stops.
+		return res, fmt.Errorf("%w: checkpoint epoch %d, source epoch %d", ErrIdentityDrift, st.Epoch, p.Mapper.Source.Epoch)
+	}
+
+	for _, inv := range invocations {
+		req, err := p.Mapper.MapInvocation(inv)
+		if err != nil {
+			return res, err
+		}
+		recordKey := req.ExternalInferenceID + "/" + req.ObservationID
+		digest, err := payloadDigest(req)
+		if err != nil {
+			return res, err
+		}
+		if prior, seen := st.Accepted[recordKey]; seen {
+			if prior.Digest != digest {
+				return res, fmt.Errorf("%w: %s", ErrChangedReplay, recordKey)
+			}
+			res.Skipped++
+			continue
+		}
+
+		got, err := p.API.CreateInference(ctx, req, IdempotencyKey(p.Mapper.Source, recordKey))
+		if err != nil {
+			return res, err
+		}
+		if err := p.verify(req, got); err != nil {
+			return res, err
+		}
+		st.Accepted[recordKey] = Acked{InferenceTeamID: got.ID, Digest: digest}
+		// The checkpoint advances only here, after acceptance. A crash between
+		// the call and this save replays the same idempotency key and the
+		// server answers with the original response.
+		if err := p.Store.Save(ctx, key, st); err != nil {
+			return res, err
+		}
+		res.Uploaded = append(res.Uploaded, Uploaded{
+			ExternalInferenceID: req.ExternalInferenceID,
+			ObservationID:       req.ObservationID,
+			InferenceTeamID:     got.ID,
+		})
+		res.Accepted++
+	}
+	return res, nil
+}
+
+// verify checks what came back against what was offered.
+func (p *Producer) verify(req CreateInferenceRequest, got Inference) error {
+	if got.ID == "" {
+		return fmt.Errorf("%w: response carries no neutral id", ErrIdentityDrift)
+	}
+	if got.ExternalInferenceID != req.ExternalInferenceID {
+		return fmt.Errorf("%w: offered %s, accepted %s", ErrIdentityDrift,
+			req.ExternalInferenceID, got.ExternalInferenceID)
+	}
+	// Every field group is present on every inference. A missing key would be
+	// an implicit "unavailable", and an implicit claim is the thing coverage
+	// exists to abolish.
+	for _, group := range CoverageFieldGroups() {
+		if _, ok := got.Coverage[group]; !ok {
+			return fmt.Errorf("%w: coverage omits field group %q", ErrCoverageRaised, group)
+		}
+	}
+	// Step attribution is unavailable by construction. Anything else means a
+	// step was materialized from data this adapter never had.
+	if Coverage(got.Coverage[FieldGroupStep]) != CoverageUnavailable {
+		return fmt.Errorf("%w: step coverage came back %q", ErrCoverageRaised, got.Coverage[FieldGroupStep])
+	}
+	// Transcript attribution may be known only where a canonical record was
+	// linked. The link is part of the invariant core, so a raised class here is
+	// a fabricated link, not another contribution's.
+	if req.TranscriptRecordID == "" && Coverage(got.Coverage[FieldGroupTranscript]) == CoverageKnown {
+		return fmt.Errorf("%w: transcript coverage claims known with no linked record", ErrCoverageRaised)
+	}
+	if req.TranscriptRecordID != "" && got.TranscriptRecordID != req.TranscriptRecordID {
+		return fmt.Errorf("%w: accepted record links a different transcript record", ErrIdentityDrift)
+	}
+	if got.Completeness != "" && Coverage(got.Completeness) != CoverageUnavailable {
+		return fmt.Errorf("%w: completeness came back %q over a best-effort producer",
+			ErrCoverageRaised, got.Completeness)
+	}
+	scope, err := ClassifyReqID(req.NativeIdentity.UpstreamReqID)
+	if err != nil {
+		return err
+	}
+	if scope == ScopeObservation && got.FoldEligible {
+		return fmt.Errorf("%w: a locally generated request id came back fold-eligible", ErrCoverageRaised)
+	}
+	return nil
+}
+
+// idempotencyDomain separates this producer's keys from every other preimage.
+const idempotencyDomain = "cityinference/idempotency/v1"
+
+// IdempotencyKey derives the server's Idempotency-Key from stable source
+// identity.
+//
+// The preimage holds the enrolled source, the ingest epoch, the resource kind
+// and the record's stable identity, and nothing else. No credential, no key
+// identifier, no wall clock and no attempt counter: a credential rotation would
+// otherwise open a fresh idempotency namespace and turn a retry into a second
+// admitted record.
+func IdempotencyKey(source Source, recordKey string) string {
+	preimage := strings.Join([]string{
+		idempotencyDomain,
+		source.Kind, source.SourceID,
+		strconv.FormatUint(source.Epoch, 10),
+		KindInference, recordKey,
+	}, "\x1f")
+	sum := sha256.Sum256([]byte(preimage))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+func payloadDigest(req CreateInferenceRequest) (string, error) {
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("%w: encode request: %w", ErrInvalidInvocation, err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
