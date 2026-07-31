@@ -113,6 +113,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
@@ -157,6 +158,7 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
@@ -239,7 +241,9 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 
 func pinTestOwnedBDHome(t *testing.T) string {
 	t.Helper()
-	return os.Getenv("HOME")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {
