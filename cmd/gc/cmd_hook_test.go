@@ -510,6 +510,74 @@ func TestDoHookClaimReadyAssignmentErrorDoesNotClaimFreshWork(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimReadyAssignmentLostRaceFallsThrough pins the deliberate
+// asymmetry between the two failure branches of claimFirstReadyHookAssignment.
+// A rejected claim (ok=false, err=nil) means another claimant genuinely owns
+// the bead, so ownership is resolved and this session is free to take other
+// routed work; an operational mutation failure (err != nil) leaves ownership
+// unresolved and fails closed instead — see
+// TestDoHookClaimReadyAssignmentErrorDoesNotClaimFreshWork.
+func TestDoHookClaimReadyAssignmentLostRaceFallsThrough(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-ready","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-fresh","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts []string
+	var rejected [][3]string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			if beadID == "hw-ready" {
+				// Lost race: bd reports the bead is already claimed by someone else.
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "other-worker"}, false, nil
+			}
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}, true, nil
+		},
+		EmitClaimRejected: func(beadID, existingClaimant, attemptedClaimant string) {
+			rejected = append(rejected, [3]string{beadID, existingClaimant, attemptedClaimant})
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment lost race) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got, want := len(rejected), 1; got != want {
+		t.Fatalf("claim_rejected emissions = %d, want %d: %v", got, want, rejected)
+	}
+	if got, want := rejected[0], [3]string{"hw-ready", "other-worker", "worker-1"}; got != want {
+		t.Fatalf("claim_rejected args = %v, want %v", got, want)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-ready,hw-fresh" {
+		t.Fatalf("claim attempts = %q, want %q", got, "hw-ready,hw-fresh")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "hw-fresh" || result.Assignee != "worker-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
+
 func TestReadyHookAssignmentDeadlineDoesNotFallThroughToFreshWork(t *testing.T) {
 	oldTimeout := hookClaimMutationTimeout
 	hookClaimMutationTimeout = 0

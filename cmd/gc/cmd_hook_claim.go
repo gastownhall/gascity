@@ -241,6 +241,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			// unrelated fresh work after an operational mutation failure.
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		// Deliberately unlike the err != nil branch above: a rejected claim is a
+		// lost race, not an operational failure. Another claimant genuinely owns
+		// the bead, so ownership is resolved and this session is free to fall
+		// through to other routed work. A mutation failure leaves ownership
+		// unresolved, so that branch fails closed instead.
 		if !ok {
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
