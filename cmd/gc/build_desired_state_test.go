@@ -7487,6 +7487,49 @@ func TestBuildDesiredState_OnDemandNamedSession_ColdCustomScaleCheckWakesOnRoute
 	}
 }
 
+func TestBuildDesiredState_AlwaysNamedSession_ColdCustomScaleCheckDoesNotAddPoolDemand(t *testing.T) {
+	// Pins the namedSessionMode != "always" guard added in PR #4749: an
+	// always-mode named session with a custom scale_check must not receive
+	// the cold-wake probe that on-demand named sessions get. None of the
+	// existing "always" tests reach this guard because none of them
+	// configure a custom scale_check.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title: "queued dog job",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 0",
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dog",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if dsResult.ScaleCheckCounts["dog"] != 0 {
+		t.Fatalf("ScaleCheckCounts[dog] = %d, want 0 (always-mode guard should suppress the cold-wake probe)", dsResult.ScaleCheckCounts["dog"])
+	}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "dog" && tp.ConfiguredNamedIdentity == "" {
+			t.Fatalf("cold-wake probe materialized an unconfigured dog-N phantom beside the always-on named session: %+v", tp)
+		}
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_NoExplicitScaleCheckUsesWorkQuery(t *testing.T) {
 	// work_query is session-local introspection in Phase 1 and must not drive
 	// controller-side named materialization.
