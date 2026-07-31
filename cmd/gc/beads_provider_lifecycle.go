@@ -1418,12 +1418,43 @@ func resolveManagedDoltPort(cityPath string) (string, managedDoltPortResolution)
 	if json.Unmarshal(data, &state) != nil {
 		return "", managedDoltPortError
 	}
-	if !validDoltRuntimeState(state, cityPath) {
-		// A state file that does not describe a live, owned server (stopped,
-		// dead PID, unreachable, or unowned) means nothing is running now.
-		return "", managedDoltPortAbsent
+	// Separate the deterministic "is this our live, owned process" verdict from
+	// the one transient probe (port reachability). Structural identity, PID
+	// liveness, and ownership are stable reads: when any fails the server is
+	// genuinely not running now (stopped, dead PID, wrong layout, or unowned) and
+	// the city is absent — so doctor's #4685 self-cleanup guard still arms. The
+	// checks short-circuit so a stopped, dead, or unowned city never pays the
+	// 250ms port dial.
+	layout, identityOK := validDoltRuntimeStateIdentity(state, cityPath)
+	deterministicallyPresent := identityOK &&
+		pidAlive(state.PID) &&
+		managedDoltRuntimeProcessOwned(state, layout)
+	portReachable := deterministicallyPresent && doltPortReachable(strconv.Itoa(state.Port))
+	if resolution := classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable); resolution != managedDoltPortFound {
+		return "", resolution
 	}
 	return strconv.Itoa(state.Port), managedDoltPortFound
+}
+
+// classifyDoltRuntimeStatePresence turns the deterministic "this is our live,
+// owned process" verdict and the transient port-reachability probe into a
+// found/absent/error resolution.
+//
+// When deterministicallyPresent is false the server is genuinely not running
+// (stopped, dead PID, wrong layout, or unowned), so the city is absent. When it
+// is true but the listener did not answer, presence is only transiently unknown
+// — an owned, live server can miss one probe — so the result is error (fail
+// closed), never absent. Classing that transient case absent would arm doctor's
+// stop guard with wasRunning=false and let release stop a pre-existing server
+// the moment its port answered again (gastownhall/gascity#4827 review finding 3).
+func classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable bool) managedDoltPortResolution {
+	if !deterministicallyPresent {
+		return managedDoltPortAbsent
+	}
+	if !portReachable {
+		return managedDoltPortError
+	}
+	return managedDoltPortFound
 }
 
 // currentManagedDoltPort is the port-or-empty projection of resolveManagedDoltPort

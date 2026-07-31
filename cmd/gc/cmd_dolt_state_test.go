@@ -1636,6 +1636,84 @@ while True:
 	return nil
 }
 
+// startProcessInDirWithoutListening spawns a live process whose working
+// directory is dir but which binds no port, so ownership resolves via
+// processCWDMatches while the managed dolt listener stays unreachable. It models
+// an owned server that is up but momentarily not answering — the finding-3 case
+// resolveManagedDoltPort must fail closed on rather than call absent.
+func startProcessInDirWithoutListening(t *testing.T, dir string) *exec.Cmd {
+	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a process whose cwd is the managed dolt data dir; run make test-cmd-gc-process for full coverage")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dir, err)
+	}
+	cmd := exec.Command("python3", "-c", `
+import os
+import signal
+import sys
+import time
+os.chdir(sys.argv[1])
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+`, dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start non-listening process in %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if processCWDMatches(cmd.Process.Pid, dir) {
+			return cmd
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+	t.Fatalf("process cwd never became %s", dir)
+	return nil
+}
+
+// Finding 3 wiring: an owned, alive managed dolt whose listener is unreachable
+// must resolve to error, not absent. Absent here arms doctor's stop guard with
+// wasRunning=false and lets release stop a pre-existing server once the port
+// answers again (#4827 review finding 3). The prior implementation folded the
+// transient reachability probe into validDoltRuntimeState and returned absent.
+func TestResolveManagedDoltPortErrorWhenOwnedServerUnreachable(t *testing.T) {
+	city := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	proc := startProcessInDirWithoutListening(t, dataDir)
+
+	port := reserveRandomTCPPort(t) // reserved then freed: nobody is listening
+	if err := writeDoltState(city, doltRuntimeState{
+		Running:   true,
+		PID:       proc.Process.Pid,
+		Port:      port,
+		DataDir:   dataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltState: %v", err)
+	}
+
+	gotPort, resolution := resolveManagedDoltPort(city)
+	if resolution != managedDoltPortError {
+		t.Fatalf("owned alive server, unreachable port: got (%q, %d), want error=%d",
+			gotPort, resolution, managedDoltPortError)
+	}
+	if gotPort != "" {
+		t.Fatalf("error resolution returned a non-empty port %q", gotPort)
+	}
+}
+
 func startLockedDelayedTCPListenerProcessInDir(t *testing.T, lockFile string, port int, dir string, delay time.Duration) *exec.Cmd {
 	t.Helper()
 	skipSlowCmdGCTest(t, "spawns a delayed TCP listener process to emulate managed dolt recovery; run make test-cmd-gc-process for full coverage")

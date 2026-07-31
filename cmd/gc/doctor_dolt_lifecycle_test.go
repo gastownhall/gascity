@@ -267,6 +267,56 @@ func TestNewDoctorManagedDoltGuardAbsentPortArms(t *testing.T) {
 	}
 }
 
+// Finding 3 core: the presence classifier must keep the deterministic
+// "not running" verdicts (stopped, dead PID, wrong layout, unowned — folded into
+// deterministicallyPresent=false) as absent, but treat an alive, owned server
+// whose listener did not answer (deterministicallyPresent=true, portReachable=
+// false) as error, never absent. Classing that transient case absent is exactly
+// the fail-open the guard's wasRunning=false arm then turns into stopping a
+// pre-existing server once the port answers again (#4827 review finding 3).
+func TestClassifyDoltRuntimeStatePresence(t *testing.T) {
+	tests := []struct {
+		name                     string
+		deterministicallyPresent bool
+		portReachable            bool
+		want                     managedDoltPortResolution
+	}{
+		{
+			name:                     "alive, owned, reachable: found",
+			deterministicallyPresent: true,
+			portReachable:            true,
+			want:                     managedDoltPortFound,
+		},
+		{
+			name:                     "alive, owned, momentarily unreachable: error (fail closed)",
+			deterministicallyPresent: true,
+			portReachable:            false,
+			want:                     managedDoltPortError,
+		},
+		{
+			name:                     "deterministically not running: absent",
+			deterministicallyPresent: false,
+			portReachable:            false,
+			want:                     managedDoltPortAbsent,
+		},
+		{
+			name:                     "not present: absent regardless of a stray reachable probe",
+			deterministicallyPresent: false,
+			portReachable:            true,
+			want:                     managedDoltPortAbsent,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyDoltRuntimeStatePresence(tc.deterministicallyPresent, tc.portReachable)
+			if got != tc.want {
+				t.Fatalf("classifyDoltRuntimeStatePresence(present=%v, reachable=%v) = %d, want %d",
+					tc.deterministicallyPresent, tc.portReachable, got, tc.want)
+			}
+		})
+	}
+}
+
 // The real resolver must classify a stopped city (no owned lifecycle, nothing
 // published) as absent, and currentManagedDoltPort must project that to empty —
 // the behavior the three bd_env.go callers depend on.
