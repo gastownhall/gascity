@@ -206,7 +206,8 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "pack-registry-requests"
+              "pack-registry-requests",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

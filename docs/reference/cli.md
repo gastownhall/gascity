@@ -301,9 +301,9 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.
+Subcommands for topology operations, health checking, diagnostics, exact-store
+metadata compare-and-set, and read-only list/show routed through the supervisor
+API with transparent fallback to direct bd reads.
 
 ```
 gc beads
@@ -314,6 +314,7 @@ gc beads
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
@@ -416,6 +417,48 @@ gc beads list --status open --format=json
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+
+## gc beads metadata-cas
+
+Atomically compare and set one metadata key in one exact local bead store.
+
+The store must be selected explicitly with --store-ref=city:&lt;name&gt; or
+--store-ref=rig:&lt;name&gt;. This command never scans other stores, follows a
+cross-store fallback, or operates on a remote city. A conflict is an ordinary
+zero-exit outcome; capability, transport, readback, and validation failures are
+non-zero.
+
+Legacy file-provider cities created before scope-local file stores may map city
+and rig references to the same shared city file. That provider-layout alias is
+preserved for compatibility; it is not a search or cross-store fallback.
+
+Use --json for the canonical machine-output contract. --format=json remains
+accepted for compatibility. Combining --json with an explicit --format=text is
+a usage error.
+
+```
+gc beads metadata-cas <bead-id> [flags]
+```
+
+**Example:**
+
+```
+gc beads metadata-cas tr-123 \
+  --store-ref=rig:tributary \
+  --key=semantic_review_sha \
+  --expected=old-sha \
+  --next=new-sha \
+  --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--expected` | string |  | expected current value (explicit empty is allowed) |
+| `--format` | string | `text` | output format: text or json |
+| `--json` | bool |  | emit the canonical JSON result |
+| `--key` | string |  | metadata key to compare and set |
+| `--next` | string |  | replacement value (explicit empty is allowed) |
+| `--store-ref` | string |  | exact local store: city:&lt;name&gt; or rig:&lt;name&gt; |
 
 ## gc beads show
 
