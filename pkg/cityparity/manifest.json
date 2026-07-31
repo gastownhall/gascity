@@ -1,0 +1,65 @@
+{
+  "schema": "api-7.23.city-producer-parity.v1",
+  "generated_client": "out-of-repo: the three adapters speak hand-written API seams (pkg/city*/contract.go); the generated v1 client is the Team Server's artifact and its digest is not resolvable from gascity, so this manifest asserts no digest for it",
+  "landings": [
+    {
+      "task": "API-7.20",
+      "pr": 4874,
+      "commit": "b44d3935a4b59d4289ceb52a76444095428cb0a6"
+    },
+    {
+      "task": "API-7.21",
+      "pr": 4883,
+      "commit": "bd0675f9842ee379cfcf776c67c2ad602ab36d53"
+    },
+    {
+      "task": "API-7.22",
+      "pr": 4884,
+      "commit": "22c6ce96ed800e1026437e3f8b884c34102d90a3"
+    }
+  ],
+  "packages": {
+    "cityartifact": "sha256:654125bfd885df9445c06a4541f45d6bf201e22dfc48b15de527c479f023c2d1",
+    "cityinference": "sha256:7997a8de3251470f343287a7d90f4a6dafcfe2c563ae9a160d54b43e8ab86caf",
+    "cityneutral": "sha256:74e975907243c8ad1d6b7d18898a0d1539cf296ec9ae5270e949a63ba6776b87",
+    "cityparity": "sha256:716fd3a8716be3a342e0506774f4b96630a9dc9212a08d3c1a71044b3cb08dd6"
+  },
+  "files": {
+    "cityartifact/checkpoint_test.go": "sha256:7a8c2f9406cfca49da64ef619e714fa2b662634d930bcb617cf5f93caf5c663e",
+    "cityartifact/cityartifact.go": "sha256:99731d1ff478ec0cd03b82f54d55c7a3a154654a4bc7e5944b67923e48c37106",
+    "cityartifact/contract.go": "sha256:667d51a756af4fa8433a5c0f8ce18fe296d0f7cb81bc4c119c1177e204c048bf",
+    "cityartifact/fake.go": "sha256:03d00896707d49451ee0ed35cd904d6dd9cb29183a5326b954feadcfb3e30d6c",
+    "cityartifact/fault_test.go": "sha256:2746cdc0820ca4814b54f4d74e02911527603071f3185b7a4ce6f8c4451a2e1f",
+    "cityartifact/mapping.go": "sha256:e4489ef85301d9fee3ad249cb02b1d86c450a7178d12eb0fff7ceb2ce58bd801",
+    "cityartifact/parity_test.go": "sha256:58181e67d6941587635d3b7881adab7a84381c2536ea281654c5c48c701bb3a3",
+    "cityartifact/producer.go": "sha256:d20eca2f10aa5b62db0eef1c34959eb4f13051f16cf1120c0b3071df5597d13b",
+    "cityinference/cityinference.go": "sha256:807fe21aa1e313947dd9122adac34956144acb27c3c82f816e135d0cf80bcc6d",
+    "cityinference/contract.go": "sha256:64fc01e9d53ee9c1c95b713deaf01a4401d3990a62fe1caa58dd08bfb1a013df",
+    "cityinference/coverage_test.go": "sha256:76d77f2c5473487736f9ce5d7b70a97fcc86ab90c006bffb8294c0d2965fec82",
+    "cityinference/fake.go": "sha256:732fcbfc7645c54372887f80202392173678375acd94418cbd93c004f988bf7c",
+    "cityinference/identity_test.go": "sha256:4680b083f0eec3d27dba551df0b12d4a68998800e6756a53b723abacb624fac4",
+    "cityinference/isolation_test.go": "sha256:e8e3ab799f2349731f3bd1f034589c56f55cbf6918d6c5657333b180d7a44ec5",
+    "cityinference/mapping.go": "sha256:ab8c7f74337e7f5104b0d15977652a36757b141ca3da7c3010ab5904c5469434",
+    "cityinference/mapping_test.go": "sha256:f8409b545eb5bb3ddd69af5dbcadd563da28cfc291c2bfe8297ff113f6fd64cc",
+    "cityinference/producer.go": "sha256:2496b747249e6b12804ac8f1319c5c512da9135731947f70ab4c57aa4852642f",
+    "cityinference/producer_test.go": "sha256:bff04544dc80585bd0bfbb50512bcccf12bd0259260f1e971665b229099b148f",
+    "cityneutral/checkpoint_test.go": "sha256:5b0eaafdd91dfea6772a1d20adb9aae43fc9af72d294adbb03645615f7f08986",
+    "cityneutral/cityneutral.go": "sha256:24d415e757b6b33549fa654d484f388571c0dc6a1a81095d454e28df4535d0c0",
+    "cityneutral/contract.go": "sha256:d945b8135eb6c1289d000836b6f993cb725bdc0daca3f6eadc9f7378a04b0892",
+    "cityneutral/fake.go": "sha256:e56703c10f44cc2571ec94c958abe691bb072a52f0438c55c8f2091e43976ace",
+    "cityneutral/mapping.go": "sha256:8b76cad82956fae5d584d3cb0620d05dd47e0a0cb3c67ef74f40f8b69ef1448b",
+    "cityneutral/parity_test.go": "sha256:a3d8df6c649eef4f226c96cb349aa507e7bf31312f47e7c304715a91c0c4d4db",
+    "cityneutral/producer.go": "sha256:c9025ddc393c22fe21b4336e7246a580758ad71ba6c8109a65f42a399d52c29b",
+    "cityneutral/provenance_test.go": "sha256:65b68ae2e9558326235b943b38e8eddd819bf1a1e9bd9b75f042e732cbaaaffe",
+    "cityparity/doc.go": "sha256:d679f649ed66776bfb4cdc5d9d9b9c5048ae6a9d891ae8548fc8c0cc0d4c3914",
+    "cityparity/golden_test.go": "sha256:4bb5b867bef60848c87b4c5b5b45447d39256de93499995579cc1e4a6560dd93",
+    "cityparity/independence_test.go": "sha256:5d75b77f0a4e5fa7b27307103c93e6bdfe5b59e72c6b4f9a87ce459d65e82e71",
+    "cityparity/manifest_test.go": "sha256:0ec087c949de8d8dd34541dd0a4fe431c0d500de29cf8d6f0642516e210b20ec"
+  },
+  "findings": [
+    "AC2/checkpoint-namespace: cityneutral.CheckpointKey and cityartifact.CheckpointKey are byte-identical for a run and an artifact sharing a native ID, and their State documents cross-decode without error. Under one shared checkpoint store the neutral adapter erases the artifact adapter's frontier. Proof: TestNeutralAndArtifactCheckpointKeysCollide. cityinference is the only adapter whose key names its domain.",
+    "AC2/reset: a declared reset (source epoch advance) is absorbed by cityneutral and cityartifact, which restart the checkpoint and keep producing, but refused by cityinference with ErrIdentityDrift. The inference refusal never writes the new epoch, so the adapter stays refused until an operator clears the checkpoint. Proof: TestDeclaredResetIsNotHandledUniformly.",
+    "AC2/rollback: only cityinference has a programmatic kill switch (Producer.Disabled + ErrDisabled); the other two roll back only by the caller ceasing to call Push. Proof: TestRollbackSwitchIsNotUniform.",
+    "AC3/generated-client: not resolvable from this repository; see generated_client above."
+  ]
+}
