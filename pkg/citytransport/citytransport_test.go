@@ -190,9 +190,16 @@ func TestSendRejectsMalformed2xx(t *testing.T) {
 }
 
 func TestSendCancellationIsTyped(t *testing.T) {
-	m := &MockDoer{Responses: []MockResponse{{Status: 200, Body: `{"request_id":"r"}`, Delay: time.Hour}}}
+	started := make(chan struct{}, 1)
+	m := &MockDoer{
+		Responses: []MockResponse{{Status: 200, Body: `{"request_id":"r"}`, Delay: time.Hour}},
+		Started:   started,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	// Cancel once the attempt is genuinely in flight. Sleeping here would only
+	// guess at that, and would either flake on a loaded machine or slow the
+	// suite down to buy confidence it cannot actually provide.
+	go func() { <-started; cancel() }()
 	_, err := newTestClient(t, m, StaticToken("t1")).Send(ctx, "cityhash", sampleUpload())
 	if !errors.Is(err, ErrCanceled) {
 		t.Fatalf("want ErrCanceled, got %v", err)

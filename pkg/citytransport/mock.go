@@ -19,6 +19,14 @@ import (
 type MockDoer struct {
 	Responses []MockResponse
 
+	// Started, if non-nil, receives once as each attempt begins — before any
+	// Delay blocks it. A test driving cancellation waits on this instead of
+	// sleeping, so it cancels at a known point rather than guessing that the
+	// request is in flight yet. Give it a buffer of 1: the send is
+	// non-blocking, so an unbuffered channel with no reader parked would drop
+	// the signal.
+	Started chan struct{}
+
 	mu       sync.Mutex
 	attempts int
 	// Bodies records every request body seen, so a test can assert what was (or
@@ -56,6 +64,13 @@ func (m *MockDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 	r := m.Responses[idx]
 	m.mu.Unlock()
+
+	if m.Started != nil {
+		select {
+		case m.Started <- struct{}{}:
+		default:
+		}
+	}
 
 	if r.Delay > 0 {
 		select {
