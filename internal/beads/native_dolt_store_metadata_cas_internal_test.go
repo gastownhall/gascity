@@ -199,7 +199,7 @@ func (s *nativeDoltMetadataCASRetryStorage) RunInTransaction(
 	if err != nil {
 		return err
 	}
-	if err := s.nativeDoltMemStorage.UpdateIssue(
+	if err := s.UpdateIssue(
 		ctx,
 		s.id,
 		map[string]interface{}{"metadata": raw},

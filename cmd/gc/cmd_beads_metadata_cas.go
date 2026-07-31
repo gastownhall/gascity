@@ -257,15 +257,6 @@ func applyBeadsMetadataCAS(store beads.Store, request beadsMetadataCASRequest) (
 	}, nil
 }
 
-func doBeadsMetadataCAS(store beads.Store, request beadsMetadataCASRequest, stdout, stderr io.Writer) int {
-	result, err := applyBeadsMetadataCAS(store, request)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc beads metadata-cas: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return renderBeadsMetadataCAS(result, request.format, stdout, stderr)
-}
-
 func renderBeadsMetadataCAS(result beadsMetadataCASResult, format string, stdout, stderr io.Writer) int {
 	if format == "json" {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc beads metadata-cas", result)

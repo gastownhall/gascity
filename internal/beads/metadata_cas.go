@@ -46,9 +46,12 @@ import "fmt"
 type MetadataCASOutcome string
 
 const (
-	MetadataCASSwapped     MetadataCASOutcome = "swapped"
+	// MetadataCASSwapped means the expected value matched and was replaced.
+	MetadataCASSwapped MetadataCASOutcome = "swapped"
+	// MetadataCASAlreadyNext means the requested next value was already present.
 	MetadataCASAlreadyNext MetadataCASOutcome = "already_next"
-	MetadataCASConflict    MetadataCASOutcome = "conflict"
+	// MetadataCASConflict means another value won the comparison.
+	MetadataCASConflict MetadataCASOutcome = "conflict"
 )
 
 // MetadataCASWriter is the metadata value-CAS half of ConditionalWriter,
