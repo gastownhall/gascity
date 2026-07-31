@@ -325,8 +325,21 @@ func TestEpochResetAndRegression(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIdentityDrift for a backwards epoch", err)
 	}
 
+	// An epoch that merely went up is not a reset: a config typo and a real
+	// reset are the same number, so the advance is refused without a
+	// declaration naming what it resets from and who declared it.
+	bumped := citySource()
+	bumped.Epoch = 2
+	undeclared := producerOn(t, f.Client("src_city_1", "gascity"), bumped, store)
+	if _, err := undeclared.Push(ctx, sampleArtifact()); !errors.Is(err, cityartifact.ErrIdentityDrift) {
+		t.Fatalf("undeclared epoch advance: err = %v, want ErrIdentityDrift", err)
+	}
+
 	ahead := citySource()
 	ahead.Epoch = 2
+	ahead.Reset = &cityartifact.ResetDeclaration{
+		FromEpoch: 1, ToEpoch: 2, Reason: "source rebuilt", DeclaredBy: "ops@city",
+	}
 	reset := producerOn(t, f.Client("src_city_1", "gascity"), ahead, store)
 	res, err := reset.Push(ctx, sampleArtifact())
 	if err != nil {

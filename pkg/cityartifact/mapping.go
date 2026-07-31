@@ -66,6 +66,9 @@ type Source struct {
 	// Epoch is the declared reset generation. A bumped epoch restarts this
 	// producer's checkpoint; it never rewrites what the server already accepted.
 	Epoch uint64
+	// Reset declares that this epoch is a reset of the checkpointed one. It is
+	// required for an epoch advance to be honoured and is ignored otherwise.
+	Reset *ResetDeclaration
 }
 
 // Mapper turns a City artifact into the closed request bodies of the frozen

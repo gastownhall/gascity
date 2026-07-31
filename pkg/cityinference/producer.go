@@ -29,6 +29,9 @@ type State struct {
 	Epoch    uint64           `json:"epoch"`
 	SourceID string           `json:"source_id"`
 	Accepted map[string]Acked `json:"accepted"`
+	// LastReset records the declaration that restarted this checkpoint, if one
+	// did. It is evidence, not input: nothing reads it back to make a decision.
+	LastReset *ResetRecord `json:"last_reset,omitempty"`
 }
 
 // Store persists checkpoints across restarts. It is an interface because the
@@ -133,7 +136,42 @@ func NewProducer(api API, mapper Mapper, store Store) (*Producer, error) {
 // carries no credential and no host, so a rotation or a redeploy resumes the
 // same checkpoint rather than starting a second one.
 func CheckpointKey(source Source) string {
-	return source.Kind + "/" + source.SourceID + "/inference"
+	return source.Kind + "/" + source.SourceID + "/" + checkpointDomain
+}
+
+// checkpointDomain names this adapter's checkpoint namespace. It is the third
+// segment of every key, and the other two City adapters now put theirs in the
+// same position.
+const checkpointDomain = "inference"
+
+// reconcileEpoch applies a declared reset and refuses everything else. It is
+// byte-for-byte the same decision in all three City adapters.
+func (p *Producer) reconcileEpoch(st *State) error {
+	src := p.Mapper.Source
+	switch {
+	case st.Epoch == 0:
+		st.Epoch = src.Epoch
+		st.SourceID = src.SourceID
+	case src.Epoch > st.Epoch:
+		rec, err := checkResetDeclaration(src.Reset, st.Epoch, src.Epoch)
+		if err != nil {
+			return err
+		}
+		// The accepted set belongs to the previous epoch and must not gate the
+		// new one, so the checkpoint restarts under the same key. The server
+		// keeps the records it already accepted; this producer simply stops
+		// claiming to have sent them. The declaration is carried into the new
+		// checkpoint: a reset nobody can attribute later is indistinguishable
+		// from corruption.
+		*st = State{Epoch: src.Epoch, SourceID: src.SourceID, LastReset: &rec}
+	case src.Epoch < st.Epoch:
+		return fmt.Errorf("%w: source epoch %d is behind checkpoint epoch %d",
+			ErrIdentityDrift, src.Epoch, st.Epoch)
+	}
+	if st.SourceID != "" && st.SourceID != src.SourceID {
+		return fmt.Errorf("%w: checkpoint belongs to source %q", ErrIdentityDrift, st.SourceID)
+	}
+	return nil
 }
 
 // Push uploads a batch of City invocations, skipping what the checkpoint
@@ -147,20 +185,25 @@ func (p *Producer) Push(ctx context.Context, invocations []CityInvocation) (Resu
 		return res, ErrDisabled
 	}
 	key := CheckpointKey(p.Mapper.Source)
-	st, ok, err := p.Store.Load(ctx, key)
+	st, _, err := p.Store.Load(ctx, key)
 	if err != nil {
 		return res, err
 	}
-	if !ok {
-		st = State{Epoch: p.Mapper.Source.Epoch, SourceID: p.Mapper.Source.SourceID}
+	prior := st.Epoch
+	if err := p.reconcileEpoch(&st); err != nil {
+		return res, err
 	}
 	if st.Accepted == nil {
 		st.Accepted = map[string]Acked{}
 	}
-	if st.Epoch != p.Mapper.Source.Epoch {
-		// An epoch change is a declared reset, and a reset re-keys identity. It
-		// is not something a restart may infer, so the producer stops.
-		return res, fmt.Errorf("%w: checkpoint epoch %d, source epoch %d", ErrIdentityDrift, st.Epoch, p.Mapper.Source.Epoch)
+	// An honoured reset is written before anything is uploaded. The old code
+	// refused the advance and never wrote the new epoch, so every later push was
+	// refused the same way until an operator deleted the checkpoint by hand —
+	// and nothing in the checkpoint said why.
+	if prior != 0 && st.Epoch != prior {
+		if err := p.Store.Save(ctx, key, st); err != nil {
+			return res, err
+		}
 	}
 
 	for _, inv := range invocations {

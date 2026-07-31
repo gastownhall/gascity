@@ -212,8 +212,22 @@ func TestResetAdvancesEpochAndBackwardsEpochIsDrift(t *testing.T) {
 	}
 	pushOK(t, p, chainWith(recordsUpTo(2), false))
 
+	// An epoch that merely went up is not a reset: a config typo and a real
+	// reset are the same number, so the advance is refused without a
+	// declaration naming what it resets from and who declared it.
+	undeclared := citySource()
+	undeclared.Epoch = 2
+	bumped, err := NewProducer(f, Mapper{Source: undeclared, AllowRawContent: true}, store)
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if _, err := bumped.Push(context.Background(), chainWith(recordsUpTo(2), false)); !errors.Is(err, ErrIdentityDrift) {
+		t.Fatalf("undeclared epoch advance: err = %v, want ErrIdentityDrift", err)
+	}
+
 	reset := citySource()
 	reset.Epoch = 2
+	reset.Reset = &ResetDeclaration{FromEpoch: 1, ToEpoch: 2, Reason: "source rebuilt", DeclaredBy: "ops@city"}
 	after, err := NewProducer(f, Mapper{Source: reset, AllowRawContent: true}, store)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
@@ -221,6 +235,16 @@ func TestResetAdvancesEpochAndBackwardsEpochIsDrift(t *testing.T) {
 	res := pushOK(t, after, chainWith(recordsUpTo(2), false))
 	if res.Accepted != 2 {
 		t.Fatalf("after reset accepted %d, want 2 (frontier restarted)", res.Accepted)
+	}
+	st, _, err := store.Load(context.Background(), CheckpointKey(reset, "city-run-7"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.Epoch != 2 {
+		t.Errorf("checkpoint epoch = %d, want the honoured reset to have been written", st.Epoch)
+	}
+	if st.LastReset == nil || st.LastReset.DeclaredBy != "ops@city" || st.LastReset.FromEpoch != 1 {
+		t.Errorf("the honoured reset was not recorded: %+v", st.LastReset)
 	}
 
 	behind, err := NewProducer(f, Mapper{Source: citySource(), AllowRawContent: true}, store)

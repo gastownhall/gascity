@@ -83,6 +83,10 @@ var (
 	// wrong-tenant credential or a reset that was never declared; both are
 	// louder than a retry.
 	ErrIdentityDrift = errors.New("cityneutral: stable source identity resolved to a different neutral id")
+	// ErrDisabled is the rollback state: the producer is off and issues no
+	// request. Rolling one adapter back is a switch on the adapter, not an
+	// arrangement with whoever schedules it.
+	ErrDisabled = errors.New("cityneutral: producer disabled")
 	// ErrNeutralAuthority is a mapping that would let a City fact become
 	// neutral authority.
 	ErrNeutralAuthority = errors.New("cityneutral: City-shaped field cannot become neutral authority")

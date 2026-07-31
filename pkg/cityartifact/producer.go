@@ -29,6 +29,9 @@ type State struct {
 	Digests       map[int]string `json:"digests"`
 	Finalized     bool           `json:"finalized"`
 	ContentDigest string         `json:"content_digest"`
+	// LastReset records the declaration that restarted this checkpoint, if one
+	// did. It is evidence, not input: nothing reads it back to make a decision.
+	LastReset *ResetRecord `json:"last_reset,omitempty"`
 }
 
 func (s *State) digests() map[int]string {
@@ -106,6 +109,11 @@ type Producer struct {
 	API    API
 	Mapper Mapper
 	Store  Store
+
+	// Disabled is the rollback switch. A disabled producer issues no request
+	// and touches no checkpoint; acknowledged parts stay exactly as the server
+	// accepted them and every other producer keeps running.
+	Disabled bool
 }
 
 // NewProducer validates its wiring up front: a producer missing a store would
@@ -123,11 +131,58 @@ func NewProducer(api API, mapper Mapper, store Store) (*Producer, error) {
 	return &Producer{API: api, Mapper: mapper, Store: store}, nil
 }
 
+// checkpointDomain names this adapter's checkpoint namespace. It is the third
+// segment of every key, the same position cityinference puts "inference" in, so
+// a City artifact and a City run that share a native ID can no longer mint one
+// key over one store.
+const checkpointDomain = "artifact"
+
 // CheckpointKey is the stable checkpoint identity of one City artifact under one
 // source. It excludes the epoch: a declared reset must LAND on the same key so
 // the old frontier is visibly superseded rather than orphaned under a new one.
 func CheckpointKey(source Source, cityArtifactID string) string {
+	return source.Kind + "/" + source.SourceID + "/" + checkpointDomain + "/" + cityArtifactID
+}
+
+// LegacyCheckpointKey is the undomained key this adapter wrote before the domain
+// segment existed. It is read once, on a miss at the current key, and it is
+// never written: leaving it unread would silently restart every in-flight
+// artifact from zero, and writing it again would re-open the collision.
+func LegacyCheckpointKey(source Source, cityArtifactID string) string {
 	return source.Kind + "/" + source.SourceID + "/" + cityArtifactID
+}
+
+// loadCheckpoint reads the current key and falls back once to the pre-domain
+// key, so a producer that was mid-upload when the domain segment shipped
+// resumes its frontier instead of re-uploading every part.
+//
+// The legacy key is the ambiguous one, so its bytes may belong to another
+// domain: a cityneutral checkpoint decodes as this State without an error.
+// Adoption therefore requires this domain's own discriminator. An artifact
+// checkpoint is only ever saved after the server minted an artifact ID, so a
+// durable one always carries it; anything else is left where it lies.
+func (p *Producer) loadCheckpoint(ctx context.Context, key, cityArtifactID string) (State, error) {
+	st, ok, err := p.Store.Load(ctx, key)
+	if err != nil {
+		return State{}, err
+	}
+	if ok {
+		return st, nil
+	}
+	legacy, ok, err := p.Store.Load(ctx, LegacyCheckpointKey(p.Mapper.Source, cityArtifactID))
+	if err != nil {
+		return State{}, err
+	}
+	if !ok || legacy.ArtifactID == "" {
+		return State{}, nil
+	}
+	// Copy it forward now rather than relying on the rest of this push to save.
+	// A finalized artifact writes nothing else, and the migration has to
+	// complete for those too or the old key stays load-bearing forever.
+	if err := p.Store.Save(ctx, key, legacy); err != nil {
+		return State{}, err
+	}
+	return legacy, nil
 }
 
 // Push creates, uploads, finalizes and reads back one City artifact.
@@ -140,6 +195,9 @@ func CheckpointKey(source Source, cityArtifactID string) string {
 // no other producer's checkpoint is touched.
 func (p *Producer) Push(ctx context.Context, a CityArtifact) (Result, error) {
 	res := Result{}
+	if p.Disabled {
+		return res, ErrDisabled
+	}
 
 	create, err := p.Mapper.MapCreate(a)
 	if err != nil {
@@ -154,7 +212,7 @@ func (p *Producer) Push(ctx context.Context, a CityArtifact) (Result, error) {
 	}
 
 	key := CheckpointKey(p.Mapper.Source, a.ArtifactID)
-	st, _, err := p.Store.Load(ctx, key)
+	st, err := p.loadCheckpoint(ctx, key, a.ArtifactID)
 	if err != nil {
 		return res, err
 	}
@@ -234,7 +292,8 @@ func (p *Producer) Push(ctx context.Context, a CityArtifact) (Result, error) {
 	return res, nil
 }
 
-// reconcileEpoch applies a declared reset and refuses an undeclared one.
+// reconcileEpoch applies a declared reset and refuses everything else. It is
+// byte-for-byte the same decision in all three City adapters.
 func (p *Producer) reconcileEpoch(st *State) error {
 	src := p.Mapper.Source
 	switch {
@@ -242,11 +301,17 @@ func (p *Producer) reconcileEpoch(st *State) error {
 		st.Epoch = src.Epoch
 		st.SourceID = src.SourceID
 	case src.Epoch > st.Epoch:
-		// A declared reset. The previous frontier belongs to the previous epoch
-		// and must not gate the new one, so the checkpoint restarts. The server
+		rec, err := checkResetDeclaration(src.Reset, st.Epoch, src.Epoch)
+		if err != nil {
+			return err
+		}
+		// The previous frontier belongs to the previous epoch and must not gate
+		// the new one, so the checkpoint restarts under the same key. The server
 		// keeps the artifacts it already accepted; this producer simply stops
-		// claiming to have sent them.
-		*st = State{Epoch: src.Epoch, SourceID: src.SourceID}
+		// claiming to have sent them. The declaration is carried into the new
+		// checkpoint: a reset nobody can attribute later is indistinguishable
+		// from corruption.
+		*st = State{Epoch: src.Epoch, SourceID: src.SourceID, LastReset: &rec}
 	case src.Epoch < st.Epoch:
 		return fmt.Errorf("%w: source epoch %d is behind checkpoint epoch %d",
 			ErrIdentityDrift, src.Epoch, st.Epoch)

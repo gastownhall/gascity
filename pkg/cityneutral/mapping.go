@@ -90,6 +90,9 @@ type Source struct {
 	// Epoch is the frozen source epoch. It advances only on a declared reset,
 	// never on a restart, and the adapter refuses to guess one.
 	Epoch uint64
+	// Reset declares that this epoch is a reset of the checkpointed one. It is
+	// required for an epoch advance to be honoured and is ignored otherwise.
+	Reset *ResetDeclaration
 }
 
 // Mapper turns a City chain into neutral request bodies.

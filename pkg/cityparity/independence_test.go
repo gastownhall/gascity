@@ -300,20 +300,25 @@ func TestCredentialRotationChangesNothing(t *testing.T) {
 	}
 }
 
-// AC2 / FINDING: the three adapters do NOT agree on what a declared reset does.
+// AC2: the three adapters agree on what a reset is and what it does.
 //
-// A declared reset — the source epoch advancing — is the loud signal the event
-// contract lacks, and all three adapters put the epoch in their idempotency
-// preimage, so all three agree that a reset re-keys identity. They disagree on
-// what to do next: cityneutral and cityartifact restart the checkpoint and keep
-// producing, while cityinference refuses the push. The inference refusal never
-// writes a new epoch to its checkpoint either, so it is not a pause: the
-// adapter stays refused until an operator deletes the checkpoint out of band.
+// A reset is the loud signal the event contract lacks, and all three adapters
+// put the epoch in their idempotency preimage, so all three agree it re-keys
+// identity. The disagreement this certification found was about what to do next,
+// and underneath it was a missing distinction: an epoch is a bare number, so a
+// declared reset and a mistyped config reached every adapter looking identical.
+// A reset is now declared separately — from-epoch, to-epoch, reason, declarer —
+// and all three adapters make the same call:
 //
-// This test asserts what the three adapters do today. It passes, and that is
-// the point: the divergence is real, it is a certification finding against
-// API-7.23-AC2, and this name is its citation.
-func TestDeclaredResetIsNotHandledUniformly(t *testing.T) {
+//   - a DECLARED advance is honoured: the checkpoint restarts under the same
+//     key, the new epoch and the declaration are written, and the push produces;
+//   - an UNDECLARED advance is identity drift and is refused;
+//   - a backwards epoch is drift in all three and is never declarable.
+//
+// The old cityinference behavior — refuse every epoch mismatch, never write the
+// new epoch, stay refused until an operator clears the checkpoint by hand — was
+// an outage with no recorded cause, and it is gone.
+func TestDeclaredResetIsHandledUniformly(t *testing.T) {
 	ctx := context.Background()
 	s := cityStyle
 
@@ -369,68 +374,136 @@ func TestDeclaredResetIsNotHandledUniformly(t *testing.T) {
 		t.Fatalf("inference epoch-1 push: %v", err)
 	}
 
-	// The reset: epoch 2, same enrolled source, same durable checkpoints.
-	np2, err := cityneutral.NewProducer(nf, cityneutral.Mapper{
-		Source:          cityneutral.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 2},
-		AllowRawContent: true,
-	}, nStore)
+	// Epoch 2 with nothing declaring it: the same bare bump a mistyped config
+	// produces. All three refuse it, and none of them writes it.
+	nBump := cityneutral.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 2}
+	npBump, err := cityneutral.NewProducer(nf,
+		cityneutral.Mapper{Source: nBump, AllowRawContent: true}, nStore)
 	if err != nil {
 		t.Fatalf("neutral NewProducer epoch 2: %v", err)
 	}
-	if _, err := np2.Push(ctx, open); err != nil {
-		t.Errorf("cityneutral no longer absorbs a declared reset: %v", err)
+	if _, err := npBump.Push(ctx, open); !errors.Is(err, cityneutral.ErrIdentityDrift) {
+		t.Errorf("cityneutral undeclared advance: want ErrIdentityDrift, got %v", err)
 	}
 
-	ap2, err := cityartifact.NewProducer(af.Client(s.sourceID, s.sourceKind),
-		cityartifact.Mapper{Source: cityartifact.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 2}}, aStore)
+	aBump := cityartifact.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 2}
+	apBump, err := cityartifact.NewProducer(af.Client(s.sourceID, s.sourceKind),
+		cityartifact.Mapper{Source: aBump}, aStore)
 	if err != nil {
 		t.Fatalf("artifact NewProducer epoch 2: %v", err)
 	}
-	if _, err := ap2.Push(ctx, openArtifact); err != nil {
-		t.Errorf("cityartifact no longer absorbs a declared reset: %v", err)
+	if _, err := apBump.Push(ctx, openArtifact); !errors.Is(err, cityartifact.ErrIdentityDrift) {
+		t.Errorf("cityartifact undeclared advance: want ErrIdentityDrift, got %v", err)
 	}
 
-	iSource := inferenceSource(s)
-	iSource.Epoch = 2
+	iBump := inferenceSource(s)
+	iBump.Epoch = iBump.Epoch + 1
+	ipBump, err := cityinference.NewProducer(iapi, cityinference.Mapper{Source: iBump}, iStore)
+	if err != nil {
+		t.Fatalf("inference NewProducer epoch bump: %v", err)
+	}
+	if _, err := ipBump.Push(ctx, []cityinference.CityInvocation{s.invocation(runID, sessID, recID)}); !errors.Is(err, cityinference.ErrIdentityDrift) {
+		t.Errorf("cityinference undeclared advance: want ErrIdentityDrift, got %v", err)
+	}
+
+	// The same epoch, declared: honoured everywhere, and the new epoch lands in
+	// the checkpoint so no adapter is left refusing its own future pushes.
+	nReset := nBump
+	nReset.Reset = &cityneutral.ResetDeclaration{
+		FromEpoch: 1, ToEpoch: 2, Reason: "source rebuilt", DeclaredBy: "ops@city",
+	}
+	np2, err := cityneutral.NewProducer(nf,
+		cityneutral.Mapper{Source: nReset, AllowRawContent: true}, nStore)
+	if err != nil {
+		t.Fatalf("neutral NewProducer reset: %v", err)
+	}
+	if _, err := np2.Push(ctx, open); err != nil {
+		t.Errorf("cityneutral refused a declared reset: %v", err)
+	}
+	nst, ok, err := nStore.Load(ctx, cityneutral.CheckpointKey(nReset, open.Run.RunID))
+	if err != nil || !ok {
+		t.Fatalf("neutral checkpoint after reset: %v (found=%t)", err, ok)
+	}
+	if nst.Epoch != 2 || nst.LastReset == nil {
+		t.Errorf("neutral reset was not written and attributed: epoch=%d reset=%+v", nst.Epoch, nst.LastReset)
+	}
+
+	aReset := aBump
+	aReset.Reset = &cityartifact.ResetDeclaration{
+		FromEpoch: 1, ToEpoch: 2, Reason: "source rebuilt", DeclaredBy: "ops@city",
+	}
+	ap2, err := cityartifact.NewProducer(af.Client(s.sourceID, s.sourceKind),
+		cityartifact.Mapper{Source: aReset}, aStore)
+	if err != nil {
+		t.Fatalf("artifact NewProducer reset: %v", err)
+	}
+	if _, err := ap2.Push(ctx, openArtifact); err != nil {
+		t.Errorf("cityartifact refused a declared reset: %v", err)
+	}
+	ast, ok, err := aStore.Load(ctx, cityartifact.CheckpointKey(aReset, openArtifact.ArtifactID))
+	if err != nil || !ok {
+		t.Fatalf("artifact checkpoint after reset: %v (found=%t)", err, ok)
+	}
+	if ast.Epoch != 2 || ast.LastReset == nil {
+		t.Errorf("artifact reset was not written and attributed: epoch=%d reset=%+v", ast.Epoch, ast.LastReset)
+	}
+
+	iSource := iBump
+	iSource.Reset = &cityinference.ResetDeclaration{
+		FromEpoch: inferenceSource(s).Epoch, ToEpoch: iBump.Epoch,
+		Reason: "source rebuilt", DeclaredBy: "ops@city",
+	}
 	ip2, err := cityinference.NewProducer(iapi, cityinference.Mapper{Source: iSource}, iStore)
 	if err != nil {
-		t.Fatalf("inference NewProducer epoch 2: %v", err)
+		t.Fatalf("inference NewProducer reset: %v", err)
 	}
-	_, err = ip2.Push(ctx, []cityinference.CityInvocation{s.invocation(runID, sessID, recID)})
-	if !errors.Is(err, cityinference.ErrIdentityDrift) {
-		t.Fatalf("cityinference reset behavior changed: want ErrIdentityDrift, got %v", err)
+	if _, err := ip2.Push(ctx, []cityinference.CityInvocation{s.invocation(runID, sessID, recID)}); err != nil {
+		t.Errorf("cityinference refused a declared reset: %v", err)
 	}
-
-	// And the refusal is durable: the checkpoint still holds epoch 1, so every
-	// later push under the declared epoch is refused the same way. Two adapters
-	// resume by themselves and one needs an operator.
-	if _, err := ip2.Push(ctx, []cityinference.CityInvocation{s.invocation(runID, sessID, recID)}); !errors.Is(err, cityinference.ErrIdentityDrift) {
-		t.Fatalf("second push after reset: want a durable ErrIdentityDrift, got %v", err)
-	}
-	st, ok, err := iStore.Load(ctx, cityinference.CheckpointKey(iSource))
+	ist, ok, err := iStore.Load(ctx, cityinference.CheckpointKey(iSource))
 	if err != nil || !ok {
 		t.Fatalf("inference checkpoint after reset: %v (found=%t)", err, ok)
 	}
-	if st.Epoch != 1 {
-		t.Fatalf("inference checkpoint epoch = %d, want the refused push to have left it at 1", st.Epoch)
+	if ist.Epoch != iSource.Epoch || ist.LastReset == nil {
+		t.Errorf("inference reset was not written and attributed: epoch=%d reset=%+v", ist.Epoch, ist.LastReset)
+	}
+	// The reset settles rather than repeating: a second push is not refused and
+	// needs no operator.
+	if _, err := ip2.Push(ctx, []cityinference.CityInvocation{s.invocation(runID, sessID, recID)}); err != nil {
+		t.Errorf("cityinference second push after a declared reset: %v", err)
 	}
 }
 
-// AC2 / FINDING: only cityinference has a programmatic rollback switch. The
-// other two roll back by the caller ceasing to call Push, which is a rollback
-// of the scheduler and not of the adapter. Rolling back one adapter is
-// supported in all three cases; doing it the same way is not.
-func TestRollbackSwitchIsNotUniform(t *testing.T) {
+// AC2: all three adapters roll back the same way — a switch on the adapter, not
+// an arrangement with whoever schedules it. A disabled adapter refuses with its
+// own ErrDisabled, issues no request and touches no checkpoint, and the other
+// two keep running.
+func TestRollbackSwitchIsUniform(t *testing.T) {
 	ctx := context.Background()
 	tr := newTrio(t)
 	tr.ip.Disabled = true
 
-	_, art, inv := tr.nextRound("rb")
+	chain, art, inv := tr.nextRound("rb")
 	if _, err := tr.ip.Push(ctx, []cityinference.CityInvocation{inv}); !errors.Is(err, cityinference.ErrDisabled) {
 		t.Fatalf("disabled inference producer: want ErrDisabled, got %v", err)
 	}
 	if _, err := tr.ap.Push(ctx, art); err != nil {
 		t.Errorf("artifact adapter stopped when the inference adapter rolled back: %v", err)
+	}
+
+	// The same switch exists on the other two, and rolling one back leaves the
+	// remaining adapter producing.
+	tr.np.Disabled = true
+	if _, err := tr.np.Push(ctx, chain); !errors.Is(err, cityneutral.ErrDisabled) {
+		t.Fatalf("disabled neutral producer: want ErrDisabled, got %v", err)
+	}
+	tr.ap.Disabled = true
+	if _, err := tr.ap.Push(ctx, art); !errors.Is(err, cityartifact.ErrDisabled) {
+		t.Fatalf("disabled artifact producer: want ErrDisabled, got %v", err)
+	}
+	tr.np.Disabled, tr.ap.Disabled = false, false
+	if _, err := tr.np.Push(ctx, chain); err != nil {
+		t.Errorf("neutral adapter did not resume after its rollback was lifted: %v", err)
 	}
 	tr.assertBaseSurvives(t)
 
@@ -511,16 +584,16 @@ func (s artifactKV) Save(_ context.Context, key string, st cityartifact.State) e
 	return nil
 }
 
-// AC2 edge / FINDING: cityneutral and cityartifact mint the SAME checkpoint key
-// for a City run and a City artifact that share a native ID, and their two
-// State documents deserialize into each other without an error. cityinference
-// is the only one of the three whose key names its domain ("/inference").
+// AC2 edge: every adapter's checkpoint key names its domain, so a City run, a
+// City artifact and a City inference that share a native ID land on three keys.
 //
-// Under separate stores this is invisible. Under one shared store — the same
-// table, the obvious operational choice, and the only thing "shared checkpoint
-// corruption" could mean — one adapter silently erases the other's frontier.
-// That is a cross-adapter fault domain, and this test is its proof.
-func TestNeutralAndArtifactCheckpointKeysCollide(t *testing.T) {
+// They used to land on two: cityneutral and cityartifact both minted
+// kind/source/native-id, and their two State documents deserialize into each
+// other without an error. Under separate stores that was invisible; under one
+// shared store — the same table, the obvious operational choice, and the only
+// thing "shared checkpoint corruption" could mean — one adapter erased the
+// other's frontier. This test is the proof it cannot happen again.
+func TestCheckpointKeysAreDomainDisjoint(t *testing.T) {
 	ctx := context.Background()
 	s := cityStyle
 	const nativeID = "shared-native-id"
@@ -531,12 +604,10 @@ func TestNeutralAndArtifactCheckpointKeysCollide(t *testing.T) {
 		cityartifact.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 1}, nativeID)
 	iKey := cityinference.CheckpointKey(inferenceSource(s))
 
-	if nKey != aKey {
-		t.Fatalf("checkpoint keys no longer collide (%q vs %q): the finding is fixed, "+
-			"update this certification to assert disjointness instead", nKey, aKey)
-	}
-	if iKey == nKey {
-		t.Fatalf("inference key now collides too: %q", iKey)
+	for _, pair := range [][2]string{{nKey, aKey}, {nKey, iKey}, {aKey, iKey}} {
+		if pair[0] == pair[1] {
+			t.Fatalf("checkpoint keys collide: %q", pair[0])
+		}
 	}
 
 	kv := newSharedKV()
@@ -567,17 +638,11 @@ func TestNeutralAndArtifactCheckpointKeysCollide(t *testing.T) {
 		t.Fatalf("artifact checkpoint is not the complete frontier this test needs: %+v", before)
 	}
 
-	// The other adapter's State decodes out of the artifact's bytes with no
-	// error at all. Nothing in either document says which domain wrote it.
-	crossed, ok, err := (neutralKV{kv}).Load(ctx, nKey)
-	if err != nil || !ok {
-		t.Fatalf("an artifact checkpoint should have decoded as a neutral one: %v (found=%t)", err, ok)
-	}
-	if crossed.Epoch != before.Epoch || crossed.SourceID != before.SourceID {
-		t.Fatalf("cross-decode lost the fields that make it look legitimate: %+v", crossed)
-	}
-	if crossed.RunTeamID != "" {
-		t.Fatalf("cross-decoded neutral state carried a run ID: %+v", crossed)
+	// Nothing in either State document says which domain wrote it — they still
+	// cross-decode without an error — so the key is the only thing keeping them
+	// apart, and it now does.
+	if _, ok, err := (neutralKV{kv}).Load(ctx, nKey); err != nil || ok {
+		t.Fatalf("the neutral key already holds something: %v (found=%t)", err, ok)
 	}
 
 	nf := cityneutral.NewFake(s.uploader, s.sourceID, s.sourceKind)
@@ -598,9 +663,33 @@ func TestNeutralAndArtifactCheckpointKeysCollide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload artifact checkpoint: %v", err)
 	}
-	if after.ArtifactID != "" || after.Finalized || after.Frontier != 0 {
-		t.Fatalf("expected the artifact frontier to be erased by the neighbor, got %+v", after)
+	if after.ArtifactID != before.ArtifactID || !after.Finalized || after.Frontier != before.Frontier {
+		t.Fatalf("the neighbour disturbed the artifact frontier: %+v, was %+v", after, before)
 	}
-	t.Logf("FINDING API-7.23-AC2: %s erased the artifact frontier %q (parts %d) under shared key %q",
-		"cityneutral", before.ArtifactID, before.Frontier, aKey)
+	neutralAfter, ok, err := (neutralKV{kv}).Load(ctx, nKey)
+	if err != nil || !ok || neutralAfter.RunTeamID == "" {
+		t.Fatalf("the neutral checkpoint is not under its own key: %v (found=%t) %+v", err, ok, neutralAfter)
+	}
+
+	// Migration edge: the pre-domain key is the ambiguous one, so an adapter
+	// resuming across the key change must not adopt a neighbour's document out
+	// of it. Inheriting one would import a foreign epoch and wedge the adapter
+	// on a drift it never caused.
+	kv2 := newSharedKV()
+	foreign := cityartifact.State{Epoch: 5, SourceID: s.sourceID, ArtifactID: before.ArtifactID, Finalized: true}
+	legacy := cityartifact.LegacyCheckpointKey(
+		cityartifact.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 1}, nativeID)
+	if err := (artifactKV{kv2}).Save(ctx, legacy, foreign); err != nil {
+		t.Fatalf("seed the legacy key: %v", err)
+	}
+	np2, err := cityneutral.NewProducer(nf, cityneutral.Mapper{
+		Source:          cityneutral.Source{SourceID: s.sourceID, Kind: s.sourceKind, Epoch: 1},
+		AllowRawContent: true,
+	}, neutralKV{kv2})
+	if err != nil {
+		t.Fatalf("neutral NewProducer: %v", err)
+	}
+	if _, err := np2.Push(ctx, chain); err != nil {
+		t.Fatalf("a neighbour's pre-domain checkpoint was inherited: %v", err)
+	}
 }

@@ -34,6 +34,9 @@ type State struct {
 	RunTeamID  string                   `json:"run_team_id"`
 	RunVersion uint64                   `json:"run_version"`
 	Sessions   map[string]*SessionState `json:"sessions"`
+	// LastReset records the declaration that restarted this checkpoint, if one
+	// did. It is evidence, not input: nothing reads it back to make a decision.
+	LastReset *ResetRecord `json:"last_reset,omitempty"`
 }
 
 func (s *State) session(sourceSessionID string) *SessionState {
@@ -127,6 +130,11 @@ type Producer struct {
 	API    API
 	Mapper Mapper
 	Store  Store
+
+	// Disabled is the rollback switch. A disabled producer issues no request
+	// and touches no checkpoint; acknowledged records stay exactly as the
+	// server accepted them and every other producer keeps running.
+	Disabled bool
 }
 
 // NewProducer validates its wiring up front: a producer missing a store would
@@ -144,11 +152,89 @@ func NewProducer(api API, mapper Mapper, store Store) (*Producer, error) {
 	return &Producer{API: api, Mapper: mapper, Store: store}, nil
 }
 
+// checkpointDomain names this adapter's checkpoint namespace. It is the third
+// segment of every key, the same position cityinference puts "inference" in, so
+// a City run and a City artifact that share a native ID can no longer mint one
+// key over one store.
+const checkpointDomain = "run"
+
 // CheckpointKey is the stable checkpoint identity of one City run under one
 // source. It excludes the epoch: a reset must LAND on the same key so the old
 // frontier is visibly superseded rather than orphaned under a new one.
 func CheckpointKey(source Source, cityRunID string) string {
+	return source.Kind + "/" + source.SourceID + "/" + checkpointDomain + "/" + cityRunID
+}
+
+// LegacyCheckpointKey is the undomained key this adapter wrote before the
+// domain segment existed. It is read once, on a miss at the current key, and it
+// is never written: leaving it unread would silently restart every in-flight run
+// from zero, and writing it again would re-open the collision.
+func LegacyCheckpointKey(source Source, cityRunID string) string {
 	return source.Kind + "/" + source.SourceID + "/" + cityRunID
+}
+
+// loadCheckpoint reads the current key and falls back once to the pre-domain
+// key, so a producer that was mid-run when the domain segment shipped resumes
+// its frontier instead of re-uploading the world.
+//
+// The legacy key is the ambiguous one, so its bytes may belong to another
+// domain: a cityartifact checkpoint decodes as this State without an error.
+// Adoption therefore requires this domain's own discriminator. A neutral
+// checkpoint is only ever saved after a run was acknowledged, so a durable one
+// always carries a run team ID; anything else is left where it lies.
+func (p *Producer) loadCheckpoint(ctx context.Context, key, cityRunID string) (State, error) {
+	st, ok, err := p.Store.Load(ctx, key)
+	if err != nil {
+		return State{}, err
+	}
+	if ok {
+		return st, nil
+	}
+	legacy, ok, err := p.Store.Load(ctx, LegacyCheckpointKey(p.Mapper.Source, cityRunID))
+	if err != nil {
+		return State{}, err
+	}
+	if !ok || legacy.RunTeamID == "" {
+		return State{}, nil
+	}
+	// Copy it forward now rather than relying on the rest of this push to save.
+	// A chain whose sessions are all finalized writes nothing else, and the
+	// migration has to complete for those too or the old key stays load-bearing
+	// forever.
+	if err := p.Store.Save(ctx, key, legacy); err != nil {
+		return State{}, err
+	}
+	return legacy, nil
+}
+
+// reconcileEpoch applies a declared reset and refuses everything else. It is
+// byte-for-byte the same decision in all three City adapters.
+func (p *Producer) reconcileEpoch(st *State) error {
+	src := p.Mapper.Source
+	switch {
+	case st.Epoch == 0:
+		st.Epoch = src.Epoch
+		st.SourceID = src.SourceID
+	case src.Epoch > st.Epoch:
+		rec, err := checkResetDeclaration(src.Reset, st.Epoch, src.Epoch)
+		if err != nil {
+			return err
+		}
+		// The previous frontier belongs to the previous epoch and must not gate
+		// the new one, so the checkpoint restarts under the same key. The server
+		// keeps the records it already accepted; this producer simply stops
+		// claiming to have sent them. The declaration is carried into the new
+		// checkpoint: a reset nobody can attribute later is indistinguishable
+		// from corruption.
+		*st = State{Epoch: src.Epoch, SourceID: src.SourceID, LastReset: &rec}
+	case src.Epoch < st.Epoch:
+		return fmt.Errorf("%w: source epoch %d is behind checkpoint epoch %d",
+			ErrIdentityDrift, src.Epoch, st.Epoch)
+	}
+	if st.SourceID != "" && st.SourceID != src.SourceID {
+		return fmt.Errorf("%w: checkpoint belongs to source %q", ErrIdentityDrift, st.SourceID)
+	}
+	return nil
 }
 
 // Push maps, uploads, checkpoints and finalizes one chain.
@@ -158,27 +244,16 @@ func CheckpointKey(source Source, cityRunID string) string {
 // restart resumes at the next accepted record and never re-sends an accepted
 // one.
 func (p *Producer) Push(ctx context.Context, chain CityChain) (Result, error) {
+	if p.Disabled {
+		return Result{}, ErrDisabled
+	}
 	key := CheckpointKey(p.Mapper.Source, chain.Run.RunID)
-	st, _, err := p.Store.Load(ctx, key)
+	st, err := p.loadCheckpoint(ctx, key, chain.Run.RunID)
 	if err != nil {
 		return Result{}, err
 	}
-	switch {
-	case st.Epoch == 0:
-		st.Epoch = p.Mapper.Source.Epoch
-		st.SourceID = p.Mapper.Source.SourceID
-	case p.Mapper.Source.Epoch > st.Epoch:
-		// A declared reset. The previous frontier belongs to the previous
-		// epoch and must not gate the new one, so the checkpoint restarts —
-		// the server keeps the old records; this producer simply stops
-		// claiming to have sent them.
-		st = State{Epoch: p.Mapper.Source.Epoch, SourceID: p.Mapper.Source.SourceID}
-	case p.Mapper.Source.Epoch < st.Epoch:
-		return Result{}, fmt.Errorf("%w: source epoch %d is behind checkpoint epoch %d",
-			ErrIdentityDrift, p.Mapper.Source.Epoch, st.Epoch)
-	}
-	if st.SourceID != "" && st.SourceID != p.Mapper.Source.SourceID {
-		return Result{}, fmt.Errorf("%w: checkpoint belongs to source %q", ErrIdentityDrift, st.SourceID)
+	if err := p.reconcileEpoch(&st); err != nil {
+		return Result{}, err
 	}
 
 	res := Result{}

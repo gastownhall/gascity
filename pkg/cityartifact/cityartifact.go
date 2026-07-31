@@ -118,6 +118,10 @@ var (
 	// holds, or an acknowledgement against the wrong artifact. Both are louder
 	// than a retry.
 	ErrIdentityDrift = errors.New("cityartifact: stable source identity resolved to a different artifact id")
+	// ErrDisabled is the rollback state: the producer is off and issues no
+	// request. Rolling one adapter back is a switch on the adapter, not an
+	// arrangement with whoever schedules it.
+	ErrDisabled = errors.New("cityartifact: producer disabled")
 	// ErrCityAuthority is a mapping that would let a City-shaped fact become
 	// artifact authority: a City-minted artifact ID, a rig or formula name in a
 	// link slot, or a producer/source field set from the body.

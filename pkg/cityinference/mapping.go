@@ -25,6 +25,9 @@ type Source struct {
 	// never on a restart and never on a credential rotation, and the adapter
 	// refuses to guess one.
 	Epoch uint64
+	// Reset declares that this epoch is a reset of the checkpointed one. It is
+	// required for an epoch advance to be honoured and is ignored otherwise.
+	Reset *ResetDeclaration
 }
 
 // CityInvocation is one City model invocation as this adapter reads it.
