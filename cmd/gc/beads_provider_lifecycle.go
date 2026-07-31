@@ -1418,22 +1418,53 @@ func resolveManagedDoltPort(cityPath string) (string, managedDoltPortResolution)
 	if json.Unmarshal(data, &state) != nil {
 		return "", managedDoltPortError
 	}
-	// Separate the deterministic "is this our live, owned process" verdict from
-	// the one transient probe (port reachability). Structural identity, PID
-	// liveness, and ownership are stable reads: when any fails the server is
-	// genuinely not running now (stopped, dead PID, wrong layout, or unowned) and
-	// the city is absent — so doctor's #4685 self-cleanup guard still arms. The
-	// checks short-circuit so a stopped, dead, or unowned city never pays the
-	// 250ms port dial.
-	layout, identityOK := validDoltRuntimeStateIdentity(state, cityPath)
-	deterministicallyPresent := identityOK &&
-		pidAlive(state.PID) &&
-		managedDoltRuntimeProcessOwned(state, layout)
-	portReachable := deterministicallyPresent && doltPortReachable(strconv.Itoa(state.Port))
-	if resolution := classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable); resolution != managedDoltPortFound {
+	if resolution := resolveDoltRuntimeStatePresence(state, cityPath, defaultManagedDoltStatePresenceProbes()); resolution != managedDoltPortFound {
 		return "", resolution
 	}
 	return strconv.Itoa(state.Port), managedDoltPortFound
+}
+
+// managedDoltStatePresenceProbes are the impure per-process reads that decide
+// whether a parsed dolt runtime state describes our live, owned server. They are
+// injected — mirroring doctorManagedDoltDeps — so the deterministic-vs-transient
+// classification wiring is testable without spawning a real owned-but-unreachable
+// server (gastownhall/gascity#4827 review finding 3).
+type managedDoltStatePresenceProbes struct {
+	identity  func(state doltRuntimeState, cityPath string) (managedDoltRuntimeLayout, bool)
+	pidAlive  func(pid int) bool
+	owned     func(state doltRuntimeState, layout managedDoltRuntimeLayout) bool
+	reachable func(port string) bool
+}
+
+// defaultManagedDoltStatePresenceProbes wires the presence assembly to the real
+// managed-dolt probes.
+func defaultManagedDoltStatePresenceProbes() managedDoltStatePresenceProbes {
+	return managedDoltStatePresenceProbes{
+		identity:  validDoltRuntimeStateIdentity,
+		pidAlive:  pidAlive,
+		owned:     managedDoltRuntimeProcessOwned,
+		reachable: doltPortReachable,
+	}
+}
+
+// resolveDoltRuntimeStatePresence classifies an already-parsed runtime state into
+// found/absent/error.
+//
+// It separates the deterministic "is this our live, owned process" verdict from
+// the one transient probe (port reachability). Structural identity, PID liveness,
+// and ownership are stable reads: when any fails the server is genuinely not
+// running now (stopped, dead PID, wrong layout, or unowned) and the city is
+// absent — so doctor's #4685 self-cleanup guard still arms. The checks
+// short-circuit so a stopped, dead, or unowned city never pays the 250ms port
+// dial. See classifyDoltRuntimeStatePresence for why a present-but-unreachable
+// server fails closed to error rather than absent.
+func resolveDoltRuntimeStatePresence(state doltRuntimeState, cityPath string, probes managedDoltStatePresenceProbes) managedDoltPortResolution {
+	layout, identityOK := probes.identity(state, cityPath)
+	deterministicallyPresent := identityOK &&
+		probes.pidAlive(state.PID) &&
+		probes.owned(state, layout)
+	portReachable := deterministicallyPresent && probes.reachable(strconv.Itoa(state.Port))
+	return classifyDoltRuntimeStatePresence(deterministicallyPresent, portReachable)
 }
 
 // classifyDoltRuntimeStatePresence turns the deterministic "this is our live,

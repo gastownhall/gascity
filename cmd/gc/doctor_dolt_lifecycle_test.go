@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -312,6 +313,76 @@ func TestClassifyDoltRuntimeStatePresence(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("classifyDoltRuntimeStatePresence(present=%v, reachable=%v) = %d, want %d",
 					tc.deterministicallyPresent, tc.portReachable, got, tc.want)
+			}
+		})
+	}
+}
+
+// Finding-3 wiring: resolveDoltRuntimeStatePresence must assemble the two
+// booleans the classifier consumes from the injected probes, hermetically —
+// spawning a real owned-but-unreachable server to prove this (the prior test)
+// cost a subprocess, a fixed sleep, and the slow-process gate, all of which
+// pushed cmd/gc past its resource-census baseline.
+//
+// An alive, owned server whose listener did not answer (identity+pidAlive+owned
+// true, reachable false) must resolve to error, never absent: absent arms
+// doctor's stop guard with wasRunning=false and lets release stop a pre-existing
+// server once the port answers again (#4827 review finding 3). Each deterministic
+// "not running" read (identity, pidAlive, or ownership false) must short-circuit
+// to absent without paying the reachability probe.
+func TestResolveDoltRuntimeStatePresence(t *testing.T) {
+	state := doltRuntimeState{Running: true, PID: 4321, Port: 6543}
+	tests := []struct {
+		name       string
+		identityOK bool
+		pidAlive   bool
+		owned      bool
+		reachable  bool
+		wantProbed bool
+		want       managedDoltPortResolution
+	}{
+		{name: "alive, owned, reachable: found", identityOK: true, pidAlive: true, owned: true, reachable: true, wantProbed: true, want: managedDoltPortFound},
+		{name: "alive, owned, unreachable: error (fail closed)", identityOK: true, pidAlive: true, owned: true, reachable: false, wantProbed: true, want: managedDoltPortError},
+		{name: "wrong identity: absent, no reachability probe", identityOK: false, pidAlive: true, owned: true, reachable: true, wantProbed: false, want: managedDoltPortAbsent},
+		{name: "dead pid: absent, no reachability probe", identityOK: true, pidAlive: false, owned: true, reachable: true, wantProbed: false, want: managedDoltPortAbsent},
+		{name: "unowned: absent, no reachability probe", identityOK: true, pidAlive: true, owned: false, reachable: true, wantProbed: false, want: managedDoltPortAbsent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			probedPort := ""
+			probes := managedDoltStatePresenceProbes{
+				identity: func(gotState doltRuntimeState, cityPath string) (managedDoltRuntimeLayout, bool) {
+					if gotState != state {
+						t.Fatalf("identity probe state = %+v, want %+v", gotState, state)
+					}
+					if cityPath != "/city" {
+						t.Fatalf("identity probe cityPath = %q, want %q", cityPath, "/city")
+					}
+					return managedDoltRuntimeLayout{}, tc.identityOK
+				},
+				pidAlive: func(pid int) bool {
+					if pid != state.PID {
+						t.Fatalf("pidAlive pid = %d, want %d", pid, state.PID)
+					}
+					return tc.pidAlive
+				},
+				owned: func(doltRuntimeState, managedDoltRuntimeLayout) bool { return tc.owned },
+				reachable: func(gotPort string) bool {
+					probedPort = gotPort
+					return tc.reachable
+				},
+			}
+
+			got := resolveDoltRuntimeStatePresence(state, "/city", probes)
+			if got != tc.want {
+				t.Fatalf("resolveDoltRuntimeStatePresence = %d, want %d", got, tc.want)
+			}
+			probed := probedPort != ""
+			if probed != tc.wantProbed {
+				t.Fatalf("reachability probed = %v (port %q), want %v", probed, probedPort, tc.wantProbed)
+			}
+			if tc.wantProbed && probedPort != strconv.Itoa(state.Port) {
+				t.Fatalf("reachability probed port = %q, want %q", probedPort, strconv.Itoa(state.Port))
 			}
 		})
 	}
