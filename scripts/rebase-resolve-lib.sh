@@ -53,8 +53,19 @@
 #
 # Required external commands: git, awk, cmp, mktemp, tr.
 
+# This file is always SOURCED (never executed via its own shebang) directly
+# into the caller's ambient interactive shell — see
+# formulas/mol-deployer-gate.formula.toml and prompts/deployer.md Guardrails,
+# both of which invoke it as ". scripts/rebase-resolve-lib.sh". BASH_SOURCE is
+# a bash-only array with no zsh equivalent; under zsh it silently expands
+# empty, so `dirname "${BASH_SOURCE[0]}"` resolves to "." instead of this
+# script's real directory whenever the sourcing shell's cwd isn't literally
+# scripts/ (ga-ql4bmm). Anchor via git instead, which is correct under any
+# shell and correctly resolves to the current worktree's own scripts/ dir.
 # shellcheck source=./push-ownership-guard.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
+_rrl_repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || _rrl_repo_root="."
+. "$_rrl_repo_root/scripts/push-ownership-guard.sh"
+unset _rrl_repo_root
 
 # is_additive_keepboth_path <path>
 #
@@ -64,11 +75,17 @@
 # whose semantics are "a bag of independent entries" (tests, docs, fixtures,
 # changelog/news fragments), never on importable source.
 is_additive_keepboth_path() {
-    local path="$1"
+    # NOT `local path` — zsh ties the scalar $PATH to a special array named
+    # `path`; declaring a plain `local path=` here blanks $PATH for the rest
+    # of this function body, so every external command below (tr) silently
+    # fails "command not found". This file is only ever sourced, never
+    # executed via its own shebang, so it inherits whatever shell the caller
+    # is running — zsh in this fork's deployer sessions (ga-g1mlel).
+    local file_path="$1"
     # Normalize to lowercase for matching; keep original for extension checks.
     local lower
-    lower="$(printf '%s' "$path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-    local base="${path##*/}"
+    lower="$(printf '%s' "$file_path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    local base="${file_path##*/}"
     local lbase
     lbase="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
 
@@ -124,9 +141,13 @@ is_additive_keepboth_path() {
 # the logic is auditable in one place. awk exits 0 (resolved) / 1 (real
 # conflict) / 2 (malformed markers); we mirror that exit code.
 resolve_conflict_markers_in_file() {
-    local path="$1"
+    # NOT `local path` — see is_additive_keepboth_path above: zsh ties $PATH
+    # to a special array named `path`, so a plain `local path=` here blanks
+    # the command search path for this function body and mktemp/awk/mv all
+    # silently fail "command not found" under a zsh caller.
+    local file_path="$1"
     local allow_keepboth="${2:-0}"
-    [[ -f "$path" ]] || return 2
+    [[ -f "$file_path" ]] || return 2
 
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/gc-rebase-resolve.XXXXXX")" || return 2
@@ -217,9 +238,9 @@ resolve_conflict_markers_in_file() {
         END {
             if (state != 0) { exit 2 }       # unterminated conflict marker
         }
-    ' "$path" > "$tmp"; then
+    ' "$file_path" > "$tmp"; then
         # awk exited 0 — fully resolved. Replace the file.
-        mv -f "$tmp" "$path"
+        mv -f "$tmp" "$file_path"
         return 0
     else
         local rc=$?
