@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
   streaming output instead of buffering it. (gascity#4823)
 
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

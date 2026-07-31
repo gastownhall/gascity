@@ -275,7 +275,7 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	}
 	runStatus := runproj.CanonicalRunStatusForLane(lane, rootPtr, countStartedMembers(fold.beads, lane.ID))
 
-	members := runMemberBeads(fold.beads, input.RunID)
+	members := topoSortRunSteps(runMemberBeads(fold.beads, input.RunID))
 	out := &RunStepsOutput{}
 	out.Body.RunID = input.RunID
 	out.Body.Steps = make([]RunStep, 0, len(members))
