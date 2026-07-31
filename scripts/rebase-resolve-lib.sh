@@ -75,11 +75,17 @@ unset _rrl_repo_root
 # whose semantics are "a bag of independent entries" (tests, docs, fixtures,
 # changelog/news fragments), never on importable source.
 is_additive_keepboth_path() {
-    local path="$1"
+    # NOT `local path` — zsh ties the scalar $PATH to a special array named
+    # `path`; declaring a plain `local path=` here blanks $PATH for the rest
+    # of this function body, so every external command below (tr) silently
+    # fails "command not found". This file is only ever sourced, never
+    # executed via its own shebang, so it inherits whatever shell the caller
+    # is running — zsh in this fork's deployer sessions (ga-g1mlel).
+    local file_path="$1"
     # Normalize to lowercase for matching; keep original for extension checks.
     local lower
-    lower="$(printf '%s' "$path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-    local base="${path##*/}"
+    lower="$(printf '%s' "$file_path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    local base="${file_path##*/}"
     local lbase
     lbase="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
 
@@ -135,9 +141,13 @@ is_additive_keepboth_path() {
 # the logic is auditable in one place. awk exits 0 (resolved) / 1 (real
 # conflict) / 2 (malformed markers); we mirror that exit code.
 resolve_conflict_markers_in_file() {
-    local path="$1"
+    # NOT `local path` — see is_additive_keepboth_path above: zsh ties $PATH
+    # to a special array named `path`, so a plain `local path=` here blanks
+    # the command search path for this function body and mktemp/awk/mv all
+    # silently fail "command not found" under a zsh caller.
+    local file_path="$1"
     local allow_keepboth="${2:-0}"
-    [[ -f "$path" ]] || return 2
+    [[ -f "$file_path" ]] || return 2
 
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/gc-rebase-resolve.XXXXXX")" || return 2
@@ -228,9 +238,9 @@ resolve_conflict_markers_in_file() {
         END {
             if (state != 0) { exit 2 }       # unterminated conflict marker
         }
-    ' "$path" > "$tmp"; then
+    ' "$file_path" > "$tmp"; then
         # awk exited 0 — fully resolved. Replace the file.
-        mv -f "$tmp" "$path"
+        mv -f "$tmp" "$file_path"
         return 0
     else
         local rc=$?
