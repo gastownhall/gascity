@@ -22,6 +22,7 @@ type ciCriticalPathJob struct {
 	If              string                    `yaml:"if"`
 	RunsOn          string                    `yaml:"runs-on"`
 	Needs           ciCriticalPathNeeds       `yaml:"needs"`
+	Outputs         map[string]string         `yaml:"outputs"`
 	Steps           []ciCriticalPathStep      `yaml:"steps"`
 	Strategy        ciCriticalPathJobStrategy `yaml:"strategy"`
 	ContinueOnError bool                      `yaml:"continue-on-error"`
@@ -590,6 +591,250 @@ func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	}
 	if !runsBDContract {
 		t.Error("Mac acceptance must retain the external bd CLI contract split from Tier A")
+	}
+}
+
+// TestMacRegressionGateCentralizesTierRouting asserts the new centralized
+// `gate` job (ga-hd99jq D1 / ga-n7ef4e): it always runs (no `if:`, so an
+// all-skipped workflow run can no longer happen), computes one reason string
+// plus the three tier booleans other jobs key off of, and mirrors
+// review-formulas.yml's own paths-filter + decision-step shape.
+func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+
+	gate, ok := wf.Jobs["gate"]
+	if !ok {
+		t.Fatal("mac-regression workflow has no centralized gate job")
+	}
+	if !slices.Contains(gate.Needs, "runner-policy") {
+		t.Errorf("gate needs = %v, want runner-policy", gate.Needs)
+	}
+	if strings.TrimSpace(gate.If) != "" {
+		t.Errorf("gate if = %q, want no condition — the gate itself must always run so every tier job and the summary can read its outputs", strings.TrimSpace(gate.If))
+	}
+	const gateRunner = "${{ needs.runner-policy.outputs.runner_2vcpu }}"
+	if gate.RunsOn != gateRunner {
+		t.Errorf("gate runs-on = %q, want %q (routing decision is cheap, keep it off macOS runners)", gate.RunsOn, gateRunner)
+	}
+
+	wantOutputs := map[string]string{
+		"run_smoke":           "${{ steps.gate.outputs.run_smoke }}",
+		"run_full":            "${{ steps.gate.outputs.run_full }}",
+		"run_review_formulas": "${{ steps.gate.outputs.run_review_formulas }}",
+		"reason":              "${{ steps.gate.outputs.reason }}",
+	}
+	for name, want := range wantOutputs {
+		if got := gate.Outputs[name]; got != want {
+			t.Errorf("gate output %s = %q, want %q", name, got, want)
+		}
+	}
+
+	var filterStep, decideStep, checkoutStep ciCriticalPathStep
+	var hasFilter, hasDecide, hasCheckout bool
+	for _, step := range gate.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			checkoutStep, hasCheckout = step, true
+		}
+		switch step.ID {
+		case "filter":
+			filterStep, hasFilter = step, true
+		case "gate":
+			decideStep, hasDecide = step, true
+		}
+	}
+	if !hasCheckout {
+		t.Fatal("gate job has no checkout step")
+	}
+	wantCheckoutWith := map[string]string{
+		"repository":          "${{ inputs.head_repo || github.repository }}",
+		"ref":                 "${{ inputs.head_sha || github.sha }}",
+		"persist-credentials": "false",
+	}
+	for name, want := range wantCheckoutWith {
+		if got := checkoutStep.With[name]; got != want {
+			t.Errorf("gate checkout with.%s = %q, want %q (every other mac-regression job pins the same head ref/repo and disables credential persistence; the gate job must not be the odd one out)", name, got, want)
+		}
+	}
+	if !hasFilter {
+		t.Fatal("gate job has no paths-filter step (id: filter)")
+	}
+	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
+		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
+	}
+	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**"}
+	filterValue := filterStep.With["filters"]
+	for _, entry := range wantFilterEntries {
+		if !strings.Contains(filterValue, "'"+entry+"'") {
+			t.Errorf("gate filter mac_sensitive list missing %q; want exactly %v", entry, wantFilterEntries)
+		}
+	}
+	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
+		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
+	}
+	if !hasDecide {
+		t.Fatal("gate job has no routing-decision step (id: gate)")
+	}
+
+	wantDecideEnv := map[string]string{
+		"EVENT_NAME":   "${{ github.event_name }}",
+		"SUITE_INPUT":  "${{ inputs.suite }}",
+		"PR_HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+		"PR_DRAFT":     "${{ github.event.pull_request.draft }}",
+		"NEEDS_LABEL":  "${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}",
+		"PATH_HIT":     "${{ steps.filter.outputs.mac_sensitive }}",
+	}
+	for name, want := range wantDecideEnv {
+		if got := decideStep.Env[name]; got != want {
+			t.Errorf("gate decision step env %s = %q, want %q", name, got, want)
+		}
+	}
+
+	// Every trigger path the exit_contract enumerates must be handled so the
+	// refactor preserves today's per-job run/skip outcome exactly.
+	for _, marker := range []string{
+		`"$EVENT_NAME" == "schedule"`,
+		`run_smoke=true; run_full=true; run_review_formulas=true`,
+		`"$EVENT_NAME" == "workflow_dispatch"`,
+		`case "$SUITE_INPUT" in`,
+		`needs-mac)`,
+		`"$EVENT_NAME" == "pull_request"`,
+		`"$PR_HEAD_REPO" != "${{ github.repository }}"`,
+		`"$PR_DRAFT" == "true"`,
+		`"$NEEDS_LABEL" == "true"`,
+		`echo "run_smoke=$run_smoke"`,
+		`echo "run_full=$run_full"`,
+		`echo "run_review_formulas=$run_review_formulas"`,
+		`echo "reason=$reason"`,
+	} {
+		if !strings.Contains(decideStep.Run, marker) {
+			t.Errorf("gate decision step run script missing %q", marker)
+		}
+	}
+
+	// An unrecognized (or default) $SUITE_INPUT on a manual dispatch must
+	// still run the smoke tier, not silently run nothing — run_smoke must
+	// be set unconditionally before the case statement, not only inside
+	// specific case branches, so the catch-all `*)` arm inherits it too.
+	const dispatchMarker = `"$EVENT_NAME" == "workflow_dispatch" ]]; then`
+	dispatchIdx := strings.Index(decideStep.Run, dispatchMarker)
+	if dispatchIdx < 0 {
+		t.Fatal("gate decision step run script missing workflow_dispatch branch")
+	}
+	afterDispatch := decideStep.Run[dispatchIdx+len(dispatchMarker):]
+	caseIdx := strings.Index(afterDispatch, `case "$SUITE_INPUT" in`)
+	if caseIdx < 0 {
+		t.Fatal("gate decision step run script missing case statement in workflow_dispatch branch")
+	}
+	if preCase := afterDispatch[:caseIdx]; !strings.Contains(preCase, "run_smoke=true") {
+		t.Errorf("gate decision step workflow_dispatch branch does not set run_smoke=true before the case statement (preamble %q) — an unrecognized suite input must still default to the smoke tier", preCase)
+	}
+}
+
+// TestMacRegressionTierJobsGateOnCentralizedOutputs asserts every tier job
+// collapses its duplicated multi-line if: into a single check against the
+// gate job's own output (ga-hd99jq D1) — a refactor of how the decision is
+// computed, not a change to which jobs run when.
+func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+
+	tests := []struct {
+		job    string
+		wantIf string
+	}{
+		{"mac-quality", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-unit", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-cmd-gc-process", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-integration-bdstore", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-integration-rest", "needs.gate.outputs.run_full == 'true'"},
+		{"mac-integration-review-formulas", "needs.gate.outputs.run_review_formulas == 'true'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.job, func(t *testing.T) {
+			job, ok := wf.Jobs[tt.job]
+			if !ok {
+				t.Fatalf("mac-regression workflow has no %s job", tt.job)
+			}
+			if !slices.Contains(job.Needs, "gate") {
+				t.Errorf("%s needs = %v, want gate", tt.job, job.Needs)
+			}
+			if got := strings.TrimSpace(job.If); got != tt.wantIf {
+				t.Errorf("%s if = %q, want exactly %q (single gate-output check, not a duplicated inline expression)", tt.job, got, tt.wantIf)
+			}
+		})
+	}
+}
+
+// TestMacRegressionSummaryAlwaysRunsAndReadsGateResult is the core
+// signal-integrity fix (ga-wecoe1, ga-hd99jq F1/F2): the summary job must
+// never itself be skipped, or an all-skipped run reports green. Its if:
+// becomes bare always(), and it must read the gate job's own result/outputs
+// rather than re-evaluating the trigger — the fleet's D5 rule.
+func TestMacRegressionSummaryAlwaysRunsAndReadsGateResult(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job, ok := wf.Jobs["mac-regression-summary"]
+	if !ok {
+		t.Fatal("mac-regression workflow has no mac-regression-summary job")
+	}
+
+	if got := strings.TrimSpace(job.If); got != "always()" {
+		t.Errorf("mac-regression-summary if = %q, want bare always() so the summary itself is never skipped (D5: an all-skipped run must not report green)", got)
+	}
+	if !slices.Contains(job.Needs, "gate") {
+		t.Errorf("mac-regression-summary needs = %v, want gate", job.Needs)
+	}
+
+	var summarize ciCriticalPathStep
+	var found bool
+	for _, step := range job.Steps {
+		if step.Name == "Summarize" {
+			summarize, found = step, true
+		}
+	}
+	if !found {
+		t.Fatal("mac-regression-summary has no Summarize step")
+	}
+
+	wantEnv := map[string]string{
+		"GATE_RESULT": "${{ needs.gate.result }}",
+		"RUN_SMOKE":   "${{ needs.gate.outputs.run_smoke }}",
+		"REASON":      "${{ needs.gate.outputs.reason }}",
+	}
+	for name, want := range wantEnv {
+		if got := summarize.Env[name]; got != want {
+			t.Errorf("Summarize env %s = %q, want %q", name, got, want)
+		}
+	}
+
+	for _, marker := range []string{
+		`"${GATE_RESULT}" != "success"`,
+		`"${RUN_SMOKE}" != "true"`,
+		`Mac Regression: not requested`,
+	} {
+		if !strings.Contains(summarize.Run, marker) {
+			t.Errorf("Summarize run script missing %q (gate-failed / not-requested branch from the exit_contract)", marker)
+		}
+	}
+}
+
+// TestMacRegressionHeaderCommentDescribesCentralizedGate asserts the file
+// header (originally documenting "each job copies the expression; keep them
+// in sync") is updated to describe the centralized-gate shape that removes
+// that exact duplication.
+func TestMacRegressionHeaderCommentDescribesCentralizedGate(t *testing.T) {
+	path := filepath.Join(repoRoot(t), ".github", "workflows", "mac-regression.yml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	content := string(body)
+	if strings.Contains(content, "each job copies the") {
+		t.Error("mac-regression.yml header comment still describes the old per-job duplicated if: expression — update it to describe the centralized gate job")
+	}
+	if !strings.Contains(content, "gate") {
+		t.Error("mac-regression.yml header comment should describe the centralized gate job")
 	}
 }
 

@@ -77,13 +77,14 @@ env:
   DOLT_VERSION: "2.1.7"
   BD_VERSION: "v1.1.0"
 
-# Trigger gate re-used by every job below via `if:`.
-# We want each job to run when EITHER:
-#   - a same-repo, non-draft PR carries the `needs-mac` label
-#   - the nightly schedule fires
-#   - the user dispatches manually (smoke/full input decides reach)
-# YAML anchors do not work inside GitHub `if:` so each job copies the
-# expression; keep them in sync.
+# Tier routing is centralized in the `gate` job below, which always runs
+# and computes run_smoke/run_full/run_review_formulas plus a human-readable
+# `reason` from the trigger (schedule / workflow_dispatch suite input /
+# same-repo non-draft PR carrying the `needs-mac` label). Every tier job
+# reads exactly one of those booleans via `needs.gate.outputs.*` instead of
+# duplicating the trigger expression, and mac-regression-summary always
+# runs (bare `always()`) so an all-skipped workflow run can never report
+# green (fleet rule D5, ga-hd99jq).
 
 jobs:
   runner-policy:
@@ -108,22 +109,97 @@ jobs:
         run: |
           python3 .github/workflows/scripts/runner_policy.py
 
+  # Centralized tier-routing decision. This job always runs (no `if:`) so
+  # every downstream job — including mac-regression-summary — can depend on
+  # `gate` and read its outputs, instead of each job re-evaluating a copy of
+  # the same trigger expression (ga-hd99jq D1).
+  gate:
+    name: Mac regression / gate
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    outputs:
+      run_smoke: ${{ steps.gate.outputs.run_smoke }}
+      run_full: ${{ steps.gate.outputs.run_full }}
+      run_review_formulas: ${{ steps.gate.outputs.run_review_formulas }}
+      reason: ${{ steps.gate.outputs.reason }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        continue-on-error: true
+        with:
+          filters: |
+            mac_sensitive:
+              - 'cmd/gc/**'
+              - 'internal/pathutil/**'
+              - 'internal/fsys/**'
+      - name: Decide which tiers should run
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SUITE_INPUT: ${{ inputs.suite }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
+          PATH_HIT: ${{ steps.filter.outputs.mac_sensitive }}
+        run: |
+          run_smoke=false
+          run_full=false
+          run_review_formulas=false
+          reason="no trigger matched"
+
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            run_smoke=true; run_full=true; run_review_formulas=true
+            reason="nightly schedule"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_smoke=true
+            case "$SUITE_INPUT" in
+              full)
+                run_full=true; run_review_formulas=true
+                reason="manual dispatch (suite=full)"
+                ;;
+              needs-mac)
+                run_full=true
+                reason="manual dispatch (suite=needs-mac)"
+                ;;
+              *)
+                reason="manual dispatch (suite=smoke)"
+                ;;
+            esac
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$PR_HEAD_REPO" != "${{ github.repository }}" ]]; then
+              reason="pull request from a fork, skipping"
+            elif [[ "$PR_DRAFT" == "true" ]]; then
+              reason="draft pull request, skipping"
+            elif [[ "$NEEDS_LABEL" == "true" ]]; then
+              run_smoke=true; run_full=true
+              reason="pull request carries needs-mac label"
+            else
+              reason="pull request without needs-mac label (path hit: ${PATH_HIT})"
+            fi
+          fi
+
+          {
+            echo "run_smoke=$run_smoke"
+            echo "run_full=$run_full"
+            echo "run_review_formulas=$run_review_formulas"
+            echo "reason=$reason"
+          } >>"$GITHUB_OUTPUT"
+
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
   mac-quality:
     name: Mac / quality (lint, fmt, vet, docs)
-    needs: runner-policy
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -173,16 +249,10 @@ jobs:
   # Unit tests — the suite Mac already ran as "smoke".
   mac-unit:
     name: Mac / make test
-    needs: runner-policy
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
@@ -205,16 +275,10 @@ jobs:
   # make test-mac sweep; coverage is preserved here across all 12 shards.
   mac-cmd-gc-process:
     name: Mac / cmd-gc process / shard ${{ matrix.shard }} of 12
-    needs: runner-policy
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 20
     strategy:
@@ -241,16 +305,10 @@ jobs:
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
     name: Mac / acceptance (Tier A)
-    needs: runner-policy
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
@@ -280,20 +338,10 @@ jobs:
   # job's result still reflects the actual outcome for the summary.
   mac-cover:
     name: Mac / test-cover
-    needs: runner-policy
-    # Heavy job: schedule/full-dispatch/needs-mac-dispatch/PR(needs-mac). Smoke dispatch skips.
-    if: >-
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
-      ) ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     outputs:
@@ -330,21 +378,11 @@ jobs:
     name: Mac / integration packages / ${{ matrix.shard_name }}
     needs:
       - runner-policy
+      - gate
       - mac-quality
       - mac-unit
       - mac-acceptance
-    if: >-
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
-      ) ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
@@ -404,21 +442,11 @@ jobs:
     name: Mac / integration (bdstore)
     needs:
       - runner-policy
+      - gate
       - mac-quality
       - mac-unit
       - mac-acceptance
-    if: >-
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
-      ) ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 60
     outputs:
@@ -455,21 +483,11 @@ jobs:
     name: Mac / integration rest / ${{ matrix.shard_name }}
     needs:
       - runner-policy
+      - gate
       - mac-quality
       - mac-unit
       - mac-acceptance
-    if: >-
-      github.event_name == 'schedule' ||
-      (
-        github.event_name == 'workflow_dispatch' &&
-        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
-      ) ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.draft &&
-        contains(github.event.pull_request.labels.*.name, 'needs-mac')
-      )
+    if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
@@ -532,12 +550,11 @@ jobs:
     name: Mac / integration (review-formulas)
     needs:
       - runner-policy
+      - gate
       - mac-quality
       - mac-unit
       - mac-acceptance
-    if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
+    if: needs.gate.outputs.run_review_formulas == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 90
     outputs:
@@ -571,26 +588,19 @@ jobs:
         run: make test-integration-review-formulas
 
   # Aggregate summary so a single check reports Mac parity status on the
-  # PR. Gated on the same trigger set as the parity jobs so it doesn't
-  # post a misleading green check on PRs that never ran Mac at all. The
+  # PR. This job always runs (bare `always()`) and reads the gate job's
+  # own result/outputs: it fails closed if the gate did not succeed, and
+  # reports "Not run: <reason>" when the gate decided no tier applies —
+  # so an all-skipped run can never appear green (fleet rule D5). The
   # best-effort jobs keep their failures visible here via job outputs that
   # capture the real step outcome — needs.<job>.result masks it as success
   # because the failing steps are continue-on-error.
   mac-regression-summary:
     name: Mac regression summary
-    if: >-
-      always() && (
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'schedule' ||
-        (
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository &&
-          !github.event.pull_request.draft &&
-          contains(github.event.pull_request.labels.*.name, 'needs-mac')
-        )
-      )
+    if: always()
     needs:
       - runner-policy
+      - gate
       - mac-quality
       - mac-unit
       - mac-cmd-gc-process
@@ -604,6 +614,9 @@ jobs:
     steps:
       - name: Summarize
         env:
+          GATE_RESULT: ${{ needs.gate.result }}
+          RUN_SMOKE: ${{ needs.gate.outputs.run_smoke }}
+          REASON: ${{ needs.gate.outputs.reason }}
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
@@ -615,6 +628,31 @@ jobs:
           INT_REST: ${{ needs.mac-integration-rest.result }}
           REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
         run: |
+          # This job always runs (if: always(), above) so an all-skipped
+          # workflow run can never report green. Read the gate job's own
+          # result and outputs here rather than re-deriving the trigger —
+          # never trust the workflow run's top-level conclusion (fleet rule
+          # D5, ga-hd99jq).
+          if [[ "${GATE_RESULT}" != "success" ]]; then
+            echo "Mac Regression: gate job failed (${GATE_RESULT}), cannot determine which tiers should have run" >&2
+            cat >>"$GITHUB_STEP_SUMMARY" <<EOF
+          ## Mac Regression
+
+          Gate job failed (\`${GATE_RESULT}\`) — tier routing could not be determined.
+          EOF
+            exit 1
+          fi
+
+          if [[ "${RUN_SMOKE}" != "true" ]]; then
+            echo "Mac Regression: not requested (${REASON})"
+            cat >>"$GITHUB_STEP_SUMMARY" <<EOF
+          ## Mac Regression
+
+          Not run: ${REASON}
+          EOF
+            exit 0
+          fi
+
           cat >>"$GITHUB_STEP_SUMMARY" <<EOF
           ## Mac Regression
 

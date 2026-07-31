@@ -154,7 +154,9 @@ func sessionWithinDesiredConfigInfo(info sessionpkg.Info, cfg *config.City, pool
 	if agent == nil {
 		return nil, false
 	}
-	if isDrainedSessionInfo(info) {
+	// ComputeAwakeSet deliberately reuses drained always-mode named beads.
+	// Keep the display classifier aligned with that decision.
+	if isDrainedSessionInfo(info) && (!isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always") {
 		return agent, false
 	}
 	if info.DependencyOnlyMetadata == "true" {
@@ -175,7 +177,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	if agent == nil {
 		return nil, false
 	}
-	if isDrainedSessionBead(session) {
+	if isDrainedSessionBead(session) && (!isNamedSessionBead(session) || namedSessionMode(session) != "always") {
 		return agent, false
 	}
 	if session.Metadata["dependency_only"] == "true" {
