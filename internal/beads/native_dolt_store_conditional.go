@@ -47,6 +47,13 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 	swapped := false
 	commitMsg := fmt.Sprintf("gc: compare-and-set metadata %s on bead %s", key, id)
 	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		// Upstream Dolt storage may retry this entire callback after a
+		// retryable commit/connection failure. The result belongs to the
+		// current attempt, not any earlier callback invocation: otherwise a
+		// first attempt that reached UpdateIssue could leave swapped=true,
+		// while a retry observes a competing value and returns a false
+		// positive CAS success.
+		swapped = false
 		issue, err := tx.GetIssue(ctx, id)
 		if err != nil {
 			return nativeStoreError(id, err)

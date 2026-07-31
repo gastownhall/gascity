@@ -1,9 +1,11 @@
 package beads
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter pins the exact
@@ -109,4 +111,103 @@ func TestCachingStoreOverNativeDoltStoreForwardsNarrowCAS(t *testing.T) {
 		t.Fatal("CachingStore reports conditional-write capability over a narrow-only backing; " +
 			"the revision-CAS trio has no sound fence there")
 	}
+}
+
+// TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult models the
+// whole-callback retry performed by beads/Dolt RunInTransaction. A first
+// callback reaches UpdateIssue, then the retry observes a competitor's value.
+// The durable result is a lost race, regardless of what the abandoned callback
+// wrote before the retry.
+func TestNativeDoltStoreMetadataCASRetryDoesNotLeakPriorAttemptResult(t *testing.T) {
+	storage := &nativeDoltMetadataCASRetryStorage{
+		nativeDoltMemStorage: newNativeDoltMemStorage(),
+		key:                  "lease",
+		competitor:           "holder-2",
+	}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{
+		Title:    "retry-safe-metadata-cas",
+		Metadata: map[string]string{"lease": "unclaimed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage.id = created.ID
+	storage.retryCAS = true
+
+	writer, ok := MetadataCASWriterFor(store)
+	if !ok {
+		t.Fatal("NativeDoltStore does not resolve a MetadataCASWriter")
+	}
+	swapped, err := writer.CompareAndSetMetadataKey(
+		created.ID,
+		storage.key,
+		"unclaimed",
+		"holder-1",
+	)
+	if err != nil {
+		t.Fatalf("CompareAndSetMetadataKey: %v", err)
+	}
+	if swapped {
+		t.Fatal("CompareAndSetMetadataKey = true after retry lost to competitor")
+	}
+	if storage.callbackCalls != 2 {
+		t.Fatalf("transaction callback calls = %d, want 2", storage.callbackCalls)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value := got.Metadata[storage.key]; value != storage.competitor {
+		t.Fatalf("durable metadata[%q] = %q, want competitor %q", storage.key, value, storage.competitor)
+	}
+}
+
+type nativeDoltMetadataCASRetryStorage struct {
+	*nativeDoltMemStorage
+	id            string
+	key           string
+	competitor    string
+	retryCAS      bool
+	callbackCalls int
+}
+
+func (s *nativeDoltMetadataCASRetryStorage) RunInTransaction(
+	ctx context.Context,
+	_ string,
+	fn func(beadslib.Transaction) error,
+) error {
+	if !s.retryCAS {
+		return s.nativeDoltMemStorage.RunInTransaction(ctx, "", fn)
+	}
+
+	tx := nativeDoltTransactionForTest{storage: s.nativeDoltMemStorage}
+	// Snapshot the durable state before the first callback. The callback's
+	// UpdateIssue is deliberately rolled back below to model a commit-phase
+	// failure: it may have set the caller's local result flag, but it never
+	// linearized in the store.
+	s.store.mu.Lock()
+	seq, beads, deps := s.store.snapshot()
+	s.store.mu.Unlock()
+	s.callbackCalls++
+	if err := fn(tx); err != nil {
+		return err
+	}
+	s.store.restoreFrom(seq, beads, deps)
+
+	raw, err := metadataRawFromMap(map[string]string{s.key: s.competitor})
+	if err != nil {
+		return err
+	}
+	if err := s.nativeDoltMemStorage.UpdateIssue(
+		ctx,
+		s.id,
+		map[string]interface{}{"metadata": raw},
+		"competitor",
+	); err != nil {
+		return err
+	}
+
+	s.callbackCalls++
+	return fn(tx)
 }
