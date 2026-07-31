@@ -52,10 +52,19 @@ COMMERCIAL_MODULES="github.com/gastownhall/gascity-hosted"
 failed=0
 note() { echo "check-core-boundary: $*" >&2; }
 
-# Non-test core .go surface (whole module tree minus vendor/testdata/tests).
+# Non-test core .go surface: TRACKED .go files only (vendor/testdata
+# excluded), never an untracked directory. Scanning `git ls-files` instead of
+# walking the working tree means any in-tree Go build-cache or artifact
+# directory is invisible to the scan regardless of its name — the prior
+# --exclude-dir=vendor --exclude-dir=testdata walk false-positived on
+# third-party module sources under a project-local GOMODCACHE (the GitLab CI
+# convention is $CI_PROJECT_DIR/.cache/go-mod, but any in-tree cache layout
+# hit the same bug; gascity#4479).
 scan() {
-	grep -rn --include='*.go' --exclude-dir=vendor --exclude-dir=testdata "$1" . 2>/dev/null \
-		| grep -v '_test\.go:'
+	local files
+	files=$(git ls-files -- '*.go' | grep -v -E '(^|/)(vendor|testdata)/')
+	[ -n "$files" ] || return 0
+	printf '%s\n' "$files" | xargs grep -n "$1" 2>/dev/null | grep -v '_test\.go:'
 }
 
 # (a) source-level import of a commercial module. This is a source-level HINT
