@@ -41,15 +41,22 @@ const (
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 
-	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
-	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
-	// maintenance (expiring/pruning stale entries) while holding the
-	// withNudgeQueueState flock. Without this, maintenance does O(backlog)
-	// serial store writes with no cap, so a large backlog turns a sub-second
-	// foreground call into a multi-minute hang. Items skipped once the budget
-	// is exceeded are left untouched for the next enqueue, the per-session
-	// poller, or the doctor reaper to handle — never dropped.
-	nudgeEnqueueMaintenanceBudget = 2 * time.Second
+	// nudgeForegroundMaintenanceBudget bounds the wall-clock time the
+	// latency-sensitive foreground nudge-queue paths — `gc sling --nudge`
+	// enqueue, `gc nudge drain` (the UserPromptSubmit hook), and `gc nudge
+	// status`/listQueuedNudgesForTarget (status reads and poller liveness
+	// checks) — spend on best-effort nudge-queue maintenance
+	// (expiring/pruning stale entries) while holding the withNudgeQueueState
+	// flock. Without this, maintenance does O(backlog) serial store writes
+	// with no cap, so a large backlog turns a sub-second foreground call
+	// into a multi-minute hang (or, for the hook, a stall up to its own
+	// external timeout). Items skipped once the budget is exceeded are left
+	// untouched for the next enqueue/drain/status pass, the per-session
+	// poller, or the doctor reaper to handle — never dropped. The actual
+	// delivery claim path (claimDueQueuedNudgesForTarget/Matching called
+	// from the poller) passes noMaintenanceDeadline explicitly and always
+	// fully drains; only read-only listing uses this budget.
+	nudgeForegroundMaintenanceBudget = 2 * time.Second
 
 	defaultNudgePollInterval   = 2 * time.Second
 	defaultNudgePollQuiescence = 3 * time.Second
@@ -455,7 +462,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 
 	now := time.Now()
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, now)
+	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, now, now.Add(nudgeForegroundMaintenanceBudget))
 	if err != nil {
 		if inject {
 			return 0
@@ -733,6 +740,19 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	}
 }
 
+// shouldKeepNudgePollerAlive reports whether the poller should stay alive while
+// its target session is missing or unobservable: it keeps running as long as
+// queued work remains (an idle session's only delivery path must not be
+// stranded) and the missing-session grace window has not elapsed.
+//
+// The pending/in-flight read goes through listQueuedNudgesForTarget, whose
+// best-effort maintenance is capped at nudgeForegroundMaintenanceBudget. With a
+// large expired backlog, maintenance may not finish pruning before the budget
+// cuts in, so this probe can observe not-yet-repaired entries and keep the
+// poller alive slightly longer than an unbounded read would. That direction is
+// safe: a bounded read can only leave the pending/in-flight buckets fuller,
+// never emptier, so the poller errs toward staying up and never shuts down
+// early on unrepaired state.
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
 	pending, inFlight, _, err := listQueuedNudgesForTarget(target.cityPath, target, now)
 	if err != nil || (len(pending) == 0 && len(inFlight) == 0) {
@@ -1316,7 +1336,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now(), noMaintenanceDeadline())
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
@@ -1823,19 +1843,18 @@ func nudgeQueueHasWork(state *nudgeQueueState) bool {
 	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
 }
 
-func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now, deadline time.Time) ([]queuedNudge, error) {
+	return claimDueQueuedNudgesMatching(cityPath, now, deadline, func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item)
 	})
 }
 
-func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+func claimDueQueuedNudgesMatching(cityPath string, now, deadline time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -1875,7 +1894,11 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		// Anchor the maintenance budget to the wall clock — the prune/recover
+		// loops enforce it against time.Now(), so deriving it from the caller's
+		// logical now would mismatch: a synthetic now (tests, replay) yields an
+		// already-expired (zero-budget) or far-future (unbounded) deadline.
+		deadline := time.Now().Add(nudgeForegroundMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -1913,7 +1936,11 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		// Anchor the maintenance budget to the wall clock — the prune/recover
+		// loops enforce it against time.Now(), so deriving it from the caller's
+		// logical now would mismatch: a synthetic now (tests, replay) yields an
+		// already-expired (zero-budget) or far-future (unbounded) deadline.
+		deadline := time.Now().Add(nudgeForegroundMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2020,7 +2047,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := clk.Now()
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
+		deadline := now.Add(nudgeForegroundMaintenanceBudget)
 		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
@@ -2335,8 +2362,10 @@ func terminalStateForDeadQueuedNudge(item queuedNudge) string {
 
 // noMaintenanceDeadline returns a deadline far enough in the future that a
 // nudge-queue maintenance pass never stops early. Callers outside the
-// latency-sensitive foreground enqueue path (poller, doctor, list/ack/release)
-// want the full backlog drained every time, matching pre-budget behavior.
+// latency-sensitive foreground paths (poller, doctor, ack/release) want the
+// full backlog drained every time, matching pre-budget behavior. The list/
+// status read path moved onto nudgeForegroundMaintenanceBudget, so it is no
+// longer in this set.
 func noMaintenanceDeadline() time.Time {
 	return time.Now().Add(24 * time.Hour)
 }

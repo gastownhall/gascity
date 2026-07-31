@@ -39,7 +39,7 @@ func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming
 	cityPath := t.TempDir()
 	fakeClock := &clock.Fake{Time: time.Now().UTC()}
 	seededBuckets := seedDeadBacklog(t, cityPath, fakeClock.Now(), backlog)
-	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
+	maxOps := int64(nudgeForegroundMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
 	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
 	item := queuedNudge{ID: "nudge-new", Agent: "gascity/deployer", Source: "sling", Message: "Work slung. Check your hook."}
 	start := fakeClock.Now()
@@ -50,10 +50,10 @@ func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming
 		virtualElapsed: fakeClock.Now().Sub(start),
 		operations:     store.operations(),
 	}
-	if timing.virtualElapsed <= nudgeEnqueueMaintenanceBudget {
-		t.Fatalf("virtual enqueue elapsed (backlog=%d) = %v, want the dead backlog to exhaust the %v budget", backlog, timing.virtualElapsed, nudgeEnqueueMaintenanceBudget)
+	if timing.virtualElapsed <= nudgeForegroundMaintenanceBudget {
+		t.Fatalf("virtual enqueue elapsed (backlog=%d) = %v, want the dead backlog to exhaust the %v budget", backlog, timing.virtualElapsed, nudgeForegroundMaintenanceBudget)
 	}
-	if maxElapsed := nudgeEnqueueMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; timing.virtualElapsed > maxElapsed {
+	if maxElapsed := nudgeForegroundMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; timing.virtualElapsed > maxElapsed {
 		t.Fatalf("virtual enqueue elapsed (backlog=%d) = %v, want at most %v", backlog, timing.virtualElapsed, maxElapsed)
 	}
 	if timing.operations > maxOps {

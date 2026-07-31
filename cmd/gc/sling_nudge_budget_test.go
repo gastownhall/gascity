@@ -172,7 +172,7 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeClock := &clock.Fake{Time: time.Now().UTC()}
 	seededBuckets := seedNudgeBudgetPreservationBacklog(t, cityPath, fakeClock.Now(), reference, deadBacklog)
-	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
+	maxOps := int64(nudgeForegroundMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
 	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
 	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", fakeClock.Now(), queuedNudgeOptions{
 		ID:        "nudge-new-preservation",
@@ -184,10 +184,10 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudgeWithStoreAndClock: %v", err)
 	}
 	virtualElapsed := fakeClock.Now().Sub(start)
-	if virtualElapsed <= nudgeEnqueueMaintenanceBudget {
-		t.Fatalf("virtual enqueue elapsed = %v, want the dead backlog to exhaust the %v budget", virtualElapsed, nudgeEnqueueMaintenanceBudget)
+	if virtualElapsed <= nudgeForegroundMaintenanceBudget {
+		t.Fatalf("virtual enqueue elapsed = %v, want the dead backlog to exhaust the %v budget", virtualElapsed, nudgeForegroundMaintenanceBudget)
 	}
-	if maxElapsed := nudgeEnqueueMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; virtualElapsed > maxElapsed {
+	if maxElapsed := nudgeForegroundMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; virtualElapsed > maxElapsed {
 		t.Fatalf("virtual enqueue elapsed = %v, want at most %v", virtualElapsed, maxElapsed)
 	}
 	if ops := store.operations(); ops > maxOps {
@@ -220,7 +220,7 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 
 // TestSlingNudgeEnqueueEmptyBacklogFast pins that an empty queue still
 // enqueues near-instantly: none of the three maintenance loops iterate, so
-// the deadline check never fires regardless of nudgeEnqueueMaintenanceBudget.
+// the deadline check never fires regardless of nudgeForegroundMaintenanceBudget.
 func TestSlingNudgeEnqueueEmptyBacklogFast(t *testing.T) {
 	cityPath := t.TempDir()
 	store := &advancingNudgeStore{fakeClock: &clock.Fake{Time: time.Now().UTC()}, failAfter: 4}
