@@ -157,6 +157,8 @@ export const createAgent = <ThrowOnError extends boolean = false>(options: Optio
 
 /**
  * Delete v0 city by city name bead by ID
+ *
+ * Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status "closed". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint.
  */
 export const deleteV0CityByCityNameBeadById = <ThrowOnError extends boolean = false>(options: Options<DeleteV0CityByCityNameBeadByIdData, ThrowOnError>) => (options.client ?? client).delete<DeleteV0CityByCityNameBeadByIdResponses, DeleteV0CityByCityNameBeadByIdErrors, ThrowOnError>({ url: '/v0/city/{cityName}/bead/{id}', ...options });
 

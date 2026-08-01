@@ -24524,6 +24524,7 @@
     },
     "/v0/city/{cityName}/bead/{id}": {
       "delete": {
+        "description": "Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status \"closed\". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint.",
         "operationId": "delete-v0-city-by-city-name-bead-by-id",
         "parameters": [
           {
