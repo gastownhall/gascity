@@ -62,6 +62,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view, not an equivalent durable source; for durable history, query the event
   log for `store.maintenance.*` directly. (gascity#4418)
 
+- **`gc formula cook --attach`'s help text no longer claims a parent-child
+  relationship it never creates.** `--attach=<bead-id>` has only ever added
+  a `blocks` dependency from the attached bead to the sub-DAG root
+  (`ensureFormulaCookAttachDep` / `molecule.Attach` both call
+  `store.DepAdd(..., "blocks")`, never setting `ParentID`), but the long
+  help described it as creating the sub-DAG "as children of the given
+  bead." Since convoy auto-close watches parent-child children, not
+  `blocks` dependents, a user following the old description would wrongly
+  expect an attached sub-DAG's completion to trigger the attached convoy's
+  auto-close — it never does. Help text now describes the actual `blocks`
+  -only relationship and says so explicitly (gastownhall/gascity#2392).
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report
