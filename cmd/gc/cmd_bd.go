@@ -41,6 +41,14 @@ const bdSilentFallbackExitCode = 4
 
 const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)"
 
+// bdDoltStartConflictUserMessage is appended (bd's own output is left
+// intact) when bd's error output suggests running `bd dolt start` to
+// recover from an unreachable managed Dolt server. That command starts a
+// second, unmanaged Dolt server that conflicts with gc's own managed server
+// on the same data directory, so gc bd points at the gc-managed remedy
+// instead. See gastownhall/gascity#1374.
+const bdDoltStartConflictUserMessage = "gc bd: bd suggested \"bd dolt start\" to recover, but that starts a second, unmanaged Dolt server that will conflict with gc's managed server on the same data directory. Run \"gc start\" (or \"gc dolt restart\") to restart the managed Dolt server instead, then retry. (See gastownhall/gascity#1374.)"
+
 // bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
 // silent-fallback marker. bd emits the marker pair while opening the store —
 // before it runs the subcommand — so the marker, when present, always lands
@@ -422,6 +430,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	if runErr != nil {
 		if traceExit > 0 {
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) {
+				fmt.Fprintln(stderr, bdDoltStartConflictUserMessage) //nolint:errcheck // best-effort stderr
+			}
 			return traceExit
 		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr

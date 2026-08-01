@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--json` envelope gained an `unregistered` field reporting whether this
   stop also removed the supervisor registration (gastownhall/gascity#4366).
 
+- **`gc bd` no longer lets bd's own error message steer operators into a
+  Dolt-server conflict.** When the managed Dolt server is unreachable, bd
+  (with `dolt.auto-start: false`, which gc always sets) tells the operator
+  to run `bd dolt start` — but that starts a second, unmanaged Dolt server
+  that fights gc's own managed server for the same data directory. `gc bd`
+  now detects that suggestion in bd's stderr and appends a corrective hint
+  pointing at the actual remedy (`gc start` / `gc dolt restart`) alongside
+  bd's original output, without altering bd's own exit code
+  (gastownhall/gascity#1374).
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

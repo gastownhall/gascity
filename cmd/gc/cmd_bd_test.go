@@ -1915,6 +1915,89 @@ exit 3
 	}
 }
 
+// doltStartConflictFakeBdScript emits bd's real "managed Dolt unreachable,
+// start it yourself" banner (gastownhall/gascity#1374) and exits 1, the way
+// bd behaves when dolt.auto-start is disabled (as gc always sets it in a
+// managed city) and the managed server has gone down.
+const doltStartConflictFakeBdScript = `#!/bin/sh
+echo "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address" >&2
+echo "" >&2
+echo "Dolt server auto-start is disabled (dolt.auto-start: false)." >&2
+echo "Start the server manually:" >&2
+echo "  bd dolt start" >&2
+exit 1
+`
+
+// TestGcBdSurfacesDoltStartConflictHint pins the #1374 fix: when bd's own
+// error output suggests running "bd dolt start" to recover, gc bd must
+// append a corrective hint pointing at the gc-managed remedy instead,
+// because following bd's own suggestion starts a second, unmanaged Dolt
+// server that conflicts with gc's on the same data directory. bd's original
+// output and exit code must still pass through unchanged.
+func TestGcBdSurfacesDoltStartConflictHint(t *testing.T) {
+	silentFallbackTestSetup(t, doltStartConflictFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 1 {
+		t.Fatalf("doBd(list) = %d, want 1 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bd dolt start") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("stderr missing corrective hint toward the gc-managed remedy; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdNoDoltStartConflictHintOnUnrelatedError guards against a false
+// positive: a plain bd usage error that happens to share no wording with
+// the "bd dolt start" banner must not trigger the corrective hint.
+func TestGcBdNoDoltStartConflictHintOnUnrelatedError(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("doBd(list) = %d, want 3 (bd's own exit code preserved); stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc start") {
+		t.Fatalf("corrective hint fired on an unrelated bd error; stderr=%q", stderr.String())
+	}
+}
+
+// TestBdOutputSuggestsConflictingDoltStart covers the marker-detection
+// helper directly with table-driven cases so the source-of-truth for what
+// counts as "bd suggested a conflicting bd dolt start" is unit-pinned.
+func TestBdOutputSuggestsConflictingDoltStart(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-start-disabled", "Dolt server auto-start is disabled (dolt.auto-start: false).", false},
+		{"single marker only bd dolt start", "  bd dolt start", false},
+		{"both markers, real bd banner", "Dolt server unreachable at 127.0.0.1:0: dial tcp 127.0.0.1:0: connect: can't assign requested address\n\nDolt server auto-start is disabled (dolt.auto-start: false).\nStart the server manually:\n  bd dolt start\n", true},
+		{"both markers same line", "auto-start is disabled, run bd dolt start", true},
+		{"case insensitive", "DOLT SERVER AUTO-START IS DISABLED. RUN: BD DOLT START", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated usage error", "bd: simulated usage error", false},
+		{"bd dolt start mentioned without disabled marker", "see 'bd dolt start --help' for standalone usage", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputSuggestsConflictingDoltStart(tt.input); got != tt.want {
+				t.Errorf("bdOutputSuggestsConflictingDoltStart(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBdOutputIndicatesSilentFallback covers the marker-detection helper
 // directly with table-driven cases so the source-of-truth for what counts
 // as "silent fallback" is unit-pinned.

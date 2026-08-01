@@ -1101,6 +1101,32 @@ func bdOutputIndicatesSilentFallback(s string) bool {
 		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
 }
 
+// bdDoltStartSuggestionMarkerAutoStart and bdDoltStartSuggestionMarkerCommand
+// are the substring pair bd emits when the managed Dolt server is
+// unreachable and dolt.auto-start is disabled: bd suggests running
+// `bd dolt start` to recover. In a gc-managed city (gc always sets
+// dolt.auto-start: false) that suggestion is actively harmful — it starts a
+// second, unmanaged Dolt server that fights gc's own server for the same
+// data directory (gastownhall/gascity#1374). Load-bearing only in
+// bdOutputSuggestsConflictingDoltStart; if bd's banner wording ever
+// changes, this is the only edit site.
+const (
+	bdDoltStartSuggestionMarkerAutoStart = "auto-start is disabled"
+	bdDoltStartSuggestionMarkerCommand   = "bd dolt start"
+)
+
+// bdOutputSuggestsConflictingDoltStart reports whether the given bd output
+// (typically captured stderr) contains the marker pair bd emits when it
+// tells the operator to run `bd dolt start` because managed auto-start is
+// disabled. Requiring both markers (rather than the command substring
+// alone) avoids a false positive on unrelated mentions of "bd dolt start",
+// e.g. in bd's own --help text.
+func bdOutputSuggestsConflictingDoltStart(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdDoltStartSuggestionMarkerAutoStart) &&
+		strings.Contains(lower, bdDoltStartSuggestionMarkerCommand)
+}
+
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		return envFn(dir), nil
