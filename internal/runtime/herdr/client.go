@@ -102,6 +102,10 @@ type agentInfo struct {
 	TerminalID  string `json:"terminal_id"`
 	AgentStatus string `json:"agent_status"`
 	Cwd         string `json:"cwd"`
+	// InteractiveReady reports that the agent's TUI is listening for input.
+	// agent_status "idle" is necessary but not sufficient — input-readiness
+	// lags it, and a prompt delivered in that window is silently swallowed.
+	InteractiveReady bool `json:"interactive_ready"`
 }
 
 // agentStartTimeoutMS bounds herdr's own wait for the launched agent TUI to
@@ -142,9 +146,51 @@ func (c *client) startAgentKind(ctx context.Context, name, kind, paneID string, 
 // prompt machinery — the reliable replacement for the paste+Enter+confirm
 // dance. target is an agent name or the pane id hosting it.
 func (c *client) agentPrompt(ctx context.Context, target, text string) error {
-	_, err := c.run(ctx, "agent", "prompt", target, text)
+	// --wait makes herdr confirm the submission actually landed: it requires an
+	// observed state change after submit and returns agent_prompt_stalled
+	// otherwise. Without it herdr reports success even when the TUI swallowed
+	// the prompt (delivered before the input was listening), which strands the
+	// agent's first turn with no error anywhere.
+	_, err := c.run(ctx, "agent", "prompt", target, text,
+		"--wait", "--timeout", strconv.Itoa(int(promptConfirmTimeout/time.Millisecond)))
 	return err
 }
+
+// promptStalled reports whether err is herdr's agent_prompt_stalled — the
+// prompt was accepted but produced no state change, i.e. the submit was
+// swallowed. Retryable: the TUI is typically a moment from ready.
+func promptStalled(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "agent_prompt_stalled")
+}
+
+// waitInteractiveReady blocks until herdr reports the agent's TUI is listening
+// for input, or the budget expires. agent_status "idle" is reached before the
+// input prompt accepts keystrokes, so gating delivery on idle alone is what
+// lets a startup prompt land in the swallow window. Best-effort: a boot that
+// never reports ready still returns, and the caller delivers anyway (no worse
+// than not waiting).
+func (c *client) waitInteractiveReady(ctx context.Context, target string, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if info, ok, err := c.getAgent(ctx, target); err == nil && ok && info.InteractiveReady {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interactiveReadyPoll):
+		}
+	}
+}
+
+const (
+	// promptConfirmTimeout bounds herdr's --wait confirmation of one submit.
+	// herdr requires the post-submit state change within 5s, so this only needs
+	// to cover that plus CLI overhead.
+	promptConfirmTimeout = 10 * time.Second
+	// interactiveReadyPoll is the gap between interactive_ready probes.
+	interactiveReadyPoll = 250 * time.Millisecond
+)
 
 // listAgents → `herdr agent list`.
 func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
@@ -252,9 +298,28 @@ func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 // shells) fall back to paste + Enter: there is no TUI prompt machinery to
 // confirm against, so delivery is best-effort by construction.
 func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
-	err := c.agentPrompt(ctx, paneID, text)
-	if err == nil {
-		return nil
+	// A submit delivered before the TUI is listening is swallowed, so wait for
+	// herdr to report input-readiness first, then let --wait confirm each
+	// attempt. A stall means the prompt never took: retry rather than report a
+	// success that strands the turn.
+	c.waitInteractiveReady(ctx, paneID, interactiveReadyBudget)
+	var err error
+	for attempt := 0; attempt < promptMaxAttempts; attempt++ {
+		err = c.agentPrompt(ctx, paneID, text)
+		if err == nil {
+			return nil
+		}
+		if !promptStalled(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interactiveReadyPoll):
+		}
+	}
+	if promptStalled(err) {
+		return fmt.Errorf("herdr deliverNudge: submit not confirmed for pane %s after %d attempts: %w", paneID, promptMaxAttempts, err)
 	}
 	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
 		return err
@@ -266,6 +331,15 @@ func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	time.Sleep(submitSettleDelay)
 	return c.sendKeys(ctx, paneID, "Enter")
 }
+
+const (
+	// interactiveReadyBudget bounds the pre-delivery wait for the TUI to accept
+	// input. Sized to cover a cold claude boot under concurrent restart load;
+	// it only bites when readiness never arrives, after which delivery proceeds.
+	interactiveReadyBudget = 60 * time.Second
+	// promptMaxAttempts bounds retries of a stalled (swallowed) submit.
+	promptMaxAttempts = 5
+)
 
 // submitSettleDelay is how long the unregistered-pane fallback waits for a
 // `pane run` paste to commit before the submit Enter (a submit racing the
