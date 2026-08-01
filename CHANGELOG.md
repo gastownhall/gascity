@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is invisible to it regardless of name, while vendor/testdata (tracked or
   not) stay excluded as before. (gascity#4479)
 
+- **`gc stop --help` and `gc stop --json` now state what actually happens to
+  a supervisor-managed city's registration.** `gc stop` has always
+  unregistered a supervisor-managed city as part of stopping it, but neither
+  the CLI help nor the `--json` output said so — a user reading "Stop all
+  agent sessions in the city" reasonably expected `gc start` to find the
+  city again later. Help text now documents the unregister behavior and
+  points at `gc register`/`gc unregister` for the split operations; the
+  `--json` envelope gained an `unregistered` field reporting whether this
+  stop also removed the supervisor registration (gastownhall/gascity#4366).
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

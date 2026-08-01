@@ -4475,6 +4475,12 @@ shutdown timeout, then force-kills any remaining sessions. Also stops
 the Dolt server and cleans up orphan sessions. If a controller is
 running, delegates shutdown to it.
 
+If the city is registered with the machine-wide supervisor, stop also
+unregisters it (equivalent to a following "gc unregister") — the city
+will not be found by name or auto-started again until it is re-registered
+with "gc register". Use "gc unregister" directly to remove a registration
+without stopping sessions.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
