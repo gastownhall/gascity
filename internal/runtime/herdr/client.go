@@ -324,13 +324,25 @@ func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	// attempt. A stall means the prompt never took: retry rather than report a
 	// success that strands the turn.
 	c.waitInteractiveReady(ctx, paneID, interactiveReadyBudget)
+	probe := lastNonEmptyLine(text)
 	var err error
 	for attempt := 0; attempt < promptMaxAttempts; attempt++ {
 		err = c.agentPrompt(ctx, paneID, text)
 		if err == nil {
-			return nil
-		}
-		if !promptStalled(err) {
+			// --wait reporting success is not proof the submit landed: it "does
+			// not track turns", so a prompt delivered while the agent is already
+			// working (a freshly launched agent running its SessionStart prime,
+			// say) can match *that* turn's completion and return success with the
+			// text still typed-but-unsubmitted. Confirm against the screen, which
+			// cannot be fooled that way, and re-submit if it is still sitting there.
+			if c.inputSettled(ctx, paneID, probe) {
+				return nil
+			}
+			if serr := c.sendKeys(ctx, paneID, "Enter"); serr == nil && c.inputSettled(ctx, paneID, probe) {
+				return nil
+			}
+			err = fmt.Errorf("herdr agent prompt reported success but the text is still in the input")
+		} else if !promptStalled(err) {
 			break
 		}
 		select {
@@ -338,6 +350,9 @@ func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 			return ctx.Err()
 		case <-time.After(interactiveReadyPoll):
 		}
+	}
+	if err != nil && strings.Contains(err.Error(), "still in the input") {
+		return fmt.Errorf("herdr deliverNudge: submit not confirmed for pane %s after %d attempts: %w", paneID, promptMaxAttempts, err)
 	}
 	if promptStalled(err) {
 		return fmt.Errorf("herdr deliverNudge: submit not confirmed for pane %s after %d attempts: %w", paneID, promptMaxAttempts, err)
@@ -392,6 +407,25 @@ func (c *client) pasteAndConfirmSubmit(ctx context.Context, paneID, text string)
 	}
 	return fmt.Errorf("herdr deliverNudge: pane %s still shows the nudge unsubmitted after %d attempts; last input: %q",
 		paneID, promptMaxAttempts, lastInput)
+}
+
+// inputSettled reports whether probe has left the pane's input area, i.e. the
+// submit landed. A read failure counts as settled: the submit was issued and an
+// unverifiable read must not spin the caller.
+func (c *client) inputSettled(ctx context.Context, paneID, probe string) bool {
+	if probe == "" {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(submitSettleDelay):
+	}
+	screen, err := c.paneRead(ctx, paneID, "visible", inputProbeLines)
+	if err != nil {
+		return true
+	}
+	return !strings.Contains(tailLines(screen, inputProbeLines), probe)
 }
 
 // lastNonEmptyLine returns the final non-blank line of s, trimmed — the part of
