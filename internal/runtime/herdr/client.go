@@ -169,10 +169,29 @@ func promptStalled(err error) bool {
 // lets a startup prompt land in the swallow window. Best-effort: a boot that
 // never reports ready still returns, and the caller delivers anyway (no worse
 // than not waiting).
+// It also waits out an in-flight turn: herdr's --wait "does not track turns",
+// so a prompt submitted while the agent is already working can match that
+// turn's completion instead of its own, turning the confirmation into a
+// spurious timeout. Delivering from a settled state keeps --wait meaningful.
+// A pane that never registers an agent at all (a bare shell, a raw
+// `exec /bin/sh -c` session) can never report readiness, so the wait gives up
+// after registrationGrace rather than burning the whole budget before the
+// caller falls back to paste+confirm.
 func (c *client) waitInteractiveReady(ctx context.Context, target string, budget time.Duration) {
 	deadline := time.Now().Add(budget)
+	graceDeadline := time.Now().Add(registrationGrace)
+	registered := false
 	for time.Now().Before(deadline) {
-		if info, ok, err := c.getAgent(ctx, target); err == nil && ok && info.InteractiveReady {
+		info, ok, err := c.getAgent(ctx, target)
+		if err == nil && ok {
+			registered = true
+			if info.InteractiveReady && !strings.EqualFold(info.AgentStatus, "working") {
+				return
+			}
+		}
+		// Still nothing registered once the grace elapses: this pane has no
+		// agent to wait for.
+		if !registered && !time.Now().Before(graceDeadline) {
 			return
 		}
 		select {
@@ -213,6 +232,8 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 // screen (the liveness/fingerprint snapshot). On 0.7.5 the CLI prints the
 // text raw rather than in the JSON envelope, so this parses failures out of
 // an envelope only when one is present.
+//
+//nolint:unparam // source documents herdr's read API; every current caller snapshots the visible screen
 func (c *client) paneRead(ctx context.Context, paneID, source string, lines int) (string, error) {
 	args := []string{"pane", "read", paneID, "--source", source}
 	if lines > 0 {
@@ -324,13 +345,79 @@ func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
 		return err
 	}
-	// No registered agent on this pane: paste, settle, submit.
+	// No registered agent on this pane (a raw `exec /bin/sh -c` session, a bare
+	// shell, or an agent herdr has not classified yet — ephemeral wisps spend a
+	// window here). There is no agent status to confirm against, so close the
+	// loop on the only signal a pane exposes: the screen. Submit, then verify
+	// the text is no longer sitting in the input, and retry the Enter until it
+	// is. A redundant Enter on an already-submitted prompt is a harmless no-op.
+	return c.pasteAndConfirmSubmit(ctx, paneID, text)
+}
+
+// pasteAndConfirmSubmit pastes text into an unregistered pane and confirms the
+// submit actually landed, rather than firing one Enter and hoping.
+//
+// A submit that races the paste-commit is swallowed and strands the text
+// typed-but-unsubmitted — the caller sees success while a human has to press
+// Enter for it. Confirmation is by screen: once submitted, the pasted text
+// leaves the input area. Bounded, and returns an error with the last observed
+// input state when it never confirms.
+func (c *client) pasteAndConfirmSubmit(ctx context.Context, paneID, text string) error {
 	if err := c.paneRun(ctx, paneID, text); err != nil {
 		return err
 	}
-	time.Sleep(submitSettleDelay)
-	return c.sendKeys(ctx, paneID, "Enter")
+	// Probe with the final non-empty line: multi-line pastes wrap, and only the
+	// tail reliably sits on the input row.
+	probe := lastNonEmptyLine(text)
+	var lastInput string
+	for attempt := 0; attempt < promptMaxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(submitSettleDelay): // let the paste commit before submitting
+		}
+		if err := c.sendKeys(ctx, paneID, "Enter"); err != nil {
+			return err
+		}
+		screen, err := c.paneRead(ctx, paneID, "visible", inputProbeLines)
+		if err != nil {
+			// Cannot verify; the Enter was sent, so report success rather than
+			// spinning on a read failure.
+			return nil //nolint:nilerr // unverifiable read: the submit was issued
+		}
+		lastInput = tailLines(screen, inputProbeLines)
+		if probe == "" || !strings.Contains(lastInput, probe) {
+			return nil // text left the input: the submit landed
+		}
+	}
+	return fmt.Errorf("herdr deliverNudge: pane %s still shows the nudge unsubmitted after %d attempts; last input: %q",
+		paneID, promptMaxAttempts, lastInput)
 }
+
+// lastNonEmptyLine returns the final non-blank line of s, trimmed — the part of
+// a pasted nudge that lands on the input row.
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// tailLines returns the last n lines of s (the input area of a rendered pane).
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// inputProbeLines is how much of the rendered pane counts as "the input area"
+// when checking whether a pasted nudge is still sitting there unsubmitted.
+const inputProbeLines = 6
 
 const (
 	// interactiveReadyBudget bounds the pre-delivery wait for the TUI to accept
@@ -339,6 +426,11 @@ const (
 	interactiveReadyBudget = 60 * time.Second
 	// promptMaxAttempts bounds retries of a stalled (swallowed) submit.
 	promptMaxAttempts = 5
+	// registrationGrace is how long to allow for an agent to appear in herdr's
+	// registry before concluding the pane has none. A launched agent registers
+	// in a second or two; a bare shell never does, and must not pay the whole
+	// readiness budget before delivery falls back to paste+confirm.
+	registrationGrace = 10 * time.Second
 )
 
 // submitSettleDelay is how long the unregistered-pane fallback waits for a

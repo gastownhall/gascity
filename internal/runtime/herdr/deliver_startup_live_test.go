@@ -87,3 +87,57 @@ func TestDeliverNudgeSurvivesStartupRace(t *testing.T) {
 // turnCompletionBudget bounds the wait for the startup turn to finish. It is a
 // safety deadline, not the expected duration (TESTING.md deadline rule).
 const turnCompletionBudget = 120 * time.Second
+
+// TestDeliverNudgeConfirmsSubmitOnUnregisteredPane covers the other half of
+// delivery: a pane herdr has not classified as an agent (a raw `exec /bin/sh
+// -c` session, a bare shell, or an agent still mid-registration — ephemeral
+// wisps spend a window there). That path cannot use `agent prompt`, and firing
+// a single Enter without confirming leaves the text pasted-but-unsubmitted,
+// which is the same stranded-turn defect with a human required to press Enter.
+//
+// This is a guard, not a reproduction: it passes against the unconfirmed path
+// too, because a bare shell commits a paste immediately and has no TUI
+// paste/submit race to lose. The stranding was observed in practice on panes
+// mid-registration, which is inherently timing-dependent; what this pins is
+// that confirming the submit does not break ordinary delivery.
+//
+// Live: needs herdr ≥0.7.5. Skipped in -short.
+func TestDeliverNudgeConfirmsSubmitOnUnregisteredPane(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live herdr test in -short mode")
+	}
+	if _, err := exec.LookPath("herdr"); err != nil {
+		t.Skip("herdr not installed")
+	}
+
+	session := fmt.Sprintf("gctest-fallback-%d", time.Now().UnixNano()%100000)
+	c := newClient(session, t.TempDir())
+	if err := c.startServer(); err != nil {
+		t.Fatalf("startServer: %v", err)
+	}
+	t.Cleanup(func() { _ = c.stopServer() })
+
+	ctx := context.Background()
+	wsID, _, pane, err := c.workspaceCreate(ctx, "fallback-probe", t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("workspaceCreate: %v", err)
+	}
+	if wsID == "" || pane == "" {
+		t.Fatalf("workspaceCreate returned empty ids: workspace=%q pane=%q", wsID, pane)
+	}
+
+	// The pane holds a bare shell: herdr registers no agent for it, so delivery
+	// takes the paste+confirm path. Proof of submission is the command's output,
+	// which only exists if the shell actually ran it.
+	const marker = "FALLBACK_SUBMITTED_OK"
+	if err := c.deliverNudge(ctx, pane, "echo "+marker+"_DONE"); err != nil {
+		t.Fatalf("deliverNudge on an unregistered pane never confirmed: %v", err)
+	}
+	screen, err := c.paneRead(ctx, pane, "visible", 40)
+	if err != nil {
+		t.Fatalf("paneRead: %v", err)
+	}
+	if !strings.Contains(screen, marker+"_DONE") {
+		t.Fatalf("nudge was not submitted (no command output); screen:\n%s", screen)
+	}
+}
