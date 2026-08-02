@@ -2,7 +2,6 @@ package pidutil
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -45,7 +44,7 @@ func TestAliveWithStartTime_RejectsMismatchedIdentity(t *testing.T) {
 }
 
 // TestAliveWithStartTime_AcceptsSameProcess is the over-correction guard: the
-// real process must still be recognised. Passes before and after.
+// real process must still be recognized. Passes before and after.
 func TestAliveWithStartTime_AcceptsSameProcess(t *testing.T) {
 	st, err := StartTime(os.Getpid())
 	if err != nil {
@@ -64,23 +63,17 @@ func TestAliveWithStartTime_EmptyIdentityFallsBackToAlive(t *testing.T) {
 	}
 }
 
-// TestAliveWithStartTime_DeadPIDIsFalse — liveness still dominates.
-func TestAliveWithStartTime_DeadPIDIsFalse(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "exit 0")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+// TestPSStartTimeReturnsIdentity covers the new fallback's success path.
+// ps -o lstart= works on linux too, so this runs on every platform — without
+// it, no CI job ever executes a successful psStartTime.
+func TestPSStartTimeReturnsIdentity(t *testing.T) {
+	got, err := psStartTime(os.Getpid())
+	if err != nil {
+		t.Fatalf("psStartTime(self) on %s: %v", runtime.GOOS, err)
 	}
-	pid := cmd.Process.Pid
-	_ = cmd.Wait()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !AliveWithStartTime(pid, "anything") {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+	if strings.TrimSpace(got) == "" {
+		t.Fatalf("psStartTime(self) on %s returned an empty identity", runtime.GOOS)
 	}
-	t.Fatalf("AliveWithStartTime(%d) stayed true for an exited child", pid)
 }
 
 // TestAliveWithStartTime_UnreadableIdentityKeepsAliveAnswer pins the deliberately

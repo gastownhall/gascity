@@ -95,41 +95,100 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Place the agent in its own tab under a per-rig (per-town) workspace, so
 	// agents are separate switchable spaces rather than tiled panes. The
 	// find-or-create is serialized so concurrent same-rig Starts share one
-	// workspace instead of racing to create duplicates.
+	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
+	// tab's root shell pane — created here with the agent's cwd and env — IS
+	// the agent's pane.
 	wsLabel, tabLabel := placementFor(name, cfg.Env)
 	p.mu.Lock()
-	tabID, strayPane, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel)
+	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, effectiveWorkDir(cfg, p.c.cityRoot), cfg.Env)
 	p.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("herdr: place %q: %w", name, err)
 	}
-	info, err := p.c.startAgent(ctx, name, tabID, effectiveWorkDir(cfg, p.c.cityRoot), cfg.Env, shellArgv(cfg.Command))
-	if err != nil {
-		return fmt.Errorf("herdr: start %q: %w", name, err)
+	spec := launchSpecFor(cfg.Command)
+	info := agentInfo{PaneID: paneID, TabID: tabID}
+	adopted := false
+	mode := bindModeShell
+	if spec.Kind != "" {
+		mode = bindModeAgent
 	}
-	// Seed the metadata sidecar from cfg.Env NOW, before the (long) startup
-	// delivery below. tmux gets this for free — its GetMeta reads the tmux
-	// session environment, which new-session initializes from cfg.Env — but
-	// herdr's meta store is a sidecar populated only by SetMeta. The reconciler's
-	// pending-create ownership check (runningSessionMatchesPendingCreateInfo)
-	// reads GC_SESSION_ID / GC_INSTANCE_TOKEN via GetMeta on ticks that fire
-	// while Start is still waiting for the agent to idle; with an unseeded
-	// sidecar it misreads the fresh runtime as "live runtime belongs to another
-	// session" and reaps it seconds after a successful start.
-	//
-	// Seeding the whole env also persists GC_SESSION_ID, which ProcessAlive's
-	// session-scoped tree-walk widening reads (herdr does not capture the
-	// creation environment the way tmux does): process env survives reparenting
-	// (only ppid changes), so this is what lets the walk find the agent when it
-	// is no longer a descendant of the pane's shell/foreground PIDs. Stop clears
-	// the whole meta dir, so teardown is covered.
+	// Seed the metadata sidecar from cfg.Env and persist a provisional pane
+	// binding BEFORE the launch. The launch below blocks for seconds (shell
+	// readiness + herdr's TUI detection), and reconcile ticks that fire in
+	// that window read both stores: the pending-create ownership check
+	// (runningSessionMatchesPendingCreateInfo) reads GC_SESSION_ID /
+	// GC_INSTANCE_TOKEN via GetMeta — with an unseeded sidecar it misreads
+	// the fresh runtime as "live runtime belongs to another session" and
+	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets
+	// the env half for free (its GetMeta reads the session environment, which
+	// new-session initializes from cfg.Env); herdr's sidecar is populated
+	// only by SetMeta. Seeding the whole env also persists GC_SESSION_ID for
+	// ProcessAlive's session-scoped tree-walk widening (process env survives
+	// reparenting). Stop clears the whole meta dir, so teardown is covered,
+	// including a launch that fails below.
 	if err := p.seedMetaFromEnv(name, cfg.Env); err != nil {
 		return fmt.Errorf("herdr: seed session metadata for %q: %w", name, err)
 	}
-	// herdr auto-spawns a stray shell pane when it creates a workspace/tab; close
-	// it so the tab holds only the agent.
-	if strayPane != "" && strayPane != info.PaneID {
-		_ = p.c.closePane(ctx, strayPane)
+	if err := p.bindPlacement(name, info, mode); err != nil {
+		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
+	}
+	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
+	// canonical executable into the shell pane and blocks until the TUI is
+	// detected (native claude-detection); commands that aren't a clean kind
+	// invocation are exec'd through the pane's shell instead, so the pane
+	// still dies with the command. On agent_name_taken (a concurrent Start
+	// won the name), adopt the live holder or reap a stale one and retry once
+	// — never loop placement, which is the pane/PTY/process storm.
+	switch {
+	case spec.Kind != "":
+		// herdr requires the target pane to be "an available shell" — a
+		// fresh pane's shell spends its first moments sourcing rc files
+		// (agent_pane_busy otherwise), so wait for the prompt, then retry a
+		// residual busy rejection briefly.
+		p.waitPaneShellReady(ctx, paneID)
+		for attempt := 0; ; attempt++ {
+			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args)
+			if err == nil || herdrErrorCode(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
+				break
+			}
+			// Back off before re-probing: herdr's own shell-prompt detection
+			// lags the process-table probe on a fresh pane, so an immediate
+			// retry burns the attempt against the same stale verdict.
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("herdr: start %q: %w", name, ctx.Err())
+			case <-time.After(time.Second << attempt):
+			}
+			p.waitPaneShellReady(ctx, paneID)
+		}
+		if err == nil && adopted && info.PaneID != "" && info.PaneID != paneID {
+			// Adopted a live holder elsewhere: the fresh pane placed above is
+			// surplus — close it (with its tab) or it leaks one shell per adopt.
+			_ = p.c.tabClose(ctx, tabID)
+		}
+	case spec.Raw != "":
+		// exec through the shell so the pane's root process becomes the
+		// command: when it exits the pane (and tab) close, preserving the
+		// tmux contract that a session ends with its command. The typed
+		// command executes only after the fresh pane's shell finishes
+		// initializing, so wait (bounded) for the launch to actually land —
+		// otherwise callers probing right after Start see a bare shell.
+		if err = p.c.paneRun(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
+			p.waitPaneLaunched(ctx, paneID, spec.Raw)
+		}
+	default:
+		// Empty command: the pane's own shell is the session.
+	}
+	if err != nil {
+		return fmt.Errorf("herdr: start %q: %w", name, err)
+	}
+	// Re-persist the binding with the launch's final placement: adoption may
+	// have landed on the live holder's pane rather than the one placed above.
+	// This binding is what keeps IsRunning/paneID resolving the session when
+	// no registry name exists — herdr ≥0.7.4 clears names on occupant change,
+	// and raw/bare-shell sessions never register one (see panebinding.go).
+	if err := p.bindPlacement(name, info, mode); err != nil {
+		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
 	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
 	// a named always-awake Claude session carries its behavioral prime in
@@ -143,7 +202,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
 	// returned unchanged. Route it through the one hardened post-idle
 	// paste+submit path. See startupDeliveryText.
-	if startupText := startupDeliveryText(cfg); startupText != "" && info.PaneID != "" {
+	// Skip delivery when we adopted an already-running holder: it is a live,
+	// already-primed agent, and re-delivering would inject the startup prime into
+	// a working session.
+	if startupText := startupDeliveryText(cfg); !adopted && startupText != "" && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening. The paste buffers and survives that window,
 		// but the submit CR does not: delivered too early it is swallowed, leaving
@@ -155,7 +217,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
 		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
-		if err := p.c.deliverNudge(ctx, info.PaneID, name, startupText); err != nil {
+		if err := p.c.deliverNudge(ctx, info.PaneID, startupText); err != nil {
 			// Best-effort: the submit didn't confirm (TUI race under boot load).
 			// Surface it rather than silently leaving a stranded startup turn;
 			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
@@ -330,13 +392,15 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 }
 
 // Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
+// The pane resolves through the sidecar binding when the name is gone — the
+// earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
+// closePane never issued ⇒ panes piled up across witness sleep cycles.
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
-	if err != nil || pid == "" {
-		return nil // idempotent
+	if err == nil && pid != "" {
+		_ = p.c.closePane(ctx, pid)
 	}
-	_ = p.c.closePane(ctx, pid)
 	_ = p.clearMeta(name)
 	return nil
 }
@@ -351,18 +415,15 @@ func (p *Provider) Interrupt(name string) error {
 	return p.c.sendKeys(ctx, pid, "ctrl+c") // herdr has no signal API; ctrl+c is the soft interrupt
 }
 
-// IsRunning reports whether an agent with this name exists in the session.
+// IsRunning reports whether the agent's session is running: its name is live
+// in herdr's registry OR its bound pane still runs its session (raw sessions
+// never register a name; herdr ≥0.7.4 clears names on occupant change — a
+// name-only check re-Starts live sessions every tick: the spawn storm). An
+// exited agent whose pane idles at a shell prompt is NOT running, so
+// restarts still happen.
 func (p *Provider) IsRunning(name string) bool {
-	agents, err := p.c.listAgents(context.Background())
-	if err != nil {
-		return false
-	}
-	for _, a := range agents {
-		if a.Name == name {
-			return true
-		}
-	}
-	return false
+	_, running, err := resolveBinding(p.lookupOps(context.Background(), name))
+	return err == nil && running
 }
 
 // IsAttached reports false: herdr 0.7.1 exposes no clean attach-state query.
@@ -370,7 +431,7 @@ func (p *Provider) IsAttached(_ string) bool { return false }
 
 // Attach runs `herdr agent attach`, blocking until the user detaches.
 func (p *Provider) Attach(name string) error {
-	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", name)
+	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", herdrAgentName(name))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run() // blocks until the user detaches
 }
@@ -394,7 +455,19 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if err != nil || pid == "" {
 		return false
 	}
-	shellPID, fg, err := p.c.processInfo(ctx, pid)
+	return p.processAliveByPane(ctx, name, pid, processNames)
+}
+
+// processAliveByPane reports whether the process tree rooted at paneID runs one
+// of processNames. It is the shared core of ProcessAlive and the adopt decision
+// in Start: ProcessAlive resolves the pane from the session name, while the
+// adopt path already holds the contested holder's pane id. The session-scoped
+// tree-walk widening (#4225) is still keyed by session name via GetMeta.
+func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, processNames []string) bool {
+	if paneID == "" {
+		return false
+	}
+	shellPID, fg, err := p.c.processInfo(ctx, paneID)
 	if err != nil || shellPID == 0 {
 		return false
 	}
@@ -410,6 +483,85 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	}
 	sessionID, _ := p.GetMeta(name, "GC_SESSION_ID")
 	return processTreeAlive(shellPID, fg, processNames, strings.TrimSpace(sessionID))
+}
+
+// startAgentAdopting issues the kind-launch agent start and, on herdr's
+// agent_name_taken rejection (a concurrent Start won the name), adopts the
+// live holder or reaps a stale one and retries once — breaking the recreate
+// storm (see resolveAgentNameTaken). Holder liveness is the pane busy probe:
+// a contested holder whose pane runs a foreground process is a live agent
+// (version-robust, unlike matching claude ≥2.1.x's comm strings). adopted is
+// true only when an already-running holder was adopted, so the caller can
+// skip re-priming a live agent.
+func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID string, args []string) (info agentInfo, adopted bool, err error) {
+	hn := herdrAgentName(name) // herdr ≥0.7.5 rejects raw gc session names (invalid_agent_name)
+	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
+	return resolveAgentNameTaken(started, startErr, agentStartOps{
+		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
+		paneAlive: func(holderPane string) bool {
+			probe, perr := p.probePane(ctx, holderPane)
+			return perr == nil && probe.Exists && probe.Busy
+		},
+		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
+		retryStart: func() (agentInfo, error) { return p.c.startAgentKind(ctx, hn, kind, paneID, args) },
+	})
+}
+
+// paneBusyRetries bounds how many agent_pane_busy rejections the kind launch
+// retries after re-waiting for the shell prompt (races between the readiness
+// probe and herdr's own availability check).
+const paneBusyRetries = 3
+
+// paneShellReadyWait bounds the wait for a fresh pane's shell to reach its
+// interactive prompt (rc files can run for seconds and spawn foreground
+// children). Best-effort: on timeout the launch proceeds and surfaces
+// herdr's own verdict.
+const paneShellReadyWait = 15 * time.Second
+
+// waitPaneShellReady polls the pane until it idles at a bare interactive
+// shell prompt — what herdr's `agent start` requires of its target pane.
+func (p *Provider) waitPaneShellReady(ctx context.Context, paneID string) {
+	deadline := time.Now().Add(paneShellReadyWait)
+	for time.Now().Before(deadline) {
+		probe, err := p.probePane(ctx, paneID)
+		if err == nil && probe.Exists && !probe.Busy {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// rawLaunchWait bounds how long Start's raw path waits for the typed
+// `exec /bin/sh -c …` to actually execute in the fresh pane. The typed launch
+// runs only after the pane's shell finishes initializing (rc files can take
+// seconds and spawn their own foreground children, so pane busyness alone
+// cannot confirm the launch). The bound only bites on a wedged shell, after
+// which Start proceeds best-effort (the reconciler tolerates a slow launch).
+const rawLaunchWait = 15 * time.Second
+
+// waitPaneLaunched polls the pane until the launched `/bin/sh -c <raw>` shows
+// up in its foreground (exec preserves argv), the pane is gone (the command
+// already ran and exited), or the bound elapses. Best-effort by design.
+func (p *Provider) waitPaneLaunched(ctx context.Context, paneID, raw string) {
+	deadline := time.Now().Add(rawLaunchWait)
+	for time.Now().Before(deadline) {
+		shellPID, fg, err := p.c.processInfo(ctx, paneID)
+		switch {
+		case err != nil && (strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found")):
+			return // pane already gone: the command ran and exited
+		case err == nil && shellPID != 0 && (paneRunsCommand(fg, raw) || paneRootReplaced(shellPID, fg)):
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // processTreeAlive is the descendant-walk fallback for ProcessAlive: it takes
@@ -471,7 +623,21 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 	if strings.TrimSpace(name) == "" {
 		return runtime.Liveness{}
 	}
-	info, present, err := p.c.getAgent(context.Background(), name)
+	ctx := context.Background()
+	info, present, err := p.c.getAgent(ctx, herdrAgentName(name))
+	if err == nil && !present {
+		// Name absent — fall back to the bound pane before declaring the
+		// session gone: raw shell sessions never register a name at all, and
+		// herdr ≥0.7.4 clears a registered name on occupant change. A binding
+		// that resolves as running means the session is up even though no
+		// agent_status is readable; report alive, matching
+		// agentAliveFromStatus's fail-safe direction. A confirmed-gone pane
+		// clears the stale binding; a transport failure clears nothing and
+		// falls through to not-running (as a failed name query already does).
+		if _, running, perr := resolveBinding(p.lookupOps(ctx, name)); perr == nil && running {
+			return runtime.Liveness{Running: true, Alive: true}
+		}
+	}
 	return livenessFromAgent(info, present, err)
 }
 
@@ -511,24 +677,53 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
-	return p.c.deliverNudge(ctx, pid, name, runtime.FlattenText(content))
+	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content))
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint
-// snapshot. recent*/scrollback is empty until lines scroll off.
+// snapshot. It reads by pane (resolved through the binding when the registry
+// name is gone), since raw shell sessions have no registered agent to read.
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	return p.c.read(context.Background(), name, "visible", lines)
+	ctx := context.Background()
+	pid, err := p.paneID(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if pid == "" {
+		return "", runtime.ErrSessionNotFound
+	}
+	return p.c.paneRead(ctx, pid, "visible", lines)
 }
 
-// ListRunning returns the names of running agents whose names start with prefix.
+// ListRunning returns the names of running sessions whose names start with
+// prefix. The sidecar bindings are the primary source (they hold the exact
+// gc names — herdr's registry stores the mapped herdrAgentName forms, and
+// never sees raw shell sessions at all); each bound candidate is verified
+// running before it is listed. Registry agents that don't correspond to any
+// bound gc session (foreign/manual agents) are appended under their own
+// names.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	agents, err := p.c.listAgents(context.Background())
+	ctx := context.Background()
+	agents, err := p.c.listAgents(ctx)
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]bool)   // gc names already listed
+	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
 	var out []string
+	for _, name := range p.boundSessionNames() {
+		mapped[herdrAgentName(name)] = true
+		if !strings.HasPrefix(name, prefix) || seen[name] {
+			continue
+		}
+		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
 	for _, a := range agents {
-		if strings.HasPrefix(a.Name, prefix) {
+		if !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
+			seen[a.Name] = true
 			out = append(out, a.Name)
 		}
 	}
@@ -576,7 +771,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if _, err := os.Stat(src); err != nil {
 		return nil // best-effort: missing src
 	}
-	a, ok, err := p.c.getAgent(context.Background(), name)
+	a, ok, err := p.c.getAgent(context.Background(), herdrAgentName(name))
 	if err != nil || !ok || a.Cwd == "" {
 		return nil
 	}
@@ -645,24 +840,15 @@ func (p *Provider) clearMeta(name string) error {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// paneID resolves a gascity session name to its herdr pane id (or "" if absent).
+// paneID resolves a gascity session name to its herdr pane id (or "" if
+// absent): registry name lookup first, then the sidecar pane binding Start
+// persisted — the only handle for raw shell sessions and for agents whose
+// registry name herdr cleared (see panebinding.go). The pane resolves
+// whenever it still exists, even for an exited agent, so Stop/keys/read keep
+// working on it.
 func (p *Provider) paneID(ctx context.Context, name string) (string, error) {
-	a, ok, err := p.c.getAgent(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", nil
-	}
-	return a.PaneID, nil
-}
-
-// shellArgv wraps a shell command string as argv for `herdr agent start -- …`.
-func shellArgv(command string) []string {
-	if strings.TrimSpace(command) == "" {
-		return []string{"/bin/sh"}
-	}
-	return []string{"/bin/sh", "-c", command}
+	pane, _, err := resolveBinding(p.lookupOps(ctx, name))
+	return pane, err
 }
 
 // workspaceTabFor maps a gascity runtime session name to its herdr placement: a

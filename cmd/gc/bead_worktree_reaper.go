@@ -110,6 +110,12 @@ func reapClosedBeadWorktrees(
 	// Authoritative liveness signal, gathered once for the whole pass. When the
 	// scan is indeterminate the reaper protects every candidate (fail closed).
 	live := collectLiveWorktreeStateFn()
+	if live.scanned && live.source != "" && live.source != liveScanSourceProc {
+		// Name the mechanism when it is not the primary one, so a reap decision
+		// made on a fallback scan is not indistinguishable from one made on
+		// /proc.
+		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
+	}
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
