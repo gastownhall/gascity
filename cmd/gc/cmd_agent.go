@@ -33,6 +33,19 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
 }
 
+// skipRevisionSnapshot is the load option shared by the loaders in this file.
+//
+// The load-time revision snapshot content-hashes every pack directory so that a
+// later config.Revision() call can compare against the tree as it was loaded.
+// Neither loader here returns the Provenance — both use it to emit warnings and
+// then drop it — so nothing they load can ever observe the snapshot, and
+// building it is pure cost on a one-shot command. Loaders that do hand the
+// Provenance back keep the default.
+//
+// Revision reads from disk for anything the snapshot does not hold, so declining
+// it changes no revision value; see config.LoadOptions.SkipRevisionSnapshot.
+var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
+
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
@@ -40,7 +53,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +72,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 // briefly reflect stale builtin-pack content after an upgrade until a normal
 // gc command refreshes the generated packs.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}

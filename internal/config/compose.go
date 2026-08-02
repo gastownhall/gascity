@@ -98,9 +98,26 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// SkipRevisionSnapshot declines the load-time revision snapshot, which
+	// content-hashes every pack directory so that a later Revision() call can
+	// compare against the config as it was loaded.
+	//
+	// Only long-running processes ever compute a Revision; a one-shot command
+	// loads config, uses it and exits. Set this on those callers to skip work
+	// nothing will read.
+	//
+	// Declining the snapshot cannot change a revision VALUE: every read of it
+	// already falls back to reading from disk (writeRevisionDirHash,
+	// revisionSnapshotFile, revisionConventionDirs), so it is a prefetch, not
+	// an input. What it does give up is load-time faithfulness — a revision
+	// computed without it reflects the tree at Revision() time rather than at
+	// load time. That only matters to a caller holding a Provenance across a
+	// window in which the config may change, which is exactly the long-running
+	// case that should leave this false.
+	SkipRevisionSnapshot    bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -773,8 +790,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Callers that never compute a Revision opt out
+	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
+	// the value is the same either way.
+	if !opts.SkipRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot)
+	}
 
 	return root, prov, nil
 }
