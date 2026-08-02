@@ -1824,6 +1824,18 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
 
+	// Reap the closed session's detached nudge pollers immediately. They are
+	// their own process-group leaders (Setpgid at spawn), so the runtime
+	// teardown above structurally never signals them — left alone they keep
+	// polling the store every cycle forever. The reconcile tick has the same
+	// reap as a backstop; doing it here means close takes effect now.
+	if cityErr == nil {
+		closedName := strings.TrimSpace(closedSessionBead.Metadata["session_name"])
+		for _, target := range reapNudgePollersForClosedSession(cityPath, closedName, stderr) {
+			fmt.Fprintf(stderr, "gc session close: reaped nudge poller %s\n", target) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:              "close",

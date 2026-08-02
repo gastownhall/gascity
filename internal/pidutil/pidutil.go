@@ -112,14 +112,25 @@ func AliveWithCmdline(pid int, match func([]string) bool) bool {
 	if match == nil {
 		return false
 	}
-	if runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "linux":
+		argv, err := Cmdline(pid)
+		if err != nil {
+			return false
+		}
+		return match(argv)
+	case "darwin":
+		// kern.procargs2 gives real argv for same-UID processes. A refused
+		// read (foreign UID, racing exit) preserves the historical darwin
+		// degradation: alive counts as matching.
+		argv, err := Cmdline(pid)
+		if err != nil {
+			return true
+		}
+		return match(argv)
+	default:
 		return true
 	}
-	argv, err := Cmdline(pid)
-	if err != nil {
-		return false
-	}
-	return match(argv)
 }
 
 // ArgvContainsSequence reports whether argv contains seq contiguously.
@@ -162,10 +173,13 @@ func ArgvHasFlagValue(argv []string, flag, value string) bool {
 	return false
 }
 
-// Cmdline returns a PID's command line from /proc, normalized through
-// NormalizeArgv. It returns an error on hosts without /proc cmdline support
-// or when the process record is unreadable.
+// Cmdline returns a PID's command line, normalized through NormalizeArgv:
+// from kern.procargs2 on darwin, from /proc elsewhere. It returns an error on
+// hosts without either mechanism or when the process record is unreadable.
 func Cmdline(pid int) ([]string, error) {
+	if argv, err, handled := platformCmdline(pid); handled {
+		return argv, err
+	}
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return nil, err
