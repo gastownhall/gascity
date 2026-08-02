@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -99,6 +101,60 @@ func TestCollectLiveWorktreeStateFallback_PartialOutputStillCounts(t *testing.T)
 	}
 	if len(got.cwds) != 1 {
 		t.Errorf("cwds = %v, want the one readable record", got.cwds)
+	}
+}
+
+// TestCollectLiveWorktreeStateFallback_SkipsLsofErrorAnnotations pins the
+// distinction between a path and lsof's way of reporting that it could not read
+// one. The error text lands inside the n field and starts with a slash, so it
+// passes the absolute-path filter and normalizes non-empty; counted, it would be
+// a phantom cwd that matches no worktree.
+func TestCollectLiveWorktreeStateFallback_SkipsLsofErrorAnnotations(t *testing.T) {
+	stubLiveWorktreeCwdEnumerator(t, "p1\x00fcwd\x00n/srv/tree\x00\np2\x00fcwd\x00n/proc/1/cwd (readlink: Permission denied)\x00\np3\x00fcwd\x00n/proc/2/cwd (readlink: Permission denied)\x00\n", nil)
+
+	got := collectLiveWorktreeStateFallback()
+
+	if len(got.cwds) != 1 {
+		t.Fatalf("cwds = %q, want only the readable path", got.cwds)
+	}
+	if got.cwds[0] != "/srv/tree" {
+		t.Errorf("cwds[0] = %q, want %q", got.cwds[0], "/srv/tree")
+	}
+}
+
+// TestCollectLiveWorktreeStateFallback_FailsClosedWhenEveryRecordIsAnAnnotation
+// is the case that makes the previous test matter: on a host where lsof can read
+// no process it owns nothing of, every record is an error annotation. Counting
+// them would report a usable scan holding no signal, and every live worktree
+// would look idle to the reaper.
+func TestCollectLiveWorktreeStateFallback_FailsClosedWhenEveryRecordIsAnAnnotation(t *testing.T) {
+	stubLiveWorktreeCwdEnumerator(t, "p1\x00fcwd\x00n/proc/1/cwd (readlink: Permission denied)\x00\np2\x00fcwd\x00n/proc/2/cwd (readlink: Permission denied)\x00\n", nil)
+
+	got := collectLiveWorktreeStateFallback()
+
+	if got.scanned {
+		t.Error("scanned = true for a listing of nothing but error annotations; the scan read no cwd at all")
+	}
+	if got.source != "" {
+		t.Errorf("source = %q, want empty for an indeterminate scan", got.source)
+	}
+}
+
+// TestCollectLiveWorktreeStateFallback_FailsClosedOnTimeout separates a deadline
+// from the ordinary non-zero exit in _PartialOutputStillCounts. Both hand back
+// records plus an error, but truncation at an arbitrary point omits records for
+// no reason the listing describes — unlike EACCES, which omits exactly the
+// processes this user cannot see, the same blind spot /proc has.
+func TestCollectLiveWorktreeStateFallback_FailsClosedOnTimeout(t *testing.T) {
+	stubLiveWorktreeCwdEnumerator(t, "p1\x00fcwd\x00n/srv/tree\x00\n", fmt.Errorf("lsof: %w", context.DeadlineExceeded))
+
+	got := collectLiveWorktreeStateFallback()
+
+	if got.scanned {
+		t.Error("scanned = true for a listing truncated by the deadline; the missing records are not a bounded blind spot")
+	}
+	if got.source != "" {
+		t.Errorf("source = %q, want empty for an indeterminate scan", got.source)
 	}
 }
 
