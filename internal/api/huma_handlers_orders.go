@@ -569,10 +569,18 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
+	// The feed body is O(store history) to build: per rig, a full active scan
+	// plus a closed-history workflow-roots scan, and an order-tracking list
+	// that fans out into a latest-run lookup per tracked order. Key its cache
+	// entry on a time bucket, not the event index: on a busy city the index
+	// advances every tick, so the index-keyed entry missed on nearly every
+	// poll and the slow body was rebuilt per request. The endpoint has no
+	// blocking variant, so there is no strict-freshness caller to bypass (same
+	// lever as /status and /formulas/feed).
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
-	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
+	bucket := responseCacheTimeBucket(time.Now())
+	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, bucket); ok {
 		return &struct {
 			Body ordersFeedBody
 		}{Body: body}, nil
@@ -623,7 +631,7 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	body.PartialErrors = appendUniqueStrings(body.PartialErrors, workflowRuns.PartialErrors...)
 	body.PartialErrors = appendUniqueStrings(body.PartialErrors, orderRuns.PartialErrors...)
 
-	s.storeResponse(cacheKey, index, body)
+	s.storeResponse(cacheKey, bucket, body)
 
 	return &struct {
 		Body ordersFeedBody
