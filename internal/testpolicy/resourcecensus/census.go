@@ -123,7 +123,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   544,
+			BaselineCalls:   546,
 			BaselineFiles:   164,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -136,8 +136,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   423,
-			BaselineFiles:   156,
+			BaselineCalls:   429,
+			BaselineFiles:   159,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -164,7 +164,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   405,
+			BaselineCalls:   407,
 			BaselineFiles:   113,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -177,8 +177,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   278,
-			BaselineFiles:   110,
+			BaselineCalls:   284,
+			BaselineFiles:   113,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -255,8 +255,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   94,
-			BaselineFiles:   35,
+			BaselineCalls:   95,
+			BaselineFiles:   36,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -407,6 +407,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-01",
 		},
+		{
+			PackageDir:      "internal/doctor",
+			PackageName:     "doctor",
+			Owner:           "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-8pkpor",
+			Invariant:       "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner",
+			ResourceOwner:   "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -442,7 +453,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   400,
+			BaselineCalls:   401,
 			BaselineFiles:   110,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
@@ -455,8 +466,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   278,
-			BaselineFiles:   110,
+			BaselineCalls:   284,
+			BaselineFiles:   113,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -533,8 +544,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
-			BaselineFiles:   34,
+			BaselineCalls:   93,
+			BaselineFiles:   35,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",

@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const psZombieTimeout = 100 * time.Millisecond
+const (
+	psZombieTimeout  = 100 * time.Millisecond
+	childEnumTimeout = 1 * time.Second
+)
 
 // Alive reports whether a PID exists and is not a zombie.
 func Alive(pid int) bool {
@@ -188,6 +191,55 @@ func NormalizeArgv(argv []string) []string {
 		out = append(out, arg)
 	}
 	return out
+}
+
+// ChildPIDs returns the pids of all live direct child processes of parent,
+// enumerated portably via `ps -axo pid=,ppid=` rather than a /proc walk, so
+// it works on darwin as well as linux. It returns an error when the ps
+// invocation itself fails or times out, so callers can tell "enumeration
+// ran and found nothing" apart from "enumeration did not run" — collapsing
+// the two into an empty slice would let an unavailable check masquerade as
+// a clean result.
+//
+// ps is itself alive, and a child of the caller, at the instant it captures
+// the process table — so a caller checking its own children (parent ==
+// os.Getpid(), the pattern this package's callers use for self leak checks)
+// always sees ps's own transient pid/ppid row alongside any real children.
+// The enumeration helper's own pid is excluded below so it can never
+// masquerade as a leaked child.
+func ChildPIDs(parent int) ([]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), childEnumTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("pidutil: ps enumeration failed: %w", err)
+	}
+	selfPID := -1
+	if cmd.Process != nil {
+		selfPID = cmd.Process.Pid
+	}
+
+	var children []int
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, errPID := strconv.Atoi(fields[0])
+		ppid, errPPID := strconv.Atoi(fields[1])
+		if errPID != nil || errPPID != nil {
+			continue
+		}
+		if pid == selfPID {
+			continue
+		}
+		if ppid == parent {
+			children = append(children, pid)
+		}
+	}
+	return children, nil
 }
 
 func psReportsZombie(pid int) bool {

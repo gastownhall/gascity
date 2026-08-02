@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -1255,40 +1256,44 @@ func TestProxyProcessSurvivesHardParentExit(t *testing.T) {
 // --- Family A: TestMain regression backstop (ga-9br097 ASK 3) ------------
 
 // livingTestChildren returns the pids of any direct child process of this
-// test binary still alive right now. Every subprocess this package's tests
-// spawn is reaped by the code under test (Manager.Close / stopProcessGroup)
-// before the spawning test returns, so any survivor found after m.Run()
-// means a leak. Reuses the same /proc/<pid>/stat parent-pid lookup as
-// orphan_reap.go's processParentPID rather than reimplementing it.
-func livingTestChildren() []int {
-	self := os.Getpid()
-	entries, err := os.ReadDir("/proc")
+// test binary still alive right now, or an error if enumeration itself
+// could not be performed. Every subprocess this package's tests spawn is
+// reaped by the code under test (Manager.Close / stopProcessGroup) before
+// the spawning test returns, so any survivor found after m.Run() means a
+// leak. Enumerates portably via pidutil.ChildPIDs (ps-based) rather than a
+// /proc walk: a /proc-only walk returns nil unconditionally on darwin,
+// which would make the guard below report a false "no leaks" on any
+// platform where it cannot actually look (ga-gxmz9n).
+func livingTestChildren() ([]int, error) {
+	return pidutil.ChildPIDs(os.Getpid())
+}
+
+// shouldFailForLeak decides whether TestMain's exit code must be forced
+// non-zero. An enumeration error means the check did not run at all, and
+// that must never be indistinguishable from a check that ran and found
+// nothing (ga-gxmz9n's binding constraint) — so it fails alongside an
+// actual leak rather than passing silently.
+func shouldFailForLeak(pids []int, err error) (fail bool, reason string) {
 	if err != nil {
-		return nil
+		return true, fmt.Sprintf("leak detection unavailable: %v", err)
 	}
-	var pids []int
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid == self {
-			continue
-		}
-		ppid, err := processParentPID(pid)
-		if err != nil || ppid != self {
-			continue
-		}
-		pids = append(pids, pid)
+	if len(pids) > 0 {
+		return true, fmt.Sprintf("%d live child process(es) leaked by tests: %v", len(pids), pids)
 	}
-	return pids
+	return false, ""
 }
 
 // TestMain runs the package's tests, then fails the run if any test left a
 // live direct child process behind (ga-9br097 ASK 3): every subprocess
 // these tests spawn is reaped by the code under test before its owning
-// test returns, so a survivor here is a real leak, not a slow child.
+// test returns, so a survivor here is a real leak, not a slow child. It
+// also fails the run if leak detection itself was unavailable, rather than
+// letting that read as a clean pass (ga-gxmz9n).
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if pids := livingTestChildren(); len(pids) > 0 {
-		fmt.Fprintf(os.Stderr, "workspacesvc: %d live child process(es) leaked by tests: %v\n", len(pids), pids)
+	pids, err := livingTestChildren()
+	if fail, reason := shouldFailForLeak(pids, err); fail {
+		fmt.Fprintf(os.Stderr, "workspacesvc: %s\n", reason)
 		if code == 0 {
 			code = 1
 		}
@@ -1296,11 +1301,47 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// TestShouldFailForLeakOnUnavailableEnumeration is a RED test for
+// ga-gxmz9n's binding constraint: an enumeration error must never be
+// treated as a clean run, even though it also carries zero pids.
+func TestShouldFailForLeakOnUnavailableEnumeration(t *testing.T) {
+	fail, reason := shouldFailForLeak(nil, errors.New("ps: command not found"))
+	if !fail {
+		t.Fatal("shouldFailForLeak(nil, non-nil err) = fail=false, want true — an unavailable check must never look like a clean pass")
+	}
+	if reason == "" {
+		t.Fatal("shouldFailForLeak(nil, non-nil err) returned an empty reason")
+	}
+}
+
+// TestShouldFailForLeakOnLeakedChild covers the pre-existing ga-9br097
+// contract: a live leaked child must fail the run.
+func TestShouldFailForLeakOnLeakedChild(t *testing.T) {
+	fail, reason := shouldFailForLeak([]int{12345}, nil)
+	if !fail {
+		t.Fatal("shouldFailForLeak([pid], nil) = fail=false, want true")
+	}
+	if reason == "" {
+		t.Fatal("shouldFailForLeak([pid], nil) returned an empty reason")
+	}
+}
+
+// TestShouldFailForLeakOnCleanRun asserts a genuinely clean run (enumeration
+// succeeded, zero children) still passes — the fix must not make the guard
+// fail unconditionally.
+func TestShouldFailForLeakOnCleanRun(t *testing.T) {
+	if fail, reason := shouldFailForLeak(nil, nil); fail {
+		t.Fatalf("shouldFailForLeak(nil, nil) = fail=true (reason %q), want false", reason)
+	}
+}
+
 // TestLivingTestChildrenDetectsSurvivor is the RED test for the TestMain
 // regression backstop (ga-9br097 ASK 3): it spawns a real child directly
 // (bypassing Manager/proxy_process entirely, so it exercises only the
 // detector) and asserts livingTestChildren both finds it while alive and
-// stops finding it once killed and reaped.
+// stops finding it once killed and reaped. Runs unconditionally on every
+// platform (no macOS skip) — ga-gxmz9n requires real detection on darwin,
+// not a skip standing in for it.
 func TestLivingTestChildrenDetectsSurvivor(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
@@ -1314,7 +1355,11 @@ func TestLivingTestChildrenDetectsSurvivor(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var pids []int
 	for time.Now().Before(deadline) {
-		pids = livingTestChildren()
+		var err error
+		pids, err = livingTestChildren()
+		if err != nil {
+			t.Fatalf("livingTestChildren(): %v", err)
+		}
 		if containsPID(pids, cmd.Process.Pid) {
 			break
 		}
@@ -1334,7 +1379,10 @@ func TestLivingTestChildrenDetectsSurvivor(t *testing.T) {
 		}
 	}
 
-	pids = livingTestChildren()
+	pids, err := livingTestChildren()
+	if err != nil {
+		t.Fatalf("livingTestChildren(): %v", err)
+	}
 	if containsPID(pids, cmd.Process.Pid) {
 		t.Fatalf("livingTestChildren() = %v, still contains reaped pid %d", pids, cmd.Process.Pid)
 	}
