@@ -437,6 +437,15 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		parentEdges = append(parentEdges, edge)
 	}
 
+	for _, child := range graphBeads {
+		if _, ok := beadIndex[child.ParentID]; ok {
+			addParentEdge(child.ParentID, child.ID)
+		}
+	}
+	if isGraphV2MetadataGraph(root, metadataChildren) {
+		return graphBeads, parentEdges, nil
+	}
+
 	// Discover parent-linked descendants and their parent-child edges by walking
 	// the tree one BFS level at a time, fetching each level's children with a
 	// single batched store.List(ParentIDs=...) call. This replaces the former
@@ -478,6 +487,16 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 
 	return graphBeads, parentEdges, nil
+}
+
+func isGraphV2MetadataGraph(root beads.Bead, metadataChildren []beads.Bead) bool {
+	if len(metadataChildren) == 0 {
+		return false
+	}
+	if !sling.IsWorkflowAttachment(root) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), "graph.v2")
 }
 
 func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {

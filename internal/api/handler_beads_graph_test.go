@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -19,6 +20,18 @@ type beadGraphResponse struct {
 		To   string `json:"to"`
 		Kind string `json:"kind"`
 	} `json:"deps"`
+}
+
+type graphCountingListStore struct {
+	beads.Store
+	parentListCalls int
+}
+
+func (s *graphCountingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID != "" {
+		s.parentListCalls++
+	}
+	return s.Store.List(query)
 }
 
 func createBeadWithMeta(t *testing.T, store beads.Store, title string, meta map[string]string) beads.Bead {
@@ -47,6 +60,72 @@ func getGraph(t *testing.T, h http.Handler, fs *fakeState, rootID string) (*http
 		}
 	}
 	return rec, resp
+}
+
+func TestBeadGraphGraphV2MetadataGraphSkipsParentWalk(t *testing.T) {
+	state := newFakeState(t)
+	base := state.stores["myrig"]
+
+	root := createBeadWithMeta(t, base, "Workflow Root", map[string]string{
+		beadmeta.KindMetadataKey:            "workflow",
+		beadmeta.FormulaContractMetadataKey: "graph.v2",
+	})
+	child, err := base.Create(beads.Bead{
+		Title:    "Step 1",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	grandchild, err := base.Create(beads.Bead{
+		Title:    "Step 1.1",
+		Type:     "task",
+		ParentID: child.ID,
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+
+	counting := &graphCountingListStore{Store: base}
+	state.stores["myrig"] = counting
+	h := newTestCityHandler(t, state)
+
+	rec, resp := getGraph(t, h, state, root.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if counting.parentListCalls != 0 {
+		t.Fatalf("ParentID List calls = %d, want 0 for graph.v2 metadata graph", counting.parentListCalls)
+	}
+	beadIDs := map[string]bool{}
+	for _, b := range resp.Beads {
+		beadIDs[b.ID] = true
+	}
+	for _, id := range []string{root.ID, child.ID, grandchild.ID} {
+		if !beadIDs[id] {
+			t.Fatalf("graph beads missing %s; got %#v", id, resp.Beads)
+		}
+	}
+	edges := map[string]bool{}
+	for _, dep := range resp.Deps {
+		edges[dep.From+"|"+dep.To+"|"+dep.Kind] = true
+	}
+	for _, edge := range []string{
+		root.ID + "|" + child.ID + "|parent-child",
+		child.ID + "|" + grandchild.ID + "|parent-child",
+	} {
+		if !edges[edge] {
+			t.Fatalf("graph deps missing %s; got %#v", edge, resp.Deps)
+		}
+	}
 }
 
 func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
