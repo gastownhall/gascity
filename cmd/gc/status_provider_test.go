@@ -98,3 +98,43 @@ func TestStatusProviderTimeoutMarksPartial(t *testing.T) {
 		t.Fatal("statusProviderPartial = false, want true after runtime probe timeout")
 	}
 }
+
+func TestStatusProviderTimeoutMarksOnlyTheTimedOutName(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	base := newStatusProbeProvider()
+	base.running.Store(true)
+	base.delay.Store(int64(100 * time.Millisecond))
+	wrapped := newBoundedStatusProvider(base)
+
+	if wrapped.IsRunning("slow-agent") {
+		t.Fatal("IsRunning returned true, want timeout fallback false")
+	}
+
+	base.delay.Store(0)
+	if !wrapped.IsRunning("fast-agent") {
+		t.Fatal("IsRunning returned false for a probe that did not time out")
+	}
+
+	if !statusProviderPartialForName(wrapped, "slow-agent") {
+		t.Fatal("statusProviderPartialForName(slow-agent) = false, want true after its own probe timed out")
+	}
+	if statusProviderPartialForName(wrapped, "fast-agent") {
+		t.Fatal("statusProviderPartialForName(fast-agent) = true, want false: this agent's own probe never timed out")
+	}
+	if statusProviderPartialForName(wrapped, "never-probed") {
+		t.Fatal("statusProviderPartialForName(never-probed) = true, want false for a name that was never observed")
+	}
+	// The city-wide flag still trips, for callers/paths that intentionally
+	// key on the broader signal.
+	if !statusProviderPartial(wrapped) {
+		t.Fatal("statusProviderPartial = false, want true after any probe timed out")
+	}
+}
