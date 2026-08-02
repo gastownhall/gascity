@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 545
+baseline_calls = 546
 baseline_files = 164
 reported_calls = 495
 reported_files = 135
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 424
-baseline_files = 156
+baseline_calls = 429
+baseline_files = 159
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 406
+baseline_calls = 407
 baseline_files = 113
 reported_calls = 380
 reported_files = 98
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 279
-baseline_files = 110
+baseline_calls = 284
+baseline_files = 113
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 94
-baseline_files = 35
+baseline_calls = 95
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -296,6 +296,17 @@ resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCh
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext"
+resources = ["subprocess"]
+owner_bead = "ga-8pkpor"
+invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -346,8 +357,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 279
-baseline_files = 110
+baseline_calls = 284
+baseline_files = 113
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -424,8 +435,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 93
+baseline_files = 35
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
