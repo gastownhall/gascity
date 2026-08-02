@@ -56,6 +56,17 @@ type bdStoreBridgeBead struct {
 	Description string            `json:"description,omitempty"`
 	Labels      []string          `json:"labels,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// bd's plain columns, keyed exactly as the exec store's beadWire decodes
+	// them. This envelope is the PRODUCER on the builtin exec-store path
+	// (`gc bd-store-bridge`, invoked by the bundled bd pack script), so a field
+	// it omits is gone before the consumer sees the stream: carrying the field
+	// on beads.Bead and on beadWire alone leaves an exec-backed city dropping
+	// it end to end.
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
 }
 
 func newBdStoreBridgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -413,5 +424,10 @@ func bridgeBead(item beads.Bead) bdStoreBridgeBead {
 		Description: item.Description,
 		Labels:      item.Labels,
 		Metadata:    item.Metadata,
+		AwaitType:   item.AwaitType,
+		AwaitID:     item.AwaitID,
+		CreatedBy:   item.CreatedBy,
+		Owner:       item.Owner,
+		Notes:       item.Notes,
 	}
 }

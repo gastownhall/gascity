@@ -104,6 +104,34 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CreatedBy and Owner mirror bd's created_by/owner columns. Together with
+	// Notes, AwaitType and AwaitID they are the plain columns bd emits on its
+	// JSON projections that this type did not model, so every store dropped
+	// them and a bead read through gc showed less than the same bead read
+	// through bd. Empty on stores whose schema predates them.
+	//
+	// READ-ONLY PROJECTION. No write path persists any of the five: they are
+	// absent from Create's argument list, from UpdateOpts, and from every exec
+	// create/update request shape. Setting one on a Bead handed to Create is
+	// therefore silently dropped — populate them through bd (`bd gate create`,
+	// `bd update --notes`, …) and read them back here.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	// Notes mirrors bd's notes column. The three remaining fields of bd's
+	// projection (comment_count, dependency_count, dependent_count) are
+	// backend-computed over relations and comments rather than plain columns,
+	// and are deliberately out of scope here.
+	Notes string `json:"notes,omitempty"`
+	// AwaitType and AwaitID are the condition a gate bead waits on, mirroring
+	// bd's await_type/await_id columns: the type ("human", "timer", "gh:run",
+	// "gh:pr", "mail") and the identifier it is scoped to (a run id, a PR
+	// number, a "<rig>:<bead-id>" pair). bd renders a gate as the pair, so
+	// carrying only the type would report that a gate waits on a PR without
+	// saying which one. Both were absent from this type, so a gate bead served
+	// from any store dropped its condition silently. Empty for every non-gate
+	// bead.
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE

@@ -81,6 +81,21 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 			out.Metadata[k] = v
 		}
 	}
+	if g.AwaitType != nil {
+		out.AwaitType = *g.AwaitType
+	}
+	if g.AwaitId != nil {
+		out.AwaitID = *g.AwaitId
+	}
+	if g.CreatedBy != nil {
+		out.CreatedBy = *g.CreatedBy
+	}
+	if g.Owner != nil {
+		out.Owner = *g.Owner
+	}
+	if g.Notes != nil {
+		out.Notes = *g.Notes
+	}
 	if g.Dependencies != nil {
 		out.Dependencies = make([]beads.Dep, 0, len(*g.Dependencies))
 		for _, d := range *g.Dependencies {
