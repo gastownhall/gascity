@@ -64,16 +64,20 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
+	// One verifier for the whole pass: the ready fast path and the repair path
+	// both validate the shared synthetic cache directory, and within a single
+	// pass that is the same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
+	if state.ready && requiredBuiltinSourcesUsable(cityPath, verifier) && lockedBundledImportsUsable(cityPath, verifier) {
 		return nil
 	}
 	state.ready = false
 
 	var problems []error
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
-	if err := ensureRequiredBuiltinSourcesCached(cityPath); err != nil {
+	if err := ensureRequiredBuiltinSourcesCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
 	if err := ensureGcBeadsBdShim(cityPath); err != nil {
@@ -82,7 +86,9 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	pruneRetiredSystemPacks(cityPath, warningWriter)
 
 	if len(problems) > 0 {
-		if !requiredBuiltinSourcesUsable(cityPath) {
+		// A fresh verifier: the repairs above just rewrote caches, so this
+		// last-resort check must not reuse anything decided before them.
+		if !requiredBuiltinSourcesUsable(cityPath, newSyntheticCacheVerifier()) {
 			state.lastWarning = ""
 			return fmt.Errorf("preparing builtin pack caches: %w", problems[0])
 		}
@@ -236,14 +242,17 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 // required bundled sources at the canonical pin, independent of packs.lock,
 // so the stable shim target and pre-migration cities always have the
 // current binary's content available.
-func ensureRequiredBuiltinSourcesCached(cityPath string) error {
+// The verifier scopes cache validation to the calling readiness pass; every
+// required source of a repository shares one synthetic cache directory, so
+// without it the same directory is walked once per source.
+func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	commit := bundledPackImportCommit()
 	for name, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
+		if verifier.Valid(cachePath, commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -253,14 +262,14 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 	return nil
 }
 
-func requiredBuiltinSourcesUsable(cityPath string) bool {
+func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	commit := bundledPackImportCommit()
 	for _, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+		if !verifier.Valid(cachePath, commit) {
 			return false
 		}
 	}

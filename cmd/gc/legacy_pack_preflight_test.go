@@ -21,7 +21,7 @@ func TestEnsureBundledLockedRemoteImportsCachedHydratesBundledLockEntry(t *testi
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
 	writePreflightImportLock(t, cityPath, commit)
 
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()); err != nil {
 		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
 	}
 
@@ -42,7 +42,7 @@ func TestEnsureBundledLockedRemoteImportsCachedValidatesWarmCacheWithoutWriteLoc
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
 	writePreflightImportLock(t, cityPath, commit)
 
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()); err != nil {
 		t.Fatalf("cold hydration returned error: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestEnsureBundledLockedRemoteImportsCachedValidatesWarmCacheWithoutWriteLoc
 	}()
 
 	warm := make(chan error, 1)
-	go func() { warm <- ensureBundledLockedRemoteImportsCached(cityPath) }()
+	go func() { warm <- ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()) }()
 	select {
 	case err := <-warm:
 		if err != nil {
@@ -87,7 +87,7 @@ func TestEnsureBundledLockedRemoteImportsCachedRejectsBundledLockEntryWithoutCom
 	source := config.PublicGastownPackSource
 	writePreflightImportLock(t, cityPath, "")
 
-	err := ensureBundledLockedRemoteImportsCached(cityPath)
+	err := ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier())
 	if err == nil {
 		t.Fatal("ensureBundledLockedRemoteImportsCached succeeded, want missing commit error")
 	}
@@ -112,7 +112,7 @@ fetched = "2026-01-01T00:00:00Z"
 		t.Fatal(err)
 	}
 
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()); err != nil {
 		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".gc", "cache", "repos")); !os.IsNotExist(err) {
@@ -149,7 +149,7 @@ func TestEnsureBundledLockedRemoteImportsCachedSkipsNonCanonicalBundledPin(t *te
 	cityPath := t.TempDir()
 	writePreflightImportLock(t, cityPath, "0123456789abcdef0123456789abcdef01234567")
 
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, newSyntheticCacheVerifier()); err != nil {
 		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".gc", "cache", "repos")); !os.IsNotExist(err) {
