@@ -181,6 +181,39 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadWorktreeDriftThreshold(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{WorktreeDriftThreshold: "7days"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[daemon]", "worktree_drift_threshold", "7days"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateDurationsRejectsUnsafeWorktreeDriftThreshold(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{Daemon: DaemonConfig{WorktreeDriftThreshold: value}}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if len(warnings) != 1 {
+				t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+			}
+			for _, want := range []string{"[daemon]", "worktree_drift_threshold", value} {
+				if !strings.Contains(warnings[0], want) {
+					t.Errorf("warning = %q, want substring %q", warnings[0], want)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateDurationsBadBeadPolicyDuration(t *testing.T) {
 	cfg := &City{
 		Beads: BeadsConfig{

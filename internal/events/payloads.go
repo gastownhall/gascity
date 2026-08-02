@@ -133,3 +133,38 @@ func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt stri
 	})
 	return b
 }
+
+// WorktreeDriftStalledPayload is the typed payload for
+// worktree.drift_stalled events. It identifies the drifted commit-class
+// agent worktree, its branch/detach state and ahead/behind counts vs. the
+// default branch, and the observation window used to compute the elapsed
+// diagnostic threshold.
+type WorktreeDriftStalledPayload struct {
+	Identity        string `json:"identity"`
+	WorktreePath    string `json:"worktree_path"`
+	Detached        bool   `json:"detached"`
+	Branch          string `json:"branch,omitempty"`
+	AheadCount      int    `json:"ahead_count"`
+	BehindCount     int    `json:"behind_count"`
+	FirstObservedAt string `json:"first_observed_at"`
+	ElapsedSeconds  int    `json:"elapsed_s"`
+}
+
+// IsEventPayload marks WorktreeDriftStalledPayload as an events.Payload variant.
+func (WorktreeDriftStalledPayload) IsEventPayload() {}
+
+// WorktreeDriftStalledPayloadJSON builds the JSON wire form for attachment
+// to an Event.Payload field.
+func WorktreeDriftStalledPayloadJSON(identity, worktreePath string, detached bool, branch string, aheadCount, behindCount int, firstObservedAt string, elapsedSeconds int) json.RawMessage {
+	b, _ := json.Marshal(WorktreeDriftStalledPayload{
+		Identity:        identity,
+		WorktreePath:    worktreePath,
+		Detached:        detached,
+		Branch:          branch,
+		AheadCount:      aheadCount,
+		BehindCount:     behindCount,
+		FirstObservedAt: firstObservedAt,
+		ElapsedSeconds:  elapsedSeconds,
+	})
+	return b
+}

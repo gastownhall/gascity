@@ -4185,6 +4185,36 @@ func TestValidateNonNegativeDurationsRejectsInvalidBeadPolicyDeleteAfterClose(t 
 	}
 }
 
+func TestValidateNonNegativeDurationsRejectsInvalidWorktreeDriftThreshold(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d", "forever-ish"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{Daemon: DaemonConfig{WorktreeDriftThreshold: value}}
+			err := ValidateNonNegativeDurations(cfg, "city.toml")
+			if err == nil {
+				t.Fatal("ValidateNonNegativeDurations() = nil, want error for invalid worktree_drift_threshold")
+			}
+			msg := err.Error()
+			for _, want := range []string{"city.toml", "[daemon]", "worktree_drift_threshold", value} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("ValidateNonNegativeDurations() error = %q, want substring %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsPositiveWorktreeDriftThreshold(t *testing.T) {
+	for _, value := range []string{"", "1h", "6h", "7d", "1d12h"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{Daemon: DaemonConfig{WorktreeDriftThreshold: value}}
+			if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+				t.Errorf("ValidateNonNegativeDurations(worktree_drift_threshold=%q) = %v, want nil", value, err)
+			}
+		})
+	}
+}
+
 func TestValidateNonNegativeDurationsAllowsPositiveBeadPolicyDeleteAfterClose(t *testing.T) {
 	for _, value := range []string{"", "1h", "1d", "1d12h"} {
 		t.Run(value, func(t *testing.T) {
@@ -5620,6 +5650,46 @@ func TestDaemonConfig_WispGCPartialNotEnabled(t *testing.T) {
 	d = DaemonConfig{WispGCInterval: "bad", WispTTL: "24h"}
 	if d.WispGCEnabled() {
 		t.Error("wisp GC should not be enabled with invalid interval")
+	}
+}
+
+func TestDaemonConfig_WorktreeDriftPatrolDisabledByDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.WorktreeDriftPatrolEnabled() {
+		t.Error("worktree drift patrol should be disabled by default")
+	}
+	if d.WorktreeDriftThresholdDuration() != 0 {
+		t.Errorf("WorktreeDriftThresholdDuration = %v, want 0", d.WorktreeDriftThresholdDuration())
+	}
+}
+
+func TestDaemonConfig_WorktreeDriftPatrolEnabledWhenPositive(t *testing.T) {
+	d := DaemonConfig{WorktreeDriftThreshold: "6h"}
+	if !d.WorktreeDriftPatrolEnabled() {
+		t.Error("worktree drift patrol should be enabled when threshold is set")
+	}
+	if d.WorktreeDriftThresholdDuration() != 6*time.Hour {
+		t.Errorf("WorktreeDriftThresholdDuration = %v, want 6h", d.WorktreeDriftThresholdDuration())
+	}
+}
+
+func TestDaemonConfig_WorktreeDriftThresholdDayAware(t *testing.T) {
+	d := DaemonConfig{WorktreeDriftThreshold: "7d"}
+	if got, want := d.WorktreeDriftThresholdDuration(), 7*24*time.Hour; got != want {
+		t.Errorf("WorktreeDriftThresholdDuration(%q) = %v, want %v", d.WorktreeDriftThreshold, got, want)
+	}
+	if !d.WorktreeDriftPatrolEnabled() {
+		t.Error("worktree drift patrol should be enabled with a day-aware threshold")
+	}
+}
+
+func TestDaemonConfig_WorktreeDriftThresholdInvalidYieldsDisabled(t *testing.T) {
+	d := DaemonConfig{WorktreeDriftThreshold: "bad"}
+	if d.WorktreeDriftThresholdDuration() != 0 {
+		t.Errorf("WorktreeDriftThresholdDuration(invalid) = %v, want 0", d.WorktreeDriftThresholdDuration())
+	}
+	if d.WorktreeDriftPatrolEnabled() {
+		t.Error("worktree drift patrol should not be enabled with an invalid threshold")
 	}
 }
 

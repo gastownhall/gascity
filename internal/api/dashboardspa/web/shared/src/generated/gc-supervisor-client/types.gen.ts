@@ -845,7 +845,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload | WorktreeDriftStalledPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5263,6 +5263,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWebhookRejected) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'worktree.drift_stalled';
+} & TypedEventStreamEnvelopeWorktreeDriftStalled) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
 
@@ -6593,6 +6595,23 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
 };
 
 /**
+ * TypedEventStreamEnvelope worktree.drift_stalled
+ */
+export type TypedEventStreamEnvelopeWorktreeDriftStalled = {
+    actor: string;
+    message?: string;
+    payload: WorktreeDriftStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'worktree.drift_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * Typed supervisor event stream envelope
  *
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
@@ -6752,6 +6771,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'worktree.drift_stalled';
+} & TypedTaggedEventStreamEnvelopeWorktreeDriftStalled) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
 
@@ -8159,6 +8180,24 @@ export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
     workflow?: WorkflowEventProjection;
 };
 
+/**
+ * TypedTaggedEventStreamEnvelope worktree.drift_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeWorktreeDriftStalled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: WorktreeDriftStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'worktree.drift_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
 export type UnboundEventPayload = {
     count: number;
     session_id: string;
@@ -8622,6 +8661,17 @@ export type WorkspaceResponse = {
     provider?: string;
     session_template?: string;
     suspended: boolean;
+};
+
+export type WorktreeDriftStalledPayload = {
+    ahead_count: number;
+    behind_count: number;
+    branch?: string;
+    detached: boolean;
+    elapsed_s: number;
+    first_observed_at: string;
+    identity: string;
+    worktree_path: string;
 };
 
 export type GetHealthData = {

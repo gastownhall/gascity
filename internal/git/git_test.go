@@ -536,6 +536,185 @@ func TestHasUnpushedCommitsResult_ReturnsProbeError(t *testing.T) {
 	}
 }
 
+func TestAheadBehindRef_Even(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "push", "origin", "HEAD")
+
+	g := New(clone)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch() error = %v", err)
+	}
+	ahead, behind, err := g.AheadBehindRef("origin/" + branch)
+	if err != nil {
+		t.Fatalf("AheadBehindRef() error = %v", err)
+	}
+	if ahead != 0 || behind != 0 {
+		t.Errorf("AheadBehindRef() = (%d, %d), want (0, 0)", ahead, behind)
+	}
+}
+
+func TestAheadBehindRef_AheadOfRef(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "push", "origin", "HEAD")
+
+	// Local-only commits not present on the ref: ahead, not behind.
+	runGit(t, clone, "commit", "--allow-empty", "-m", "local 1")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "local 2")
+
+	g := New(clone)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch() error = %v", err)
+	}
+	ahead, behind, err := g.AheadBehindRef("origin/" + branch)
+	if err != nil {
+		t.Fatalf("AheadBehindRef() error = %v", err)
+	}
+	if ahead != 2 || behind != 0 {
+		t.Errorf("AheadBehindRef() = (%d, %d), want (2, 0)", ahead, behind)
+	}
+}
+
+func TestAheadBehindRef_BehindRef(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "push", "origin", "HEAD")
+
+	// A second clone pushes commits the first clone never fetched.
+	other := t.TempDir()
+	runGit(t, other, "clone", bare, ".")
+	runGit(t, other, "config", "user.email", "test@test.com")
+	runGit(t, other, "config", "user.name", "Test")
+	runGit(t, other, "commit", "--allow-empty", "-m", "upstream 1")
+	runGit(t, other, "commit", "--allow-empty", "-m", "upstream 2")
+	runGit(t, other, "commit", "--allow-empty", "-m", "upstream 3")
+	runGit(t, other, "push", "origin", "HEAD")
+	runGit(t, clone, "fetch", "origin")
+
+	g := New(clone)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch() error = %v", err)
+	}
+	ahead, behind, err := g.AheadBehindRef("origin/" + branch)
+	if err != nil {
+		t.Fatalf("AheadBehindRef() error = %v", err)
+	}
+	if ahead != 0 || behind != 3 {
+		t.Errorf("AheadBehindRef() = (%d, %d), want (0, 3)", ahead, behind)
+	}
+}
+
+func TestAheadBehindRef_Diverged(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "push", "origin", "HEAD")
+
+	other := t.TempDir()
+	runGit(t, other, "clone", bare, ".")
+	runGit(t, other, "config", "user.email", "test@test.com")
+	runGit(t, other, "config", "user.name", "Test")
+	runGit(t, other, "commit", "--allow-empty", "-m", "upstream 1")
+	runGit(t, other, "push", "origin", "HEAD")
+	runGit(t, clone, "fetch", "origin")
+
+	runGit(t, clone, "commit", "--allow-empty", "-m", "local 1")
+
+	g := New(clone)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch() error = %v", err)
+	}
+	ahead, behind, err := g.AheadBehindRef("origin/" + branch)
+	if err != nil {
+		t.Fatalf("AheadBehindRef() error = %v", err)
+	}
+	if ahead != 1 || behind != 1 {
+		t.Errorf("AheadBehindRef() = (%d, %d), want (1, 1)", ahead, behind)
+	}
+}
+
+func TestAheadBehindRef_UnknownRef(t *testing.T) {
+	repo := initTestRepo(t)
+	g := New(repo)
+	if _, _, err := g.AheadBehindRef("origin/does-not-exist"); err == nil {
+		t.Fatal("AheadBehindRef() error = nil, want error for unresolvable ref")
+	}
+}
+
+func TestInProgressOperation_Clean(t *testing.T) {
+	repo := initTestRepo(t)
+	g := New(repo)
+	if g.InProgressOperation() {
+		t.Error("InProgressOperation() = true for clean repo, want false")
+	}
+}
+
+func TestInProgressOperation_RebaseConflict(t *testing.T) {
+	repo := initTestRepo(t)
+	branch, err := New(repo).CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "f.txt")
+	runGit(t, repo, "commit", "-m", "base")
+
+	runGit(t, repo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "commit", "-am", "feature change")
+
+	runGit(t, repo, "checkout", branch)
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "commit", "-am", "main change")
+
+	// This rebase is expected to conflict and pause mid-operation — run it
+	// directly (not via runGit, which fails the test on any error) and
+	// ignore the outcome; only the paused-operation marker matters here.
+	cmd := exec.Command("git", "rebase", "feature")
+	cmd.Dir = repo
+	_ = cmd.Run()
+
+	g := New(repo)
+	if !g.InProgressOperation() {
+		t.Fatal("InProgressOperation() = false during paused rebase conflict, want true")
+	}
+}
+
 func TestHasStashes_NoneWhenClean(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)

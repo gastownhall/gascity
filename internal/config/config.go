@@ -2591,6 +2591,19 @@ type DaemonConfig struct {
 	// quarantine entirely (every closed-bead worktree is immediately
 	// eligible for the rest of the gate chain, regardless of age).
 	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
+	// WorktreeDriftThreshold is how long a commit-class agent's persistent
+	// worktree may sit detached-HEAD or behind its default branch, with no
+	// session having run to correct it, before patrolCommitClassWorktreeDrift
+	// publishes a worktree.drift_stalled event. This is an independent sweep
+	// that runs on the controller's own tick regardless of session activity —
+	// it exists because a zero-active-session pool (min_active_sessions=0,
+	// demand-gated) can otherwise drift unnoticed indefinitely between
+	// sessions; see ga-6prf1p. Duration string with day support (e.g., "6h",
+	// "7d"); use [session].idle_timeout / [agent].idle_timeout as a reference
+	// scale for initial tuning — this threshold should be well above normal
+	// idle gaps between sessions. Unset (empty, the default) disables the
+	// sweep entirely.
+	WorktreeDriftThreshold string `toml:"worktree_drift_threshold,omitempty"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2682,6 +2695,27 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 		return true
 	}
 	return *d.AutoPruneWorkerDir
+}
+
+// WorktreeDriftThresholdDuration returns WorktreeDriftThreshold as a
+// time.Duration, accepting the day-aware syntax ("7d", "1d12h") in addition
+// to ordinary Go durations. Returns 0 if unset or unparseable.
+func (d *DaemonConfig) WorktreeDriftThresholdDuration() time.Duration {
+	if d.WorktreeDriftThreshold == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(d.WorktreeDriftThreshold)
+	if err != nil {
+		return 0
+	}
+	return dur
+}
+
+// WorktreeDriftPatrolEnabled reports whether the independent commit-class
+// worktree-drift sweep should run. Disabled (the safe default) unless
+// worktree_drift_threshold is set to a positive duration.
+func (d *DaemonConfig) WorktreeDriftPatrolEnabled() bool {
+	return d.WorktreeDriftThresholdDuration() > 0
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.

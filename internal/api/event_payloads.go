@@ -680,4 +680,8 @@ func init() {
 	// gc.store.disk_* — ENOSPC pre-flight events emitted before CALL DOLT_GC.
 	events.RegisterPayload(events.StoreDiskWarn, events.StoreDiskWarnPayload{})
 	events.RegisterPayload(events.StoreDiskCritical, events.StoreDiskCriticalPayload{})
+
+	// worktree.drift_stalled — independent health-patrol sweep for
+	// commit-class agent worktree drift (ga-6prf1p).
+	events.RegisterPayload(events.WorktreeDriftStalled, events.WorktreeDriftStalledPayload{})
 }

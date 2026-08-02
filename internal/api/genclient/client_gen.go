@@ -6357,6 +6357,21 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorktreeDriftStalled defines model for TypedEventStreamEnvelopeWorktreeDriftStalled.
+type TypedEventStreamEnvelopeWorktreeDriftStalled struct {
+	Actor     string                      `json:"actor"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   WorktreeDriftStalledPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
@@ -7610,6 +7625,22 @@ type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWorktreeDriftStalled defines model for TypedTaggedEventStreamEnvelopeWorktreeDriftStalled.
+type TypedTaggedEventStreamEnvelopeWorktreeDriftStalled struct {
+	Actor     string                      `json:"actor"`
+	City      string                      `json:"city"`
+	Message   *string                     `json:"message,omitempty"`
+	Payload   WorktreeDriftStalledPayload `json:"payload"`
+	RunId     *string                     `json:"run_id,omitempty"`
+	Seq       int64                       `json:"seq"`
+	SessionId *string                     `json:"session_id,omitempty"`
+	StepId    *string                     `json:"step_id,omitempty"`
+	Subject   *string                     `json:"subject,omitempty"`
+	Ts        time.Time                   `json:"ts"`
+	Type      string                      `json:"type"`
+	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
 // UnboundEventPayload defines model for UnboundEventPayload.
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
@@ -7989,6 +8020,18 @@ type WorkspaceResponse struct {
 	Provider          *string `json:"provider,omitempty"`
 	SessionTemplate   *string `json:"session_template,omitempty"`
 	Suspended         bool    `json:"suspended"`
+}
+
+// WorktreeDriftStalledPayload defines model for WorktreeDriftStalledPayload.
+type WorktreeDriftStalledPayload struct {
+	AheadCount      int64   `json:"ahead_count"`
+	BehindCount     int64   `json:"behind_count"`
+	Branch          *string `json:"branch,omitempty"`
+	Detached        bool    `json:"detached"`
+	ElapsedS        int64   `json:"elapsed_s"`
+	FirstObservedAt string  `json:"first_observed_at"`
+	Identity        string  `json:"identity"`
+	WorktreePath    string  `json:"worktree_path"`
 }
 
 // PostV0CityParams defines parameters for PostV0City.
@@ -10348,6 +10391,32 @@ func (t *EventPayload) FromWorkerOperationEventPayload(v WorkerOperationEventPay
 
 // MergeWorkerOperationEventPayload performs a merge with any union data inside the EventPayload, using the provided WorkerOperationEventPayload
 func (t *EventPayload) MergeWorkerOperationEventPayload(v WorkerOperationEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWorktreeDriftStalledPayload returns the union data inside the EventPayload as a WorktreeDriftStalledPayload
+func (t EventPayload) AsWorktreeDriftStalledPayload() (WorktreeDriftStalledPayload, error) {
+	var body WorktreeDriftStalledPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorktreeDriftStalledPayload overwrites any union data inside the EventPayload as the provided WorktreeDriftStalledPayload
+func (t *EventPayload) FromWorktreeDriftStalledPayload(v WorktreeDriftStalledPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorktreeDriftStalledPayload performs a merge with any union data inside the EventPayload, using the provided WorktreeDriftStalledPayload
+func (t *EventPayload) MergeWorktreeDriftStalledPayload(v WorktreeDriftStalledPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14189,6 +14258,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkerOperation(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorktreeDriftStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorktreeDriftStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorktreeDriftStalled() (TypedEventStreamEnvelopeWorktreeDriftStalled, error) {
+	var body TypedEventStreamEnvelopeWorktreeDriftStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorktreeDriftStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorktreeDriftStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorktreeDriftStalled(v TypedEventStreamEnvelopeWorktreeDriftStalled) error {
+	v.Type = "worktree.drift_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorktreeDriftStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorktreeDriftStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorktreeDriftStalled(v TypedEventStreamEnvelopeWorktreeDriftStalled) error {
+	v.Type = "worktree.drift_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeCustom returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCustom
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCustom() (TypedEventStreamEnvelopeCustom, error) {
 	var body TypedEventStreamEnvelopeCustom
@@ -14387,6 +14484,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWebhookRejected()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
+	case "worktree.drift_stalled":
+		return t.AsTypedEventStreamEnvelopeWorktreeDriftStalled()
 	default:
 		return nil, errors.New("unknown discriminator value: " + discriminator)
 	}
@@ -16558,6 +16657,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWork
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorktreeDriftStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorktreeDriftStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorktreeDriftStalled() (TypedTaggedEventStreamEnvelopeWorktreeDriftStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeWorktreeDriftStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorktreeDriftStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorktreeDriftStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorktreeDriftStalled(v TypedTaggedEventStreamEnvelopeWorktreeDriftStalled) error {
+	v.Type = "worktree.drift_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorktreeDriftStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorktreeDriftStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorktreeDriftStalled(v TypedTaggedEventStreamEnvelopeWorktreeDriftStalled) error {
+	v.Type = "worktree.drift_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeCustom returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeCustom
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeCustom() (TypedTaggedEventStreamEnvelopeCustom, error) {
 	var body TypedTaggedEventStreamEnvelopeCustom
@@ -16756,6 +16883,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookRejected()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
+	case "worktree.drift_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeWorktreeDriftStalled()
 	default:
 		return nil, errors.New("unknown discriminator value: " + discriminator)
 	}

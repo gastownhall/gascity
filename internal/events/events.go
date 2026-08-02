@@ -238,6 +238,15 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// WorktreeDriftStalled fires when the independent health-patrol sweep
+	// (patrolCommitClassWorktreeDrift) finds a commit-class agent's
+	// persistent worktree detached or behind its default branch for
+	// longer than the configured threshold, with no session having run to
+	// correct it. Unlike bead.worktree.* events, this is not tied to any
+	// one bead's lifecycle — it is fleet-wide worktree-identity drift,
+	// keyed by agent.QualifiedName(). See ga-6prf1p.
+	WorktreeDriftStalled = "worktree.drift_stalled"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -283,6 +292,7 @@ var KnownEventTypes = []string{
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	WorktreeDriftStalled,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

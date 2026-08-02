@@ -344,7 +344,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 401
+baseline_calls = 402
 baseline_files = 110
 reported_calls = 394
 reported_files = 105

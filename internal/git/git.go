@@ -272,6 +272,31 @@ func (g *Git) AheadBehindCtx(ctx context.Context) (ahead, behind int, err error)
 	if err != nil {
 		return 0, 0, err
 	}
+	return parseAheadBehindCounts(out)
+}
+
+// AheadBehindRef returns the number of commits ahead and behind an explicit
+// ref (e.g. "origin/main"), unlike AheadBehind which compares against the
+// configured @{upstream} — often unset for ephemeral commit-class branches
+// that were never given a tracking branch. Performs no network I/O; ref must
+// already be resolvable locally (e.g. a remote-tracking ref refreshed by a
+// prior fetch), or this returns an error.
+func (g *Git) AheadBehindRef(ref string) (ahead, behind int, err error) {
+	return g.AheadBehindRefCtx(context.Background(), ref)
+}
+
+// AheadBehindRefCtx is like AheadBehindRef but accepts a context.
+func (g *Git) AheadBehindRefCtx(ctx context.Context, ref string) (ahead, behind int, err error) {
+	out, err := g.runCtx(ctx, "rev-list", "--left-right", "--count", "HEAD..."+ref)
+	if err != nil {
+		return 0, 0, err
+	}
+	return parseAheadBehindCounts(out)
+}
+
+// parseAheadBehindCounts parses the two-column "ahead\tbehind" output of
+// `git rev-list --left-right --count`.
+func parseAheadBehindCounts(out string) (ahead, behind int, err error) {
 	parts := strings.Fields(strings.TrimSpace(out))
 	if len(parts) != 2 {
 		return 0, 0, fmt.Errorf("unexpected rev-list output: %q", out)
@@ -285,6 +310,36 @@ func (g *Git) AheadBehindCtx(ctx context.Context) (ahead, behind int, err error)
 		return 0, 0, fmt.Errorf("parsing behind count: %w", err)
 	}
 	return ahead, behind, nil
+}
+
+// InProgressOperation reports whether the worktree has a paused rebase,
+// merge, or cherry-pick — i.e. HEAD is mid-transition and a read of
+// branch/commit state right now may be transiently inconsistent with the
+// operation's eventual outcome. Callers should treat true as ambiguous
+// (skip this interval rather than act), e.g. to avoid racing a
+// concurrently-starting session performing its own rebase/reset.
+//
+// Uses `git rev-parse --git-path` so the check resolves correctly for
+// linked worktrees, whose .git is a file redirecting to the real git
+// dir rather than a directory.
+func (g *Git) InProgressOperation() bool {
+	for _, marker := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		out, err := g.run("rev-parse", "--git-path", marker)
+		if err != nil {
+			continue
+		}
+		path := strings.TrimSpace(out)
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(g.workDir, path)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // gitEnvBlacklist lists git environment variables that must be stripped
