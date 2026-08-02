@@ -2,11 +2,94 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
 )
+
+// TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypes protects the
+// native metadata boundary that the string-valued Store projection otherwise
+// hides. A value-CAS changes exactly one logical string key; boolean, number,
+// null, object, array, and string siblings must retain their JSON types.
+func TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypes(t *testing.T) {
+	const id = "gc-mixed-metadata"
+	durable := &beadslib.Issue{
+		ID:        id,
+		Title:     "mixed metadata CAS",
+		Status:    beadslib.StatusOpen,
+		IssueType: beadslib.TypeTask,
+		Priority:  2,
+		Metadata: json.RawMessage(`{
+		"lease":"old",
+		"bool_sibling":true,
+		"number_sibling":42,
+		"large_number_sibling":9007199254740993123456789,
+		"null_sibling":null,
+		"object_sibling":{"nested":"value"},
+		"array_sibling":[1,"two",false],
+		"string_sibling":"preserved"
+	}`),
+	}
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return cloneNativeIssueForTest(durable), nil
+		},
+		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+			raw, ok := updates["metadata"].(json.RawMessage)
+			if !ok {
+				t.Fatalf("metadata update type = %T, want json.RawMessage", updates["metadata"])
+			}
+			durable.Metadata = append(json.RawMessage(nil), raw...)
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	swapped, err := store.CompareAndSetMetadataKey(id, "lease", "old", "1")
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (true, nil)", swapped, err)
+	}
+	assertMixedMetadataCASResult(t, durable.Metadata, "9007199254740993123456789")
+}
+
+func assertMixedMetadataCASResult(t *testing.T, raw json.RawMessage, wantLargeNumber string) {
+	t.Helper()
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode durable metadata: %v", err)
+	}
+	var want map[string]interface{}
+	if err := json.Unmarshal([]byte(`{
+		"lease":"1",
+		"bool_sibling":true,
+		"number_sibling":42,
+		"large_number_sibling":9007199254740993123456789,
+		"null_sibling":null,
+		"object_sibling":{"nested":"value"},
+		"array_sibling":[1,"two",false],
+		"string_sibling":"preserved"
+	}`), &want); err != nil {
+		t.Fatalf("decode expected metadata: %v", err)
+	}
+	var wantLarge interface{}
+	if err := json.Unmarshal([]byte(wantLargeNumber), &wantLarge); err != nil {
+		t.Fatalf("decode expected large number: %v", err)
+	}
+	want["large_number_sibling"] = wantLarge
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("durable metadata = %#v, want %#v; raw=%s", got, want, raw)
+	}
+	var rawValues map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawValues); err != nil {
+		t.Fatalf("decode raw durable metadata: %v", err)
+	}
+	if value := string(rawValues["large_number_sibling"]); value != wantLargeNumber {
+		t.Fatalf("large numeric sibling = %s, want exact %s", value, wantLargeNumber)
+	}
+}
 
 // TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter pins the exact
 // capability split the narrow interface exists to express: NativeDoltStore

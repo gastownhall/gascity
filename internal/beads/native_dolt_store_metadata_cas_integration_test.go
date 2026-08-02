@@ -4,6 +4,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -11,6 +12,77 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+// TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt
+// retains one real-storage proof for the raw JSON metadata boundary. The fast
+// in-memory test owns the branch detail; this test proves the CAS preserves the
+// exact durable sibling representation exposed by upstream Dolt.
+func TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt(t *testing.T) {
+	ctx := context.Background()
+	store := openRealNativeDoltStoreForCAS(t, "cas-mixed-metadata")
+	created, err := store.Create(Bead{Title: "real Dolt mixed metadata CAS"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	seed := json.RawMessage(`{
+		"lease":"old",
+		"bool_sibling":true,
+		"number_sibling":42,
+		"large_number_sibling":9007199254740993123456789,
+		"null_sibling":null,
+		"object_sibling":{"nested":"value"},
+		"array_sibling":[1,"two",false],
+		"string_sibling":"preserved"
+	}`)
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		t.Fatalf("acquire storage for fixture: %v", err)
+	}
+	if err := storage.UpdateIssue(
+		ctx,
+		created.ID,
+		map[string]interface{}{"metadata": seed},
+		"mixed-metadata-fixture",
+	); err != nil {
+		release()
+		t.Fatalf("seed mixed metadata: %v", err)
+	}
+	release()
+	storage, release, err = store.acquireStorage()
+	if err != nil {
+		t.Fatalf("reacquire storage for pre-CAS read: %v", err)
+	}
+	preCAS, err := storage.GetIssue(ctx, created.ID)
+	release()
+	if err != nil {
+		t.Fatalf("GetIssue before CAS: %v", err)
+	}
+	var preRaw map[string]json.RawMessage
+	if err := json.Unmarshal(preCAS.Metadata, &preRaw); err != nil {
+		t.Fatalf("decode pre-CAS metadata: %v", err)
+	}
+	largeNumberBefore := string(preRaw["large_number_sibling"])
+	if largeNumberBefore == "" {
+		t.Fatal("pre-CAS metadata lacks the large numeric sibling")
+	}
+
+	swapped, err := store.CompareAndSetMetadataKey(created.ID, "lease", "old", "1")
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (true, nil)", swapped, err)
+	}
+
+	storage, release, err = store.acquireStorage()
+	if err != nil {
+		t.Fatalf("reacquire storage for readback: %v", err)
+	}
+	issue, err := storage.GetIssue(ctx, created.ID)
+	release()
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	assertMixedMetadataCASResult(t, issue.Metadata, largeNumberBefore)
+}
 
 // openRealNativeDoltStoreForCAS opens a NativeDoltStore over REAL upstream
 // native storage. The narrow CAS contract is a claim about the backend's
