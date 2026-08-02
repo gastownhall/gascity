@@ -41,6 +41,15 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so a machine
+	// HOME with dolt.shared-server: true still routes bd to the shared
+	// server — which answers with every required type present and turns
+	// this check StatusOK, defeating the assertion below. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	t.Setenv("HOME", t.TempDir())
+
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
