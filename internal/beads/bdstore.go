@@ -792,6 +792,7 @@ func (b *bdIssue) toBead() Bead {
 		ID:           b.ID,
 		Title:        b.Title,
 		Status:       mapBdStatus(b.Status),
+		StatusDetail: b.Status,
 		Type:         b.IssueType,
 		Priority:     cloneIntPtr(b.Priority),
 		CreatedAt:    b.CreatedAt.Truncate(time.Second),
@@ -871,9 +872,9 @@ func isBdClaimConflictMessage(msg string) bool {
 		strings.Contains(msg, "claim conflict")
 }
 
-// mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
-// in_progress, blocked, review, testing, closed. Gas City uses:
-// open, in_progress, closed.
+// mapBdStatus maps bd's statuses to Gas City's 3-state compatibility
+// lifecycle. Bead.StatusDetail separately preserves the exact bd status for
+// API consumers that need truthful workflow state.
 func mapBdStatus(s string) string {
 	switch s {
 	case "closed":

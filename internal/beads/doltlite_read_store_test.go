@@ -1301,6 +1301,31 @@ func TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies(t *testing.T) 
 	}
 }
 
+func TestDoltliteReadStorePreservesExactStatusDetail(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{
+		ID:        "gc-manually-blocked",
+		Title:     "manual blocker",
+		Status:    "blocked",
+		IssueType: "task",
+	})
+
+	bead, err := store.Get("gc-manually-blocked")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if bead.Status != "open" {
+		t.Fatalf("Status = %q, want compatibility status open", bead.Status)
+	}
+	if bead.StatusDetail != "blocked" {
+		t.Fatalf("StatusDetail = %q, want blocked", bead.StatusDetail)
+	}
+}
+
 func TestDoltliteCachingStoreLiveFastReadDoesNotEraseDependencyCache(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

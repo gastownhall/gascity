@@ -62,12 +62,19 @@ var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import"
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`     // "open", "in_progress", "closed"
-	Type      string    `json:"issue_type"` // "task" default; matches bd wire format
-	Priority  *int      `json:"priority,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"` // compatibility lifecycle: "open", "in_progress", "closed"
+	// StatusDetail preserves the store's exact lifecycle status when it is
+	// more specific than Gas City's compatibility lifecycle (for example
+	// "blocked", "review", or "testing" from bd). Consumers that need truthful
+	// workflow state should prefer StatusDetail when present and fall back to
+	// Status. Gas City orchestration continues to use Status so this additive
+	// wire field does not change existing scheduling behavior.
+	StatusDetail string    `json:"status_detail,omitempty"`
+	Type         string    `json:"issue_type"` // "task" default; matches bd wire format
+	Priority     *int      `json:"priority,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
 	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
 	Assignee    string    `json:"assignee,omitempty"`

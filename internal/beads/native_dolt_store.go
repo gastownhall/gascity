@@ -2045,20 +2045,21 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
-		ID:          issue.ID,
-		Title:       issue.Title,
-		Status:      mapBdStatus(string(issue.Status)),
-		Type:        string(issue.IssueType),
-		Priority:    nativePriorityFromIssue(issue),
-		CreatedAt:   issue.CreatedAt,
-		Assignee:    issue.Assignee,
-		From:        issue.Sender,
-		Description: issue.Description,
-		Labels:      append([]string(nil), issue.Labels...),
-		Metadata:    metadata,
-		Ephemeral:   issue.Ephemeral,
-		NoHistory:   issue.NoHistory,
-		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		ID:           issue.ID,
+		Title:        issue.Title,
+		Status:       mapBdStatus(string(issue.Status)),
+		StatusDetail: string(issue.Status),
+		Type:         string(issue.IssueType),
+		Priority:     nativePriorityFromIssue(issue),
+		CreatedAt:    issue.CreatedAt,
+		Assignee:     issue.Assignee,
+		From:         issue.Sender,
+		Description:  issue.Description,
+		Labels:       append([]string(nil), issue.Labels...),
+		Metadata:     metadata,
+		Ephemeral:    issue.Ephemeral,
+		NoHistory:    issue.NoHistory,
+		DeferUntil:   cloneTimePtr(issue.DeferUntil),
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {
