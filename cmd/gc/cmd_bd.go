@@ -206,6 +206,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Refuse a dropped --set-metadata pair before any store work, so nothing is
+	// written and the exit code is honest. bd applies the subset and exits 0.
+	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
