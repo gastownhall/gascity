@@ -131,6 +131,25 @@ stranding it. Use **`mol-scoped-work`** when you want worktree isolation and
 step-level routing but own the work end-to-end and need no merge-review handoff.
 Drop to **`mol-do-work`** only for the trivial single-agent case.
 
+**When the refinery handoff doesn't apply.** `mol-polecat-work` ends by pushing a
+feature branch and reassigning the bead to the refinery, which merges it into the
+rig's own repo. Two kinds of work break that contract — model them as **plain
+beads** with a coordinator/mayor handoff instead of attaching this formula:
+
+- **Cross-repo / GitHub deliverables.** When the change must land in a *different*
+  repo than the one the rig's refinery merges (e.g. a change to a GitHub fork PR
+  rather than the rig's own repo), the refinery has nothing to merge and the
+  `branch`/`target` metadata points at the wrong remote. Diverge from the formula:
+  edit the fork clone, push, open the PR yourself, and hand the bead to the
+  coordinator — not the refinery (gas-city precedent: gci-7ti).
+- **Mayor-publish-rail beads.** When a bead is shipped-and-closed by a mayor
+  publish step (not by the formula's own submit step), an attached v2 workflow
+  leaves its `submit-and-exit`/`finalize` steps live and routable *after* the bead
+  closes — an unrelated pool agent then claims the moot step (churn + manual
+  cleanup). Until `mol-port-review` (packs#260), whose stage 3 *is* the mayor
+  publish, lands, use plain beads for mayor-rail work; interim, the mayor drains
+  the attached workflow at publish time.
+
 ### Built-in formulas
 
 **mol-do-work** — Simple work lifecycle. Agent reads the bead, implements
