@@ -23,34 +23,114 @@ func TestRebaseResolveLibUsesBash3Syntax(t *testing.T) {
 	}
 }
 
-// TestRebaseResolveLibDefinesOwnershipGuardUnderAmbientZsh guards against a
-// regression where sourcing rebase-resolve-lib.sh from a non-bash ambient
-// shell silently fails to load its sibling push-ownership-guard.sh, leaving
-// assert_bead_still_claimed undefined. rebase-resolve-lib.sh is always
-// SOURCED (". scripts/rebase-resolve-lib.sh"), never executed via its own
-// bash shebang — see formulas/mol-deployer-gate.formula.toml and
+// ownershipGuardProbe sources rebase-resolve-lib.sh and proves that the
+// sibling push-ownership-guard.sh it pulled in is the one from THIS tree.
+// Provenance needs three checks, not one: assert_bead_still_claimed must
+// exist (it is what attempt_bounded_self_rebase calls before its
+// --force-with-lease push), one of the real guard's private helpers must
+// exist alongside it, and the decoy marker planted by the unrelated-repo
+// fixture must be absent. `typeset -f` is the spelling that works in both
+// bash and zsh.
+const ownershipGuardProbe = `
+. "$REBASE_LIB" || { echo "SOURCE_FAILED"; exit 1; }
+typeset -f assert_bead_still_claimed >/dev/null 2>&1 || { echo "GUARD_MISSING"; exit 1; }
+typeset -f _pog_resolve_bead_id >/dev/null 2>&1 || { echo "GUARD_MISSING_HELPER"; exit 1; }
+if [ -n "${RRL_DECOY_GUARD_LOADED:-}" ]; then echo "GUARD_WRONG_TREE"; exit 1; fi
+echo "GUARD_OK"
+`
+
+// decoyGuard mimics push-ownership-guard.sh closely enough to be
+// indistinguishable by function name alone, so the only thing that
+// distinguishes it from the real guard is the marker it sets. It stands in
+// for the genuinely dangerous case: an unrelated worktree that happens to
+// have a scripts/push-ownership-guard.sh of its own.
+const decoyGuard = `#!/usr/bin/env bash
+RRL_DECOY_GUARD_LOADED=1
+_pog_resolve_bead_id() { echo "decoy"; }
+assert_bead_still_claimed() { return 0; }
+`
+
+// TestRebaseResolveLibDefinesOwnershipGuardAcrossShellsAndCwds guards
+// against a regression where sourcing rebase-resolve-lib.sh silently fails
+// to load its sibling push-ownership-guard.sh, leaving
+// assert_bead_still_claimed undefined — or, worse, loads a DIFFERENT tree's
+// copy of it. rebase-resolve-lib.sh is always SOURCED
+// (". scripts/rebase-resolve-lib.sh"), never executed via its own bash
+// shebang — see formulas/mol-deployer-gate.formula.toml and
 // prompts/deployer.md Guardrails — so whatever shell the deployer's
-// interactive session runs (zsh, in this fork) becomes the shell that
-// parses it. A self-location trick that only works under bash
-// (${BASH_SOURCE[0]}) silently expands empty under zsh, so dirname resolves
-// to "." instead of the script's real directory (ga-ql4bmm).
-func TestRebaseResolveLibDefinesOwnershipGuardUnderAmbientZsh(t *testing.T) {
-	if _, err := exec.LookPath("zsh"); err != nil {
-		t.Skip("zsh not installed")
-	}
+// interactive session runs (zsh, in this fork) becomes the shell that parses
+// it, and whatever cwd that session happens to be in becomes the cwd.
+//
+// Both axes have produced real bugs, in opposite directions, which is why
+// this is a matrix and not a single case:
+//
+//   - A bash-only self-location trick (${BASH_SOURCE[0]}) expands empty
+//     under zsh, so dirname resolves to "." instead of the script's real
+//     directory (ga-ql4bmm). Caught by the zsh arms.
+//   - A git-toplevel anchor ($(git rev-parse --show-toplevel)/scripts)
+//     resolves from the CALLER's cwd, not the sourced file's location, so it
+//     breaks outside any repo and silently cross-sources from an unrelated
+//     repo that has its own scripts/ dir. Caught by the outside-any-repo and
+//     unrelated-git-repo arms — under bash as well as zsh.
+//
+// Only the zsh arms skip when zsh is absent; the bash arms always run, so
+// the self-location path stays covered on any runner image.
+func TestRebaseResolveLibDefinesOwnershipGuardAcrossShellsAndCwds(t *testing.T) {
 	root := repoRoot(t)
 	lib := filepath.Join(root, "scripts", "rebase-resolve-lib.sh")
 
-	cmd := exec.Command("zsh", "-c", `. "$REBASE_LIB" && typeset -f assert_bead_still_claimed >/dev/null`)
-	// cwd = repo root, matching the real invocation: both
-	// mol-deployer-gate.formula.toml and prompts/deployer.md.tmpl source this
-	// file via the repo-root-relative path ". scripts/rebase-resolve-lib.sh".
-	// A cwd-independent fix must work here too, not just from scripts/ itself.
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "REBASE_LIB="+lib)
+	// An unrelated git repo carrying its own scripts/push-ownership-guard.sh.
+	// A cwd-anchored resolver "succeeds" here — it finds a real file — which
+	// makes this the worst case: a force-push gate sourced from a foreign
+	// tree rather than an honest failure.
+	unrelated := filepath.Join(t.TempDir(), "unrelated-repo")
+	if err := os.MkdirAll(filepath.Join(unrelated, "scripts"), 0o755); err != nil {
+		t.Fatalf("create unrelated repo tree: %v", err)
+	}
+	if out, err := exec.Command("git", "init", "-q", unrelated).CombinedOutput(); err != nil {
+		t.Fatalf("git init unrelated repo: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "scripts", "push-ownership-guard.sh"), []byte(decoyGuard), 0o755); err != nil {
+		t.Fatalf("write decoy guard: %v", err)
+	}
 
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("rebase-resolve-lib.sh sourced under zsh did not define assert_bead_still_claimed from push-ownership-guard.sh: %v\n%s", err, out)
+	cwds := []struct {
+		name string
+		dir  string
+	}{
+		// The real invocation path: both mol-deployer-gate.formula.toml and
+		// prompts/deployer.md.tmpl source this file as
+		// ". scripts/rebase-resolve-lib.sh" from the repo root.
+		{"repo-root", root},
+		{"scripts-dir", filepath.Join(root, "scripts")},
+		{"outside-any-repo", t.TempDir()},
+		{"unrelated-git-repo", unrelated},
+	}
+
+	for _, shell := range []string{"bash", "zsh"} {
+		for _, cwd := range cwds {
+			t.Run(shell+"/"+cwd.name, func(t *testing.T) {
+				if _, err := exec.LookPath(shell); err != nil {
+					if shell == "zsh" {
+						t.Skip("zsh not installed")
+					}
+					t.Fatalf("%s not installed: %v", shell, err)
+				}
+
+				cmd := exec.Command(shell, "-c", ownershipGuardProbe)
+				cmd.Dir = cwd.dir
+				cmd.Env = append(os.Environ(), "REBASE_LIB="+lib)
+
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("sourcing rebase-resolve-lib.sh under %s from %s did not load this tree's push-ownership-guard.sh: %v\n%s",
+						shell, cwd.name, err, out)
+				}
+				if !strings.Contains(string(out), "GUARD_OK") {
+					t.Fatalf("expected GUARD_OK under %s from %s, got: %s", shell, cwd.name, out)
+				}
+			})
+		}
 	}
 }
 
