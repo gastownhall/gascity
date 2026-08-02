@@ -263,11 +263,13 @@ func ChildPIDs(parent int) ([]int, error) {
 // spaces. Reading argv exactly on darwin needs KERN_PROCARGS2 via cgo, which is
 // not worth it for that gap. A mis-split argv fails the match, and failing the
 // match is the safe direction for every caller.
+//
+// -ww asks ps for full width, since a truncated argv fails the match on BSD ps.
 func psCmdline(pid int) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), psCmdlineTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	out, err := exec.CommandContext(ctx, "ps", "-ww", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return nil, fmt.Errorf("reading argv for pid %d via ps: %w", pid, err)
 	}

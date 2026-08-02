@@ -125,6 +125,10 @@ func TestAliveWithCmdline_NilMatchIsFalse(t *testing.T) {
 // caller then assumes no poller is running and starts one. A duplicate poller is
 // recoverable; a silently absent one is not.
 func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
+	}
+
 	binDir := t.TempDir()
 	// A ps that produces nothing, so the non-/proc path has no argv to offer.
 	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
@@ -132,11 +136,21 @@ func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	if runtime.GOOS == "linux" {
-		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
-	}
 	if AliveWithCmdline(os.Getpid(), func([]string) bool { return true }) {
 		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
+	}
+}
+
+// TestPSCmdlineParsesOwnArgv exercises the ps parse path directly. Calling
+// psCmdline bypasses Cmdline's /proc shortcut, so the parser this PR adds
+// gets real coverage on linux runners too — otherwise it runs nowhere in CI.
+func TestPSCmdlineParsesOwnArgv(t *testing.T) {
+	argv, err := psCmdline(os.Getpid())
+	if err != nil {
+		t.Fatalf("psCmdline(self) on %s: %v", runtime.GOOS, err)
+	}
+	if len(argv) == 0 || !strings.Contains(filepath.Base(argv[0]), "pidutil") {
+		t.Fatalf("psCmdline(self) = %q, want test binary argv", argv)
 	}
 }
 

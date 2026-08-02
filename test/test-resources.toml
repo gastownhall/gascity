@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 546
-baseline_files = 164
+baseline_calls = 548
+baseline_files = 165
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 429
-baseline_files = 159
+baseline_calls = 431
+baseline_files = 160
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 407
-baseline_files = 113
+baseline_calls = 409
+baseline_files = 114
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 284
-baseline_files = 113
+baseline_calls = 286
+baseline_files = 114
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -344,8 +344,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 401
-baseline_files = 110
+baseline_calls = 403
+baseline_files = 111
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -357,8 +357,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 284
-baseline_files = 113
+baseline_calls = 286
+baseline_files = 114
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
