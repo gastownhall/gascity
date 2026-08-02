@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,5 +146,30 @@ time.sleep(30)
 	// while still proving the child didn't run the full 30s sleep.
 	if elapsed > 10*time.Second {
 		t.Fatalf("run_bounded took %s to return; expected escalation to SIGKILL well under 10s", elapsed)
+	}
+}
+
+// TestRunBoundedPython3FallbackPassesThroughOutputAndExitCode covers the
+// non-timeout path: the rewrite swapped buffered capture for inherited
+// fds, and on stock macOS this fallback is run_bounded's only
+// implementation, so a child that exits normally must still have its
+// output and exit status reach the caller.
+func TestRunBoundedPython3FallbackPassesThroughOutputAndExitCode(t *testing.T) {
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child.py")
+	writeExecutable(t, child, `import sys
+
+sys.stdout.write("to-stdout\n")
+sys.stderr.write("to-stderr\n")
+sys.exit(3)
+`)
+
+	exitCode, out := runRunBoundedUnderPython3Fallback(t, child)
+
+	if exitCode != 3 {
+		t.Fatalf("run_bounded exit code = %d, want 3 (child's own status)\noutput:\n%s", exitCode, out)
+	}
+	if !strings.Contains(out, "to-stdout") || !strings.Contains(out, "to-stderr") {
+		t.Fatalf("child output not passed through; got:\n%s", out)
 	}
 }
