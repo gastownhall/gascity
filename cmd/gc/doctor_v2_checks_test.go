@@ -1829,10 +1829,9 @@ scope = "city"
 // lexically nested under cityPath but actually escapes it through a
 // symlink must be reported as outside the city, even when the leaf of
 // the candidate does not exist yet (e.g. a path doctor is about to
-// create). The current implementation falls back to a lexical-only
-// check (return true) whenever filepath.EvalSymlinks fails on the
-// candidate, which it always does for a not-yet-existing leaf — so it
-// fails open here instead.
+// create). Resolving only fully-existing paths is not enough — the
+// escape has to be detected from the nearest existing ancestor, so a
+// missing leaf can never downgrade the check to a lexical-only pass.
 func TestDoctorPathWithinCityDetectsSymlinkEscapeWithMissingLeaf(t *testing.T) {
 	t.Parallel()
 
