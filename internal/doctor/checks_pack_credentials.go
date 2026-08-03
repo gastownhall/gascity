@@ -38,7 +38,7 @@ func (c *PackCredentialsCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("pack credentials could not be loaded: %v", err)
-		r.FixHint = "fix the credentials.toml permissions (must be 0600) and pointer cardinality, then re-run gc doctor"
+		r.FixHint = "fix the credentials.toml permissions (must be 0600/0400, or root-owned own-group 0440 for a Kubernetes Secret mount) and pointer cardinality, then re-run gc doctor"
 		return r
 	}
 

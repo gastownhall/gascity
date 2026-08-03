@@ -303,9 +303,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("resolving pack root: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(absPackRoot); evalErr == nil {
-		absPackRoot = resolved
-	}
+	absPackRoot = normalizePathForCompare(absPackRoot)
 	manifest, err := readRegistryPackManifest(absPackRoot)
 	if err != nil {
 		return registryPublishRequest{}, err
@@ -317,9 +315,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("pack root must be inside a Git repository: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(repoRoot); evalErr == nil {
-		repoRoot = resolved
-	}
+	repoRoot = normalizePathForCompare(repoRoot)
 	status, err := gitOutput(ctx, repoRoot, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("checking Git status: %w", err)

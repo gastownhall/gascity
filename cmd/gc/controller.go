@@ -618,6 +618,11 @@ func (r *configWatchRegistrar) addPath(root string, recursive bool, done <-chan 
 		return true
 	}
 	walkRoot := root
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. This resolves root so WalkDir can descend into a
+	// symlinked root directory at all; the actual identity comparison below
+	// (samePath(path, root)) already normalizes both sides independently of
+	// walkRoot's resolution state.
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		walkRoot = resolved
 	}

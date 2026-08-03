@@ -759,6 +759,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	recipe = recipeWithNativeStepDependencies(recipe)
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
@@ -1060,6 +1061,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
 		root, err := store.Get(opts.RootID)

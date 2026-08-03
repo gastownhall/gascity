@@ -309,6 +309,9 @@ type Event struct {
 	RunID     string          `json:"run_id,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	StepID    string          `json:"step_id,omitempty"`
+	// DependsOnStepIDs is nil for unknown native topology; a present empty
+	// slice represents a known root.
+	DependsOnStepIDs *[]string `json:"depends_on_step_ids,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.
