@@ -1261,6 +1261,75 @@ func TestWorkerObserveNudgeTargetPrefersSessionNameWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestWorkerObserveNudgeTargetRetriesTransientErrorThenSucceeds(t *testing.T) {
+	prevOnce := workerObserveNudgeTargetOnce
+	defer func() { workerObserveNudgeTargetOnce = prevOnce }()
+
+	calls := 0
+	want := worker.LiveObservation{Running: true}
+	workerObserveNudgeTargetOnce = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		calls++
+		if calls == 1 {
+			return worker.LiveObservation{}, errors.New("search count wisps: invalid connection")
+		}
+		return want, nil
+	}
+
+	obs, err := workerObserveNudgeTarget(nudgeTarget{}, nil, nil)
+	if err != nil {
+		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if obs != want {
+		t.Fatalf("obs = %+v, want %+v", obs, want)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (one transient failure, one retry success)", calls)
+	}
+}
+
+func TestWorkerObserveNudgeTargetSurfacesPersistentTransientError(t *testing.T) {
+	prevOnce := workerObserveNudgeTargetOnce
+	defer func() { workerObserveNudgeTargetOnce = prevOnce }()
+
+	calls := 0
+	persistentErr := errors.New("search count wisps: invalid connection")
+	workerObserveNudgeTargetOnce = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		calls++
+		return worker.LiveObservation{}, persistentErr
+	}
+
+	_, err := workerObserveNudgeTarget(nudgeTarget{}, nil, nil)
+	if err == nil {
+		t.Fatal("workerObserveNudgeTarget: want error surfaced after exhausting retries, got nil")
+	}
+	if !errors.Is(err, persistentErr) && err.Error() != persistentErr.Error() {
+		t.Fatalf("err = %v, want persistent transient error surfaced", err)
+	}
+	if calls != nudgeObserveTransientAttempts {
+		t.Fatalf("calls = %d, want %d (bounded retry, no silent drop)", calls, nudgeObserveTransientAttempts)
+	}
+}
+
+func TestWorkerObserveNudgeTargetDoesNotRetryNonTransientError(t *testing.T) {
+	prevOnce := workerObserveNudgeTargetOnce
+	defer func() { workerObserveNudgeTargetOnce = prevOnce }()
+
+	calls := 0
+	nonTransientErr := errors.New("target not found")
+	workerObserveNudgeTargetOnce = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		calls++
+		return worker.LiveObservation{}, nonTransientErr
+	}
+
+	_, err := workerObserveNudgeTarget(nudgeTarget{}, nil, nil)
+	if !errors.Is(err, nonTransientErr) && (err == nil || err.Error() != nonTransientErr.Error()) {
+		t.Fatalf("err = %v, want non-transient error surfaced immediately", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (non-transient errors must not be retried)", calls)
+	}
+}
+
 func TestShouldKeepNudgePollerAliveDuringStartupGrace(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
