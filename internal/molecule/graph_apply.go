@@ -134,6 +134,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	if len(recipe.Steps) == 0 {
 		return nil, false, "", fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	recipe = recipeWithNativeStepDependencies(recipe)
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	priorityOverride := clonePriority(opts.PriorityOverride)
@@ -393,6 +394,7 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	if len(recipe.Steps) == 0 {
 		return &beads.GraphApplyPlan{}, nil
 	}
+	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 
 	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)
 	if err != nil {

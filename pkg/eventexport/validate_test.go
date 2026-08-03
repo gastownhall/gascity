@@ -48,7 +48,7 @@ func TestValidateEnvelope_Rejects(t *testing.T) {
 		"non-opaque ref":      {Seq: 1, Type: "bead.closed", TS: rfc(t), Ref: "a/b"},
 		"non-opaque run_id":   {Seq: 1, Type: "bead.closed", TS: rfc(t), RunID: "a/b"},
 		"non-opaque session":  {Seq: 1, Type: "bead.closed", TS: rfc(t), SessionID: "A@b"},
-		"non-opaque step_id":  {Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "a/b"},
+		"over-cap step_id":    {Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: strings.Repeat("x", maxExecutionStepIDLen+1)},
 		"mail with extras":    {Seq: 1, Type: "mail.sent", TS: rfc(t), ActorHash: "0123456789abcdef"},
 		"mail with step_id":   {Seq: 1, Type: "mail.sent", TS: rfc(t), StepID: "mc-step-1"},
 		// Receiver-side content trust boundary: the length cap and the
@@ -117,8 +117,8 @@ func TestValidateBatch(t *testing.T) {
 		t.Fatalf("schema skew must wrap ErrSchemaMismatch, got %v", err)
 	}
 
-	// Receiver trust boundary: city_hash must be the opaque 16-hex partition-key
-	// shape schema v2 promises. An empty, too-short, cleartext-shaped, uppercase,
+	// Receiver trust boundary: city_hash retains the opaque 16-hex partition-key
+	// shape introduced in schema v2. An empty, too-short, cleartext-shaped, uppercase,
 	// or over-length value is rejected before any row is processed — the receiver
 	// cannot assume the producer redacted the operator-chosen city name.
 	for name, ch := range map[string]string{
@@ -151,6 +151,30 @@ func TestValidateBatch(t *testing.T) {
 	}
 }
 
+func TestValidateEnvelopeNativeStepDependencies(t *testing.T) {
+	root := []string{}
+	for _, tc := range []struct {
+		name string
+		env  Envelope
+		want error
+	}{
+		{name: "omitted is unknown", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-a"}},
+		{name: "explicit empty is known root", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-a", DependsOnStepIDs: &root}},
+		{name: "sorted unique dependencies", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-b", DependsOnStepIDs: &[]string{"step-a", "step-c"}}},
+		{name: "dependencies require step", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), DependsOnStepIDs: &[]string{"step-a"}}, want: ErrInvalidStepTopology},
+		{name: "duplicate dependency", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-b", DependsOnStepIDs: &[]string{"step-a", "step-a"}}, want: ErrInvalidStepTopology},
+		{name: "out of order dependency", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-c", DependsOnStepIDs: &[]string{"step-b", "step-a"}}, want: ErrInvalidStepTopology},
+		{name: "self dependency", env: Envelope{Seq: 1, Type: "bead.closed", TS: rfc(t), StepID: "step-a", DependsOnStepIDs: &[]string{"step-a"}}, want: ErrInvalidStepTopology},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateEnvelope(tc.env)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("ValidateEnvelope() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }
@@ -180,20 +204,21 @@ func TestProfileZeroValue(t *testing.T) {
 // author to gate it in ProjectEvent + ValidateEnvelope (and bump SchemaVersion if
 // the wire changes) rather than letting it ship ungated.
 func TestEnvelopeFieldCount(t *testing.T) {
-	// 11 = the original 7 + StepID (a version-NEUTRAL opaque correlation field,
-	// gated in ProjectEvent + ValidateEnvelope exactly like run_id/session_id) +
+	// 12 = the original 7 + StepID (a version-NEUTRAL native execution identity,
+	// gated in ProjectEvent + ValidateEnvelope) +
 	// Title + Formula (free-form content under the content opt-in — the deliberate
 	// exception to envelope-only, gated separately and length-capped, never
 	// opaque-gated) + the trailing blank `_ struct{}` keyed-literal guard, which is
-	// NOT a wire field (json ignores it; it only forces keyed Envelope literals).
-	if n := reflect.TypeOf(Envelope{}).NumField(); n != 11 {
+	// NOT a wire field (json ignores it; it only forces keyed Envelope literals),
+	// plus the optional DependsOnStepIDs topology field.
+	if n := reflect.TypeOf(Envelope{}).NumField(); n != 12 {
 		t.Fatalf("Envelope has %d fields; a field changed — gate it in ProjectEvent and ValidateEnvelope, then update this guard (and bump SchemaVersion if the wire changes)", n)
 	}
 }
 
 // TestOptionsContentOptInUnexported locks the content opt-in as package-private.
 // If emitContent were exported, any importer of pkg/eventexport could call
-// ProjectEvent with content enabled and emit Title/Formula on a SchemaVersion==2
+// ProjectEvent with content enabled and emit Title/Formula on a SchemaVersion==3
 // batch — exactly the reachable wire change the off-by-default exemption forbids.
 // When a producer makes content reachable (ga-mt1e99) it owns the SchemaVersion
 // decision; exporting this gate without that coordination must fail here rather
@@ -204,7 +229,7 @@ func TestOptionsContentOptInUnexported(t *testing.T) {
 		t.Fatal("Options.emitContent missing: the content opt-in gate must exist as an unexported field")
 	}
 	if f.PkgPath == "" {
-		t.Fatal("Options.emitContent must stay UNEXPORTED: an exported content opt-in lets importers emit title/formula on schema v2 without a SchemaVersion bump (see ga-mt1e99)")
+		t.Fatal("Options.emitContent must stay UNEXPORTED: an exported content opt-in lets importers emit title/formula on schema v3 without a SchemaVersion bump (see ga-mt1e99)")
 	}
 }
 
@@ -241,7 +266,7 @@ func TestProjectEvent_ContentGating(t *testing.T) {
 		t.Fatalf("formula must round-trip verbatim, got %q want %q", on.Formula, src.Formula)
 	}
 	if on.StepID != src.StepID {
-		t.Fatalf("step_id must round-trip (opaque), got %q want %q", on.StepID, src.StepID)
+		t.Fatalf("step_id must round-trip, got %q want %q", on.StepID, src.StepID)
 	}
 	if err := ValidateEnvelope(on); err != nil {
 		t.Fatalf("populated content envelope must validate: %v", err)

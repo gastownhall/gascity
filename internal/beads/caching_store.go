@@ -46,7 +46,7 @@ type CachingStore struct {
 	syncFailures   int
 	circuitTripped bool
 	stats          CacheStats
-	onChange       func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
+	onChange       func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
 	problemf       func(string)
 	problemLog     map[string]cacheProblemLogState
 
@@ -233,7 +233,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // changed bead's metadata at the record site (see notifyChange); the wiring
 // stamps them onto the recorded event so the redacted export can forward them
 // as typed primitives without ever decoding the payload.
-func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) *CachingStore {
+func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -261,7 +261,7 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sess
 
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
-// run/session ids); adaptLegacyOnChange bridges it to the production 5-param form.
+// typed correlation fields); adaptLegacyOnChange bridges it to production form.
 func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return newCachingStore(backing, "", adaptLegacyOnChange(onChange))
 }
@@ -275,11 +275,11 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 // adaptLegacyOnChange bridges the legacy 3-param onChange used by the test
 // constructors to the production 5-param form, dropping the run/session ids the
 // tests do not exercise. Nil-safe.
-func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 	if fn == nil {
 		return nil
 	}
-	return func(eventType, beadID string, _, _, _ string, payload json.RawMessage) {
+	return func(eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		fn(eventType, beadID, payload)
 	}
 }
@@ -291,7 +291,7 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 	c.primeRetryDelay = fn
 }
 
-func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) *CachingStore {
+func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:     backing,
 		idPrefix:    normalizeIDPrefix(idPrefix),
