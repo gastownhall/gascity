@@ -1370,16 +1370,33 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if err := target.storeView.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
 			return err
 		}
-		// Pre-route to gc.run_target so the bead is never left unrouted
-		// between the reopen and the caller's follow-up re-sling (vp-nq8 /
-		// FR-C0.1). A blank gc.routed_to is invisible to route-reclaim (which
-		// only heals set-but-dead/stuck routes) and causes unrouted-feeder to
-		// mis-route to the rig planner instead of the correct next step, so an
-		// unset route orphans the bead if the re-sling fails to land.
+		// Pre-route so the bead is never left unrouted between the reopen and
+		// the caller's follow-up re-sling (vp-nq8 / FR-C0.1). A blank
+		// gc.routed_to is invisible to route-reclaim (which only heals
+		// set-but-dead/stuck routes) and causes unrouted-feeder to mis-route to
+		// the rig planner instead of the correct next step, so an unset route
+		// orphans the bead if the re-sling fails to land.
 		//
-		// When gc.run_target is empty (legacy beads created before the field
-		// was stamped), we fall back to blank for backward compatibility.
+		// gc.run_target wins when present. Otherwise keep the route the bead
+		// already carries instead of blanking it (ga-20zd). Re-pooling a bead
+		// takes two separate commands — the caller writes the route with
+		// `gc bd update`, and calls reopen-source — and blanking made that pair
+		// order-dependent: a reopen landing after the route write silently
+		// erased it. The bead then looked correctly re-pooled (rejection
+		// metadata set, branch intact) while being invisible to pool-demand
+		// dispatch, which filters on gc.routed_to. Nothing healed it either:
+		// restoreCarriedWorkRoutes can only recover a route from
+		// gc.run_target, which plain work beads never carry, so the bead sat
+		// until a human re-slung it by hand.
+		//
+		// Preserving costs the caller nothing. A re-sling to a different target
+		// overwrites the route, and one to the same target still re-runs
+		// finalize via resolveConvoyRecovery, which sees the just-deleted
+		// workflow rather than short-circuiting as idempotent.
 		nextRoute := strings.TrimSpace(currentSource.Metadata[beadmeta.RunTargetMetadataKey])
+		if nextRoute == "" {
+			nextRoute = strings.TrimSpace(currentSource.Metadata[beadmeta.RoutedToMetadataKey])
+		}
 		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
 			return err
 		}

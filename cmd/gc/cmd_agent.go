@@ -130,6 +130,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsDisabledNamedSessionWarning(warning) {
 		return true
 	}
+	if config.IsAlwaysFreshWakeModeWarning(warning) {
+		return true
+	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
 		return true
 	}

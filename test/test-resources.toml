@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 535
-baseline_files = 163
+baseline_calls = 549
+baseline_files = 166
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 427
-baseline_files = 156
+baseline_calls = 431
+baseline_files = 160
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 396
-baseline_files = 112
+baseline_calls = 410
+baseline_files = 115
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 288
-baseline_files = 111
+baseline_calls = 286
+baseline_files = 114
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -103,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 57
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 94
-baseline_files = 35
+baseline_calls = 95
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -296,6 +296,17 @@ resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCh
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext"
+resources = ["subprocess"]
+owner_bead = "ga-8pkpor"
+invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -333,8 +344,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 391
-baseline_files = 109
+baseline_calls = 404
+baseline_files = 112
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
@@ -346,8 +357,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 288
-baseline_files = 111
+baseline_calls = 286
+baseline_files = 114
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
@@ -385,7 +396,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 57
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 75
 reported_files = 25
@@ -424,8 +435,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 93
+baseline_files = 35
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"

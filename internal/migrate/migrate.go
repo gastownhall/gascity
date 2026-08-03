@@ -90,6 +90,7 @@ type agentFile struct {
 	MaxSessionAge          string            `toml:"max_session_age,omitempty"`
 	MaxSessionAgeJitter    string            `toml:"max_session_age_jitter,omitempty"`
 	SleepAfterIdle         string            `toml:"sleep_after_idle,omitempty"`
+	AssignedWorkDeferLimit *int              `toml:"assigned_work_defer_limit,omitempty"`
 	InstallAgentHooks      []string          `toml:"install_agent_hooks,omitempty"`
 	HooksInstalled         *bool             `toml:"hooks_installed,omitempty"`
 	InjectAssignedSkills   *bool             `toml:"inject_assigned_skills,omitempty"`
@@ -945,6 +946,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MaxSessionAge:          agent.MaxSessionAge,
 		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
 		SleepAfterIdle:         agent.SleepAfterIdle,
+		AssignedWorkDeferLimit: agent.AssignedWorkDeferLimit,
 		InstallAgentHooks:      agent.InstallAgentHooks,
 		HooksInstalled:         agent.HooksInstalled,
 		InjectAssignedSkills:   agent.InjectAssignedSkills,
@@ -997,6 +999,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxSessionAge == "" &&
 		cfg.MaxSessionAgeJitter == "" &&
 		cfg.SleepAfterIdle == "" &&
+		cfg.AssignedWorkDeferLimit == nil &&
 		len(cfg.InstallAgentHooks) == 0 &&
 		cfg.HooksInstalled == nil &&
 		cfg.InjectAssignedSkills == nil &&

@@ -42,6 +42,19 @@ func (s *Store) SetEnv(env map[string]string) {
 	s.env = env
 }
 
+// IDPrefix returns the bead ID prefix for this exec-backed scope, taken from
+// the projected GC_BEADS_PREFIX env. NewCachingStore uses this to key the
+// per-scope cache (owner metadata); without it an exec-backed rig store caches
+// as "(no-prefix)" and the reconciler's rig-scoped scale-check cannot associate
+// routed rig beads with the rig pool, so a direct `gc sling <rig>/<agent>` never
+// scales a worker.
+func (s *Store) IDPrefix() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.env["GC_BEADS_PREFIX"])
+}
+
 // NewStore returns a Store that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.

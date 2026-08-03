@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,52 @@ schema = 2
 	}
 	if got := stdout.String(); got != "Agent: ada\n" {
 		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	}
+}
+
+// TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake covers the
+// prime-inject-mail patch (dip-bj7pgj): an autonomous/promptless restart runs
+// the SessionStart prime hook but NOT the UserPromptSubmit mail hook, so gc
+// prime must fold unread mail into the SessionStart payload itself. With no
+// unread mail the injection is empty (never noises up a prime); once mail is
+// waiting for the self-recipient, prime surfaces the same <system-reminder>
+// block the check path produces.
+func TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+
+	// No unread mail yet: a promptless wake must inject nothing.
+	if got := primeInjectMailContent(); got != "" {
+		t.Fatalf("primeInjectMailContent with an empty inbox = %q, want empty", got)
+	}
+
+	// Seed unread mail for the self-recipient (mayor) through the real city
+	// provider so the read path is exercised end to end.
+	mp, code := openCityMailProvider(io.Discard, "test seed")
+	if mp == nil {
+		t.Fatalf("openCityMailProvider returned nil (code=%d)", code)
+	}
+	if _, err := mp.Send("worker", "mayor", "PR ready", "please review the auth PR"); err != nil {
+		t.Fatalf("seed Send: %v", err)
+	}
+
+	got := primeInjectMailContent()
+	if !strings.Contains(got, "<system-reminder>") || !strings.Contains(got, "</system-reminder>") {
+		t.Fatalf("prime mail injection missing system-reminder wrapper:\n%s", got)
+	}
+	if !strings.Contains(got, "unread message(s)") {
+		t.Fatalf("prime mail injection missing unread count:\n%s", got)
+	}
+	if !strings.Contains(got, "please review the auth PR") {
+		t.Fatalf("prime mail injection missing the seeded message body:\n%s", got)
 	}
 }
 
@@ -598,6 +645,102 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
+// TestDoPrimeWithHook_SuppressedSessionStartInjectsUnreadMail drives the full
+// SessionStart hook payload (doPrimeWithHookFormat) on the suppressed-startup-
+// prompt path — the promptless-wake shape (dip-bj7pgj) where the rendered
+// startup prompt is delivered out of band, so only hook-only context survives.
+// With unread mail waiting for the self-recipient, the mail <system-reminder>
+// block must land in additionalContext alongside the beacon (and after the
+// suppressed prompt), for both the codex and gemini hook formats.
+func TestDoPrimeWithHook_SuppressedSessionStartInjectsUnreadMail(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	for _, hookFormat := range []string{hookOutputFormatCodex, hookOutputFormatGemini} {
+		hookFormat := hookFormat
+		t.Run(hookFormat, func(t *testing.T) {
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_SESSION_NAME", "gastown--worker")
+			sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_SOURCE", "startup")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			t.Setenv(startupPromptDeliveredEnv, "1")
+			withPrimeHookStdin(t)
+
+			// Seed unread mail for the self-recipient (worker) through the real
+			// city provider so the SessionStart injection path is exercised end
+			// to end.
+			mp, code := openCityMailProvider(io.Discard, "test seed")
+			if mp == nil {
+				t.Fatalf("openCityMailProvider returned nil (code=%d)", code)
+			}
+			if _, err := mp.Send("boss", "worker", "restart handoff", "resume the migration"); err != nil {
+				t.Fatalf("seed Send: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if got := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookFormat, false); got != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", got, stderr.String())
+			}
+
+			var out struct {
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			context := out.HookSpecificOutput.AdditionalContext
+			if strings.Contains(context, promptContent) {
+				t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+			}
+			if !strings.Contains(context, "[gastown] worker") {
+				t.Fatalf("additionalContext = %q, want hook beacon", context)
+			}
+			if !strings.Contains(context, "<system-reminder>") {
+				t.Fatalf("additionalContext = %q, want mail system-reminder block", context)
+			}
+			if !strings.Contains(context, "unread message(s)") {
+				t.Fatalf("additionalContext = %q, want unread-mail count", context)
+			}
+			if !strings.Contains(context, "resume the migration") {
+				t.Fatalf("additionalContext = %q, want seeded mail body", context)
+			}
+			// Ordering: the mail block folds in after the beacon (which carries
+			// the suppressed prompt slot), matching writePrimePromptWithFormat.
+			if strings.Index(context, "[gastown] worker") > strings.Index(context, "<system-reminder>") {
+				t.Fatalf("additionalContext = %q, want beacon before mail block", context)
+			}
+		})
+	}
+}
+
 // mustCreateInProgressStore creates a bead in a beads.Store and transitions it
 // to in_progress. It mirrors the MemStore helper in wisp_step_inject_test.go
 // but works against the concrete city store opened on disk.
@@ -726,8 +869,13 @@ provider = "exec:/not-used-by-auto-handoff"
 					t.Fatalf("additionalContext = %q, want auto-handoff substring %q", context, want)
 				}
 			}
+			// This city configures an exec: ordinary-mail provider, so the
+			// ordinary-mail read contributes nothing to the SessionStart payload
+			// while beadmail-backed auto-handoff still does. (The beadmail-backed
+			// ordinary case — where unread mail *is* injected — is pinned by
+			// TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen.)
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
-				t.Fatalf("additionalContext = %q, must not inject ordinary mail %q at SessionStart", context, ordinary.ID)
+				t.Fatalf("additionalContext = %q, want no ordinary mail %q from the exec: provider at SessionStart", context, ordinary.ID)
 			}
 			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
 				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
@@ -751,6 +899,103 @@ provider = "exec:/not-used-by-auto-handoff"
 				t.Fatalf("auto-handoff must remain durable when SessionStart output fails: %v", err)
 			}
 		})
+	}
+}
+
+// TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen is
+// the beadmail-backed counterpart to
+// TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder: with no [mail]
+// provider configured, beadmail backs ordinary mail too, so the SessionStart
+// ordinary-unread read (dip-bj7pgj) sees the auto-handoff as well. It pins the
+// three properties that shape depends on: the auto-handoff is rendered exactly
+// once (the dedup branch actually filters), ordinary unread mail *is* surfaced,
+// and the ordinary read is non-destructive — the message is still in the store
+// after the hook run, so the later UserPromptSubmit delivery is not consumed.
+func TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("launch-only startup prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	// No [mail] provider: beadmail backs ordinary mail, so the ordinary read
+	// and the auto-handoff read hit the same store.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+		[]string{"context cycle", "continue the durable task"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "review the auth PR")
+	if err != nil {
+		t.Fatalf("Send ordinary mail: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+
+	// The auto-handoff is rendered by sessionStartAutoHandoffInjection and must
+	// NOT be rendered a second time by the ordinary-mail block.
+	if n := strings.Count(context, auto.ID); n != 1 {
+		t.Fatalf("additionalContext contains auto-handoff %q %d time(s), want exactly 1:\n%s", auto.ID, n, context)
+	}
+	// Ordinary unread mail is surfaced at SessionStart so a promptless wake is
+	// not blind to it.
+	for _, want := range []string{ordinary.ID, ordinary.Body} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("additionalContext = %q, want ordinary-mail substring %q", context, want)
+		}
+	}
+	// ...and surfacing it is read-only: it stays in the store for the
+	// UserPromptSubmit delivery that archives it.
+	if _, err := store.Get(ordinary.ID); err != nil {
+		t.Fatalf("ordinary mail must remain open after a SessionStart injection: %v", err)
 	}
 }
 
@@ -1012,6 +1257,12 @@ func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
 
 			cityDir := t.TempDir()
 			cleanupManagedDoltTestCity(t, cityDir)
+			// This test's subject is agent-from-workdir inference (downstream
+			// of city resolution), not ambient city discovery itself, so an
+			// explicit override here doesn't defeat its purpose — it just
+			// keeps city resolution out of the ambient-discovery path that
+			// isTestBinary() refuses in test binaries (ga-klo4gz).
+			t.Setenv("GC_CITY", cityDir)
 			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
 			agentWorkDir := filepath.Join(agentWorkDirParts...)
 			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {

@@ -2,7 +2,8 @@
 # gc dolt health — Lightweight Dolt data-plane health report.
 #
 # Checks server status and latency, per-database commit counts and open
-# beads, backup freshness, orphan databases, and zombie Dolt processes.
+# beads, backup freshness, orphan databases, active compaction quarantine
+# markers, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
@@ -90,6 +91,36 @@ now_ms() {
     ''|*[!0-9]*) printf '%s000' "$(date +%s 2>/dev/null)" ;;
     *)        printf '%s' "$_raw" | cut -c1-13 ;;
   esac
+}
+
+# marker_epoch — convert an RFC3339 UTC timestamp (e.g. 2026-06-14T23:22:55Z)
+# to epoch seconds, portably across GNU and BSD date(1). Empty output on a
+# missing or unparseable timestamp so the caller can fall back to file mtime.
+marker_epoch() {
+  _ts="$1"
+  case "$_ts" in
+    ''|*[!0-9TZ:.+-]*) return 0 ;;
+  esac
+  # GNU date parses the RFC3339 string directly; BSD/macOS date needs an
+  # explicit input format and the -j (do-not-set-clock) flag.
+  # Use `if` rather than `&&` so a failed date(1) doesn't set a non-zero
+  # exit status that would trigger `set -e` in the caller's subshell.
+  if _e=$(date -u -d "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  if _e=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  return 0
+}
+
+# human_duration — format a whole-second count as a compact age string
+# (e.g. 12d3h, 5h2m, 7m1s, 9s). Used for compaction quarantine marker age.
+human_duration() {
+  _s="$1"
+  case "$_s" in ''|*[!0-9]*) printf '0s'; return ;; esac
+  _d=$((_s / 86400)); _h=$(((_s % 86400) / 3600))
+  _m=$(((_s % 3600) / 60)); _sec=$((_s % 60))
+  if [ "$_d" -gt 0 ]; then printf '%dd%dh' "$_d" "$_h"
+  elif [ "$_h" -gt 0 ]; then printf '%dh%dm' "$_h" "$_m"
+  elif [ "$_m" -gt 0 ]; then printf '%dm%ds' "$_m" "$_sec"
+  else printf '%ds' "$_sec"; fi
 }
 
 # Find dolt PID by port for local managed servers. External Dolt endpoints do
@@ -331,6 +362,54 @@ if [ -d "$data_dir" ]; then
   done
 fi
 
+# Detect active compaction quarantine markers.
+#
+# `gc dolt compact` writes a per-database marker under
+# $PACK_STATE_DIR/compact-quarantine/<db> when a post-flatten integrity probe
+# trips (value-hash drift, row-count change, etc. — see commands/compact/run.sh).
+# While a marker stands, auto-GC and scheduled compaction for that database are
+# blocked indefinitely until an operator clears it, so the working set can grow
+# unbounded and degrade the managed sql-server. Nothing else in this report
+# surfaces the marker, so a quarantine can sit unnoticed for many days
+# (gascity#3729). Scan filesystem-only — independent of server reachability,
+# since a wedged server may itself be a downstream symptom of the un-GC'd
+# bloat — and report each marker's db, reason, and age. The directory and
+# one-file-per-db key=value body layout mirror compact/run.sh exactly.
+quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
+quarantine_list=""
+quarantine_count=0
+if [ -d "$quarantine_dir" ]; then
+  for marker in "$quarantine_dir"/*; do
+    [ -f "$marker" ] || continue
+    q_db=$(basename "$marker")
+    # compact/run.sh writes transient files into this same directory:
+    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
+    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
+    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
+    # and a spurious exit 2.
+    case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
+    # Anchor each key to column 1 with index()==1 — the same reader idiom
+    # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
+    # key (8 and 12 = key length + 1).
+    q_reason=$(awk 'index($0, "reason=") == 1 { print substr($0, 8); exit }' "$marker" 2>/dev/null || true)
+    q_created=$(awk 'index($0, "created_at=") == 1 { print substr($0, 12); exit }' "$marker" 2>/dev/null || true)
+    [ -n "$q_reason" ] || q_reason="unknown"
+    q_epoch=$(marker_epoch "$q_created")
+    if [ -z "$q_epoch" ]; then
+      q_epoch=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null || echo "")
+    fi
+    q_age_sec=0
+    if [ -n "$q_epoch" ]; then
+      q_now=$(date +%s)
+      q_age_sec=$((q_now - q_epoch))
+      [ "$q_age_sec" -lt 0 ] && q_age_sec=0
+    fi
+    quarantine_list="$quarantine_list$q_db|$q_reason|$q_age_sec
+"
+    quarantine_count=$((quarantine_count + 1))
+  done
+fi
+
 # Check for zombie dolt processes.
 # Use pgrep -x to match only processes named "dolt", then verify
 # each is actually running sql-server via ps. This avoids false
@@ -510,6 +589,20 @@ JSONEOF
   cat <<JSONEOF
 
   ],
+  "quarantine": [
+JSONEOF
+  first=true
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    # db and reason both come from the filesystem; escape backslash then quote.
+    q_db_esc=$(printf '%s' "$q_db" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    q_reason_esc=$(printf '%s' "$q_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db_esc" "$q_reason_esc" "$q_age_sec"
+  done
+  cat <<JSONEOF
+
+  ],
   "processes": {
     "zombie_count": $zombie_count,
     "zombie_pids": [$(echo "$zombie_pids" | tr -s ' ' ',' | sed 's/^,//;s/,$//')]
@@ -559,6 +652,15 @@ else
   echo "Backups: none found"
 fi
 
+if [ "$quarantine_count" -gt 0 ]; then
+  echo ""
+  echo "Compaction quarantine: $quarantine_count (auto-GC blocked)"
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    echo "  $q_db: $q_reason (held $(human_duration "$q_age_sec"))"
+  done
+fi
+
 if [ "$orphan_count" -gt 0 ]; then
   echo ""
   echo "Orphans: $orphan_count"
@@ -579,9 +681,19 @@ fi
 # process that isn't speaking MySQL. Stale backups, orphans, and
 # zombies are informational and do not fail the exit code.
 #
+# A standing compaction quarantine is the exception: auto-GC for that
+# database is blocked until an operator clears the marker, so it is a
+# real (if non-fatal) data-plane degradation. Signal it with a distinct
+# non-zero code (2) so CLI and CI callers can catch a blocked compaction
+# without conflating it with an unreachable server (1).
+#
 # JSON mode is unconditionally exit 0 (see above) — programmatic
-# consumers read `server.reachable` from the payload instead.
+# consumers read `server.reachable` and the `quarantine` array from the
+# payload instead.
 if [ "$server_reachable" = true ]; then
+  if [ "$quarantine_count" -gt 0 ]; then
+    exit 2
+  fi
   exit 0
 fi
 exit 1
