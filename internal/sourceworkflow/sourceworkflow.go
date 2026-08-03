@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -350,11 +351,7 @@ func canonicalScopeRef(scopeRef string) string {
 	if scopeRef == "" {
 		return ""
 	}
-	scopeRef = filepath.Clean(scopeRef)
-	if resolved, err := filepath.EvalSymlinks(scopeRef); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved
-	}
-	return scopeRef
+	return pathutil.NormalizePathForCompare(scopeRef)
 }
 
 // ListWorkflowBeads returns the root and all descendant beads tagged with
@@ -776,12 +773,5 @@ func canonicalCityPath(cityPath string) (string, error) {
 	if cleaned == "" || cleaned == "." {
 		return "", fmt.Errorf("source workflow lock requires city path")
 	}
-	abs, err := filepath.Abs(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize city path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved, nil
-	}
-	return abs, nil
+	return pathutil.NormalizePathForCompare(cleaned), nil
 }
