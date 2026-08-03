@@ -110,7 +110,7 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 	// not leave sidecars writing .gcmeta files that imply an event stream exists.
 	transcriptmeta.SetEnabled(true)
 
-	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
+	src := eventfeed.NewMuxSource(exportProvidersForCities(providers, ec.Cities), exp.Cursors, muxRebuildInterval, logf)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); _ = exp.Run(ctx, src) }()
@@ -118,6 +118,33 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 
 	logf("enabled -> %s (envelope-only metadata; no payloads leave the box)", ec.Endpoint)
 	return &wg
+}
+
+// exportProvidersForCities restricts a dynamic provider source to the exact
+// configured city names. A nil city list preserves the existing all-city
+// behavior; every non-nil list is restrictive, including an empty list or one
+// containing only invalid names.
+func exportProvidersForCities(providers func() map[string]events.Provider, cities []string) func() map[string]events.Provider {
+	if cities == nil {
+		return providers
+	}
+
+	allowed := make(map[string]struct{}, len(cities))
+	for _, city := range cities {
+		if supervisor.IsValidCityName(city) {
+			allowed[city] = struct{}{}
+		}
+	}
+	return func() map[string]events.Provider {
+		available := providers()
+		filtered := make(map[string]events.Provider, len(allowed))
+		for city, provider := range available {
+			if _, ok := allowed[city]; ok {
+				filtered[city] = provider
+			}
+		}
+		return filtered
+	}
 }
 
 // persistExportCursors snapshots the exporter cursor to disk periodically and on

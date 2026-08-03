@@ -5,12 +5,80 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 )
+
+func TestExportProvidersForCities(t *testing.T) {
+	north := events.NewFake()
+	south := events.NewFake()
+	invalid := events.NewFake()
+	providers := map[string]events.Provider{
+		"north":    north,
+		"south":    south,
+		"bad/name": invalid,
+	}
+	source := func() map[string]events.Provider {
+		result := make(map[string]events.Provider, len(providers))
+		for city, provider := range providers {
+			result[city] = provider
+		}
+		return result
+	}
+
+	tests := []struct {
+		name   string
+		cities []string
+		want   []string
+	}{
+		{name: "omitted cities keeps every provider", want: []string{"bad/name", "north", "south"}},
+		{name: "explicit empty exports no providers", cities: []string{}, want: []string{}},
+		{name: "only blank and invalid names export no providers", cities: []string{"", "  ", "bad/name"}, want: []string{}},
+		{name: "selects exact configured names only", cities: []string{"north", " south ", "bad/name"}, want: []string{"north"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := exportProvidersForCities(source, tt.cities)
+			got := filtered()
+			names := make([]string, 0, len(got))
+			for city := range got {
+				names = append(names, city)
+			}
+			slices.Sort(names)
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("provider names = %v, want %v", names, tt.want)
+			}
+		})
+	}
+}
+
+func TestExportProvidersForCitiesFiltersDynamicProviders(t *testing.T) {
+	north := events.NewFake()
+	south := events.NewFake()
+	providers := map[string]events.Provider{"north": north}
+	source := func() map[string]events.Provider {
+		result := make(map[string]events.Provider, len(providers))
+		for city, provider := range providers {
+			result[city] = provider
+		}
+		return result
+	}
+
+	filtered := exportProvidersForCities(source, []string{"north"})
+	if got := filtered(); len(got) != 1 || got["north"] != north {
+		t.Fatalf("initial providers = %#v, want north only", got)
+	}
+
+	providers["south"] = south
+	if got := filtered(); len(got) != 1 || got["north"] != north {
+		t.Fatalf("providers after dynamic update = %#v, want north only", got)
+	}
+}
 
 // TestResolveExportCredentials_EmptyTokenFileErrors proves a configured but
 // empty (or whitespace-only) token_file fails closed: the provider returns an
