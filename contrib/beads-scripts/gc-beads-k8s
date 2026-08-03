@@ -27,7 +27,9 @@
 #   GC_K8S_CUSTOM_TYPES      - custom bead types CSV (optional, e.g. "session,molecule")
 #
 # Label conventions:
-#   parent:<id>  — tracks parent-child relationships
+#   parent:<id>  — legacy parent-child encoding, read-only. The parent is
+#                  written natively via bd --parent; this label is only still
+#                  read as a fallback for beads created before that.
 #   needs:<id>   — tracks step dependencies
 #
 # Metadata is stored natively via bd --metadata (JSON). Legacy meta:<k>=<v>
@@ -127,16 +129,21 @@ run_bd() {
 #   - native .metadata field (bd >= 0.62 stores metadata natively)
 #   - meta:<key>=<value> labels (legacy storage, backward compatible)
 # Native metadata takes precedence over label-derived metadata for the same key.
+# The parent is read the same way: native .parent first, parent:<id> label only
+# as a fallback for beads written before the native flag was used.
 bd_to_gc() {
   jq '{
     id: .id,
     title: .title,
     status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
     type: (.issue_type // .type // "task"),
+    priority: .priority,
     created_at: .created_at,
     assignee: (.assignee // ""),
     parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
+      if (.parent // "") != "" then .parent
+      else ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // "")
+      end
     ),
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
@@ -157,10 +164,13 @@ bd_list_to_gc() {
     title: .title,
     status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
     type: (.issue_type // .type // "task"),
+    priority: .priority,
     created_at: .created_at,
     assignee: (.assignee // ""),
     parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
+      if (.parent // "") != "" then .parent
+      else ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // "")
+      end
     ),
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],

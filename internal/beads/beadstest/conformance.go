@@ -516,19 +516,25 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		title, status, typ, desc, assignee := "renamed", "in_progress", "gate", "new description", "worker-1"
 		// Not 2: backends normalize the default priority back to "unset".
 		priority := 1
-		for name, opts := range map[string]beads.UpdateOpts{
-			"title":       {Title: &title},
-			"status":      {Status: &status},
-			"type":        {Type: &typ},
-			"priority":    {Priority: &priority},
-			"description": {Description: &desc},
-			"assignee":    {Assignee: &assignee},
-			"parent_id":   {ParentID: &parent.ID},
-			"labels":      {Labels: []string{"added"}},
-			"metadata":    {Metadata: map[string]string{"note": "x"}},
+		// A slice, not a map: update order is part of what is being pinned, so
+		// a future field whose result depends on a prior one fails
+		// deterministically instead of flaking on map iteration order.
+		for _, u := range []struct {
+			name string
+			opts beads.UpdateOpts
+		}{
+			{"title", beads.UpdateOpts{Title: &title}},
+			{"status", beads.UpdateOpts{Status: &status}},
+			{"type", beads.UpdateOpts{Type: &typ}},
+			{"priority", beads.UpdateOpts{Priority: &priority}},
+			{"description", beads.UpdateOpts{Description: &desc}},
+			{"assignee", beads.UpdateOpts{Assignee: &assignee}},
+			{"parent_id", beads.UpdateOpts{ParentID: &parent.ID}},
+			{"labels", beads.UpdateOpts{Labels: []string{"added"}}},
+			{"metadata", beads.UpdateOpts{Metadata: map[string]string{"note": "x"}}},
 		} {
-			if err := s.Update(b.ID, opts); err != nil {
-				t.Fatalf("Update(%s): %v", name, err)
+			if err := s.Update(b.ID, u.opts); err != nil {
+				t.Fatalf("Update(%s): %v", u.name, err)
 			}
 		}
 

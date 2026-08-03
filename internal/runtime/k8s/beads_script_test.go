@@ -329,7 +329,7 @@ if [[ "$joined" == *" wait --for=condition=Ready pod/gc-beads-runner "* ]]; then
   exit 0
 fi
 if [[ "$joined" == *" exec gc-beads-runner -- sh -c "* ]]; then
-  if [[ "$*" == *"bd list --json --limit 0 --all"* ]]; then
+  if [[ "$*" == *" list --json --limit 0 --all"* ]]; then
     printf '%%s' "$list_output"
     exit 0
   fi
@@ -464,5 +464,63 @@ func TestBeadsScriptUpdateOmitsAbsentFields(t *testing.T) {
 		"--assignee", "--parent", "--add-label", "--remove-label",
 	} {
 		assertCallNotContains(t, result.callLog, absent)
+	}
+}
+
+// TestBeadsScriptListProjectsParentAndPriority pins the read half of the write
+// path above. The update op writes the parent natively via `bd --parent` and
+// forwards `--priority`, so a projection that reconstructs parent_id from
+// `parent:` labels alone — or omits priority entirely — turns a successful
+// re-parent into a silently lost write on the next read.
+func TestBeadsScriptListProjectsParentAndPriority(t *testing.T) {
+	tests := []struct {
+		name       string
+		listOutput string
+		wantParent string
+	}{
+		{
+			// Native .parent wins over a stale parent: label, which is what a
+			// re-parent leaves behind.
+			name:       "native parent wins over legacy label",
+			listOutput: `[{"id":"tr-a","title":"t","labels":["parent:tr-old"],"parent":"tr-new","priority":1}]`,
+			wantParent: "tr-new",
+		},
+		{
+			// Beads written before --parent carry only the label.
+			name:       "legacy label when no native parent",
+			listOutput: `[{"id":"tr-a","title":"t","labels":["parent:tr-old"],"priority":1}]`,
+			wantParent: "tr-old",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runBeadsScript(t, beadsScriptOptions{
+				Op: "list",
+				Env: map[string]string{
+					"GC_CITY_PATH": "/city", "GC_STORE_ROOT": "/city/rigs/testrig", "GC_BEADS_PREFIX": "tr",
+				},
+				ListOutput: tc.listOutput,
+			})
+			if result.err != nil {
+				t.Fatalf("gc-beads-k8s list error = %v\noutput:\n%s", result.err, result.output)
+			}
+			var got []struct {
+				ID       string `json:"id"`
+				ParentID string `json:"parent_id"`
+				Priority *int   `json:"priority"`
+			}
+			if err := json.Unmarshal([]byte(result.output), &got); err != nil {
+				t.Fatalf("parse list output: %v\noutput:\n%s", err, result.output)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d beads, want 1\noutput:\n%s", len(got), result.output)
+			}
+			if got[0].ParentID != tc.wantParent {
+				t.Errorf("parent_id = %q, want %q", got[0].ParentID, tc.wantParent)
+			}
+			if got[0].Priority == nil || *got[0].Priority != 1 {
+				t.Errorf("priority = %v, want 1", got[0].Priority)
+			}
+		})
 	}
 }
