@@ -208,6 +208,14 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 	// symlink — which broke filepath.Rel in the containment checks below —
 	// and ensures the post-resolution containment check compares like with
 	// like.
+	//
+	// NormalizePathForCompare does more than absolutize-and-resolve: on
+	// darwin it also collapses the /private/tmp and /private/var host
+	// aliases back to /tmp and /var, which is the REVERSE direction from
+	// bare filepath.EvalSymlinks. Any value compared against canonEnvelope
+	// or canonBase must therefore go through pathutil too — a bare
+	// EvalSymlinks result is in a different convention and will mismatch on
+	// darwin even when the paths name the same location.
 	canonEnvelope := pathutil.NormalizePathForCompare(envelope)
 	canonBase := pathutil.NormalizePathForCompare(base)
 
@@ -245,8 +253,16 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 	// Re-validate the symlink-resolved path against the same envelope-OR-base
 	// rule to close the symlink-escape gap (gastownhall/gascity#2354 review).
 	// Absolute paths still skip — same rationale as the pre-resolution check.
+	//
+	// Use pathutil.PathWithin rather than the lexical containedIn: resolved
+	// comes from bare filepath.EvalSymlinks, so on darwin it carries the
+	// /private prefix that canonEnvelope/canonBase have had collapsed away.
+	// PathWithin normalizes both operands, so the alias collapse applies
+	// symmetrically. (The pre-resolution check above keeps containedIn:
+	// absPath is derived from canonBase, so both sides already share a
+	// convention there.)
 	if !filepath.IsAbs(conditionPath) {
-		if !containedIn(resolved, canonEnvelope) && !containedIn(resolved, canonBase) {
+		if !pathutil.PathWithin(canonEnvelope, resolved) && !pathutil.PathWithin(canonBase, resolved) {
 			return "", fmt.Errorf("resolving gate condition path: symlink target outside containment: %s", conditionPath)
 		}
 	}

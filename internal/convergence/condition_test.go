@@ -558,6 +558,46 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 		testutil.AssertSamePath(t, got, script)
 	})
+
+	// Pins the darwin half of the same comparison contract: on macOS the
+	// system temp root lives under /var (or /tmp), which EvalSymlinks
+	// expands to /private/var (or /private/tmp) while
+	// pathutil.NormalizePathForCompare collapses it back the other way.
+	// canonEnvelope/canonBase therefore carry the collapsed spelling while
+	// the post-resolution `resolved` (bare EvalSymlinks) carries the
+	// /private spelling — a lexical containment check compares the two
+	// conventions and falsely rejects a plainly contained script. The
+	// containment check must normalize both sides.
+	//
+	// This needs the real os.TempDir() root, not an arbitrary directory:
+	// the /private alias only exists on the platform temp trees. No symlink
+	// is created by the test — the platform's own /var symlink is the
+	// trigger.
+	t.Run("darwin private temp alias must not falsely reject a contained relative condition path", func(t *testing.T) {
+		if runtime.GOOS != "darwin" {
+			t.Skip("darwin-only: the /private/{tmp,var} alias collapse is a no-op on other platforms")
+		}
+		root, err := os.MkdirTemp(os.TempDir(), "gc-cond-alias-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+		scripts := filepath.Join(root, "scripts")
+		if err := os.MkdirAll(scripts, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scripts, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(root, "", "scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v — post-resolution containment must normalize both operands, not compare a /private-prefixed resolved path against an alias-collapsed envelope", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
 }
 
 func TestRunConditionPass(t *testing.T) {
