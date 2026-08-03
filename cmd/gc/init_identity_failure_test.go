@@ -167,7 +167,7 @@ path = "/srv/frontend"
 `)
 	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"declared-city\"\nschema = 2\n")
 
-	cfg, _, _, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, "/city", "")
+	cfg, _, _, persistSiteIdentity, _, err := rewriteCopiedInitFromIdentity(fs, "/city", "")
 	if err != nil {
 		t.Fatalf("rewriteCopiedInitFromIdentity: %v", err)
 	}
@@ -353,7 +353,7 @@ path = "/srv/frontend"
 `)
 	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"declared-city\"\nschema = 2\n")
 
-	if _, _, _, _, err := rewriteCopiedInitFromIdentity(fs, "/city", ""); err != nil {
+	if _, _, _, _, _, err := rewriteCopiedInitFromIdentity(fs, "/city", ""); err != nil {
 		t.Fatalf("rewriteCopiedInitFromIdentity: %v", err)
 	}
 
@@ -389,7 +389,7 @@ path = "/srv/frontend"
 		t.Fatal(err)
 	}
 
-	_, _, _, _, err := rewriteCopiedInitFromIdentity(fs, cityPath, "")
+	_, _, _, _, _, err := rewriteCopiedInitFromIdentity(fs, cityPath, "")
 	if err == nil {
 		t.Fatal("rewriteCopiedInitFromIdentity succeeded, want injected site binding failure")
 	}

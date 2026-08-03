@@ -1768,6 +1768,13 @@ func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride strin
 }
 
 func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
+	// Validate the supplied endpoint before touching the filesystem: a rejected
+	// endpoint must not leave a partially-copied destination behind, which would
+	// make the corrected retry fail with "already initialized".
+	if err := hosted.validate(); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
@@ -1786,7 +1793,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
-	cfg, cityName, cityPrefix, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
+	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1805,10 +1812,6 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	// template) is already resolved in hosted; when no endpoint was supplied it
 	// is disabled and the copied template is preserved unchanged.
 	if hosted.enabled() {
-		if err := hosted.validate(); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 		if err := hostedDoltBackendError(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1817,7 +1820,15 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := writeCityConfigForEditFS(fs, copiedToml, cfg); err != nil {
+		// Re-supply the rig paths stripped by the identity rewrite: the write
+		// path treats a rig with an empty path as "no binding" and would erase
+		// the .gc/site.toml entries just persisted. MarshalForWrite strips the
+		// paths from city.toml either way, so this only preserves site.toml.
+		writeCfg := *cfg
+		if len(rigSiteBindings) > 0 {
+			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+		}
+		if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1884,15 +1895,20 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
-func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, error) {
+// rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
+// city identity. When the source declares rig paths, those paths are stripped
+// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
+// returned so later writers of the same city.toml can re-supply them and avoid
+// erasing the site bindings just written.
+func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)
 	if err != nil {
-		return nil, "", "", false, fmt.Errorf("reading copied city.toml: %w", err)
+		return nil, "", "", false, nil, fmt.Errorf("reading copied city.toml: %w", err)
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, nil, err
 	}
 
 	cityName := resolveCityName(nameOverride, "", cityPath)
@@ -1900,17 +1916,17 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if _, err := fs.Stat(packPath); err != nil {
 		if !os.IsNotExist(err) {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		cfg.Workspace.Name = cityName
 		content, err := cfg.Marshal()
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
-		return cfg, cityName, cityPrefix, false, nil
+		return cfg, cityName, cityPrefix, false, nil, nil
 	}
 	cfg.Workspace.Name = ""
 	cfg.Workspace.Prefix = ""
@@ -1926,21 +1942,21 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 		writeCfg := *cfg
 		writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
 		if err := config.WriteCityAndRigSiteBindingsForEdit(fs, copiedToml, &writeCfg); err != nil {
-			return nil, "", "", false, initSiteBindingPersistError(err)
+			return nil, "", "", false, nil, initSiteBindingPersistError(err)
 		}
 	} else {
 		content, err := cfg.Marshal()
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 	}
 	if err := rewriteCopiedInitPackName(fs, cityPath, cityName); err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, nil, err
 	}
-	return cfg, cityName, cityPrefix, true, nil
+	return cfg, cityName, cityPrefix, true, rigSiteBindings, nil
 }
 
 func initSiteBindingPersistError(err error) error {
