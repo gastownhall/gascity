@@ -371,15 +371,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if marker.ContentHash != wantHash {
 		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
 	}
-	if err := validateSyntheticRepoFileSet(dir); err != nil {
-		return err
-	}
-	for _, layout := range syntheticPackLayouts() {
-		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath))); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateSyntheticRepoTree(dir)
 }
 
 // MaterializedFileMode returns the filesystem mode used for bundled pack files
@@ -476,45 +468,39 @@ func materializeFS(src fs.FS, dst string) error {
 	return nil
 }
 
-// validatePackFiles verifies a materialized pack against the embedded manifest:
-// every expected file present, with the expected mode and content.
+// validateSyntheticRepoTree walks the materialized cache once and enforces both
+// halves of the integrity contract in that single traversal: no unexpected path,
+// and every expected file byte-identical to the copy embedded in this binary.
 //
-// It does not walk dst looking for unexpected files. validateSyntheticRepoFileSet
-// already walks the whole cache once against the union of every layout's
-// manifest, and that union check strictly subsumes a per-pack one: a file
-// unexpected for its own pack is absent from the union too. Keeping both meant
-// about nine traversals of the same tree per call.
-func validatePackFiles(pack Pack, dst string) error {
-	manifest, err := manifestForPack(pack)
-	if err != nil {
-		return fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
-	}
-	for rel, want := range manifest {
-		target := filepath.Join(dst, filepath.FromSlash(rel))
-		info, err := os.Lstat(target)
-		if err != nil {
-			return fmt.Errorf("checking bundled pack cache %q file %s: %w", pack.Name, rel, err)
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != want.perm.Perm() {
-			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", pack.Name, rel, info.Mode().Perm(), want.perm.Perm())
-		}
-		got, err := os.ReadFile(target)
-		if err != nil {
-			return fmt.Errorf("reading bundled pack cache %q file %s: %w", pack.Name, rel, err)
-		}
-		if !bytes.Equal(got, want.data) {
-			return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
-		}
-	}
-	return nil
-}
-
-func validateSyntheticRepoFileSet(dir string) error {
+// These used to be two passes over the same tree — this walk for the file set,
+// then a manifest-driven os.Lstat plus os.ReadFile per expected file in
+// validatePackFiles — which resolved all of the same paths twice. Every check
+// survives the fusion: content is still compared with bytes.Equal, mode is still
+// checked (now from the walk's own fs.DirEntry rather than a second Lstat), and
+// symlinks, unexpected files and unexpected directories are still rejected.
+//
+// Every rejection also keeps the exact message it had before, which is why the
+// per-file failure is recorded rather than returned from the walk callback: a
+// returned error would pick up the walk's own "file set" wrapper and report
+// content drift as a file-set problem. Recording it and continuing also
+// preserves the old precedence, in which the whole file-set walk ran before any
+// content was compared, so an unexpected path still outranks content drift no
+// matter which the walk reaches first.
+//
+// Missing files are the one property whose mechanism changes, and the seen count
+// is what preserves it. The old per-file Lstat could not miss a deletion; a walk
+// simply never visits a path that is not there, so without the count a cache
+// short of a file would validate clean — the worst direction for a
+// cache-integrity check to fail, because the rehydration it gates would never
+// fire.
+func validateSyntheticRepoTree(dir string) error {
 	allowedFiles, allowedDirs, err := syntheticRepoAllowedPaths()
 	if err != nil {
 		return err
 	}
 	firstUnexpectedDir := ""
+	var firstFileErr error
+	seen := 0
 	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -539,34 +525,112 @@ func validateSyntheticRepoFileSet(dir string) error {
 			}
 			return nil
 		}
-		if _, ok := allowedFiles[rel]; ok {
+		// The marker's own schema, repository, commit and content hash are
+		// validated by the caller before the tree is walked at all.
+		if rel == syntheticMarkerFile {
 			return nil
 		}
-		return fmt.Errorf("bundled pack cache contains unexpected file %s", rel)
+		want, ok := allowedFiles[rel]
+		if !ok {
+			return fmt.Errorf("bundled pack cache contains unexpected file %s", rel)
+		}
+		seen++
+		if firstFileErr == nil {
+			firstFileErr = checkCachedFile(path, entry, want)
+		}
+		return nil
 	}); err != nil {
 		return fmt.Errorf("validating bundled pack cache file set: %w", err)
 	}
 	if firstUnexpectedDir != "" {
 		return fmt.Errorf("validating bundled pack cache file set: bundled pack cache contains unexpected directory %s", firstUnexpectedDir)
 	}
+	if firstFileErr != nil {
+		return firstFileErr
+	}
+	if seen != len(allowedFiles) {
+		if missing := firstMissingExpectedFile(dir, allowedFiles); missing != "" {
+			return fmt.Errorf("validating bundled pack cache file set: bundled pack cache is missing expected file %s (%d of %d present)", missing, seen, len(allowedFiles))
+		}
+		return fmt.Errorf("validating bundled pack cache file set: bundled pack cache holds %d of %d expected files", seen, len(allowedFiles))
+	}
 	return nil
 }
 
-// syntheticRepoAllowedPaths returns the file and directory sets a materialized
-// synthetic repo may contain.
+// checkCachedFile verifies one cached file against the copy embedded in this
+// binary: the mode the materializer would have given it, and its exact bytes.
+//
+// Its errors are returned unwrapped, exactly as they read before the two
+// validation passes were fused, so a content or mode failure is never dressed up
+// as a file-set failure.
+func checkCachedFile(path string, entry os.DirEntry, want expectedFile) error {
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("checking bundled pack cache %q file %s: %w", want.pack, want.rel, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != want.entry.perm.Perm() {
+		return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", want.pack, want.rel, info.Mode().Perm(), want.entry.perm.Perm())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading bundled pack cache %q file %s: %w", want.pack, want.rel, err)
+	}
+	if !bytes.Equal(got, want.entry.data) {
+		return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", want.pack, want.rel)
+	}
+	return nil
+}
+
+// firstMissingExpectedFile returns the lexically first expected file that is not
+// present under dir, or "" if every expected path resolves. It exists only to
+// put a path in the error message, and runs only once the walk has already
+// established that the cache is short, so its cost stays off the valid-cache
+// path.
+func firstMissingExpectedFile(dir string, allowedFiles map[string]expectedFile) string {
+	rels := make([]string, 0, len(allowedFiles))
+	for rel := range allowedFiles {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		if _, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel))); err != nil {
+			return rel
+		}
+	}
+	return ""
+}
+
+// expectedFile is one file a materialized cache must contain. Carrying the
+// embedded content and its owning pack alongside the path is what lets one
+// traversal do the work two used to.
+//
+// It costs no retained memory: fileEntry.data aliases the byte slice the
+// memoized per-pack manifest already holds for the process lifetime.
+type expectedFile struct {
+	pack  string
+	rel   string
+	entry fileEntry
+}
+
+// syntheticRepoAllowedPaths returns every path a materialized synthetic repo may
+// contain: the expected files keyed by their path relative to the cache root and
+// carrying the content they must hold, and the directories those files imply.
+//
+// The marker file is deliberately absent — its content is per-cache rather than
+// embedded, so the caller validates it separately and the tree walk skips it.
 //
 // The result derives entirely from content embedded in the running binary, so it
 // is memoized for the process lifetime the same way syntheticContentHashOnce
 // memoizes the content hash. Rebuilding it per call re-walked every bundled
 // pack's embed.FS on every config load. Callers must treat the returned maps as
 // read-only.
-func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
+func syntheticRepoAllowedPaths() (map[string]expectedFile, map[string]struct{}, error) {
 	cached := syntheticRepoAllowedPathsOnce()
 	return cached.files, cached.dirs, cached.err
 }
 
 type syntheticRepoPathSets struct {
-	files map[string]struct{}
+	files map[string]expectedFile
 	dirs  map[string]struct{}
 	err   error
 }
@@ -576,8 +640,8 @@ var syntheticRepoAllowedPathsOnce = sync.OnceValue(func() syntheticRepoPathSets 
 	return syntheticRepoPathSets{files: files, dirs: dirs, err: err}
 })
 
-func computeSyntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
-	files := map[string]struct{}{syntheticMarkerFile: {}}
+func computeSyntheticRepoAllowedPaths() (map[string]expectedFile, map[string]struct{}, error) {
+	files := make(map[string]expectedFile)
 	dirs := make(map[string]struct{})
 	for _, layout := range syntheticPackLayouts() {
 		subpath := filepath.ToSlash(layout.Subpath)
@@ -585,9 +649,9 @@ func computeSyntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", layout.Pack.Name, err)
 		}
-		for rel := range manifest {
+		for rel, want := range manifest {
 			full := path.Join(subpath, rel)
-			files[full] = struct{}{}
+			files[full] = expectedFile{pack: layout.Pack.Name, rel: rel, entry: want}
 			for dir := path.Dir(full); dir != "." && dir != "/"; dir = path.Dir(dir) {
 				dirs[dir] = struct{}{}
 			}

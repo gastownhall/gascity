@@ -535,8 +535,8 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 }
 
 // TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
-// justifies validatePackFiles no longer walking its own directory. The whole-tree
-// walk in validateSyntheticRepoFileSet checks every path against the union of all
+// justifies there being no per-pack walk of each pack's own directory. The
+// whole-tree walk in validateSyntheticRepoTree checks every path against the union of all
 // layout manifests, which strictly subsumes a per-pack check: a file that is
 // unexpected for its own pack is absent from the union too. Nested layouts
 // (examples/bd contains examples/bd/dolt) are covered explicitly, because that is
