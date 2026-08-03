@@ -1024,14 +1024,18 @@ func pendingCreateLeaseExpiredForRollbackInfo(i sessionpkg.Info, clk clock.Clock
 	if !pendingCreateRollbackState(string(state)) {
 		return false
 	}
+	// The lifecycle projection can mark a dead-looking creating runtime asleep
+	// after the generic one-minute stale window. That advisory state must not
+	// bypass the longer configured provider Start lease: use the same in-flight
+	// decision before every state-specific rollback path.
+	if pendingCreateStartInFlightInfo(i, clk, startupTimeout) {
+		return false
+	}
 	if state == sessionpkg.StateAsleep {
 		if strings.TrimSpace(i.LastWokeAt) == "" {
 			return pendingCreateNeverStartedExpiredInfo(i, clk)
 		}
 		return pendingCreateAttemptStaleInfo(i, clk)
-	}
-	if pendingCreateStartInFlightInfo(i, clk, startupTimeout) {
-		return false
 	}
 	if strings.TrimSpace(i.LastWokeAt) == "" {
 		return pendingCreateNeverStartedExpiredInfo(i, clk)

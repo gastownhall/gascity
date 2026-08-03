@@ -43,8 +43,10 @@ type healOracleCase struct {
 // start-request, failed-create preserve/clear, stale-creating rollback,
 // reset-continuation clears, named-session mode guard, deferred-rollback). Each
 // row is load-bearing: a mutation of the corresponding non-trivial branch flips
-// the batch. The expected batches were captured from the WI-6-R2 raw
-// healStatePatchWithRollback before it was deleted in R3 (byte-identical oracle).
+// the batch. The deferred-rollback row pins the corrected atomic transition:
+// state and lease remain together until rollback is available. The other
+// expected batches were captured from the WI-6-R2 raw healStatePatchWithRollback
+// before it was deleted in R3.
 func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	rfc := func(d time.Duration) string { return clk.Now().Add(d).UTC().Format(time.RFC3339) }
@@ -78,12 +80,12 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			want:     resetBatch,
 		},
 		{
-			name:     "stale-creating-rollback-deferred",
+			name:     "stale-creating-rollback-deferred-preserves",
 			created:  -2 * time.Minute,
 			meta:     map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": rfc(-2 * time.Minute)},
 			alive:    false,
 			rollback: false,
-			want:     map[string]string{"state": "asleep"},
+			want:     nil,
 		},
 		{
 			name:     "never-started-inflight",
