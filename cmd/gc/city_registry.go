@@ -299,11 +299,12 @@ func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider 
 		if v == nil || v.Started {
 			continue
 		}
-		name := v.Name
-		if registeredName, ok := registeredNamesByPath[pathutil.NormalizePathForCompare(v.Path)]; ok {
-			name = registeredName
-		} else if name == "" {
-			name = filepath.Base(v.Path)
+		name, registered := registeredNamesByPath[pathutil.NormalizePathForCompare(v.Path)]
+		if !registered {
+			name = v.Name
+			if name == "" || snap.byName[name] != v {
+				continue
+			}
 		}
 		paths[name] = v.Path
 	}

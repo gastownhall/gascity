@@ -108,6 +108,57 @@ func TestExportProvidersForCitiesExcludesRegisteredAliasAfterInitFailure(t *test
 	}
 }
 
+func TestExportProvidersForCitiesFailsClosedOnInitFailureWhenRegistryMalformed(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	registryFile := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := registryFile.Register(cityPath, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(supervisor.RegistryPath(), []byte("[[cities]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registryFile.List(); err == nil {
+		t.Fatal("malformed supervisor registry unexpectedly loaded")
+	}
+
+	registry := newCityRegistry()
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("providers with malformed registry = %#v, want no matching configured city", got)
+	}
+}
+
+func TestExportProvidersForCitiesExcludesUnregisteredInitFailureBasename(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	registry := newCityRegistry()
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("unregistered failure providers = %#v, want no matching configured city", got)
+	}
+}
+
 // TestResolveExportCredentials_EmptyTokenFileErrors proves a configured but
 // empty (or whitespace-only) token_file fails closed: the provider returns an
 // error so the cursor holds and the empty credential surfaces, instead of
