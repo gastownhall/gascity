@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Worktree represents a single git worktree entry.
@@ -595,8 +596,5 @@ func unquoteGitPath(path string) string {
 }
 
 func canonicalWorktreePath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-	return path
+	return pathutil.NormalizePathForCompare(path)
 }

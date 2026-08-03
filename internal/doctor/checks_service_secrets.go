@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ServiceSecretsPermsCheck flags group/other-readable entries inside service
@@ -135,6 +135,13 @@ func (c *ServiceSecretsPermsCheck) secretsDirs() (targets []secretsTarget, skipp
 		// looks in-city — and Fix recursively chmods everything it walks.
 		// EvalSymlinks resolves every symlink and `..` segment against the real
 		// filesystem so the confinement check below sees the true target.
+		//
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. A root that cannot be resolved must be
+		// skipped — the confinement check below can't be trusted for a target
+		// that doesn't verifiably exist — so pathutil's never-errors
+		// missing-path fallback would be wrong here; this call's error return
+		// is exactly the skip signal secretsDirs needs.
 		walk, err := filepath.EvalSymlinks(configured)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s: secrets path could not be resolved (%v); skipped (not audited or repaired)", configured, err))
@@ -167,23 +174,7 @@ func (c *ServiceSecretsPermsCheck) secretsDirs() (targets []secretsTarget, skipp
 // escape. A resolved secrets target outside the city must never be walked or
 // chmodded by Fix.
 func (c *ServiceSecretsPermsCheck) withinCity(resolved string) bool {
-	city := c.cityPath
-	if abs, err := filepath.Abs(city); err == nil {
-		city = abs
-	}
-	if r, err := filepath.EvalSymlinks(city); err == nil {
-		city = r
-	}
-	city = filepath.Clean(city)
-	resolved = filepath.Clean(resolved)
-	if resolved == city {
-		return true
-	}
-	rel, err := filepath.Rel(city, resolved)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+	return pathutil.PathWithin(c.cityPath, resolved)
 }
 
 // looseEntries walks one confined secrets directory and returns descriptions
