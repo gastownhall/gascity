@@ -902,6 +902,7 @@ export type EventRotateResponse = {
 
 export type EventStreamEnvelope = {
     actor: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload?: EventPayload;
     run_id?: string;
@@ -5081,6 +5082,7 @@ export type SupervisorStartup = {
 export type TaggedEventStreamEnvelope = {
     actor: string;
     city: string;
+    depends_on_step_ids?: Array<string>;
     message?: string;
     payload?: EventPayload;
     run_id?: string;

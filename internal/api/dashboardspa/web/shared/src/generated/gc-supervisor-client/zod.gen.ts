@@ -3310,6 +3310,7 @@ export const zWorkflowEventProjection = z.object({
 
 export const zEventStreamEnvelope = z.object({
     actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
     payload: zEventPayload.optional(),
     run_id: z.string().optional(),
@@ -3325,6 +3326,7 @@ export const zEventStreamEnvelope = z.object({
 export const zTaggedEventStreamEnvelope = z.object({
     actor: z.string(),
     city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
     payload: zEventPayload.optional(),
     run_id: z.string().optional(),

@@ -1692,17 +1692,18 @@ type EventRotateResponse struct {
 
 // EventStreamEnvelope defines model for EventStreamEnvelope.
 type EventStreamEnvelope struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   *EventPayload            `json:"payload,omitempty"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          *EventPayload            `json:"payload,omitempty"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // ExtMsgAdapterRegisterInputBody defines model for ExtMsgAdapterRegisterInputBody.
@@ -5162,18 +5163,19 @@ type SupervisorStartup struct {
 
 // TaggedEventStreamEnvelope defines model for TaggedEventStreamEnvelope.
 type TaggedEventStreamEnvelope struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   *EventPayload            `json:"payload,omitempty"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          *EventPayload            `json:"payload,omitempty"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TranscriptMessageKind Direction of a transcript entry.
