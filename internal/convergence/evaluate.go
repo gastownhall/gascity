@@ -41,12 +41,20 @@ func ResolveEvaluateStep(cityPath string, formula Formula) (EvaluateStep, error)
 		promptPath = formula.EvaluatePrompt
 	}
 
-	// Canonicalize cityPath first so that symlinked workspace roots
-	// (e.g., /tmp -> /private/tmp on macOS) don't cause false rejections.
-	canonCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		canonCity = filepath.Clean(cityPath) // best-effort if city doesn't exist yet
-	}
+	// Canonicalize cityPath first via pathutil.NormalizePathForCompare, which
+	// absolutizes before resolving symlinks (falling back to a best-effort
+	// ancestor walk when the path doesn't exist yet). This keeps symlinked
+	// workspace roots (e.g., /tmp -> /private/tmp on macOS) from causing
+	// false rejections, and keeps a relative cityPath (e.g. ".") from
+	// producing a relative PromptPath below.
+	//
+	// NormalizePathForCompare does more than absolutize-and-resolve: on
+	// darwin it also collapses the /private/tmp and /private/var host
+	// aliases back to /tmp and /var, which is the REVERSE direction from
+	// bare filepath.EvalSymlinks. resolved is built on canonCity and so
+	// inherits that convention; any value compared against it must pass
+	// through pathutil too.
+	canonCity := pathutil.NormalizePathForCompare(cityPath)
 
 	resolved := filepath.Clean(filepath.Join(canonCity, promptPath))
 
@@ -57,8 +65,24 @@ func ResolveEvaluateStep(cityPath string, formula Formula) (EvaluateStep, error)
 	}
 
 	// Reject symlinks in the resolved path (matching ResolveConditionPath).
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. This deliberately checks whether the resolved path IS a
+	// symlink — a blanket "reject any symlink component" policy that is
+	// stricter than, and different in kind from, plain containment — and
+	// silently tolerates an unresolvable path (err != nil) rather than
+	// failing, so pathutil.NormalizePathForCompare's fallback-and-never-error
+	// contract would change this function's behavior, not just its
+	// canonicalization.
+	//
+	// Only realResolved is normalized before the comparison. It is already
+	// fully symlink-resolved, so NormalizePathForCompare on it amounts to
+	// the darwin alias collapse alone — which puts it in the same convention
+	// as resolved (built on the collapsed canonCity). Do NOT switch this to
+	// pathutil.SamePath: that would normalize resolved too, re-resolving it
+	// through its own symlink, so a genuinely symlinked prompt would compare
+	// equal and this rejection would stop firing.
 	realResolved, err := filepath.EvalSymlinks(resolved)
-	if err == nil && realResolved != resolved {
+	if err == nil && pathutil.NormalizePathForCompare(realResolved) != resolved {
 		return EvaluateStep{}, fmt.Errorf("evaluate prompt path contains symlinks: %s resolves to %s", resolved, realResolved)
 	}
 

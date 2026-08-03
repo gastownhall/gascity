@@ -303,9 +303,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("resolving pack root: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(absPackRoot); evalErr == nil {
-		absPackRoot = resolved
-	}
+	absPackRoot = normalizePathForCompare(absPackRoot)
 	manifest, err := readRegistryPackManifest(absPackRoot)
 	if err != nil {
 		return registryPublishRequest{}, err
@@ -317,9 +315,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("pack root must be inside a Git repository: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(repoRoot); evalErr == nil {
-		repoRoot = resolved
-	}
+	repoRoot = normalizePathForCompare(repoRoot)
 	status, err := gitOutput(ctx, repoRoot, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("checking Git status: %w", err)
@@ -917,6 +913,10 @@ func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result regi
 	} else if result.ValidationError != "" {
 		fmt.Fprintf(stdout, "Message: %s\n", result.ValidationError) //nolint:errcheck
 	}
+	// Pin the effective publish base URL: the requests command resolves its
+	// registry independently (flag/env/stored default/hosted default), so an
+	// unqualified handoff can query a different Registry than the publish used.
+	fmt.Fprintf(stdout, "Next: gc pack registry requests --registry-url %s %s\n", baseURL, result.ID) //nolint:errcheck
 }
 
 // registryPublishValidationRejectedStatuses lists publish-request statuses that

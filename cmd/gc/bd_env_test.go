@@ -351,6 +351,41 @@ func TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
 	}
 }
 
+// TestBdRuntimeEnvForRigResolvesSymlinkAlias pins ga-iawy13.8: GC_RIG_ROOT
+// and BEADS_DIR must canonicalize a symlink-alias rig path the same way
+// findCity canonicalizes city paths, not just filepath.Clean it. BEADS_DIR
+// and GC_RIG_ROOT are set unconditionally before any dolt/backend branching,
+// so the error return is deliberately ignored here -- only the two env
+// values are under test.
+func TestBdRuntimeEnvForRigResolvesSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	rigPath := filepath.Join(realRoot, "repo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+	aliasRigPath := filepath.Join(aliasRoot, "repo")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigPath}}}
+	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, aliasRigPath)
+	if err != nil {
+		t.Logf("bdRuntimeEnvForRigWithError() error = %v (ignored; BEADS_DIR/GC_RIG_ROOT are set before backend resolution)", err)
+	}
+
+	wantBeadsDir := filepath.Join(rigPath, ".beads")
+	if env["BEADS_DIR"] != wantBeadsDir {
+		t.Errorf("BEADS_DIR = %q, want canonical %q (must resolve the symlink alias, not just Clean it)", env["BEADS_DIR"], wantBeadsDir)
+	}
+	if env["GC_RIG_ROOT"] != rigPath {
+		t.Errorf("GC_RIG_ROOT = %q, want canonical %q (must resolve the symlink alias, not just Clean it)", env["GC_RIG_ROOT"], rigPath)
+	}
+}
+
 // TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget is
 // TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget for the
 // rig-scoped resolver.
@@ -3991,6 +4026,49 @@ dolt.auto-start: false
 	}
 	if recoverCalls != 0 {
 		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
+	}
+}
+
+// TestBDCommandRunnerManagedRetry_RetryDelayApplied guards that
+// bdCommandRunnerWithManagedRetryErr sleeps bdCommandRetryBaseDelay before the
+// single retry on the transport-retryable path.
+func TestBDCommandRunnerManagedRetry_RetryDelayApplied(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	origSleep := bdCommandRetrySleep
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+		bdCommandRetrySleep = origSleep
+	})
+
+	var sleepCalled time.Duration
+	bdCommandRetrySleep = func(d time.Duration) { sleepCalled = d }
+
+	attempts := 0
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, fmt.Errorf("server unreachable")
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error { return nil }
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return map[string]string{}
+	})
+
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if sleepCalled != bdCommandRetryBaseDelay {
+		t.Fatalf("bdCommandRetrySleep called with %v, want %v", sleepCalled, bdCommandRetryBaseDelay)
 	}
 }
 

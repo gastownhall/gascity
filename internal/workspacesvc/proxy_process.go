@@ -223,7 +223,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = proxyProcessSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)

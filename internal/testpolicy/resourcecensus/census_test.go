@@ -1,12 +1,12 @@
 package resourcecensus
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +15,12 @@ import (
 	"testing/fstest"
 	"time"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked resource ledger block
+// from test/test-resources.toml when set. Run:
+//
+//	go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked resource ledger block from test/test-resources.toml")
 
 func TestScanUsesImportIdentityAndParsedBuildConstraints(t *testing.T) {
 	t.Parallel()
@@ -1983,12 +1989,12 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 94 || debt.BaselineFiles != 35 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 94/35, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 95 || debt.BaselineFiles != 36 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 95/36, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 92 || smallDebt.BaselineFiles != 34 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 92/34", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 93 || smallDebt.BaselineFiles != 35 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 93/35", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
@@ -2278,6 +2284,75 @@ func TestCheckedMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
 	}
 }
 
+func TestReplaceMarkdownBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	document := "# Title\n\nintro text\n\n" + markdownBegin + "\nstale content\n" + markdownEnd + "\n\ntrailing text\n"
+	replacement := markdownBegin + "\nfresh content\n" + markdownEnd
+
+	updated, err := ReplaceMarkdownBlock(document, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	want := "# Title\n\nintro text\n\n" + replacement + "\n\ntrailing text\n"
+	if updated != want {
+		t.Fatalf("ReplaceMarkdownBlock mismatch\n--- got ---\n%s\n--- want ---\n%s", updated, want)
+	}
+
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != replacement {
+		t.Fatalf("round-trip mismatch\n--- got ---\n%s\n--- want ---\n%s", block, replacement)
+	}
+}
+
+func TestGeneratedLedgerBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	ledger := Ledger{
+		Version: 2,
+		AuditBaseline: []Baseline{
+			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
+		},
+		Debt: []Baseline{
+			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+		},
+	}
+	generated := RenderMarkdown(ledger)
+	document := "# TESTING\n\nsome preamble\n\n" + markdownBegin + "\nold, stale table\n" + markdownEnd + "\n\nmore docs below\n"
+
+	updated, err := ReplaceMarkdownBlock(document, generated)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != generated {
+		t.Fatalf("generated ledger block did not round-trip\n--- got ---\n%s\n--- want ---\n%s", block, generated)
+	}
+	if !strings.HasPrefix(updated, "# TESTING\n\nsome preamble\n\n") || !strings.HasSuffix(updated, "\n\nmore docs below\n") {
+		t.Fatalf("ReplaceMarkdownBlock altered content outside the marker pair:\n%s", updated)
+	}
+}
+
+func TestReplaceMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{
+		"no markers",
+		markdownEnd + "\n" + markdownBegin,
+		markdownBegin + "\n" + markdownEnd + "\n" + markdownBegin,
+	} {
+		if _, err := ReplaceMarkdownBlock(document, markdownBegin+markdownEnd); err == nil {
+			t.Fatalf("ReplaceMarkdownBlock(%q) unexpectedly succeeded", document)
+		}
+	}
+}
+
 func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	root := repositoryRoot(t)
 	ledger, err := LoadLedger(filepath.Join(root, "test", "test-resources.toml"))
@@ -2292,16 +2367,32 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 		t.Fatalf("resource ledger drift:\n%v", err)
 	}
 
-	doc, err := fs.ReadFile(os.DirFS(root), "TESTING.md")
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatalf("read TESTING.md: %v", err)
 	}
+	want := RenderMarkdown(ledger)
+
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), want)
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
+	}
+
 	got, err := CheckedMarkdownBlock(string(doc))
 	if err != nil {
-		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, RenderMarkdown(ledger))
+		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, want)
 	}
-	if want := RenderMarkdown(ledger); got != want {
-		t.Fatalf("TESTING.md resource ledger block is stale\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	if got != want {
+		t.Fatalf("TESTING.md resource ledger block is stale; run `go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update` to regenerate it, then review the diff\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 // without ever decoding the payload.
 func TestNotifyChangeResolvesRunSession(t *testing.T) {
 	var gotType, gotID, gotRun, gotSession, gotStep string
-	cs := NewCachingStore(NewMemStore(), func(eventType, beadID, runID, sessionID, stepID string, _ json.RawMessage) {
+	cs := NewCachingStore(NewMemStore(), func(eventType, beadID, runID, sessionID, stepID string, _ *[]string, _ json.RawMessage) {
 		gotType, gotID, gotRun, gotSession, gotStep = eventType, beadID, runID, sessionID, stepID
 	})
 
@@ -38,7 +38,7 @@ func TestNotifyChangeResolvesRunSession(t *testing.T) {
 
 	// workflow_id wins the run-chain precedence over gc.root_bead_id.
 	var run2 string
-	cs2 := NewCachingStore(NewMemStore(), func(_, _, runID, _, _ string, _ json.RawMessage) { run2 = runID })
+	cs2 := NewCachingStore(NewMemStore(), func(_, _, runID, _, _ string, _ *[]string, _ json.RawMessage) { run2 = runID })
 	cs2.notifyChange("bead.created", Bead{ID: "mc-2", Metadata: map[string]string{
 		"workflow_id":     "wf-graph-root",
 		"gc.root_bead_id": "wf-root-x",
@@ -50,7 +50,7 @@ func TestNotifyChangeResolvesRunSession(t *testing.T) {
 	// No run-chain metadata: run falls back to the bead's own id; session + step empty
 	// (a non-work bead carries no gc.step_id).
 	var run3, sess3, step3 string
-	cs3 := NewCachingStore(NewMemStore(), func(_, _, runID, sessionID, stepID string, _ json.RawMessage) {
+	cs3 := NewCachingStore(NewMemStore(), func(_, _, runID, sessionID, stepID string, _ *[]string, _ json.RawMessage) {
 		run3, sess3, step3 = runID, sessionID, stepID
 	})
 	cs3.notifyChange("bead.created", Bead{ID: "mc-3"})

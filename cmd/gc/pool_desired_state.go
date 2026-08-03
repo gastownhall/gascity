@@ -362,10 +362,19 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 			if sb.Closed || isPoolManagedSessionInfo(sb) || isDrainedSessionInfo(sb) || isFailedCreateSessionInfo(sb) {
 				continue
 			}
-			if strings.TrimSpace(sb.MetadataState) == "asleep" {
-				continue
-			}
 			if strings.TrimSpace(sb.Alias) == template {
+				held[template] = struct{}{}
+				break
+			}
+			// A named session's Alias holds its own configured identity, not
+			// the backing template (build_desired_state.go sets tp.Alias =
+			// identity for every named session, e.g. "primary" bound to
+			// template "worker"). When identity != template, the Alias check
+			// above never matches even though this bead is the singleton
+			// slot's sole occupant. Its Template field is always the backing
+			// template's qualified name, so use that as the named-session
+			// match instead of Alias.
+			if isNamedSessionInfo(sb) && strings.TrimSpace(sb.Template) == template {
 				held[template] = struct{}{}
 				break
 			}

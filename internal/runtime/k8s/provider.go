@@ -533,13 +533,16 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Uses -l (literal mode) so tmux key names in the message text are not
 // interpreted as keystrokes. Content blocks are flattened to text.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	_ = p.carrier().Nudge(context.Background(), name, content) // best-effort
-	return nil
+	return p.carrier().Nudge(context.Background(), name, content)
 }
 
-// SendKeys sends bare keystrokes to the tmux session.
+// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
+// missing session (contract: no-op), but a genuine transport failure to a
+// live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	_ = p.carrier().SendKeys(context.Background(), name, keys...) // best-effort
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+		return err
+	}
 	return nil
 }
 
@@ -718,6 +721,11 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return []byte(out), 0, nil
 }
 
+// findRunningPod resolves the running pod for name. A missing pod (scaled
+// down, evicted, never provisioned) is reported as [runtime.ErrSessionNotFound]
+// so callers can distinguish "session is gone" from a genuine transport
+// failure reaching a pod that does exist — the same distinction Relaunch
+// already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
 	label := SanitizeLabel(name)
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
@@ -725,7 +733,7 @@ func (p *Provider) findRunningPod(ctx context.Context, name string) (string, err
 		return "", err
 	}
 	if len(pods) == 0 {
-		return "", fmt.Errorf("no running pod for session %q", name)
+		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
 	}
 	return pods[0].Name, nil
 }
@@ -831,7 +839,7 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
 	// connection target through env; they do not rewrite canonical .beads files.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
 	if err != nil {
 		return err
 	}

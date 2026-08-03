@@ -11796,3 +11796,63 @@ func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) fu
 		<-done
 	}
 }
+
+// TestDefaultScopeDoltDatabase covers ga-p658sc: a rig whose derived prefix
+// is digit-leading (e.g. "001", the basename t.TempDir() hands to `gc rig
+// add` in acceptance tests) must not be used verbatim as a Dolt database
+// name, since Dolt rejects identifiers that start with a digit. The HQ
+// scope and ordinary letter-led prefixes must be unaffected.
+func TestDefaultScopeDoltDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "001")
+
+	tests := []struct {
+		name   string
+		dir    string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "hq scope always returns hq regardless of prefix",
+			dir:    cityPath,
+			prefix: "001",
+			want:   "hq",
+		},
+		{
+			name:   "ordinary letter-led prefix is unchanged",
+			dir:    rigPath,
+			prefix: "ga",
+			want:   "ga",
+		},
+		{
+			name:   "digit-leading prefix is sanitized to a non-digit-leading name",
+			dir:    rigPath,
+			prefix: "001",
+			want:   "r001",
+		},
+		{
+			name:   "longer all-numeric prefix is sanitized",
+			dir:    rigPath,
+			prefix: "12345",
+			want:   "r12345",
+		},
+		{
+			name:   "digit elsewhere in the prefix is unaffected",
+			dir:    rigPath,
+			prefix: "g1",
+			want:   "g1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultScopeDoltDatabase(cityPath, tt.dir, tt.prefix)
+			if got != tt.want {
+				t.Errorf("defaultScopeDoltDatabase(%q, %q, %q) = %q, want %q", cityPath, tt.dir, tt.prefix, got, tt.want)
+			}
+			if got != "hq" && got != "" && got[0] >= '0' && got[0] <= '9' {
+				t.Errorf("defaultScopeDoltDatabase(%q, %q, %q) = %q starts with a digit; Dolt rejects digit-leading database names", cityPath, tt.dir, tt.prefix, got)
+			}
+		})
+	}
+}

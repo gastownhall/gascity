@@ -68,10 +68,15 @@
 #   - Malformed tunables fall back to their documented defaults with a
 #     diagnostic naming the offending variable; they never reach arithmetic
 #     or `sleep` unvalidated.
-#   - A timed-out acquire returns 1 (shell-false). This library never calls
-#     `exit` itself — mapping a timeout to process exit code 75 is the
-#     caller's job (scripts/test-local-parallel), keeping this file a pure,
-#     testable function library.
+#   - A timed-out acquire returns 1 (shell-false), and ONLY a timed-out
+#     acquire returns 1 — every degrade case (missing flock(1), a slot dir
+#     that cannot be created) prints its own diagnostic and returns 0 with
+#     an empty fd instead, so callers can trust that a 1 always means a
+#     real wait-bound expiry, never an environment defect misreported as
+#     fleet contention. This library never calls `exit` itself — mapping a
+#     timeout to process exit code 75 is the caller's job
+#     (scripts/test-local-parallel), keeping this file a pure, testable
+#     function library.
 #
 # FUNCTIONS
 #   push_gate_city_root
@@ -100,12 +105,15 @@
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
-#       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. Sweeps
-#       slots 0..N-1 non-blocking; acquires the first free one immediately
-#       (fd assigned to the caller's <fd_out_var>, return 0). If all slots
-#       are busy: prints an immediate unbuffered diagnostic naming current
-#       holders (FR5), then re-sweeps every POLL_SECONDS until a slot frees
-#       or MAX_WAIT_SECONDS elapses. Returns 0 (acquired) or 1 (timed out —
+#       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
+#       dir cannot be created (e.g. an unwritable parent), degrades the same
+#       way as a missing flock(1): diagnostic to stderr, empty fd, return 0
+#       — never conflated with a timeout. Otherwise sweeps slots 0..N-1
+#       non-blocking; acquires the first free one immediately (fd assigned
+#       to the caller's <fd_out_var>, return 0). If all slots are busy:
+#       prints an immediate unbuffered diagnostic naming current holders
+#       (FR5), then re-sweeps every POLL_SECONDS until a slot frees or
+#       MAX_WAIT_SECONDS elapses. Returns 0 (acquired) or 1 (timed out —
 #       caller should `exit 75`).
 #   push_gate_describe_slots <slot_dir> <max_concurrent>
 #       Print one "slot-<i>: <holder line>" line per currently-occupied
@@ -276,7 +284,16 @@ push_gate_acquire_slot() {
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 
-    mkdir -p "$_pgl_slot_dir" 2>/dev/null || return 1
+    # An unwritable slot dir (e.g. a parent path component that is a file,
+    # as .git is in a linked worktree prior to push_gate_slots_dir's
+    # common-dir fix) is a degrade case, not a wait-bound timeout — same
+    # `return 1` used to mean both, which sent operators chasing fleet
+    # contention that did not exist. Degrade best-effort instead.
+    if ! mkdir -p "$_pgl_slot_dir" 2>/dev/null; then
+        echo "push-gate: cannot create slot dir $_pgl_slot_dir — running without a cross-invocation cap" >&2
+        eval "$_pgl_fd_var="
+        return 0
+    fi
 
     local _pgl_i _pgl_slot _pgl_fd _pgl_announced=0 _pgl_start=0
 

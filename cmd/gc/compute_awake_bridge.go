@@ -21,6 +21,7 @@ func buildAwakeInputFromReconciler(
 	sessionInfos []session.Info,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
+	namedRoutedDemand map[string]bool,
 	workSet map[string]bool,
 	readyWaitSet map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -30,16 +31,17 @@ func buildAwakeInputFromReconciler(
 	clk time.Time,
 ) AwakeInput {
 	input := AwakeInput{
-		ScaleCheckCounts:   poolDesired,
-		NamedSessionDemand: cloneBoolMap(namedSessionDemand),
-		WorkSet:            workSet,
-		ReadyWaitSet:       readyWaitSet,
-		RunningSessions:    make(map[string]bool),
-		AttachedSessions:   make(map[string]bool),
-		PendingSessions:    make(map[string]bool),
-		ChatIdleTimeout:    cfg.ChatSessions.IdleTimeoutDuration(),
-		ManualGracePeriod:  cfg.ChatSessions.GracePeriodDuration(),
-		Now:                clk,
+		ScaleCheckCounts:         poolDesired,
+		NamedSessionDemand:       cloneBoolMap(namedSessionDemand),
+		NamedSessionRoutedDemand: cloneBoolMap(namedRoutedDemand),
+		WorkSet:                  workSet,
+		ReadyWaitSet:             readyWaitSet,
+		RunningSessions:          make(map[string]bool),
+		AttachedSessions:         make(map[string]bool),
+		PendingSessions:          make(map[string]bool),
+		ChatIdleTimeout:          cfg.ChatSessions.IdleTimeoutDuration(),
+		ManualGracePeriod:        cfg.ChatSessions.GracePeriodDuration(),
+		Now:                      clk,
 	}
 
 	// Agents. Load runtime suspension state once against the in-scope
@@ -50,7 +52,7 @@ func buildAwakeInputFromReconciler(
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
 			QualifiedName:     a.QualifiedName(),
-			Suspended:         isAgentEffectivelySuspendedWith(cfg, a, suspState),
+			Suspended:         isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState),
 			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
 			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
@@ -245,7 +247,7 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakePin}
 			case "wait-ready":
 				reasons = []WakeReason{WakeWait}
-			case "assigned-work", "named-demand", "work-query":
+			case "assigned-work", "named-demand", "routed-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
 			case "min-active":
 				reasons = []WakeReason{WakeConfig}

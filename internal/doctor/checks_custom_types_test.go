@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -34,10 +35,20 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	for _, key := range []string{
 		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
 		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
 	} {
 		t.Setenv(key, "")
 	}
+
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so a machine
+	// HOME with dolt.shared-server: true still routes bd to the shared
+	// server — which answers with every required type present and turns
+	// this check StatusOK, defeating the assertion below. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	t.Setenv("HOME", t.TempDir())
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
@@ -54,6 +65,22 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 	if !c.CanFix() {
 		t.Fatal("CanFix should return true")
+	}
+}
+
+// retryRemoveAllForTest retries os.RemoveAll briefly to absorb a lingering
+// embedded-dolt background writer that can hold files open a few dozen ms
+// past the owning bd subprocess's apparent exit — which otherwise races
+// t.TempDir()'s single-shot RemoveAll cleanup with an intermittent
+// "directory not empty" error. Falls through silently on final failure so
+// TempDir's own best-effort cleanup still gets the last word.
+func retryRemoveAllForTest(t *testing.T, dir string) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -87,12 +114,23 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	for _, key := range []string{
 		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
 		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
 	} {
 		t.Setenv(key, "")
 	}
 
+	// Scrubbing env vars alone is not enough: bd's config precedence falls
+	// through to $HOME/.beads/config.yaml as a last resort, so on a fleet
+	// agent HOME with dolt.shared-server: true set there, bd still routes
+	// to the shared server regardless of the vars above. Pin a test-owned
+	// HOME so that fallback file doesn't exist. See ga-zxpfic and
+	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	dir := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -151,6 +189,81 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	out := runBD("create", "--type", "step", "drift healed check")
 	if !strings.Contains(out, "Created issue") {
 		t.Fatalf("bd create --type step failed after Fix, table still drifted: %s", out)
+	}
+}
+
+// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext is a regression
+// test for ga-zxpfic: env-var scrubbing alone does not stop a machine-level
+// dolt.shared-server config from leaking into the bd subprocesses this
+// package's tests spawn. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml — so on any HOME that has
+// dolt.shared-server: true set there (as fleet agent HOMEs do), scrubbing
+// BEADS_DOLT_SERVER_PORT and friends changes nothing: bd still discovers the
+// shared server via that config file, not an env var. Pinning a test-owned
+// HOME via t.TempDir() removes the fallback file entirely, which is the only
+// complete fix — this test asserts that isolation actually holds, not just
+// that the drift check's Run/Fix behavior happens to look right.
+func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd binary not on PATH")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt binary not on PATH")
+	}
+
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
+	} {
+		t.Setenv(key, "")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
+
+	runBD := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("bd", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	initOut := runBD("init", "--non-interactive", "-p", "tst2", "--skip-hooks", "--skip-agents")
+	setOut := runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
+
+	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
+	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no config.yaml under test-owned HOME %s, but Stat returned err=%v", homeConfigPath, err)
+	}
+
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMetadataState(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	if meta.DoltMode != "embedded" {
+		t.Fatalf("metadata.json dolt_mode = %q, want %q", meta.DoltMode, "embedded")
+	}
+	if meta.DoltDatabase == "" {
+		t.Fatal("metadata.json dolt_database is empty, want it to match the embedded store")
+	}
+
+	for _, out := range []string{initOut, setOut} {
+		if strings.Contains(out, "Dolt server at") {
+			t.Fatalf("bd output leaked a shared-server connection: %s", out)
+		}
+		if strings.Contains(out, "shared-server mode is enabled") {
+			t.Fatalf("bd output leaked shared-server mode: %s", out)
+		}
 	}
 }
 

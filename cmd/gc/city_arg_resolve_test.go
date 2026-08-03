@@ -337,6 +337,80 @@ func TestResolveCityFlagValueByName(t *testing.T) {
 	}
 }
 
+// makeCitySymlinkAliasFixture creates a real city directory plus a sibling
+// symlink alias to its parent, mirroring makeRigSymlinkAliasFixture in
+// main_test.go. Returns the canonical city path and an alias path that
+// reaches the same city through a symlinked ancestor.
+func makeCitySymlinkAliasFixture(t *testing.T) (cityPath, aliasCityPath string) {
+	t.Helper()
+
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	cityPath = filepath.Join(realRoot, "my-city")
+	mkTestCity(t, cityPath)
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+	return cityPath, filepath.Join(aliasRoot, "my-city")
+}
+
+// TestResolveCityFlagValueResolvesSymlinkAlias pins ga-iawy13.8: --city must
+// canonicalize a symlink-alias path to the same value findCity would produce
+// from cwd discovery, not just filepath.Abs it. Deliberately compares with
+// raw == (not samePath, which normalizes both sides and would pass even
+// against the un-normalized result).
+func TestResolveCityFlagValueResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	got, err := resolveCityFlagValue(aliasCityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != cityPath {
+		t.Fatalf("resolveCityFlagValue(%q) = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", aliasCityPath, got, cityPath)
+	}
+}
+
+// TestResolveExplicitCityPathEnvResolvesSymlinkAlias pins ga-iawy13.8 for the
+// GC_CITY_PATH env ingest point (path-only, so it exercises validateCityPath
+// directly without registry name resolution).
+func TestResolveExplicitCityPathEnvResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", aliasCityPath)
+	t.Setenv("GC_CITY_ROOT", "")
+
+	got, ok := resolveExplicitCityPathEnv()
+	if !ok {
+		t.Fatal("resolveExplicitCityPathEnv() ok = false, want true")
+	}
+	if got != cityPath {
+		t.Fatalf("resolveExplicitCityPathEnv() via GC_CITY_PATH = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", got, cityPath)
+	}
+}
+
+// TestResolveCommandContextPathArgResolvesSymlinkAlias pins ga-iawy13.8 for
+// the bare positional city/rig path argument (resolveContextFromPath's
+// direct HasCityConfig branch), which currently returns the raw Abs'd alias
+// path instead of canonicalizing like its sibling branches (findCity,
+// resolveRigPathToContext) already do.
+func TestResolveCommandContextPathArgResolvesSymlinkAlias(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, aliasCityPath := makeCitySymlinkAliasFixture(t)
+
+	ctx, err := resolveCommandContext([]string{aliasCityPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.CityPath != cityPath {
+		t.Fatalf("resolveCommandContext([%q]).CityPath = %q, want canonical %q (must resolve the symlink alias, not just Abs it)", aliasCityPath, ctx.CityPath, cityPath)
+	}
+}
+
 func TestResolveExplicitCityPathEnvByName(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Chdir(t.TempDir())
@@ -785,5 +859,61 @@ func TestResolveExplicitCityPathEnvNameBestEffortOnCorruptRegistry(t *testing.T)
 
 	if got, ok := resolveExplicitCityPathEnv(); ok {
 		t.Fatalf("resolveExplicitCityPathEnv() = (%q, true) on a corrupt registry; want (\"\", false) best-effort fall-through", got)
+	}
+}
+
+// Regression (ga-klo4gz): resolveContextFromDir's step 10 (the ambient
+// upward walk via findCity) must never resolve inside a test binary, even
+// when a real city.toml sits above cwd. Silent ambient discovery is exactly
+// what let TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior/default
+// bleed a live host city into an unrelated test's result. This test itself
+// runs as a real *.test binary, so isTestBinary() is unconditionally true
+// here and the guard is exercised directly rather than mocked.
+func TestResolveContextFromDirRefusesAmbientWalkUpInTestBinary(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	ambient := t.TempDir()
+	mkTestCity(t, ambient) // real city.toml above cwd
+	nested := filepath.Join(ambient, "sub", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	ctx, err := resolveContextFromDir()
+	if err == nil {
+		t.Fatalf("resolveContextFromDir() = %+v, nil; want an error refusing the ambient walk-up to %q in a test binary", ctx, ambient)
+	}
+	for _, want := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name the override env var %q", err.Error(), want)
+		}
+	}
+}
+
+// Regression (ga-klo4gz, "guard-false-fail" — first reported ga-klo4gz.3,
+// mail gm-wisp-0d6monc): callers like cmd_events.go/cmd_sling.go/
+// resolveLocalCityForRigFallback use isCityDiscoveryNotFound to treat "no
+// city" as an expected, soft condition rather than a hard error. The step
+// 10 test-binary guard above must produce an error that satisfies this
+// same check, or every one of those callers starts hard-failing inside
+// test binaries instead of falling through the way they do in production.
+func TestIsCityDiscoveryNotFoundRecognizesTestBinaryGuardRefusal(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	ambient := t.TempDir()
+	mkTestCity(t, ambient)
+	nested := filepath.Join(ambient, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	_, err := resolveContextFromDir()
+	if err == nil {
+		t.Fatal("resolveContextFromDir() = nil error; want the test-binary ambient-walk refusal")
+	}
+	if !isCityDiscoveryNotFound(err) {
+		t.Errorf("isCityDiscoveryNotFound(%v) = false, want true — the guard's refusal must read as city-not-found so callers that special-case it don't hard-fail", err)
 	}
 }
