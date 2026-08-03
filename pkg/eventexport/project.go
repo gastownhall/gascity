@@ -430,7 +430,7 @@ func normalizeStepDependencies(stepID string, dependencies *[]string) (*[]string
 	if dependencies == nil {
 		return nil, true
 	}
-	normalized := append([]string(nil), (*dependencies)...)
+	normalized := append([]string{}, (*dependencies)...)
 	sort.Strings(normalized)
 	if err := validateStepDependencies(stepID, &normalized); err != nil {
 		return nil, false

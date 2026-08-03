@@ -180,6 +180,13 @@ func TestProjectEventNormalizesNativeStepDependencies(t *testing.T) {
 	if !ok || env.DependsOnStepIDs == nil || len(*env.DependsOnStepIDs) != 0 {
 		t.Fatalf("explicit root = %+v, %v; want present empty dependency list", env, ok)
 	}
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"depends_on_step_ids":[]`) {
+		t.Fatalf("explicit root wire = %s; want empty dependency array", wire)
+	}
 }
 
 func TestProjectEventRejectsInvalidPresentNativeTopology(t *testing.T) {
