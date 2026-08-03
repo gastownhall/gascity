@@ -897,10 +897,15 @@ func TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses(t *testing.T) {
 	}
 }
 
-func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
+// TestWispGC_ReapsRootlessPlainTaskWisp is the regression for
+// gastownhall/gascity#3780: a closed, wisp-tier, type=task row with no
+// gc.root_bead_id pointer has no owning root to check for collectibility --
+// it is its own closure boundary, so its already-closed status (guaranteed by
+// the candidates query) is sufficient to reap it. Previously such rows were
+// skipped outright and accumulated uncollected in the wisp tier.
+func TestWispGC_ReapsRootlessPlainTaskWisp(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
-	// Closed wisp-tier row with no gc.root_bead_id pointer: out of scope.
 	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
 	noRoot.Ephemeral = true
 	store := newGCStore([]beads.Bead{noRoot})
@@ -910,11 +915,33 @@ func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 0 {
-		t.Fatalf("purged = %d, want 0; rows without a root pointer are out of scope", purged)
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1; a rootless plain-task wisp is its own closure boundary", purged)
 	}
-	if _, err := store.Get("no-root"); err != nil {
-		t.Fatalf("no-root must be preserved: %v", err)
+	assertDeletedIDs(t, store.deletedIDs, "no-root")
+}
+
+// TestWispGC_ReapSkipsRootlessNonTaskRow preserves the original safety
+// boundary for any rootless closed wisp-tier row that is NOT a plain task:
+// an unrecognized shape the reaper cannot prove safe to collect stays out of
+// scope, same as before #3780.
+func TestWispGC_ReapSkipsRootlessNonTaskRow(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	noRoot := makeGCBeadWithMetadata("no-root-other", now.Add(-2*time.Hour), "closed", "note", map[string]string{})
+	noRoot.Ephemeral = true
+	store := newGCStore([]beads.Bead{noRoot})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless non-task row stays out of scope", purged)
+	}
+	if _, err := store.Get("no-root-other"); err != nil {
+		t.Fatalf("no-root-other must be preserved: %v", err)
 	}
 }
 

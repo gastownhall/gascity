@@ -317,15 +317,19 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
-// list). Candidates are closed wisp-tier rows carrying a gc.root_bead_id
-// pointer and older than cutoff.
+// list), plus rootless plain-task wisps that never had an owning root at all
+// (gastownhall/gascity#3780). Candidates are closed wisp-tier rows older than
+// cutoff, either carrying a gc.root_bead_id pointer or a bare type=task row.
 //
-// Safety: a descendant is reaped only when its root is provably collectible —
-// the root Get returns ErrNotFound (root gone) or the root is terminal
-// (closed/tombstone). A live/open root, or any other (unreadable) Get error,
-// causes the descendant to be SKIPPED so an in-flight workflow is never
-// stripped of its closed steps. The per-root Get decision is cached so many
-// siblings sharing one dead root cost a single Get.
+// Safety: a descendant with a root pointer is reaped only when its root is
+// provably collectible — the root Get returns ErrNotFound (root gone) or the
+// root is terminal (closed/tombstone). A live/open root, or any other
+// (unreadable) Get error, causes the descendant to be SKIPPED so an in-flight
+// workflow is never stripped of its closed steps. The per-root Get decision
+// is cached so many siblings sharing one dead root cost a single Get. A
+// rootless row needs no such check when it is a plain task: its own closed
+// status is the entire collectibility fence. A rootless row that is not a
+// plain task is an unrecognized shape and stays SKIPPED.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
@@ -366,8 +370,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		}
 
 		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
-		if rootID == "" {
-			// No root pointer — out of scope for orphan reaping.
+		if rootID == "" && c.Type != "task" {
+			// No root pointer and not a plain task: an unrecognized shape
+			// this reaper cannot prove safe to collect — out of scope.
 			continue
 		}
 
@@ -376,23 +381,34 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
-		decision, cached := rootCollectible[rootID]
-		if !cached {
-			root, getErr := store.Get(rootID)
-			switch {
-			case errors.Is(getErr, beads.ErrNotFound):
-				decision = true // root gone
-			case getErr == nil && convoycore.IsTerminalStatus(root.Status):
-				decision = true // root terminal
-			case getErr == nil:
-				decision = false // root live/open — never reap its descendants
-			default:
-				// Any other Get error: cannot prove safe — skip without caching
-				// as collectible. Surface so the sweep records the failure.
-				decision = false
-				collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+		var decision bool
+		if rootID == "" {
+			// A rootless plain-task wisp has no owning root to check for
+			// collectibility — its own closed status (guaranteed by the
+			// candidates query above) is the only fence needed
+			// (gastownhall/gascity#3780).
+			decision = true
+		} else {
+			cached, ok := rootCollectible[rootID]
+			if !ok {
+				root, getErr := store.Get(rootID)
+				switch {
+				case errors.Is(getErr, beads.ErrNotFound):
+					cached = true // root gone
+				case getErr == nil && convoycore.IsTerminalStatus(root.Status):
+					cached = true // root terminal
+				case getErr == nil:
+					cached = false // root live/open — never reap its descendants
+				default:
+					// Any other Get error: cannot prove safe — skip without
+					// caching as collectible. Surface so the sweep records
+					// the failure.
+					cached = false
+					collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+				}
+				rootCollectible[rootID] = cached
 			}
-			rootCollectible[rootID] = decision
+			decision = cached
 		}
 		if !decision {
 			continue
