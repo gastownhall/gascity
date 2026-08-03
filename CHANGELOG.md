@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
+  latest tag.** Per `gc import add --help`, a local path inside a git
+  worktree is documented to be "locked to the current commit," but the
+  default version resolution (absent an explicit `--version`) preferred the
+  repo's latest semver tag whenever one existed. A pack added to the
+  worktree after the last tag was cut resolved to a checkout whose tree
+  predates the pack, failing with a misleading "missing pack.toml" error
+  even though the pack exists at HEAD. A local-worktree-promoted source now
+  always locks to `sha:<HEAD commit>`, matching the documented behavior;
+  registry/remote sources are unaffected. Fixes #3659.
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
