@@ -344,8 +344,10 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // The pod must be Running with a live tmux "main" session, else
 // [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run (provision-half); env is provision-half too (set in the pod spec at
-// create time, not re-injected — respawn-pane carries no env), matching tmux/ssh.
+// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
+// too (set in the pod spec at create time, not re-injected — respawn-pane carries
+// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
+// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -531,13 +533,16 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Uses -l (literal mode) so tmux key names in the message text are not
 // interpreted as keystrokes. Content blocks are flattened to text.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	_ = p.carrier().Nudge(context.Background(), name, content) // best-effort
-	return nil
+	return p.carrier().Nudge(context.Background(), name, content)
 }
 
-// SendKeys sends bare keystrokes to the tmux session.
+// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
+// missing session (contract: no-op), but a genuine transport failure to a
+// live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	_ = p.carrier().SendKeys(context.Background(), name, keys...) // best-effort
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+		return err
+	}
 	return nil
 }
 
@@ -716,6 +721,11 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return []byte(out), 0, nil
 }
 
+// findRunningPod resolves the running pod for name. A missing pod (scaled
+// down, evicted, never provisioned) is reported as [runtime.ErrSessionNotFound]
+// so callers can distinguish "session is gone" from a genuine transport
+// failure reaching a pod that does exist — the same distinction Relaunch
+// already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
 	label := SanitizeLabel(name)
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
@@ -723,7 +733,7 @@ func (p *Provider) findRunningPod(ctx context.Context, name string) (string, err
 		return "", err
 	}
 	if len(pods) == 0 {
-		return "", fmt.Errorf("no running pod for session %q", name)
+		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
 	}
 	return pods[0].Name, nil
 }

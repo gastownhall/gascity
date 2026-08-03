@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -143,6 +145,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
 			s.state.CityPath(),
+			configuredWorkspaceSessionEnv(s.state.Config()),
 			alias,
 			explicitName,
 			template,
@@ -322,7 +325,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	}
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
@@ -375,20 +378,134 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 
 // --- Session Transcript ---
 
-// sessionTranscriptGetResponse is the union of conversation/text and raw
-// transcript response shapes. When Format is "conversation" or "text",
-// Turns is populated. When Format is "raw", Messages carries pre-decoded
-// provider-native frames as generic JSON values. The spec describes the
-// items as arbitrary JSON (any) — clients interpret shapes based on the
-// session's provider.
+// sessionTranscriptGetResponse is the runtime container for conversation,
+// raw, and structured transcript responses. Its OpenAPI schema is a
+// discriminated union so generated clients never see raw provider frames on
+// the structured response branch.
 type sessionTranscriptGetResponse struct {
+	ID                 string                      `json:"id"`
+	Template           string                      `json:"template"`
+	Provider           string                      `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format             string                      `json:"format" doc:"conversation, text, raw, or structured."`
+	SchemaVersion      string                      `json:"schema_version,omitempty" doc:"Structured session transcript schema version when format is structured."`
+	Operation          string                      `json:"operation,omitempty" doc:"Structured response application mode. REST structured transcripts are snapshots."`
+	ResetReason        string                      `json:"reset_reason,omitempty" doc:"Structured reset reason when operation is reset."`
+	History            *SessionStructuredHistory   `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
+	Turns              []outputTurn                `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
+	Messages           *[]SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo  `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptConversationResponse struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
-	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
-	Format     string                     `json:"format" doc:"conversation, text, or raw."`
-	Turns      []outputTurn               `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages   []SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
+	Format     string                     `json:"format" enum:"conversation,text" doc:"Conversation or text transcript format."`
+	Turns      []outputTurn               `json:"turns,omitempty" doc:"Conversation/text transcript turns."`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptRawResponse struct {
+	ID         string                     `json:"id"`
+	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format     string                     `json:"format" enum:"raw" doc:"Raw provider-native transcript format."`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames emitted only for raw format."`
+	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptStructuredResponse struct {
+	ID                 string                     `json:"id"`
+	Template           string                     `json:"template"`
+	Provider           string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, opencode, etc.)."`
+	Format             string                     `json:"format" enum:"structured" doc:"Structured provider-neutral transcript format."`
+	SchemaVersion      string                     `json:"schema_version" enum:"session.structured.v1" doc:"Structured session transcript schema version."`
+	Operation          string                     `json:"operation" enum:"snapshot" doc:"Always snapshot for a REST structured transcript."`
+	History            *SessionStructuredHistory  `json:"history" doc:"Normalized worker-history envelope when format is structured."`
+	StructuredMessages []SessionStructuredMessage `json:"structured_messages" doc:"Provider-normalized structured messages."`
+	Pagination         *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+func nonNilStructuredMessages(messages []SessionStructuredMessage) []SessionStructuredMessage {
+	if messages == nil {
+		return []SessionStructuredMessage{}
+	}
+	return messages
+}
+
+func structuredMessagesField(messages []SessionStructuredMessage) *[]SessionStructuredMessage {
+	messages = nonNilStructuredMessages(messages)
+	return &messages
+}
+
+func nonNilRawMessages(messages []SessionRawMessageFrame) []SessionRawMessageFrame {
+	if messages == nil {
+		return []SessionRawMessageFrame{}
+	}
+	return messages
+}
+
+func rawMessagesField(messages []SessionRawMessageFrame) *[]SessionRawMessageFrame {
+	messages = nonNilRawMessages(messages)
+	return &messages
+}
+
+func structuredTranscriptMessages(response sessionTranscriptGetResponse) []SessionStructuredMessage {
+	if response.StructuredMessages == nil {
+		return nil
+	}
+	return *response.StructuredMessages
+}
+
+func rawTranscriptMessages(response sessionTranscriptGetResponse) []SessionRawMessageFrame {
+	if response.Messages == nil {
+		return nil
+	}
+	return *response.Messages
+}
+
+// Schema publishes session transcript responses as a discriminated union over
+// the format field, keeping provider-native raw frames out of the structured
+// response schema while preserving the compact runtime container above.
+func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
+	const name = "SessionTranscriptGetResponse"
+	if _, ok := r.Map()[name]; !ok {
+		variants := []struct {
+			format string
+			name   string
+			typ    reflect.Type
+		}{
+			{format: "conversation", name: "SessionTranscriptConversationResponse", typ: reflect.TypeOf(sessionTranscriptConversationResponse{})},
+			{format: "text", name: "SessionTranscriptConversationResponse", typ: reflect.TypeOf(sessionTranscriptConversationResponse{})},
+			{format: "raw", name: "SessionTranscriptRawResponse", typ: reflect.TypeOf(sessionTranscriptRawResponse{})},
+			{format: "structured", name: "SessionTranscriptStructuredResponse", typ: reflect.TypeOf(sessionTranscriptStructuredResponse{})},
+		}
+		oneOf := make([]*huma.Schema, 0, 3)
+		mapping := make(map[string]string, len(variants))
+		seen := make(map[string]bool, 3)
+		for _, variant := range variants {
+			ref := schemaRefPrefix + variant.name
+			if _, ok := r.Map()[variant.name]; !ok {
+				r.Schema(variant.typ, true, variant.name)
+			}
+			if !seen[variant.name] {
+				oneOf = append(oneOf, &huma.Schema{Ref: ref})
+				seen[variant.name] = true
+			}
+			mapping[variant.format] = ref
+		}
+		r.Map()[name] = &huma.Schema{
+			Title:       "Session transcript response",
+			Description: "Discriminated union of session transcript response shapes. Raw provider-native frames are available only on the raw branch; structured responses contain only provider-neutral typed data.",
+			OneOf:       oneOf,
+			Discriminator: &huma.Discriminator{
+				PropertyName: "format",
+				Mapping:      mapping,
+			},
+		}
+	}
+	return &huma.Schema{Ref: schemaRefPrefix + name}
 }
 
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
@@ -416,21 +533,32 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, apierr.ValidationFailed.Msg("at least one of 'title' or 'alias' is required")
 	}
 
-	b, err := store.Get(id)
+	// Validate through the session front door: the codec stays confined inside
+	// Store.Get. A present-but-non-session bead yields ErrSessionNotFound → the
+	// existing "not a session" 400; an absent id stays on the beads.ErrNotFound
+	// chain → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+	// Preserve the empty-type heal RepairEmptyType performed on the raw bead.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
 		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
-		if strings.TrimSpace(session.InfoFromPersistedBead(b).AgentName) != "" {
+		// agent_name off the persisted Info from the front door — the
+		// controller-managed-alias gate; the codec projection of the persisted
+		// agent_name field, with no raw bead in the handler's hands.
+		if strings.TrimSpace(info.AgentName) != "" {
 			return nil, apierr.Forbidden.Msg("forbidden: alias is controller-managed for this session")
 		}
 		if lockErr := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
@@ -445,7 +573,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -472,6 +600,12 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
+	// WI-6 residual: raw-validation lane NOT converted to the session front door,
+	// because the raw bead is read downstream — b.Metadata feeds legacySessionKind
+	// and resolveProviderForSessionOptions below (provider/options resolution reads
+	// the raw metadata map, not projected Info fields). Converting needs an
+	// Info/PersistedResponse-fed provider-options resolution; deferred to the
+	// front-door flip (WI-7). The 400/404 contract matches the converted siblings.
 	b, err := store.Get(id)
 	if err != nil {
 		return nil, humaStoreError(err)
@@ -524,7 +658,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	s.state.Poke()
 
-	info, presponse, err := mgr.GetWithPersistedResponse(id)
+	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -548,10 +682,20 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
-func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
+func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+		}
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	intent := input.Body.Intent
@@ -595,10 +739,20 @@ func (s *Server) humaHandleSessionSubmit(_ context.Context, input *SessionSubmit
 
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
-func (s *Server) humaHandleSessionMessage(_ context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
+func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+		}
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return nil, humaResolveError(err)
 	}
 
 	reqID, reqIDErr := newRequestID()
@@ -866,30 +1020,31 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		return nil, humaResolveError(err)
 	}
 
-	b, err := store.Get(id)
+	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
+		if errors.Is(err, session.ErrNotSessionBead) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
+		if state, conflict := session.WakeConflictState(err); conflict {
+			return nil, apierr.SessionConflict.Msg("session " + id + " is " + state)
+		}
+		// Route every remaining store error through humaStoreError: the fused
+		// Get error keeps its original 404 "not_found: "/500 "internal: " mapping,
+		// and a mid-wake write error keeps the "internal: " prefix. (Delta vs the
+		// pre-fusion handler: a mid-wake write ErrNotFound now maps 404 instead of
+		// 500 — a safe-direction, near-unreachable shift, mirrored in the REST
+		// handler's writeStoreError.)
 		return nil, humaStoreError(err)
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
-	}
-	session.RepairEmptyType(store.Store, &b)
-	if b.Status == "closed" {
-		return nil, apierr.SessionConflict.Msg("session " + id + " is closed")
-	}
-
-	nudgeIDs, err := session.WakeSession(store.Store, b, time.Now().UTC())
-	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// RAW SessionNameMetadata (not Info.SessionName, which falls back to
-	// sessionNameFor(ID)) to preserve the skip-when-unset behavior.
-	sessionName := session.InfoFromPersistedBead(b).SessionNameMetadata
+	// sessionNameFor(ID)) to preserve the skip-when-unset behavior. res.Info is
+	// the typed WakeResult projection (WI-4), so no raw bead is cracked here.
+	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
@@ -925,21 +1080,28 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	}
 
 	// Huma validates Body.Title (minLength:1); no handler guard needed.
-	b, err := store.Get(id)
+	// Validate through the session front door (mirrors humaHandleSessionPatch):
+	// nothing downstream reads the raw bead — rename operates by id. Present-but-
+	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound
+	// → 404.
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
 		return nil, humaStoreError(err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	session.RepairEmptyType(store.Store, &b)
 
 	mgr := s.sessionManager(store.Store)
 	if err := mgr.Rename(id, input.Body.Title); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

@@ -1,7 +1,7 @@
 import { errorMessage, GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { apiErrorParts, formatApiError } from '../api/client';
+import { formatApiError } from '../api/client';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { Button } from '../components/Button';
 import { PageHeader } from '../components/PageHeader';
@@ -9,7 +9,6 @@ import { RelatedEntities } from '../components/RelatedEntities';
 import { StatusBadge, stateTone } from '../components/StatusBadge';
 import { AgentBeadsAssigned } from '../components/agent/AgentBeadsAssigned';
 import { AgentChatThread } from '../components/agent/AgentChatThread';
-import { AgentDirectives, type AgentDirectivesError } from '../components/agent/AgentDirectives';
 import { AgentLivePeek } from '../components/agent/AgentLivePeek';
 import { AgentMetadata } from '../components/agent/AgentMetadata';
 import { useOperatorConfig } from '../contexts/OperatorConfigContext';
@@ -19,7 +18,6 @@ import { useAbortableVisibleRefresh } from '../hooks/useAbortableVisibleRefresh'
 import { useEntityLinks } from '../hooks/useEntityLinks';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { fetchSupervisorAgentPrime } from '../supervisor/agentReads';
 import { listSupervisorBeadsAssignedTo, type SupervisorBead } from '../supervisor/beadReads';
 import { listSupervisorMail, type SupervisorMailItem } from '../supervisor/mailReads';
 import { listSupervisorSessions, type SupervisorSession } from '../supervisor/sessionReads';
@@ -52,10 +50,6 @@ export function AgentDetailPage() {
   const [viewingBeadId, setViewingBeadId] = useState<string | null>(null);
 
   const now = useNow();
-
-  const [directivesPrompt, setDirectivesPrompt] = useState<string | null>(null);
-  const [directivesLoading, setDirectivesLoading] = useState(false);
-  const [directivesError, setDirectivesError] = useState<AgentDirectivesError | null>(null);
 
   const decoded = useMemo(() => {
     try {
@@ -196,38 +190,6 @@ export function AgentDetailPage() {
         ? chatState.error
         : null;
 
-  // Directives: lazy-fetch the agent's composed prompt from the supervisor.
-  // Cached for the lifetime of the page (no auto-refresh); operator can
-  // manually re-pull. Bail out (render nothing) when there's no alias
-  // candidate — supervisor prime is alias-keyed, not id-keyed.
-  const primeAlias = useMemo<string | null>(() => {
-    if (session === null) return null;
-    return session.alias ?? session.template ?? null;
-  }, [session]);
-
-  const refreshDirectives = useCallback(async () => {
-    if (primeAlias === null) return;
-    setDirectivesLoading(true);
-    setDirectivesError(null);
-    try {
-      const result = await fetchSupervisorAgentPrime(primeAlias);
-      setDirectivesPrompt(result.prompt);
-    } catch (err) {
-      const parts = apiErrorParts(err, 'directives fetch failed');
-      const directivesError: {
-        status?: number;
-        kind?: string;
-        message: string;
-      } = { message: parts.message };
-      if (parts.status !== undefined) directivesError.status = parts.status;
-      if (parts.kind !== undefined) directivesError.kind = parts.kind;
-      setDirectivesError(directivesError);
-      setDirectivesPrompt(null);
-    } finally {
-      setDirectivesLoading(false);
-    }
-  }, [primeAlias]);
-
   // Related entities (gascity-dashboard-j4x). Focus on the session id so
   // the index surfaces the beads, formula runs, and PRs adjacent to this
   // agent's work. Hook is called unconditionally (before the early
@@ -364,16 +326,6 @@ export function AgentDetailPage() {
       />
 
       <AgentLivePeek session={session} />
-
-      {primeAlias !== null && (
-        <AgentDirectives
-          alias={primeAlias}
-          prompt={directivesPrompt}
-          loading={directivesLoading}
-          error={directivesError}
-          onRefresh={() => void refreshDirectives()}
-        />
-      )}
 
       <AgentChatThread messages={chatMessages} loading={chatLoading} error={chatError} now={now} />
 

@@ -29,6 +29,92 @@ source_kind = "git"
   description = "Stable release."
 `
 
+func TestParseCatalogNormalizesAttributionPermissively(t *testing.T) {
+	const catalogText = `schema = 1
+
+[[pack]]
+name = "maintained"
+tier = "maintained"
+publisher = "  Gas City  "
+description = "Maintained pack."
+source = "https://packages.example/maintained.git"
+source_kind = "git"
+
+[[pack]]
+name = "community"
+tier = "community"
+publisher = "wespd"
+description = "Community pack."
+source = "https://packages.example/community.git"
+source_kind = "git"
+
+[[pack]]
+name = "missing"
+description = "Legacy pack."
+source = "https://packages.example/missing.git"
+source_kind = "git"
+
+[[pack]]
+name = "invalid-tier"
+tier = "official"
+publisher = "Impostor"
+description = "Invalid tier."
+source = "https://packages.example/invalid-tier.git"
+source_kind = "git"
+
+[[pack]]
+name = "unattributed-maintained"
+tier = "maintained"
+publisher = " "
+description = "Maintained without a publisher."
+source = "https://packages.example/unattributed-maintained.git"
+source_kind = "git"
+
+[[pack]]
+name = "malformed"
+tier = true
+publisher = 42
+description = "Malformed attribution types."
+source = "https://packages.example/malformed.git"
+source_kind = "git"
+`
+
+	catalog, err := ParseCatalog([]byte(catalogText))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+	if err := ValidateCatalog(catalog, true); err != nil {
+		t.Fatalf("ValidateCatalog: %v", err)
+	}
+
+	got := make(map[string][2]string, len(catalog.Packs))
+	for _, pack := range catalog.Packs {
+		got[pack.Name] = [2]string{pack.Tier, pack.Publisher}
+	}
+	want := map[string][2]string{
+		"maintained":              {CatalogTierMaintained, "Gas City"},
+		"community":               {CatalogTierCommunity, "wespd"},
+		"missing":                 {CatalogTierCommunity, UnknownPublisher},
+		"invalid-tier":            {CatalogTierCommunity, "Impostor"},
+		"unattributed-maintained": {CatalogTierCommunity, UnknownPublisher},
+		"malformed":               {CatalogTierCommunity, UnknownPublisher},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("attribution rows = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for name, wantAttribution := range want {
+		if gotAttribution := got[name]; gotAttribution != wantAttribution {
+			t.Errorf("%s attribution = %q/%q, want %q/%q",
+				name,
+				gotAttribution[0],
+				gotAttribution[1],
+				wantAttribution[0],
+				wantAttribution[1],
+			)
+		}
+	}
+}
+
 func TestValidateCatalogNamesReleasesAndHashes(t *testing.T) {
 	catalog, err := ParseCatalog([]byte(validCatalog))
 	if err != nil {

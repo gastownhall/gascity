@@ -161,6 +161,179 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 	}
 }
 
+func TestApplyGraphControlsFinalizerExcludesRalphIterationScope(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "review-loop",
+				Title: "Review loop",
+				Ralph: &RalphSpec{
+					MaxAttempts: 3,
+					Check: &RalphCheckSpec{
+						Mode: "exec",
+						Path: ".gascity/checks/review.sh",
+					},
+				},
+				Children: []*Step{
+					{ID: "review", Title: "Review", Type: "task"},
+					{ID: "synthesize", Title: "Synthesize", Type: "task", Needs: []string{"review"}},
+				},
+			},
+			{
+				ID:    "publish",
+				Title: "Publish",
+				Type:  "task",
+				Needs: []string{"review-loop"},
+			},
+		},
+	}
+
+	expanded, err := ApplyRalph(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	if !containsString(finalizer.Needs, "review-loop") {
+		t.Fatalf("workflow-finalize needs = %v, want logical Ralph control even when referenced downstream", finalizer.Needs)
+	}
+	if !containsString(finalizer.Needs, "publish") {
+		t.Fatalf("workflow-finalize needs = %v, want downstream sink", finalizer.Needs)
+	}
+	if containsString(finalizer.Needs, "review-loop.iteration.1") {
+		t.Fatalf("workflow-finalize needs = %v, must not include physical Ralph iteration", finalizer.Needs)
+	}
+	logicalCount := 0
+	for _, id := range finalizer.Needs {
+		if id == "review-loop" {
+			logicalCount++
+		}
+	}
+	if logicalCount != 1 {
+		t.Fatalf("workflow-finalize needs = %v, want logical Ralph control exactly once", finalizer.Needs)
+	}
+}
+
+func TestApplyGraphControlsFinalizerExcludesNestedRalphAttemptLineage(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "outer-loop",
+				Title: "Outer loop",
+				Ralph: &RalphSpec{
+					MaxAttempts: 3,
+					Check:       &RalphCheckSpec{Mode: "exec", Path: ".gascity/checks/outer.sh"},
+				},
+				Children: []*Step{
+					{
+						ID:    "inner-loop",
+						Title: "Inner loop",
+						Ralph: &RalphSpec{
+							MaxAttempts: 2,
+							Check:       &RalphCheckSpec{Mode: "exec", Path: ".gascity/checks/inner.sh"},
+						},
+						Children: []*Step{{ID: "review", Title: "Review", Type: "task"}},
+					},
+				},
+			},
+			{ID: "publish", Title: "Publish", Type: "task", Needs: []string{"outer-loop"}},
+		},
+	}
+
+	expanded, err := ApplyRalph(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	for _, required := range []string{"outer-loop", "publish"} {
+		if !containsString(finalizer.Needs, required) {
+			t.Fatalf("workflow-finalize needs = %v, want %q", finalizer.Needs, required)
+		}
+	}
+	for _, stale := range []string{
+		"outer-loop.iteration.1",
+		"outer-loop.iteration.1.inner-loop",
+		"outer-loop.iteration.1.inner-loop.iteration.1",
+	} {
+		if containsString(finalizer.Needs, stale) {
+			t.Fatalf("workflow-finalize needs = %v, must not include nested physical lineage %q", finalizer.Needs, stale)
+		}
+	}
+}
+
+func TestGraphSinkStepIDsFailsClosedForInvalidAttemptControl(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		includeControl   bool
+		controlKind      string
+		attemptStepID    string
+		controlStepID    string
+		scopeRef         string
+		includeEnclosing bool
+		enclosingKind    string
+	}{
+		{name: "missing control", attemptStepID: "loop"},
+		{name: "non-control target", includeControl: true, controlKind: beadmeta.KindTask, attemptStepID: "loop", controlStepID: "loop"},
+		{name: "missing attempt step ID", includeControl: true, controlKind: beadmeta.KindRalph, controlStepID: "loop"},
+		{name: "missing control step ID", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop"},
+		{name: "mismatched step IDs", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "other-loop"},
+		{name: "dangling enclosing scope", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "loop", scopeRef: "missing"},
+		{name: "wrong-kind enclosing scope", includeControl: true, controlKind: beadmeta.KindRalph, attemptStepID: "loop", controlStepID: "loop", scopeRef: "enclosing", includeEnclosing: true, enclosingKind: beadmeta.KindTask},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := []*Step{
+				{
+					ID: "iteration",
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:       beadmeta.KindScope,
+						beadmeta.AttemptMetadataKey:    "1",
+						beadmeta.ControlForMetadataKey: "logical",
+						beadmeta.StepIDMetadataKey:     tc.attemptStepID,
+						beadmeta.ScopeRefMetadataKey:   tc.scopeRef,
+					},
+				},
+			}
+			if tc.includeControl {
+				steps = append(steps, &Step{
+					ID:    "logical",
+					Needs: []string{"iteration"},
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:   tc.controlKind,
+						beadmeta.StepIDMetadataKey: tc.controlStepID,
+					},
+				})
+			}
+			if tc.includeEnclosing {
+				steps = append(steps, &Step{
+					ID:       "enclosing",
+					Metadata: map[string]string{beadmeta.KindMetadataKey: tc.enclosingKind},
+				})
+			}
+
+			if sinks := graphSinkStepIDs(steps); !containsString(sinks, "iteration") {
+				t.Fatalf("graphSinkStepIDs = %v, want physical scope retained for invalid lineage", sinks)
+			}
+		})
+	}
+}
+
 func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *testing.T) {
 	t.Parallel()
 

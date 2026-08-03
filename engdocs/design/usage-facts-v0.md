@@ -18,7 +18,7 @@ A new package `internal/usage` exposing a usage fact and a narrow write-only sin
 type UsageFact struct {
 	RunID     string // groups facts of one execution (see Run identity). A bead id, never frozen on the session.
 	SessionID string // the session bead id. Join key to manifold spend (EIA session_id) + recall transcripts. omitempty.
-	StepID    string // the acting work bead id when gc.active_work_bead is present; omitempty for ad-hoc/manual/idle sessions.
+	StepID    string // reserved for per-step attribution; unset in v0 — model/compute facts are run-level. omitempty.
 	Worker    string // session name
 	City      string
 

@@ -217,7 +217,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
   `docs/reference/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `internal/api/dashboardspa/web/shared/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -239,6 +239,19 @@ build; full rationale is in the architecture docs):
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Vendor-neutral hosted-service wire.** The OSS client of a hosted
+  Gas City service (`internal/cliauth`, `internal/serviceproto`, the
+  `gc login`/`gc whoami` commands) speaks a generic, published protocol
+  (`docs/reference/specs/service-protocol-v0.md`) and holds an **opaque
+  bearer** it never parses. Account/commercial policy — trial, billing,
+  credit, plan, quota, org/tenant identity — must **never** be a wire
+  field; it travels only in the opaque server-authored `message`/`links`
+  fields the CLI prints verbatim (spec §5). Default endpoint URLs (e.g.
+  `defaultServiceURL = "https://gascity.com"`) are **configuration data,
+  not commercial code** — sanctioned exactly like the pack-registry
+  default. Enforced by `scripts/check-core-boundary.sh` check (f) and the
+  `internal/cliauth` wire golden test; all provisioning/billing/trial
+  logic lives server-side in the private hosted repos.
 
 ## Active migrations
 
@@ -255,9 +268,12 @@ the canonical route, not the legacy route.
   `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
   `cmd/gc`. The remaining manager-construction/direct-create bypasses
   are split by category: `internal/api/session_manager.go` constructs
-  `session.Manager` values for API handlers, and
-  `internal/api/session_resolution.go` still calls
-  `mgr.CreateSession(...)` directly. Session creation goes through the
+  `session.Manager` values for API handlers.
+  (`internal/api/session_resolution.go`'s named-session create was
+  converted to the worker boundary — it now routes through
+  `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
+  `newResolvedWorkerSessionHandle`, no longer calling
+  `mgr.CreateSession(...)` directly.) Session creation goes through the
   single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
   point (`NewManagerWithOptions` is the sole Manager constructor). This
   list is not a sessionlog read-site inventory; stream and transcript
@@ -298,6 +314,9 @@ These decisions are final. Do not revisit them.
   consumer layer. Apply this before adding any new primitive.
 - **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
   lifecycle analysis, and Gas Town cleanup bug lessons.
+- **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
+  "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
+  before signing off that criterion on any deploy gate.
 
 ## Key design principles
 
@@ -356,6 +375,14 @@ becoming more useful as models improve — it becomes LESS useful instead.
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
   for city shutdown. Treat personal tmux servers as out of bounds.
+- **Git safety:** Never run `git checkout <ref> -- .` (or any pathspec
+  checkout) in a worktree you do not own — above all the shared rig root
+  (`$GC_RIG_ROOT`). Unlike `git checkout <ref>`, the pathspec form overwrites
+  the index and worktree for every tracked path, moves no HEAD (so no reflog
+  entry) and stages nothing (so no dangling blob): overwritten uncommitted
+  work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
+  To check something out, use your own worktree or a disposable
+  `git worktree add`.
 - **Adding agent config fields:** When adding a field to `config.Agent`,
   also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
   merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
@@ -391,14 +418,30 @@ full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
 the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
 ~10 cascading cache-miss errors across the executor pool.
 
-**Safe alternative for cold builds:**
+**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
+shim already routes the default `GOCACHE` to a shared **on-disk** cache
+(`~/.cache/go-build`) and pins compile/link temp to disk
+(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
+corrupted by a normal build.
+
+**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
+RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
+tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
+unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
+2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
+on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
+does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
+defeats it.
+
+**If you truly need an isolated cold build** (a from-scratch compile without
+`go clean -cache`), put the throwaway cache **on disk** and remove it
+unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
+linker's own scratch also stays off tmpfs:
 
 ```bash
-GOCACHE=$(mktemp -d) go build ./cmd/gc/
+tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
+GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 ```
-
-This isolates the cache to a throwaway directory without touching the shared
-pool. Clean up with `rm -rf` after if disk space matters.
 
 **Exception:** `go clean -testcache` is explicitly allowed. It clears only the
 test-result cache, not the compiled-object cache, and does not corrupt
@@ -415,12 +458,12 @@ Before considering any task complete:
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
-- `make dashboard-check` passes for any change touching `internal/api/`,
+- `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-ci`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
@@ -472,6 +515,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 - For controller or session reconciler incidents, use `gc trace` and follow `engdocs/contributors/reconciler-debugging.md` for the artifact collection workflow.
+- When a bead needs to pause on a specific actor or condition, only `hold:mayor` and `hold:external` are canonical (set via `bd set-state <id> hold=mayor|external --reason "..."`) — never invent a new ad hoc hold/blocked label. See `engdocs/contributors/hold-label-conventions.md`.
 
 ## Session Completion
 

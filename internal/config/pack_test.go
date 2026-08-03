@@ -5330,3 +5330,49 @@ func TestCachedPackField(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports is the
+// end-to-end regression for #4524: a pack's [agent_defaults] never applies
+// to agents brought in by the pack's own [imports.*]. This confirms the
+// warning actually surfaces through the real pack-load path, not just the
+// pure warnUnusedPackAgentDefaultsForImports function in isolation.
+func TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/roles/pack.toml", `
+[pack]
+name = "roles"
+schema = 2
+
+[[agent]]
+name = "requirements-planner"
+`)
+
+	writeFile(t, dir, "packs/local/pack.toml", `
+[pack]
+name = "local"
+schema = 2
+
+[agent_defaults]
+provider = "cacc-sol"
+
+[imports.roles]
+source = "../roles"
+`)
+
+	loaded, err := LoadPackForLint(fsys.OSFS{}, filepath.Join(dir, "packs", "local"))
+	if err != nil {
+		t.Fatalf("LoadPackForLint: %v", err)
+	}
+	const wantSubstring = "does not apply to a pack's own [imports.*] agents"
+	found := false
+	for _, w := range loaded.Warnings {
+		if strings.Contains(w, wantSubstring) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %#v, want one containing %q", loaded.Warnings, wantSubstring)
+	}
+}

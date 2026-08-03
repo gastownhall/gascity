@@ -99,7 +99,7 @@ func TestAssigneeIdentities(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AssigneeIdentities(InfoFromPersistedBead(tt.bead))
+			got := AssigneeIdentities(infoFromPersistedBead(tt.bead))
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d identities %v, want %d %v", len(got), got, len(tt.want), tt.want)
 			}

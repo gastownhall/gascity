@@ -26,7 +26,42 @@ command -v advisory_changed >/dev/null 2>&1 || { echo "FAIL: advisory_changed no
 command -v advisory_record  >/dev/null 2>&1 || { echo "FAIL: advisory_record not defined"; exit 1; }
 command -v advisory_clear   >/dev/null 2>&1 || { echo "FAIL: advisory_clear not defined"; exit 1; }
 
-WORK=$(mktemp -d)
+# Reap work dirs left by a run of this script that was SIGKILLed or timed
+# out: SIGKILL cannot be trapped, so `trap ... EXIT` below never fires for
+# a killed run. This sweep is the backstop, keying on the creator's PID
+# embedded in the dir name (ga-ntbpyb.1 -- same fragility class as the tmux
+# socket parent dir leak).
+#
+# Only dirs older than the age guard are eligible. A directory's mtime is
+# visible across PID namespaces, whereas `kill -0 <pid>` is not: when two
+# runs share /tmp in distinct PID namespaces, a live sibling's host PID can
+# read as dead, so a PID-only sweep could rm -rf its fresh WORK dir out from
+# under it and flake it. The age guard mirrors test/tmuxtest's
+# socketParentSweepMinAge (1h) so a just-created sibling is never eligible and
+# only genuine orphans are swept. Among eligible dirs we still skip any whose
+# creator PID is alive, treating EPERM as alive to match internal/pidutil.Alive
+# rather than removing on it. The probe runs under LC_ALL=C so the EPERM message
+# is the deterministic C-locale text the case below matches; strerror is
+# otherwise localized and a non-C locale would reap a live foreign-user dir.
+TMPROOT="${TMPDIR:-/tmp}"
+find "$TMPROOT" -maxdepth 1 -type d -name 'gc-dolt-advisory-test-work.*' -mmin +60 2>/dev/null |
+  while IFS= read -r d; do
+    base=${d##*/}
+    rest=${base#gc-dolt-advisory-test-work.}
+    pid=${rest%%.*}
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if kill_err=$(LC_ALL=C kill -0 "$pid" 2>&1); then
+      continue
+    fi
+    case "$kill_err" in
+      *ermitted*|*ermission*) continue ;;
+    esac
+    rm -rf "$d"
+  done
+
+WORK=$(mktemp -d "$TMPROOT/gc-dolt-advisory-test-work.$$.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 STATE="$WORK/doctor-advisory-state"
 

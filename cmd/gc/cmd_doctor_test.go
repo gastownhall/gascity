@@ -230,7 +230,7 @@ prefix = "fe"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
 
 	if citySkip == nil || *citySkip {
 		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
@@ -240,13 +240,10 @@ prefix = "fe"
 	}
 }
 
-func TestDoDoctorRegistersDoltBackupCheckOnlyForActiveManagedRigs(t *testing.T) {
+func TestBuildDoctorChecksRegistersDoltChecksOnlyForActiveManagedRigs(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 
 	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 
@@ -291,24 +288,12 @@ suspended = true
 		}
 	}
 	doltDataDir := filepath.Join(cityDir, "runtime-dolt")
-	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_DOLT_DATA_DIR", doltDataDir)
-	oldCityFlag := cityFlag
-	cityFlag = cityDir
-	t.Cleanup(func() { cityFlag = oldCityFlag })
 
-	oldCityCheck := newDoctorDoltServerCheck
-	oldRigCheck := newDoctorRigDoltServerCheck
 	oldBackupCheck := newDoctorDoltBackupCheck
 	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
 	registeredBackup := map[string]string{}
 	registeredLocalOnly := map[string]string{}
-	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
-		return doctor.NewDoltServerCheck(cityPath, true)
-	}
-	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
-		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
-	}
 	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
 		registeredBackup[rig.Name] = dataDir
 		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
@@ -318,14 +303,23 @@ suspended = true
 		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
 	}
 	t.Cleanup(func() {
-		newDoctorDoltServerCheck = oldCityCheck
-		newDoctorRigDoltServerCheck = oldRigCheck
 		newDoctorDoltBackupCheck = oldBackupCheck
 		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
-	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "managed", Path: "managed", Prefix: "ma"},
+			{Name: "filebacked", Path: "filebacked", Prefix: "fi"},
+			{Name: "sleeping", Path: "sleeping", Prefix: "sl", Suspended: true},
+		},
+	}
+	buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	})
 
 	if len(registeredBackup) != 1 {
 		t.Fatalf("registered dolt-backup checks = %#v, want only active managed rig", registeredBackup)
@@ -353,14 +347,11 @@ suspended = true
 	}
 }
 
-func TestDoDoctorSkipsDoltBackupCheckWhenGCDoltSkip(t *testing.T) {
+func TestBuildDoctorChecksSkipsRigDoltChecks(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "managed")
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -388,47 +379,38 @@ prefix = "ma"
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_DOLT", "skip")
-	oldCityFlag := cityFlag
-	cityFlag = cityDir
-	t.Cleanup(func() { cityFlag = oldCityFlag })
 
-	oldCityCheck := newDoctorDoltServerCheck
 	oldRigCheck := newDoctorRigDoltServerCheck
-	oldBackupCheck := newDoctorDoltBackupCheck
-	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
-	registeredBackup := 0
-	registeredLocalOnly := 0
-	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
-		return doctor.NewDoltServerCheck(cityPath, true)
-	}
-	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
-		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
-	}
-	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
-		registeredBackup++
-		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
-	}
-	newDoctorDoltLocalOnlyCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltLocalOnlyRemoteCheck {
-		registeredLocalOnly++
-		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
+	var rigSkip *bool
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigDoltServerCheck {
+		rigSkip = &skip
+		return doctor.NewRigDoltServerCheck(cityPath, rig, skip)
 	}
 	t.Cleanup(func() {
-		newDoctorDoltServerCheck = oldCityCheck
 		newDoctorRigDoltServerCheck = oldRigCheck
-		newDoctorDoltBackupCheck = oldBackupCheck
-		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
-	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
-
-	if registeredBackup != 0 {
-		t.Fatalf("registered %d dolt-backup checks, want 0 when GC_DOLT=skip", registeredBackup)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "managed", Path: "managed", Prefix: "ma"}},
 	}
-	if registeredLocalOnly != 0 {
-		t.Fatalf("registered %d dolt-local-only checks, want 0 when GC_DOLT=skip", registeredLocalOnly)
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	if rigSkip == nil {
+		t.Error("rig dolt-server check was not registered")
+	} else if !*rigSkip {
+		t.Error("rig dolt-server check skip = false, want true")
+	}
+	names := doctorCheckNames(checks)
+	for _, name := range []string{"rig:managed:dolt-backup", "rig:managed:dolt-local-only-remote"} {
+		if doctorCheckIndex(names, name) >= 0 {
+			t.Errorf("check %q registered with SkipRigDoltChecks=true; names=%v", name, names)
+		}
 	}
 }
 
@@ -485,7 +467,7 @@ dolt_port = "3308"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
 		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
@@ -517,7 +499,7 @@ source = "https://github.com/gastownhall/gc-actual-packs"
 	cleanupManagedDoltTestCity(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, false, false, &stdout, &stderr)
+	_ = doDoctor(false, true, false, false, 0, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "stale-local-pack-dirs") {
 		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
@@ -706,7 +688,7 @@ func runDoctorForStaleLocalPackDirTest(t *testing.T, cityDir string) string {
 	cleanupManagedDoltTestCity(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, false, false, &stdout, &stderr)
+	_ = doDoctor(false, true, false, false, 0, &stdout, &stderr)
 	return stdout.String() + stderr.String()
 }
 
@@ -734,7 +716,7 @@ func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	t.Cleanup(func() { cityFlag = origCityFlag })
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "bd-split-store") {
 		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)
@@ -1049,5 +1031,41 @@ dolt_port = "3307"
 	res := newDoltTopologyCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
 	if res.Status != doctor.StatusOK {
 		t.Fatalf("status = %v, want ok; message = %q", res.Status, res.Message)
+	}
+}
+
+// TestWriteDoctorJSONProjectsTimedOut pins the machine-readable timeout
+// signal: a timed-out check projects timed_out=true so automation can tell an
+// abandoned check (outcome unknown) from an ordinary advisory failure, while
+// omitempty keeps output byte-identical for every non-timed-out result.
+func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
+	report := &doctor.Report{
+		Failed: 2,
+		Results: []*doctor.CheckResult{
+			{Name: "wedged", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "timed out", TimedOut: true},
+			{Name: "advisory", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "ran and found an advisory issue"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := writeDoctorJSON(&buf, report); err != nil {
+		t.Fatalf("writeDoctorJSON: %v", err)
+	}
+	var decoded doctorJSONReport
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode doctor JSON: %v; out=%q", err, buf.String())
+	}
+	if len(decoded.Results) != 2 {
+		t.Fatalf("Results = %d, want 2", len(decoded.Results))
+	}
+	if !decoded.Results[0].TimedOut {
+		t.Fatalf("timed-out check projected TimedOut=false, want true")
+	}
+	if decoded.Results[1].TimedOut {
+		t.Fatalf("ordinary advisory check projected TimedOut=true, want false")
+	}
+	// omitempty: only the abandoned check carries the key, so existing --json
+	// consumers of non-timed-out results see unchanged output.
+	if n := strings.Count(buf.String(), "timed_out"); n != 1 {
+		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
 	}
 }

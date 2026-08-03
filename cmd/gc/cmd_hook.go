@@ -14,8 +14,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -115,12 +118,31 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// Forward the provider hook stdin so wrapped commands like
-	// `nudge drain --inject` still receive the UserPromptSubmit JSON
-	// (carrying transcript_path) they need for context-pressure injection.
-	// readHookStdin already bounds the read with an io.LimitReader and the
-	// hard timeout below bounds any block, so forwarding is safe.
-	cmd.Stdin = stdin
+	// Read the provider's hook stdin FULLY into a buffer before running the
+	// wrapped command, then hand it that buffer. Forwarding the live stdin
+	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
+	// the timeout — before consuming the payload, so gc hook run returned and
+	// closed the pipe under the provider's in-flight write. Codex surfaced that
+	// fleet-wide as "UserPromptSubmit hook (failed): failed to write hook stdin:
+	// Broken pipe (os error 32)", silently killing nudge-drain and mail-check
+	// injection on every prompt submit. Buffering up front guarantees the
+	// provider's write always completes regardless of the wrapped command. The
+	// 1<<20 bound matches readHookStdin, so `nudge drain --inject` still sees the
+	// same UserPromptSubmit JSON (carrying transcript_path) for context
+	// injection.
+	//
+	// drainHookStdin skips an interactive/inherited terminal (a char-device
+	// stdin never EOFs, so a manual gc hook run must not drain it) and bounds the
+	// pipe drain by ctx: os.Stdin carries no read deadline, so a provider pipe
+	// that writes < 1 MiB and never closes (no EOF) would otherwise block this
+	// read forever — before cmd.Run() and past the hard timeout — freezing the
+	// prompt-submit hot path. Bounding it keeps the "gc hook run is always
+	// bounded by the timeout" invariant enforced in code rather than assumed of
+	// every present and future provider. On the deadline drainHookStdin returns
+	// with ctx already expired, so cmd.Run() sees the canceled context and never
+	// spawns the child: gc hook run fails open to the timeout exit code in the
+	// timeout branch below instead of hanging before it spawns.
+	cmd.Stdin = bytes.NewReader(drainHookStdin(ctx, stdin))
 	// Buffer child stdout instead of streaming it straight to the provider so
 	// a wedged command cannot leak partial injectable output before the
 	// fail-open timeout path runs. The buffer is flushed only on a clean or
@@ -130,6 +152,7 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
+	disableProductMetricsForChild(cmd)
 
 	err = cmd.Run()
 	// A clean exit wins even if the deadline fired in the same instant: the
@@ -153,6 +176,45 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	}
 	fmt.Fprintf(stderr, "gc hook run: %v\n", err) //nolint:errcheck
 	return 1
+}
+
+// drainHookStdin reads up to 1 MiB of the provider's hook stdin, bounded by ctx.
+// A normal provider write-then-close returns the full payload well before the
+// timeout; a pipe that writes less than the limit and stays open (no EOF) is
+// abandoned when ctx's hard timeout fires, so gc hook run cannot wedge before it
+// even spawns the child. The read runs in a goroutine that can outlive a
+// timed-out call: that is safe because gc hook run is a short-lived process
+// which exits right after, and the buffered channel keeps the goroutine from
+// blocking on send if it later unblocks. A partial buffer still lets the wrapped
+// command run.
+//
+// An interactive or inherited terminal is skipped entirely, matching
+// readHookStdin: a char-device stdin never reaches EOF on its own, so draining
+// it would only unblock when ctx's hard timeout fired, handing the child an
+// empty reader after gc hook run had already burned its whole budget — a manual
+// `gc hook run -- <cmd>` would then time out without ever running <cmd>. Provider
+// hooks always arrive on a pipe, which this guard leaves buffered and
+// timeout-bounded.
+func drainHookStdin(ctx context.Context, stdin io.Reader) []byte {
+	if stdin == nil {
+		return nil
+	}
+	if f, ok := stdin.(*os.File); ok {
+		if st, err := f.Stat(); err != nil || st.Mode()&os.ModeCharDevice != 0 {
+			return nil
+		}
+	}
+	done := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(io.LimitReader(stdin, 1<<20)) //nolint:errcheck // best-effort; a partial read still lets the wrapped command run
+		done <- data
+	}()
+	select {
+	case data := <-done:
+		return data
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 type hookCommandOptions struct {
@@ -223,6 +285,23 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// Other CLI entry points (cmd_sling, cmd_start, cmd_rig, cmd_supervisor)
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
+
+	// Fence a stale/superseded runtime session BEFORE the city-suspension,
+	// agent-resolution, and agent-suspension early returns below. A stale
+	// incarnation in a suspended city, or one whose template was removed from
+	// config (resolveAgentIdentity fails), or whose agent was suspended, would
+	// otherwise hit one of those bare `return 1` paths, and its startup wrapper
+	// would keep retrying the plain failure instead of seeing the terminal
+	// stale-session drain result and exiting. The fence reads the runtime's own
+	// identity from the environment; it is a no-op for a non-session runtime (no
+	// GC_SESSION_ID / GC_INSTANCE_TOKEN) and fails open for an eligible session or a
+	// transient session-store fault, so a healthy worker still falls through to the
+	// suspension and config checks below.
+	if opts.Claim {
+		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
+			return code
+		}
+	}
 
 	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if citySuspendedWithState(cfg, st) {
@@ -361,6 +440,8 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return out, err
 	}
 	if opts.Claim {
+		// The stale-session fence already ran before agent resolution above; this
+		// sessionID feeds only the claim assignee identity.
 		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
@@ -368,8 +449,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingOrAssigned); it must be scoped to this
-			// session's OWN runtime identity, never the bare pool template. A
+			// work (hookClaimExistingAssignment and
+			// claimFirstReadyHookAssignment); it must be scoped to this session's
+			// OWN runtime identity, never the bare pool template. A
 			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
 			// resolvedAgentName == a.QualifiedName() is the bare template, which is
 			// ALSO the [[named_session]] holder's identity — including it let a
@@ -392,6 +474,128 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+}
+
+// hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
+// work, as decided by the pre-work-query identity fence in gc hook --claim.
+type hookClaimSessionVerdict int
+
+const (
+	// hookClaimSessionEligible: the session bead is the current incarnation
+	// (matching instance token) and in a state where a live worker legitimately
+	// claims work — proceed to the work query.
+	hookClaimSessionEligible hookClaimSessionVerdict = iota
+	// hookClaimSessionStale: the session is closed, superseded (its instance token
+	// was reminted onto a newer incarnation), or in a dormant/terminal state. The
+	// incarnation must stop rather than claim, so the caller emits a structured
+	// terminal drain result instead of a bare exit 1 the startup wrapper retries.
+	hookClaimSessionStale
+	// hookClaimSessionStoreUnavailable: the session store could not be opened, or
+	// its read failed for a reason other than a confirmed-missing or non-session
+	// bead. That is a transient infrastructure fault, not a definitive
+	// ineligibility, so the caller fails open into the normal claim path (whose
+	// runner surfaces and escalates its own store errors) rather than mislabeling
+	// the fault as a stale session. A bead that is confirmed absent or resolves to
+	// a non-session bead is NOT this verdict — it is a definitive identity failure
+	// and classified stale.
+	hookClaimSessionStoreUnavailable
+)
+
+// fenceHookClaimSession applies the runtime-identity fence that gates
+// gc hook --claim before it runs the work query. It returns (code, handled):
+// handled is true only for a definitively stale session, whose terminal drain
+// result the caller must return as-is. An un-fenceable context (no session id or
+// no instance token), an eligible session, or a transient session-store fault all
+// return handled=false so the normal claim path runs — the fence never turns an
+// infrastructure hiccup or an in-progress start into a false refusal.
+func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	if sessionID == "" || instanceToken == "" {
+		return 0, false
+	}
+	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
+	case hookClaimSessionStale:
+		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
+		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true
+	case hookClaimSessionStoreUnavailable:
+		// Fail open: let the claim path run and surface/escalate its own store
+		// error rather than reporting a false stale session. Name the fault
+		// without the alarming "stale session" wording.
+		fmt.Fprintf(stderr, "gc hook --claim: session fence unavailable for %s: %s; proceeding to claim\n", sessionID, reason) //nolint:errcheck
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+// classifyHookClaimSession loads the session bead named by sessionID and reports
+// whether the runtime holding instanceToken may claim. A confirmed identity
+// failure — the session bead is absent, or resolves to a non-session bead — is a
+// stale verdict: the incarnation can no longer prove its identity and must drain
+// rather than claim. Only a genuine store-open or read fault yields
+// hookClaimSessionStoreUnavailable (transient, fails open), so an infrastructure
+// hiccup is not mislabeled as staleness AND a vanished session is not laundered
+// into an infrastructure hiccup that lets a stale runtime reach the claim path.
+func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
+	}
+	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	if err != nil {
+		return classifyHookClaimSessionLookupError(err)
+	}
+	return hookClaimSessionEligibility(info, instanceToken)
+}
+
+// classifyHookClaimSessionLookupError maps a session Store.Get error to a fence
+// verdict. session.Store.Get reports a CONFIRMED-absent id as the store not-found
+// error wrapped around beads.ErrNotFound, and a present-but-non-session id (the
+// id resolves to a bead that is not a session) as session.ErrSessionNotFound.
+// Both are definitive identity failures — the runtime's session no longer exists
+// in the store — so the incarnation is stale and must drain. Any other error is a
+// genuine store open/read fault the fence fails open on, letting the normal claim
+// path surface and escalate its own store error rather than refusing a healthy
+// worker over an infrastructure hiccup.
+func classifyHookClaimSessionLookupError(err error) (hookClaimSessionVerdict, string) {
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return hookClaimSessionStale, fmt.Sprintf("session bead not found: %v", err)
+	case errors.Is(err, session.ErrSessionNotFound):
+		return hookClaimSessionStale, fmt.Sprintf("session id resolves to a non-session bead: %v", err)
+	default:
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("loading session bead: %v", err)
+	}
+}
+
+// hookClaimSessionEligibility is the pure eligibility decision over a session Info
+// snapshot. The instance-token arm proves whether this is the current
+// incarnation; the state arm then admits only the states in which a live worker
+// legitimately claims: active/awake plus the in-startup states creating/
+// start-pending that the deferred-start path passes through before its async
+// active commit lands (refusing those rejects a healthy first claim). An empty
+// MetadataState (session.StateNone) is a pre-metadata legacy bead mid-upgrade,
+// not a dormant state: the session lifecycle canonicalizes empty state to
+// StateActive (canonicalLifecycleState in internal/session/manager.go), so once
+// Closed is false and the instance token matches — proving this is the live
+// current incarnation — it is admitted with the active states, or a healthy
+// upgraded legacy runtime would be drained before claiming its routed work.
+// Every other state — failed-create, draining, drained, asleep, suspended,
+// archived, quarantined — is dormant or terminal and classified stale.
+func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookClaimSessionVerdict, string) {
+	if info.Closed {
+		return hookClaimSessionStale, "session bead is closed"
+	}
+	storedToken := strings.TrimSpace(info.InstanceToken)
+	if storedToken == "" || storedToken != strings.TrimSpace(instanceToken) {
+		return hookClaimSessionStale, "runtime instance token does not match the session bead"
+	}
+	switch state := session.State(strings.TrimSpace(info.MetadataState)); state {
+	case session.StateNone, session.StateActive, session.StateAwake, session.StateCreating, session.StateStartPending:
+		return hookClaimSessionEligible, ""
+	default:
+		return hookClaimSessionStale, fmt.Sprintf("session state %q is not claim-eligible", state)
+	}
 }
 
 // claimHookWork claims routed work for gc hook --claim from the federated store
@@ -480,13 +684,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
-	if a == nil {
-		return ""
-	}
-	if target := strings.TrimSpace(a.PoolName); target != "" {
-		return target
-	}
-	return a.QualifiedName()
+	return agentutil.RoutedToIdentity(a)
 }
 
 func firstNonEmptyHookValue(values ...string) string {
@@ -562,6 +760,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
+	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -687,6 +886,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			filtered = append(filtered, item)
 			continue
 		}
+		if isClosedHookCandidate(obj) {
+			continue
+		}
 		if isFutureDeferredHookCandidate(obj, now) {
 			continue
 		}
@@ -746,7 +948,7 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 // isSelfBlockedHookCandidate reports whether a candidate carries bd's own
 // is_blocked marker or an explicit status=="blocked", independent of the
 // blocked_by dependency array checked by isDepBlockedHookCandidate. An
-// absent is_blocked field is treated as NOT blocked — bd's denormalized
+// absent is_blocked field is treated as NOT blocked - bd's denormalized
 // projection is not always populated, and over-filtering here would strand
 // otherwise-ready work.
 func isSelfBlockedHookCandidate(item map[string]any) bool {
@@ -757,6 +959,14 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth
+// against upstream Dolt status-index drift that can cause bd list --status=open
+// to return closed beads (gcy-1on).
+func isClosedHookCandidate(item map[string]any) bool {
+	status, ok := item["status"].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(status), "closed")
 }
 
 func normalizeWorkQueryOutput(output string) string {

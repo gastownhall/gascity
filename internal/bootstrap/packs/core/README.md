@@ -22,8 +22,10 @@ none requires per-city configuration.
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
+| **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
+| **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 
-The two **event-driven nudge orders** are documented in detail below.
+The **event-driven nudge orders** are documented in detail below.
 
 ## `nudge-on-route`
 
@@ -68,7 +70,7 @@ older than the retention window are pruned on each run.
 
 ## `cascade-nudge-on-blocker-close`
 
-**Why.** When a blocker bead closes (linked via `bd dep <dependent> --blocks
+**Why.** When a blocker bead closes (linked via `gc bd dep <dependent> --blocks
 <blocker>`), the assignee of each dependent has no event-driven signal that
 work can resume — they poll, get nudged by hand, or miss the unblock. This
 order removes that class of "the blocker closed but my agent didn't notice"
@@ -112,6 +114,7 @@ Entries older than the retention window are pruned on each run.
 
 ## Dependencies
 
-Both nudge scripts use only `bd`, `gc`, and `jq` — already required by the
-other core-pack scripts. `jq` is a hard dependency and the scripts fail
-loud at startup if it is missing.
+Both nudge scripts use only `gc`, `bd`, and `jq` — already required by the
+other core-pack scripts. `gc bd` routes the request, then delegates to the
+underlying `bd` binary. `jq` is a hard dependency and the scripts fail loud
+at startup if it is missing.

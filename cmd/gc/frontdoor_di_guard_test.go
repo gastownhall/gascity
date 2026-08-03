@@ -99,6 +99,10 @@ var snapshotInfoOnlyFiles = []string{
 // a raw beads.Bead (or []beads.Bead). The typed mirrors OpenInfos()/FindInfoByID/
 // FindInfoByTemplate/FindInfoByNamedIdentity do not contain these substrings, so
 // a converted file matching one of these has reintroduced a raw session-bead read.
+// The typed mirrors read openInfos + the index maps (not the raw open slice), so
+// they return correct results on BOTH a bead-built snapshot and an Info-built one
+// (newSessionBeadSnapshotFromInfos leaves open nil); the raw accessors above
+// return empty on an Info-built snapshot, which is why they are forbidden here.
 var forbiddenRawSnapshotAccessors = []string{
 	".Open()",
 	".FindByID(",
@@ -319,9 +323,10 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // doWaitInspectFallback — derive sessStore := cliSessionStore(store, cfg, cityPath)
 // and route the SESSION/wait bead access (wait-bead CRUD, session-bead lookups,
 // wait_hold clears, cap-diagnostic stamps) through it, while dependency-bead reads
-// (loadWaitDependencyBead / depsWaitReadyDetailedForCity) deliberately stay on the
-// plain WORK store (dep beads are work class, federated across rig scopes) and the
-// wait-nudge shadow lookups ride a NudgesStore over the same work store (nudges class,
+// (loadWaitDependencyBead, injected into doSessionWait's waitDependencyReader)
+// deliberately stay on the plain WORK store (dep beads are work class, federated
+// across rig scopes), and wait-nudge shadow lookups ride a NudgesStore over the same
+// work store (nudges class,
 // its own E1.2 routing). The positive cliSessionStore( tripwire protects the routed
 // arm; as a non-front-door router (most session reads go through store args) this
 // guard is a regression canary for the file, not a completeness proof — the
@@ -373,6 +378,7 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_sling.go",
 	"cmd_handoff.go",
 	"cmd_runtime_drain.go",
+	"cmd_runtime_heartbeat.go",
 	"cmd_wait.go",
 	"cmd_nudge.go",
 }

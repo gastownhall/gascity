@@ -79,6 +79,17 @@ var loadCityConfigDefaultWarningWriter = func() io.Writer {
 	return os.Stderr
 }
 
+// configWarnWriter routes advisory config-load warnings to io.Discard in JSON
+// mode and to stderr otherwise, so `--json` output stays clean for scripting on
+// every command (extending c806e54a3's rig-list fix uniformly). Hard load errors
+// are unaffected — they always go to stderr with a non-zero exit.
+func configWarnWriter(jsonOut bool, stderr io.Writer) io.Writer {
+	if jsonOut {
+		return io.Discard
+	}
+	return stderr
+}
+
 func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 	for _, w := range warningWriter {
 		if w != nil {
@@ -110,10 +121,16 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // [agent_defaults]/[agents] config remains strict-fatal because overlapping
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
+	if config.IsRetiredKeyWarning(warning) {
+		return true
+	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
 	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
+	if config.IsAlwaysFreshWakeModeWarning(warning) {
 		return true
 	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
@@ -259,12 +276,16 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
 // 3-step resolution:
-//  1. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
-//  2. Contextual: if input has no "/" and currentRigDir is set, try
-//     "{currentRigDir}/{input}" to resolve rig-scoped agents from context.
+//  1. Contextual: if input has no "/" and currentRigDir is set, try
+//     "{currentRigDir}/{input}" first. This includes binding-qualified but
+//     scope-unqualified inputs such as "core.control-dispatcher".
+//  2. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
 //  3. Unambiguous bare name: scan all agents by Name (ignoring Dir).
 //     Succeeds only when exactly one configured agent matches. Pool
 //     members are synthesized when the input uses {name}-{N}.
+//
+// This context sensitivity is for interactive CLI input. Persisted routes such
+// as gc.routed_to must already be canonical and must not be re-resolved here.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
@@ -771,7 +792,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Suspended agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -849,7 +870,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Resumed agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

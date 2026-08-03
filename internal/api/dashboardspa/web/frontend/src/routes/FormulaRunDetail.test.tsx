@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FormulaRunDetailPage, runDetailNudgeRefresh } from './FormulaRunDetail';
@@ -10,7 +10,6 @@ import {
   GC_EVENT_PREFIX,
   type TranscriptResult,
   type TranscriptTurn,
-  type RunDiffResponse,
   type FormulaRunDetail,
   type RunScopeKind,
   type RunLane,
@@ -19,6 +18,8 @@ import {
 } from 'gas-city-dashboard-shared';
 import { ApiClientError } from '../api/client';
 import rawFormulaRunDetailFixture from '../test/fixtures/formula-run-detail.json';
+
+import type { LoadRunDetailOptions } from '../supervisor/runDetail';
 
 const loadSupervisorFormulaRunDetail = vi.hoisted(() => vi.fn());
 
@@ -34,20 +35,17 @@ const eventSources: FakeEventSource[] = [];
 
 interface FormulaRunDetailFixture {
   detail: FormulaRunDetail;
-  diff: RunDiffResponse;
   transcripts: Record<string, TranscriptResult>;
   streamTurns: Record<string, TranscriptTurn[]>;
 }
 
 const formulaRunDetailFixture = parseFormulaRunDetailFixture(rawFormulaRunDetailFixture);
 const detail = formulaRunDetailFixture.detail;
-const diff = formulaRunDetailFixture.diff;
 const transcripts = formulaRunDetailFixture.transcripts;
 const reviewPipelineName = /multi-model review pipeline/i;
 const applyFixesName = /apply review fixes/i;
 const fetchUrls: string[] = [];
 let currentDetail: FormulaRunDetail = detail;
-let currentDiff: RunDiffResponse = diff;
 
 beforeEach(() => {
   setActiveCity('test-city');
@@ -59,16 +57,12 @@ beforeEach(() => {
   loadSupervisorFormulaRunDetail.mockReset();
   loadSupervisorFormulaRunDetail.mockImplementation(async () => currentDetail);
   currentDetail = detail;
-  currentDiff = diff;
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       fetchUrls.push(url);
-      if (url.startsWith('/api/city/test-city/runs/gc-adopt-pr-active/diff')) {
-        return jsonResponse(currentDiff);
-      }
       if (url.startsWith('/api/city/test-city/runs/gc-adopt-pr-active')) {
         throw new Error(`old dashboard formula-run mirror should not be called: ${url}`);
       }
@@ -117,7 +111,7 @@ describe('FormulaRunDetailPage', () => {
     // (gascity-dashboard-wqsk). When the operator arrives from /runs the
     // run-summary cache already holds this run's lane, so the page shows its
     // title + phase stages instantly instead of a blank spinner. Here the
-    // detail (and diff) fetch hangs while the warm summary supplies the lane.
+    // detail fetch hangs while the warm summary supplies the lane.
     setCached('runs:summary:test-city', runSummarySourceWithActiveLane());
     vi.stubGlobal(
       'fetch',
@@ -138,7 +132,7 @@ describe('FormulaRunDetailPage', () => {
     // The plain spinner is replaced by the skeleton, and the heavy detail
     // diagram has not rendered yet.
     expect(screen.queryByText(/^Loading formula run\.$/i)).toBeNull();
-    expect(screen.queryByRole('heading', { name: /local changes/i })).toBeNull();
+    expect(screen.queryByRole('heading', { name: /adopt pr #42/i })).toBeNull();
   });
 
   it('renders the optimistic skeleton for a BLOCKED run lane (gascity-dashboard-4xcv)', async () => {
@@ -243,11 +237,12 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     expect(screen.getByText(/3 running, 1 done, 1 ready, 1 skipped/i)).toBeTruthy();
     expect(screen.getByText(/v11 · seq 91/i)).toBeTruthy();
-    expect(screen.getByRole('tab', { name: /diff/i }).getAttribute('aria-controls')).toBe(
+    expect(screen.queryByRole('tab', { name: /diff/i })).toBeNull();
+    expect(screen.getByRole('tab', { name: /session/i }).getAttribute('aria-controls')).toBe(
       'run-evidence-panel',
     );
     expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(
-      'run-evidence-tab-diff',
+      'run-evidence-tab-session',
     );
     expect(nodePressed(reviewPipelineName)).toBe('false');
     expect(nodePressed(applyFixesName)).toBe('false');
@@ -343,13 +338,15 @@ describe('FormulaRunDetailPage', () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+    // Detach the detail stream so a MATCHING event would refresh detail; the
+    // terminal + identity-less event must still be suppressed by the matcher.
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
     cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
     await Promise.resolve();
 
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
-    expect(diffUrls()).toHaveLength(1);
   });
 
   it('drives ambient suppression from the server progress.terminal flag, not a client taxonomy', async () => {
@@ -357,9 +354,8 @@ describe('FormulaRunDetailPage', () => {
     // the server reports progress.terminal=false. The retired isTerminalProgress
     // derivation would suppress here; the server flag must win and the ambient
     // event must still refresh — proving the flag, not a re-derived taxonomy,
-    // gates suppression. P4 moved detail to the stream, so this ambient nudge now
-    // refreshes the DIFF; the terminal flag still gates whether it fires. The
-    // Diff tab is the default-active tab, so the P5 tab gate is open here.
+    // gates suppression. With the detail stream detached, the nudge lane refreshes
+    // detail directly, so the refresh is observable as a re-GET.
     currentDetail = {
       ...terminalDetail(),
       progress: { ...terminalDetail().progress, terminal: false },
@@ -367,164 +363,124 @@ describe('FormulaRunDetailPage', () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
     cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    await waitFor(() => expect(diffUrls()).toHaveLength(2));
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
   });
 
-  it('fires NO diff POST from a nudge while the Diff tab is hidden (P5 tab gate)', async () => {
-    // The Diff tab is the default-active view, so switch to Session first to hide
-    // it. A nudge must then issue ZERO /diff POSTs — the git-exec chain no longer
-    // runs for a tab the operator can't see.
-    renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-
-    openSessionTab();
-    const hiddenTabDiffCount = diffUrls().length;
-
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(diffUrls()).toHaveLength(hiddenTabDiffCount);
-  });
-
-  it('refreshes the diff once when the operator switches to the Diff tab (P5, not stale)', async () => {
-    // Switch away from the default Diff tab, let a nudge fire (no diff POST while
-    // hidden), then switch back — the Diff tab must refresh once on activation so
-    // it does not show stale changes the hidden-tab nudges skipped.
-    renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-
-    openSessionTab();
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    await Promise.resolve();
-    expect(diffUrls()).toHaveLength(1);
-
-    currentDiff = {
-      ...diff,
-      changedFiles: [{ path: 'src/switched.ts', status: 'M', kind: 'code' }],
-      status: [' M src/switched.ts'],
-      patch: [
-        'diff --git a/src/switched.ts b/src/switched.ts',
-        'index 3a4e79a..b6c9d02 100644',
-        '--- a/src/switched.ts',
-        '+++ b/src/switched.ts',
-        '@@ -1 +1 @@',
-        '-stale',
-        '+fresh on tab activation',
-      ].join('\n'),
-    };
-    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
-
-    await screen.findByText('fresh on tab activation');
-    // Exactly one activation refresh (the hidden-tab nudge added none).
-    await waitFor(() => expect(diffUrls()).toHaveLength(2));
-  });
-
-  it('coalesces a burst of nudges into at most one diff POST per window (P5)', async () => {
-    renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
-    // Default Diff tab is visible, so the diff refresh gate is open.
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-
-    // A burst inside one coalesce window yields a single leading fire.
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-    await waitFor(() => expect(diffUrls()).toHaveLength(2));
-
-    await Promise.resolve();
-    await Promise.resolve();
-    // No per-event storm: the burst added exactly one diff POST.
-    expect(diffUrls()).toHaveLength(2);
-  });
-
-  it('does not refresh from city events before the initial run detail identifies the run', async () => {
+  it('refreshes a not-yet-loaded run from city events anchored on the ROUTE runId (F4)', async () => {
+    // The printed deep-link case: before the initial detail load resolves (or
+    // after it failed), the run's own eventual bead events must nudge a
+    // refresh — the matcher anchors on the route's runId, never on a loaded
+    // detail (the old `detail === null → return false` early-return made the
+    // failed state permanent). Events identifying a DIFFERENT run stay
+    // ignored; an identity-less (ambient) event matches, mirroring the
+    // non-terminal ambient behavior after load — a root bead's own events may
+    // carry no run identity.
     const initialLoad = deferred<FormulaRunDetail>();
     loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
 
     renderPage();
     const cityStream = requireCityEventSource();
+    // The SSE precheck 503 is fatal to EventSource: the detail stream closes
+    // terminally, releasing the nudge lane back to detail refreshes.
+    act(() => requireRunDetailStream().fail());
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.bead}updated` });
+    // Another run's event: no refresh.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'other-run' } } },
+    });
     await Promise.resolve();
-
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    // This run's event: the detail refresh fires even though no detail ever
+    // loaded.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
+
     initialLoad.resolve(detail);
     await screen.findByRole('heading', { name: /adopt pr #42/i });
   });
 
-  it('does not load the execution-folder diff before the initial run detail is ready', async () => {
-    const initialLoad = deferred<FormulaRunDetail>();
-    loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
-
-    renderPage();
-    await Promise.resolve();
-
-    expect(diffUrls()).toHaveLength(0);
-
-    initialLoad.resolve(detail);
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-  });
-
-  it('refreshes the execution-folder diff during a run without leaving an explicit Diff tab choice', async () => {
-    renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
-
-    fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
-    expect(nodePressed(reviewPipelineName)).toBe('true');
-    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
-    await screen.findByRole('heading', { name: /local changes/i });
-
-    currentDiff = {
-      ...diff,
-      changedFiles: [{ path: 'src/live-run.ts', status: 'M', kind: 'code' }],
-      status: [' M src/live-run.ts'],
-      patch: [
-        'diff --git a/src/live-run.ts b/src/live-run.ts',
-        'index 3a4e79a..b6c9d02 100644',
-        '--- a/src/live-run.ts',
-        '+++ b/src/live-run.ts',
-        '@@ -1 +1 @@',
-        '-stale diff',
-        '+live run diff update',
-      ].join('\n'),
-    };
-    currentDetail = {
-      ...detail,
-      snapshotVersion: 12,
-      snapshotEventSeq: { kind: 'known', seq: 92 },
-    };
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
-
-    await screen.findByText('live run diff update');
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(
-      'run-evidence-tab-diff',
+  it('recovers a failed warming load when the run’s bead events later arrive (F4)', async () => {
+    // A deep link printed right after `gc sling` can exhaust even the long
+    // warming budget before the controller's cache-reconcile emits the run's
+    // bead events. Those eventual events must nudge the page out of the
+    // failed state — the run's detail loads on the retriggered refresh.
+    loadSupervisorFormulaRunDetail.mockRejectedValueOnce(
+      new ApiClientError(503, 'run view is warming', undefined, 'unknown_run'),
     );
-    expect(screen.queryByText(/checking graph\.v2 node grouping/i)).toBeNull();
+
+    renderPage();
+    await screen.findByRole('alert');
+    const cityStream = requireCityEventSource();
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('renders honest recording copy while an unknown run is inside its warming grace (F4)', async () => {
+    // While the loader polls the graced 503 (body reason 'unknown_run': the
+    // projection is warm but has never seen this run), the interim copy must
+    // say honestly that the run may still be being recorded — or may not
+    // exist — rather than implying a client-side wait bug or failing outright.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: 'unknown_run' });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toMatch(/may still be being recorded/i);
+    expect(status.textContent).toMatch(/couple of minutes/i);
+    expect(status.textContent).toMatch(/may no longer exist/i);
+    // Interim, not terminal: no error alert while the poll is still running.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the generic loading copy for a cold-replay warming 503 (no reason)', async () => {
+    // The projection-still-warming 503 carries no reason: the run is not in
+    // doubt, the fold just hasn't caught up — so the plain loading copy stays.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: undefined });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    expect(await screen.findByText(/^Loading formula run\.$/i)).toBeTruthy();
+    expect(screen.queryByText(/may still be being recorded/i)).toBeNull();
   });
 
   it('ignores city events whose gc metadata identifies another formula run', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    const detailStream = requireRunDetailStream();
-    detailStream.open();
-    // The diff nudge must not fire for an unrelated run; capture the current
-    // count so a stray refresh is detectable. (Detail no longer re-GETs on the
-    // nudge — it streams — so this asserts the diff-lane match filter.)
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-    const diffCount = diffUrls().length;
+    // Detach the detail stream so a MATCHING event would refresh detail; an event
+    // whose gc metadata identifies a DIFFERENT run must be filtered out and leave
+    // the detail unrefreshed.
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
     cityStream.dispatch('event', {
       type: `${GC_EVENT_PREFIX.bead}updated`,
@@ -539,21 +495,8 @@ describe('FormulaRunDetailPage', () => {
     });
 
     await Promise.resolve();
-    expect(diffUrls()).toHaveLength(diffCount);
-    expect(screen.getByRole('heading', { name: /adopt pr #42/i })).toBeTruthy();
-
-    // A pushed frame for THIS run (the stream is per-run, so a frame is always
-    // this run's) updates the rendered detail — with zero re-GET.
-    detailStream.dispatch('detail', {
-      ...detail,
-      title: 'Adopt PR #42 current formula run refresh',
-      snapshotVersion: 12,
-      snapshotEventSeq: { kind: 'known', seq: 92 },
-    });
-
-    await screen.findByRole('heading', { name: /adopt pr #42 current formula run refresh/i });
-    expect(screen.getByText(/v12 · seq 92/i)).toBeTruthy();
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: /adopt pr #42/i })).toBeTruthy();
   });
 
   it('rejects a half-specified scope query without loading the formula run', async () => {
@@ -567,17 +510,16 @@ describe('FormulaRunDetailPage', () => {
     expect(fetchUrls.some((url) => url.startsWith('/api/city/test-city/runs/'))).toBe(false);
   });
 
-  it('passes complete scope query params when loading detail and diff', async () => {
+  it('passes complete scope query params when loading detail', async () => {
     renderPage('/runs/gc-adopt-pr-active?scope_kind=city&scope_ref=racoon-city');
     await screen.findByRole('heading', { name: /adopt pr #42/i });
 
-    const runUrls = fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
     // The detail loader is scope-independent now (the BFF projection derives the
-    // run's scope from its own root bead); the route's scope still drives the
-    // separate run-diff fetch below.
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith('gc-adopt-pr-active');
-    expect(runUrls).toContain(
-      '/api/city/test-city/runs/gc-adopt-pr-active/diff?scope_kind=city&scope_ref=racoon-city',
+    // run's scope from its own root bead). The second argument is the
+    // warming-poll wiring (onWarming/keepPolling).
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith(
+      'gc-adopt-pr-active',
+      expect.anything(),
     );
   });
 
@@ -684,7 +626,7 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByText(/supervisor snapshot event replaced the active transcript/i);
   });
 
-  it('closes the active session stream when selection changes or the Session tab is hidden', async () => {
+  it('closes the active session stream when selection changes', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
@@ -701,16 +643,6 @@ describe('FormulaRunDetailPage', () => {
     // review-pipeline stream.
     await screen.findByText('This node has not started a session yet.');
     await waitFor(() => expect(firstStream?.closed).toBe(true));
-
-    fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
-    await screen.findByText(/checking graph\.v2 node grouping/i);
-    await waitFor(() => expect(sessionEventSources()).toHaveLength(2));
-    const secondStream = sessionEventSources()[1];
-    expect(secondStream?.closed).toBe(false);
-
-    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
-    await screen.findByRole('heading', { name: /local changes/i });
-    await waitFor(() => expect(secondStream?.closed).toBe(true));
   });
 
   it('surfaces current not-started instances beside historical attached evidence', async () => {
@@ -743,17 +675,6 @@ describe('FormulaRunDetailPage', () => {
     const sessionTab = screen.getByRole('tab', { name: /session/i }) as HTMLButtonElement;
     expect(sessionTab.disabled).toBe(false);
     expect(sessionTab.getAttribute('aria-disabled')).toBeNull();
-  });
-
-  it('renders the current execution-folder diff as grouped files', async () => {
-    const { container } = renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    expect(screen.getByRole('heading', { name: /local changes/i })).toBeTruthy();
-    expect(screen.getByText('shared/src/runs/enrich.ts')).toBeTruthy();
-    expect(screen.getByText('docs/plan.md')).toBeTruthy();
-    await screen.findByText('preserve failed attempt transcript links');
-    expect(container.querySelector('.diff-code-insert')?.textContent).toContain('preserve failed');
-    expect(container.querySelector('.diff-code-delete')?.textContent).toContain('old session');
   });
 
   it('renders an informative list-only message for a v1 / wisp (unsupported) run, not the generic failure (gascity-dashboard-9w3k)', async () => {
@@ -864,43 +785,20 @@ describe('FormulaRunDetailPage', () => {
   });
 });
 
-describe('runDetailNudgeRefresh (P4 stream-vs-nudge division, P5 diff tab gate)', () => {
-  it('refreshes only the diff when the detail stream is live and the Diff tab is visible', async () => {
+describe('runDetailNudgeRefresh (P4 stream-vs-nudge division)', () => {
+  it('does not re-GET detail when the detail stream is live', async () => {
     const refreshDetail = vi.fn(() => Promise.resolve());
-    const refreshDiff = vi.fn(() => Promise.resolve());
-    await runDetailNudgeRefresh(true, true, refreshDetail, refreshDiff);
     // The stream carries detail, so a nudge must NOT re-GET it (no double refetch).
+    await runDetailNudgeRefresh(true, refreshDetail);
     expect(refreshDetail).not.toHaveBeenCalled();
-    expect(refreshDiff).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes BOTH detail and diff when the stream is unavailable and the Diff tab is visible (F2)', async () => {
+  it('refreshes detail when the stream is unavailable (F2)', async () => {
     const refreshDetail = vi.fn(() => Promise.resolve());
-    const refreshDiff = vi.fn(() => Promise.resolve());
     // No EventSource → the stream can't carry detail, so the nudge must keep the
     // detail auto-refresh alive (otherwise detail freezes after first paint).
-    await runDetailNudgeRefresh(false, true, refreshDetail, refreshDiff);
+    await runDetailNudgeRefresh(false, refreshDetail);
     expect(refreshDetail).toHaveBeenCalledTimes(1);
-    expect(refreshDiff).toHaveBeenCalledTimes(1);
-  });
-
-  it('fires NO diff refresh when the Diff tab is hidden but the stream is live (P5)', async () => {
-    const refreshDetail = vi.fn(() => Promise.resolve());
-    const refreshDiff = vi.fn(() => Promise.resolve());
-    await runDetailNudgeRefresh(true, false, refreshDetail, refreshDiff);
-    // Stream carries detail; Diff tab hidden → zero git-exec diff read.
-    expect(refreshDetail).not.toHaveBeenCalled();
-    expect(refreshDiff).not.toHaveBeenCalled();
-  });
-
-  it('still refreshes detail (not the diff) when the Diff tab is hidden and the stream is unavailable (P5)', async () => {
-    const refreshDetail = vi.fn(() => Promise.resolve());
-    const refreshDiff = vi.fn(() => Promise.resolve());
-    await runDetailNudgeRefresh(false, false, refreshDetail, refreshDiff);
-    // Detail still auto-refreshes without a stream; the hidden Diff tab skips its
-    // git-exec read.
-    expect(refreshDetail).toHaveBeenCalledTimes(1);
-    expect(refreshDiff).not.toHaveBeenCalled();
   });
 });
 
@@ -1074,12 +972,6 @@ function sessionEventSources(): FakeEventSource[] {
   return eventSources.filter((eventSource) => eventSource.url.includes('/session/'));
 }
 
-function diffUrls(): string[] {
-  return fetchUrls.filter(
-    (url) => url.startsWith('/api/city/test-city/runs/') && url.includes('/diff'),
-  );
-}
-
 function terminalDetail(): FormulaRunDetail {
   return {
     ...detail,
@@ -1191,7 +1083,6 @@ function parseFormulaRunDetailFixture(raw: unknown): FormulaRunDetailFixture {
   if (typeof raw.detail.phase !== 'string') {
     throw new Error('run detail fixture missing detail.phase');
   }
-  if (!isRecord(raw.diff)) throw new Error('run detail fixture missing diff');
   if (!isRecord(raw.transcripts)) {
     throw new Error('run detail fixture missing transcripts');
   }

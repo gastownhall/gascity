@@ -19,10 +19,12 @@ var (
 	MailNotFound        = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
 	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
 	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
+	WaitNotFound        = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
 	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
 	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
 	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
 	WorkflowNotFound    = Register(ProblemType{Code: "workflow-not-found", Status: http.StatusNotFound, Title: "Workflow Not Found"})
+	RunNotFound         = Register(ProblemType{Code: "run-not-found", Status: http.StatusNotFound, Title: "Run Not Found"})
 	FormulaNotFound     = Register(ProblemType{Code: "formula-not-found", Status: http.StatusNotFound, Title: "Formula Not Found"})
 	OrderNotFound       = Register(ProblemType{Code: "order-not-found", Status: http.StatusNotFound, Title: "Order Not Found"})
 	ExtmsgGroupNotFound = Register(ProblemType{Code: "extmsg-group-not-found", Status: http.StatusNotFound, Title: "External-Message Group Not Found"})
@@ -37,6 +39,10 @@ var (
 	// Request validation.
 	InvalidRequest   = Register(ProblemType{Code: "invalid-request", Status: http.StatusBadRequest, Title: "Invalid Request"})
 	ValidationFailed = Register(ProblemType{Code: "validation-failed", Status: http.StatusUnprocessableEntity, Title: "Validation Failed"})
+	// InvalidCursor is a pagination token the server cannot parse (garbage,
+	// a legacy offset cursor, or the wrong kind for the endpoint). Clients
+	// recover by re-fetching the first page.
+	InvalidCursor = Register(ProblemType{Code: "invalid-cursor", Status: http.StatusBadRequest, Title: "Invalid Cursor"})
 	// WebhookRejected is a well-formed webhook request the receiver declined to
 	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
 	// which is huma's schema-validation auto-stamp.
@@ -58,6 +64,10 @@ var (
 	// client cannot today distinguish "pick a different name" from "resume/stop
 	// first" by code or prefix.
 	SessionConflict = Register(ProblemType{Code: "session-conflict", Status: http.StatusConflict, Title: "Session State Conflict"})
+	// TranscriptCursorInvalidated means a stable transcript entry cursor no
+	// longer exists in the provider's current transcript view. Clients recover
+	// by discarding the cursor and fetching a fresh snapshot.
+	TranscriptCursorInvalidated = Register(ProblemType{Code: "transcript-cursor-invalidated", Status: http.StatusConflict, Title: "Transcript Cursor Invalidated"})
 
 	// AmbiguousReference is a name/reference that matched more than one resource;
 	// the client should re-address with a scoped/qualified name, not retry or wait.
@@ -66,6 +76,10 @@ var (
 	// is running; the client may retry — distinct from a terminal "already exists"
 	// wrong-state conflict.
 	OperationInProgress = Register(ProblemType{Code: "operation-in-progress", Status: http.StatusConflict, Title: "Operation In Progress"})
+	// PackCredentialRequired means a pack's git source needs an org-scoped
+	// credential before the import can proceed. Clients may connect or rotate
+	// access, wait for credential propagation, and retry the same import.
+	PackCredentialRequired = Register(ProblemType{Code: "pack-credential-required", Status: http.StatusConflict, Title: "Pack Credential Required"})
 
 	// Authorization / capability.
 	Forbidden      = Register(ProblemType{Code: "forbidden", Status: http.StatusForbidden, Title: "Forbidden"})

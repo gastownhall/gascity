@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -31,48 +32,111 @@ type rawDBGetter interface {
 var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
 
 // repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
-// and only issues the ALTER when the id column exists without a default.
+// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
+// the id column exists without a default.
 //
-//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
+// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
+// probe was a full catalog scan — cheap once, but it runs per store open per
+// repair table, and a fleet of concurrent gc/bd sessions firing it several
+// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
+// Default cell directly, so one cheap statement replaces the scan.
 func repairIDDefault(db *sql.DB, table string) error {
-	var idCols, withDefault int
-	err := db.QueryRow(`
-		SELECT COUNT(*), COUNT(COLUMN_DEFAULT)
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = ?
-		  AND COLUMN_NAME = 'id'
-	`, table).Scan(&idCols, &withDefault)
+	// 'id' contains no LIKE wildcards, but Field is still compared exactly
+	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+	if err != nil {
+		if isTableNotExistError(err) {
+			return nil
+		}
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("checking %s.id default: %w", table, err)
 	}
-	if idCols == 0 || withDefault > 0 {
-		// Table/column absent, or the default is already present.
+	defaultIdx := -1
+	for i, col := range cols {
+		if strings.EqualFold(col, "Default") {
+			defaultIdx = i
+			break
+		}
+	}
+	if defaultIdx < 0 {
+		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
+	}
+
+	idFound, withDefault := false, false
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("checking %s.id default: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == "id" {
+			idFound = true
+			withDefault = cells[defaultIdx] != nil
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking %s.id default: %w", table, err)
+	}
+	if !idFound || withDefault {
+		// Column absent, or the default is already present.
 		return nil
 	}
-	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table))
-	if err != nil {
+	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
 		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
 }
 
+// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
+// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
+// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
+// wisp_events on an older schema) is not an error.
+func isTableNotExistError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	// The embedded Dolt driver surfaces the same condition without the
+	// go-sql-driver error type; match Dolt's message shape.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
+}
+
 const nativeDoltStoreActor = "gascity"
 
+// nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
+// GetReadyWork for. This must match IsReadyCandidateForTier's contract of
+// "open status ... and no future defer_until": only StatusOpen (bd's own
+// status-category table marks it the sole "active" category status) and
+// StatusDeferred (kept only because IsDeferred independently re-checks
+// DeferUntil, so an expired deferral must still resurface) belong here.
+// blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
+// ready semantics already exclude them, and Gas City has no analogous
+// re-check for them the way it does for deferred, so querying for them let
+// dependency-blocked beads erase their status to "open" via mapBdStatus and
+// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
+// the full investigation.
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
-	beadslib.StatusBlocked,
 	beadslib.StatusDeferred,
-	beadslib.Status("pinned"),
-	beadslib.Status("hooked"),
-	beadslib.Status("review"),
-	beadslib.Status("testing"),
 }
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
 	nativeDoltOpenEnvMu         sync.Mutex
+	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
 var nativeDoltOpenEnvKeys = []string{
@@ -98,6 +162,25 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 	return context.WithTimeout(parent, bdCommandTimeout)
 }
 
+// nativeGraphApplyDeadline scales the graph-apply transaction budget with plan
+// size. The library's AddDependency runs a recursive cycle-reachability query
+// per blocking edge, so a large molecule (67 nodes / ~100 edges on the
+// mol-adopt-pr-v2 shape) cannot finish inside the flat per-command budget: the
+// batch died at the 120s deadline mid-edges, retried into the same wall, and
+// fell back to per-bead creates — turning a single atomic pour into ~9 minutes
+// of partial work (2026-07-17 code red). Until the per-edge check is replaced
+// by one whole-graph CycleThroughEdges pass (needs a beads-side export of
+// DependencyAddOptions), give each node and edge a slice of budget on top of
+// the flat floor so the atomic path completes instead of falling back.
+func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
+	d := bdCommandTimeout
+	if plan == nil {
+		return d
+	}
+	const perItem = 2 * time.Second
+	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
+}
+
 func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), bdCommandTimeout)
 }
@@ -108,6 +191,19 @@ func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 	return os.Environ()
+}
+
+// AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
+// under nativeDoltOpenEnvMu so it reflects the restored ambient environment
+// rather than a value a concurrent native Dolt open is temporarily projecting.
+// withNativeDoltOpenEnv mutates the keys in nativeDoltOpenEnvKeys (which include
+// BEADS_DOLT_SERVER_TLS) under this mutex, so a bare os.Getenv of one of those
+// keys can observe another scope's transient projection; this guarded read
+// cannot. It mirrors os.Getenv: an unset key returns "".
+func AmbientNativeDoltOpenEnv(key string) string {
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+	return os.Getenv(key)
 }
 
 func processEnvSnapshotExcludingNativeDoltOpen() []string {
@@ -157,10 +253,85 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
 type NativeDoltStore struct {
-	mu       sync.RWMutex
-	storage  beadslib.Storage
-	actor    string
-	idPrefix string
+	mu      sync.RWMutex
+	storage beadslib.Storage
+	// generation increments on every successful reconnect. A read that fails
+	// with a transient connection error records the generation it observed and
+	// asks reconnect to swap the dead handle only if no other reader already did.
+	generation uint64
+	actor      string
+	idPrefix   string
+
+	// reopen re-establishes the managed Dolt connection after a transient
+	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
+	// CURRENT managed Dolt port and return a fresh storage handle bound to the
+	// live server — the store's original open env pins the now-dead port, so a
+	// naive re-open of the cached env would keep dialing it. It is injected by
+	// the store factory (which owns managed-Dolt port discovery + restart); a
+	// nil reopen disables reconnect and preserves fail-fast behavior for test
+	// handles built directly from a storage value.
+	reopen NativeReopenFunc
+	// reconnectGate is a single token used to serialize reconnects. Readers wait
+	// on it with their retry context, so a reconnect already in progress cannot
+	// make another read outlive its wall-clock budget.
+	reconnectGate chan struct{}
+	// closed is the one-way terminal latch. CloseStore sets it (under mu) so an
+	// in-flight reconnect's post-reopen re-check discards its fresh handle instead
+	// of installing it after the store is permanently closed.
+	closed bool
+	// readRetryBudgetOverride, when non-zero, replaces nativeReadRetryBudget as the
+	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
+	// tests set it (to exercise budget exhaustion without a real 90s wait).
+	readRetryBudgetOverride time.Duration
+
+	// condWritesStamp carries the factory-stamped conditional-writes mode.
+	// NativeDoltStore implements the NARROW metadata value-CAS
+	// (MetadataCASWriter, see native_dolt_store_conditional.go) but NOT
+	// ConditionalWriter, so the stamp's effect at the seam is unchanged:
+	// require→typed refusal / auto→loud degrade, never a silent legacy write
+	// under require.
+	//
+	// The gap is the revision-CAS trio, and it is a BACKEND gap, not an
+	// unwritten method. UpdateIfMatch/CloseIfMatch/DeleteIfMatch need a fence
+	// token that advances on every mutation and is never reused; beads v1.1.0
+	// has none. types.Issue carries no revision, the issues DDL has no version
+	// column, updated_at is second-granularity — so two same-second writes
+	// compare EQUAL and a stale fence silently succeeds, which is the lost
+	// update the fence exists to prevent — and label mutations never touch
+	// updated_at at all. A counter this store maintained itself would fence
+	// nothing, because the Dolt database is multi-writer (bd CLI, other
+	// gascity processes, graph-apply). Upstream beads #4697 (claim_fence) is
+	// the missing primitive; when it lands the trio becomes implementable and
+	// this store can declare ConditionalWriter.
+	//
+	// Declaring ConditionalWriter early to expose the CAS method would make
+	// ResolveConditionalWriter resolve under require and hand the trio's
+	// callers a wrong fence — the precise silent-write failure this refusal
+	// currently makes impossible. internal/beads/metadata_cas.go carries the
+	// full reasoning and the narrow interface's own resolution path.
+	condWritesStamp
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+}
+
+// NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
+// It is aliased so a caller (e.g. the store factory) can build a WithNativeReopen
+// hook without importing the upstream beads package directly.
+type NativeStorage = beadslib.Storage
+
+// NativeReopenFunc re-establishes a native Dolt storage handle after a transient
+// connection failure. See WithNativeReopen and NativeDoltStore.reopen.
+type NativeReopenFunc func(context.Context) (NativeStorage, error)
+
+// NativeDoltStoreOption configures a NativeDoltStore at open.
+type NativeDoltStoreOption func(*NativeDoltStore)
+
+// WithNativeReopen injects the reconnect hook the read path uses to recover the
+// managed Dolt connection after a transient failure. The hook must re-resolve
+// the current managed port (the cached open env pins the old one) and return a
+// fresh storage handle. See NativeDoltStore.reopen.
+func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) { s.reopen = reopen }
 }
 
 var (
@@ -170,13 +341,14 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -187,26 +359,59 @@ func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idP
 
 // OpenNativeDoltStoreAt opens a native Dolt-backed beads store at scopeRoot
 // while projecting the supplied scoped Dolt environment for upstream beads.
-func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
-	return newNativeDoltStoreAt(ctx, scopeRoot, env)
+// Pass WithNativeReopen to arm transparent reconnect across a managed-Dolt
+// rebind.
+func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	return newNativeDoltStoreAt(ctx, scopeRoot, env, opts...)
 }
 
-func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
+func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
-	restoreEnv, err := withNativeDoltOpenEnv(env)
+	storage, prefix, err := openAndRepairNativeStorage(ctx, scopeRoot, env, true)
 	if err != nil {
 		return nil, err
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store, nil
+}
+
+// OpenNativeStorage opens a native Dolt storage handle for the given scope and
+// projected env. It is the building block for a NativeDoltStore reopen hook: a
+// caller that has re-resolved the CURRENT managed Dolt env (fresh port) passes
+// it here to get a fresh handle bound to the live server.
+func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]string) (NativeStorage, error) {
+	storage, _, err := openAndRepairNativeStorage(ctx, scopeRoot, env, false)
+	return storage, err
+}
+
+// openAndRepairNativeStorage projects the scoped Dolt env, opens the
+// best-available native storage, repairs the id-default columns some Dolt
+// versions strip, and (when readPrefix) reads the configured issue prefix while
+// the env is still projected. It is shared by the initial open and by the
+// read-path reconnect that recovers from a managed-Dolt hard-kill/rebind, so
+// both establish an identically configured connection.
+func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
+	restoreEnv, err := withNativeDoltOpenEnv(env)
+	if err != nil {
+		return nil, "", err
 	}
 	defer restoreEnv()
 	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	prefix, err := storage.GetConfig(ctx, "issue_prefix")
-	if err != nil {
-		_ = storage.Close()
-		return nil, fmt.Errorf("reading native issue prefix: %w", err)
+	var prefix string
+	if readPrefix {
+		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			_ = storage.Close()
+			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
+		}
 	}
 	if accessor, ok := storage.(rawDBGetter); ok {
 		for _, table := range idDefaultRepairTables {
@@ -217,7 +422,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 			}
 		}
 	}
-	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+	return storage, prefix, nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
@@ -241,22 +446,301 @@ func (s *NativeDoltStore) acquireStorage() (beadslib.Storage, func(), error) {
 		return nil, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 	s.mu.RLock()
-	if s.storage == nil {
+	if s.closed || s.storage == nil {
 		s.mu.RUnlock()
 		return nil, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 	return s.storage, s.mu.RUnlock, nil
 }
 
-// CloseStore releases the underlying native beads storage handle.
+// acquireStorageGen is acquireStorage plus the current reconnect generation, so
+// the read-retry path can ask reconnect to swap only the exact handle it saw
+// fail (single-flight across concurrent readers).
+func (s *NativeDoltStore) acquireStorageGen() (beadslib.Storage, uint64, func(), error) {
+	if s == nil {
+		return nil, 0, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	s.mu.RLock()
+	if s.closed || s.storage == nil {
+		s.mu.RUnlock()
+		return nil, 0, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	return s.storage, s.generation, s.mu.RUnlock, nil
+}
+
+const (
+	// nativeReadRetryBudget bounds the total reconnect-and-retry time for a
+	// single read. It must comfortably exceed the managed-Dolt hard-kill/rebind
+	// window (~40-56s of mysql i/o timeouts before the dead handle surfaces the
+	// error, plus the restart) so a read spanning a rebind recovers rather than
+	// failing, while still failing fast for a genuinely down server.
+	nativeReadRetryBudget = 90 * time.Second
+	// nativeReadRetryBackoff spaces reconnect-and-retry passes.
+	nativeReadRetryBackoff = 200 * time.Millisecond
+)
+
+// withReadRetry runs a read against the native storage handle, transparently
+// reconnecting and retrying when the handle fails with a transient connection
+// error — the :3307 hard-kill/rebind class ("invalid connection", "i/o timeout",
+// "broken pipe", "dial tcp", "unexpected EOF", "use of closed network
+// connection"). Retrying the same handle is pointless: its *sql.DB pool points
+// at the killed server's port, so each retry first reconnects via the injected
+// reopen hook, which re-resolves the CURRENT managed Dolt port (restarting the
+// server if needed) and returns a fresh handle bound to the live server.
+// Reconnect is single-flight across concurrent readers via the generation guard.
+// The loop is deadline-bounded (nativeReadRetryBudget) rather than a fixed
+// attempt count so it spans the whole rebind window. Non-transient errors
+// (ErrNotFound, decode failures) return immediately, and a store without a
+// reopen hook (test handle built directly from a storage value) keeps the prior
+// fail-fast behavior.
+//
+// This closes the gap #4188 left: runBDTransientRead hardened the bd-CLI read
+// path (each bd subprocess re-resolves the port and restarts Dolt), but
+// factory.go prefers NativeDoltStore when native preflight passes, and that
+// long-lived provider-store handle had no equivalent recovery — so a rig store's
+// reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
+// timeout" after a managed-Dolt rebind instead of recovering.
+func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storage) error) error {
+	if s == nil {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	budget := nativeReadRetryBudget
+	if s.readRetryBudgetOverride > 0 {
+		budget = s.readRetryBudgetOverride
+	}
+	// One wall-clock context bounds the WHOLE chain — the read, the reconnect
+	// (env re-resolution + recovery + reopen), the retried read, and the backoff.
+	// Every step derives its deadline from this ctx and is canceled in-flight
+	// when it expires, so the total cannot stack per-call timeouts past budget.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	for {
+		storage, gen, release, err := s.acquireStorageGen()
+		if err != nil {
+			return err
+		}
+		opErr := fn(ctx, storage)
+		release()
+		if opErr == nil {
+			return nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nativeReadRetryBudgetError(ctxErr, opErr)
+		}
+		reopen, closed := s.reopenState()
+		if closed {
+			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+		}
+		if !isNativeDoltTransientReadError(opErr) || reopen == nil {
+			return opErr
+		}
+		if rcErr := s.reconnect(ctx, gen); rcErr != nil {
+			reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
+			// A reconnect that itself fails transiently (server mid-restart) is
+			// worth another pass while the budget remains; a non-transient
+			// reconnect failure or an exhausted budget is terminal.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nativeReadRetryBudgetError(ctxErr, reconnectErr)
+			}
+			if !isNativeDoltTransientReadError(rcErr) {
+				return reconnectErr
+			}
+		}
+		// Cancellable backoff: budget expiry during the wait aborts the chain
+		// instead of sleeping past the wall.
+		select {
+		case <-ctx.Done():
+			return nativeReadRetryBudgetError(ctx.Err(), opErr)
+		case <-time.After(nativeReadRetryBackoff):
+		}
+	}
+}
+
+func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("native Dolt read retry budget exhausted: %w", ctxErr)
+	}
+	return fmt.Errorf("native Dolt read retry budget exhausted (%w), last error: %w", ctxErr, lastErr)
+}
+
+// reopenState returns the reconnect hook and terminal-close state atomically.
+func (s *NativeDoltStore) reopenState() (NativeReopenFunc, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reopen, s.closed
+}
+
+// acquireReconnectGate waits for the single reconnect token or the caller's
+// deadline. Lazy initialization keeps zero-value test stores safe without a
+// second constructor-only invariant.
+func (s *NativeDoltStore) acquireReconnectGate(ctx context.Context) (chan struct{}, error) {
+	if s == nil {
+		return nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	s.mu.Lock()
+	if s.reconnectGate == nil {
+		s.reconnectGate = make(chan struct{}, 1)
+		s.reconnectGate <- struct{}{}
+	}
+	gate := s.reconnectGate
+	s.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-gate:
+		if err := ctx.Err(); err != nil {
+			gate <- struct{}{}
+			return nil, err
+		}
+		return gate, nil
+	}
+}
+
+func (s *NativeDoltStore) releaseReconnectGate(gate chan struct{}) {
+	gate <- struct{}{}
+}
+
+// nativeDoltTransientReadErrorSignatures are the substrings that mark a native
+// read failure as a transient managed-Dolt connection error worth reconnecting
+// and retrying for. It mirrors and extends the bd read path's connection-error
+// set (#4188) with the mysql/net signatures a :3307 hard-kill/rebind emits.
+var nativeDoltTransientReadErrorSignatures = []string{
+	"invalid connection",
+	"bad connection",
+	"connection reset",
+	"broken pipe",
+	"i/o timeout",
+	"dial tcp",
+	"unexpected eof",
+	"use of closed network connection",
+	"connection refused",
+}
+
+// isNativeDoltTransientReadError reports whether err is a transient managed-Dolt
+// connection error worth reconnecting-and-retrying for.
+func isNativeDoltTransientReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range nativeDoltTransientReadErrorSignatures {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconnect swaps the dead storage handle for a freshly opened one after a
+// transient connection failure, single-flighted so concurrent readers reconnect
+// once. observedGen is the generation the failing read ran under; if another
+// reader already reconnected (generation advanced), this is a no-op and the
+// caller simply retries against the new handle. The fresh handle comes from the
+// injected reopen hook, which re-resolves the CURRENT managed port (the cached
+// open env pins the old, now-dead port) and re-opens against the live server.
+func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) error {
+	gate, err := s.acquireReconnectGate(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.releaseReconnectGate(gate)
+
+	s.mu.RLock()
+	curGen := s.generation
+	closed := s.closed
+	old := s.storage
+	reopen := s.reopen
+	s.mu.RUnlock()
+
+	if closed || reopen == nil {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if curGen != observedGen {
+		return nil // another reader already reconnected
+	}
+
+	// The reopen hook re-resolves the current managed port and re-opens under the
+	// caller's wall context, so a stuck env-resolution/recovery is canceled at
+	// the budget rather than running under its own separate timeout.
+	fresh, err := reopen(ctx)
+	if err != nil {
+		closeStorageQuietly(fresh)
+		return err
+	}
+	if fresh == nil {
+		return fmt.Errorf("native Dolt reopen returned nil storage")
+	}
+
+	s.mu.Lock()
+	// Void the install if the store was closed while we were reopening (terminal
+	// latch — never resurrect a closed store) or another reader reconnected first
+	// (generation advanced). Either way the fresh handle is discarded, not leaked.
+	if s.closed {
+		s.mu.Unlock()
+		closeStorageQuietly(fresh)
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if s.generation != observedGen {
+		s.mu.Unlock()
+		closeStorageQuietly(fresh)
+		return nil
+	}
+	s.storage = fresh
+	s.generation++
+	s.mu.Unlock()
+
+	closeStorageQuietly(old)
+	return nil
+}
+
+// closeStorageQuietly closes a (possibly dead) storage handle without blocking
+// the caller: a handle whose server was hard-killed can wedge on Close, so it is
+// closed on a detached goroutine and any error is ignored. The handle is
+// unreferenced by the time this is called (the swap took the write lock, so no
+// reader still holds it), making the detached close safe.
+func closeStorageQuietly(storage beadslib.Storage) {
+	if storage == nil {
+		return
+	}
+	go func() { _ = storage.Close() }()
+}
+
+// CloseStore permanently releases the underlying native beads storage handle.
+// It is a one-way terminal latch that must win any race with an in-flight
+// reconnect: after it returns no reconnect may install a fresh handle (which
+// would resurrect a closed store and leak a live Dolt connection).
 func (s *NativeDoltStore) CloseStore() error {
 	if s == nil {
 		return nil
 	}
+	// Phase 1 — latch closed immediately under mu before waiting on the reconnect
+	// gate, so a reconnect currently blocked in its reopen observes the close on
+	// its post-reopen re-check, while new operations fail with ErrStoreClosed.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.mu.Unlock()
+
+	// Phase 2 — serialize the teardown with any in-flight reconnect,
+	// then advance generation + drop the storage handle + drop the reopen hook
+	// atomically under mu. Combined with the phase-1 latch, no fresh handle can be
+	// installed after this point.
+	gate, err := s.acquireReconnectGate(context.Background())
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	storage := s.storage
 	s.storage = nil
+	s.reopen = nil
+	s.generation++
 	s.mu.Unlock()
+	s.releaseReconnectGate(gate)
+
 	if storage == nil {
 		return nil
 	}
@@ -289,7 +773,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	}
 	defer release()
 
-	ctx, cancel := nativeDoltOperationContext(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
 	keyToID := make(map[string]string, len(plan.Nodes))
@@ -470,26 +957,28 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return Bead{}, err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
-		IDs:                 []string{id},
-		IncludeDependencies: true,
-	})
-	if err != nil {
-		return Bead{}, nativeStoreError(id, err)
-	}
-	for _, issue := range issues {
-		if issue != nil && issue.ID == id {
-			return beadFromNativeIssue(issue)
+	var out Bead
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs:                 []string{id},
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			return nativeStoreError(id, err)
 		}
-	}
-	return Bead{}, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		for _, issue := range issues {
+			if issue != nil && issue.ID == id {
+				bead, err := beadFromNativeIssue(issue)
+				if err != nil {
+					return err
+				}
+				out = bead
+				return nil
+			}
+		}
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	})
+	return out, err
 }
 
 // Update modifies an existing bead through the upstream beads storage layer.
@@ -738,27 +1227,31 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	filter := nativeIssueFilterFromListQuery(query)
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	issues, err := storage.SearchIssues(ctx, "", filter)
-	if err != nil {
-		return nil, err
-	}
-	beads := make([]Bead, 0, len(issues))
-	for _, issue := range issues {
-		bead, err := beadFromNativeIssue(issue)
+	var out []Bead
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		filter := nativeIssueFilterFromListQuery(query)
+		issues, err := storage.SearchIssues(ctx, "", filter)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		beads = append(beads, bead)
+		beads := make([]Bead, 0, len(issues))
+		for _, issue := range issues {
+			bead, err := beadFromNativeIssue(issue)
+			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
+				return err
+			}
+			beads = append(beads, bead)
+		}
+		out = ApplyListQuery(beads, query)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return ApplyListQuery(beads, query), nil
+	return out, nil
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
@@ -776,45 +1269,57 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 // Ready returns open, unblocked actionable beads.
 func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(queries)
-	storage, release, err := s.acquireStorage()
+	var out []Bead
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		var beads []Bead
+		seen := make(map[string]bool)
+		now := time.Now().UTC()
+	statusLoop:
+		for _, status := range nativeDoltOpenReadyStatuses {
+			filter := beadslib.WorkFilter{Status: status}
+			if q.TierMode == TierBoth || q.TierMode == TierWisps {
+				filter.IncludeEphemeral = true
+			}
+			if q.Assignee != "" {
+				filter.Assignee = &q.Assignee
+			}
+			issues, err := storage.GetReadyWork(ctx, filter)
+			if err != nil {
+				return err
+			}
+			for _, issue := range issues {
+				// The StatusDeferred branch exists so an expired time-bound
+				// deferral (defer_until in the past) can resurface. An issue
+				// with no defer_until at all was never time-bound — it's bd
+				// defer's status-based indefinite deferral — and must stay
+				// hidden. mapBdStatus collapses status to "open" and
+				// IsDeferred only inspects DeferUntil, so both would
+				// otherwise look identical to an ordinary open bead once
+				// beadFromNativeIssue erases the raw status.
+				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+					continue
+				}
+				bead, err := beadFromNativeIssue(issue)
+				if err != nil {
+					return err
+				}
+				if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
+					continue
+				}
+				seen[bead.ID] = true
+				beads = append(beads, bead)
+				if q.Limit > 0 && len(beads) >= q.Limit {
+					break statusLoop
+				}
+			}
+		}
+		out = beads
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	var beads []Bead
-	seen := make(map[string]bool)
-	now := time.Now().UTC()
-statusLoop:
-	for _, status := range nativeDoltOpenReadyStatuses {
-		filter := beadslib.WorkFilter{Status: status}
-		if q.TierMode == TierBoth || q.TierMode == TierWisps {
-			filter.IncludeEphemeral = true
-		}
-		if q.Assignee != "" {
-			filter.Assignee = &q.Assignee
-		}
-		issues, err := storage.GetReadyWork(ctx, filter)
-		if err != nil {
-			return nil, err
-		}
-		for _, issue := range issues {
-			bead, err := beadFromNativeIssue(issue)
-			if err != nil {
-				return nil, err
-			}
-			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
-				continue
-			}
-			seen[bead.ID] = true
-			beads = append(beads, bead)
-			if q.Limit > 0 && len(beads) >= q.Limit {
-				break statusLoop
-			}
-		}
-	}
-	return beads, nil
+	return out, nil
 }
 
 // Children returns all beads whose parent-child dependency points at parentID.
@@ -917,6 +1422,11 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
+const (
+	nativeMetadataWriteAttempts     = 3
+	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+)
+
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
@@ -924,8 +1434,23 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		cancel()
+		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
+	}
+	return err
+}
+
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
+// A retry must call this whole operation again so metadata committed by the
+// competing transaction is included rather than overwritten from a stale read.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -948,6 +1473,42 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+}
+
+// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
+// serialization conflicts, which are known not to have committed and are safe
+// to retry. Ambiguous connection failures intentionally remain fail-fast.
+func isNativeDoltSerializationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 1213") ||
+		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
+		strings.Contains(msg, "(40001)") ||
+		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+}
+
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than through Dolt storage: unlike SetMetadata,
+// this never touches the Dolt DB or commits. Does not validate that id
+// refers to an existing bead — see the interface doc comment for why.
+func (s *NativeDoltStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *NativeDoltStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
 }
 
 // Tx executes fn inside a single native Dolt transaction so every write in the
@@ -1014,7 +1575,13 @@ func (s *NativeDoltStore) Delete(id string) error {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	return nativeStoreError(id, storage.DeleteIssue(ctx, id))
+	if err := nativeStoreError(id, storage.DeleteIssue(ctx, id)); err != nil {
+		return err
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
+	}
+	return nil
 }
 
 // Ping verifies that the upstream storage is reachable.
@@ -1060,14 +1627,19 @@ func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
 
 // DepList returns dependencies for a bead.
 func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
-	storage, release, err := s.acquireStorage()
+	var out []Dep
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		deps, err := s.depList(ctx, storage, id, direction)
+		if err != nil {
+			return err
+		}
+		out = deps
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return s.depList(ctx, storage, id, direction)
+	return out, nil
 }
 
 func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage, id, direction string) ([]Dep, error) {
@@ -1470,7 +2042,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
-		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", issue.ID, err)
+		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
 		ID:          issue.ID,
@@ -1505,6 +2077,10 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	return b, nil
 }
 
+func isNativeIssueMetadataParseError(err error) bool {
+	return errors.Is(err, errNativeIssueMetadataParse)
+}
+
 func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 	// Upstream beads stores omitted priority as P2. Gas City's Store surface
 	// represents that unset/default state as nil, matching BdStore's sparse
@@ -1516,13 +2092,77 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 	return &priority
 }
 
+// nativeCreatedLimitPushdown reports the row limit to forward to the backing
+// search for a ListQuery, or 0 to fetch the full candidate set and let
+// ApplyListQuery cut the exact page client-side. Created-order sorts push down
+// to the backing search (IssueFilter.SortBy drives sqlbuild.OrderBy) so the
+// caller's limit survives and the store pages instead of materializing +
+// hydrating the whole corpus (sr-dp9o: the dispatcher's RecentRunsAll(2048) was
+// scanning ~22k closed order-tracking wisps per call with the limit stripped).
+// A backing limit is exact only when the backing's ordering and tie-break match
+// the query's client-side semantics; the guards below keep every shape whose
+// exact result needs client-side work from truncating the page early.
+func nativeCreatedLimitPushdown(query ListQuery) int {
+	if query.Limit <= 0 {
+		return 0
+	}
+	// The wisp tier still needs the gc-side post-filter over the full candidate
+	// set (it can discard rows), so a backing limit would cut the page short.
+	if query.TierMode == TierWisps {
+		return 0
+	}
+	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
+	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
+	// backing limit applied before them would cut rows before the residual filter
+	// runs and silently drop page rows. Fetch the full candidate set for those
+	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
+	// exec.go, bdstore canApplyWispsServerLimit).
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+		return 0
+	}
+	switch query.Sort {
+	case SortCreatedAsc:
+		// The backing renders created-asc ties as `id ASC`, matching the
+		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
+		return query.Limit
+	case SortCreatedDesc:
+		// The backing renders created-desc ties as `id ASC` (upstream
+		// sqlbuild.OrderBy hardcodes the id tie-break), but Gas City's canonical
+		// order and cursor continuation break created_at ties by `id DESC`
+		// (sortBeadsForQuery / SeekBoundary.After). A bounded desc read therefore
+		// keeps the smaller-id tie members at the boundary and drops the larger-id
+		// ties, so an exact or cursor-paginated caller loses rows across the page
+		// seam. Only push the limit when the caller opted into a bounded
+		// newest-by-created_at sample (aggregates); otherwise fetch the full set
+		// and let ApplyListQuery cut the exact (created_at DESC, id DESC) prefix.
+		if query.AllowBackingCreatedLimit {
+			return query.Limit
+		}
+		return 0
+	case SortDefault:
+		// The default backing order (priority, created_at DESC, id ASC) is
+		// deterministic, so a bounded default read cuts a stable prefix.
+		return query.Limit
+	default:
+		// Non-mappable sorts can't page server-side; fetch unbounded and sort
+		// client-side in ApplyListQuery.
+		return 0
+	}
+}
+
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
-	limit := query.Limit
-	if query.Sort != SortDefault || query.TierMode == TierWisps {
-		limit = 0
+	var sortBy string
+	var sortDesc bool
+	switch query.Sort {
+	case SortCreatedDesc:
+		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
+	case SortCreatedAsc:
+		sortBy, sortDesc = "created", true // flip the DESC default
 	}
 	filter := beadslib.IssueFilter{
-		Limit:               limit,
+		Limit:               nativeCreatedLimitPushdown(query),
+		SortBy:              sortBy,
+		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,

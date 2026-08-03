@@ -93,6 +93,16 @@ func TestWireContractSystemHealth(t *testing.T) {
 	m := wireGet(t, contractPlane(), "/api/health/system")
 	mustObject(t, m, "admin")
 	mustObject(t, m, "host")
+	admin := m["admin"].(map[string]any)
+	host := m["host"].(map[string]any)
+	for _, field := range []string{"rss"} {
+		mustObject(t, admin, field)
+		mustString(t, admin[field].(map[string]any), "status")
+	}
+	for _, field := range []string{"load", "memory", "uptime"} {
+		mustObject(t, host, field)
+		mustString(t, host[field].(map[string]any), "status")
+	}
 }
 
 func TestWireContractLocalTools(t *testing.T) {
@@ -138,28 +148,6 @@ func TestWireContractRigStoreHealth(t *testing.T) {
 	m := wireGet(t, contractPlane(), "/api/city/alpha/rig-store-health")
 	mustBool(t, m, "available")
 	mustArray(t, m, "rigs")
-}
-
-func TestWireContractRunDiff(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/city/alpha/runs/gc-run-1/diff",
-		strings.NewReader(`{"executionPath":{"kind":"unavailable","reason":"missing_cwd_and_rig_root"}}`))
-	req.Header.Set("X-GC-Request", "dashboard")
-	contractPlane().Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("run-diff: status %d, want 200 (body %s)", rec.Code, rec.Body.String())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-		t.Fatalf("run-diff decode: %v", err)
-	}
-	mustString(t, m, "kind")
-	mustObject(t, m, "rootPath")
-	mustObject(t, m, "comparison")
-	mustArray(t, m, "status")
-	mustArray(t, m, "changedFiles")
-	mustString(t, m, "patch")
-	mustBool(t, m, "truncated")
 }
 
 // TestWireContractRunDetailProgressTerminal guards the Go-derived

@@ -1129,23 +1129,51 @@ func (t *convergeShadowTick) tallyDroppedRecords() {
 // --- fact builders (3a) -------------------------------------------------------
 
 // buildDurableFactsFromInfo assembles durableFacts from the reconciler's ALREADY
-// coherent typed Info snapshot plus the raw priming metadata (Info does not
-// mirror the priming keys). No probes, no writes. currentPromptHash and
-// promptConfigured are template-derived facts the caller resolves; on real
-// cities the priming inputs are still captured so the fixpoint stays honest, but
-// the priming action FAMILY is excluded from real-city comparison downstream.
-func buildDurableFactsFromInfo(info sessionpkg.Info, rawMeta map[string]string, tickNow time.Time) durableFacts {
+// coherent typed Info snapshot. Every compared key — canonical identity AND the
+// priming markers — is a verbatim raw Info mirror (the typed tree projects all
+// five compared keys onto Info via the codec table), so the harness reads the
+// priming facts straight off Info instead of a raw side-channel: the reconciler
+// loop carries no raw session beads. No probes, no writes. On real cities the
+// priming inputs are still captured so the fixpoint stays honest, but the priming
+// action FAMILY is excluded from real-city comparison downstream.
+func buildDurableFactsFromInfo(info sessionpkg.Info, tickNow time.Time) durableFacts {
 	d := durableFacts{
-		primedAt:          rawMeta[sessionpkg.PrimedAtMetadataKey],
-		primedPromptHash:  rawMeta[sessionpkg.PromptHashMetadataKey],
+		primedAt:          info.PrimedAtMetadata,
+		primedPromptHash:  info.PromptHashMetadata,
 		canonicalIdentity: info.CanonicalInstanceNameMetadata,
 		absent:            info.Closed,
 		now:               tickNow,
 	}
-	if v := strings.TrimSpace(rawMeta[sessionpkg.PrimingAttemptedAtMetadataKey]); v != "" {
+	if v := strings.TrimSpace(info.PrimingAttemptedAtMetadata); v != "" {
 		if ts, err := time.Parse(time.RFC3339, v); err == nil {
 			d.primingAttemptedAt = ts.UTC()
 		}
 	}
 	return d
+}
+
+// comparedKeyMetadataFromInfo projects the five compared keys off a typed Info
+// into a dense metadata map (canonical identity + priming markers, all verbatim
+// raw Info mirrors). It is the typed-tree bridge for snapshotComparedKeys: the
+// reconciler no longer carries raw session beads through the tick loop, so the
+// shadow harness snapshots the compared keys from Info's mirrors — kept in
+// lockstep with the store by the same codec that drives every other projected
+// key — instead of a raw metadata map.
+func comparedKeyMetadataFromInfo(info sessionpkg.Info) map[string]string {
+	return map[string]string{
+		sessionpkg.CanonicalInstanceNameMetadata: info.CanonicalInstanceNameMetadata,
+		sessionpkg.CanonicalPoolSlotMetadata:     info.CanonicalPoolSlotMetadata,
+		sessionpkg.PrimedAtMetadataKey:           info.PrimedAtMetadata,
+		sessionpkg.PrimingAttemptedAtMetadataKey: info.PrimingAttemptedAtMetadata,
+		sessionpkg.PromptHashMetadataKey:         info.PromptHashMetadata,
+	}
+}
+
+// snapshotComparedKeysFromInfo is the Info-mirror counterpart of
+// snapshotComparedKeys: it reads the compared keys off a typed Info into a dense
+// snapshot (missing keys map to ""). The reconciler uses it for the tick-start
+// and tick-end compared-key snapshots, since the typed loop carries Info, not raw
+// beads.
+func snapshotComparedKeysFromInfo(info sessionpkg.Info) map[string]string {
+	return snapshotComparedKeys(comparedKeyMetadataFromInfo(info))
 }

@@ -574,7 +574,7 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 	// through the retyped policy read path, so assert both wait IDs are present;
 	// the no_history parse assertion remains covered by the loadSessionBeads half
 	// above and by the bdstore tests.
-	waits, err := loadWaits(store)
+	waits, err := sessionFrontDoor(store).ListWaits("", "")
 	if err != nil {
 		t.Fatalf("loadWaits: %v", err)
 	}

@@ -64,6 +64,55 @@ func TestSessionProgressStalled(t *testing.T) {
 	}
 }
 
+func TestSessionClaimHolderStalled(t *testing.T) {
+	now := time.Date(2026, 7, 25, 20, 0, 0, 0, time.UTC)
+	const threshold = 20 * time.Minute
+
+	tests := []struct {
+		name            string
+		threshold       time.Duration
+		holdsClaim      bool
+		providerHealthy bool
+		exempt          bool
+		lastProgress    time.Time
+		want            bool
+	}{
+		{"stale confirmed holder is recyclable", threshold, true, true, false, now.Add(-time.Hour), true},
+		{"disabled", 0, true, true, false, now.Add(-time.Hour), false},
+		{"recent activity", threshold, true, true, false, now.Add(-time.Second), false},
+		{"claimless session belongs to other recycler", threshold, false, true, false, now.Add(-time.Hour), false},
+		{"unhealthy provider", threshold, true, false, false, now.Add(-time.Hour), false},
+		{"protected session", threshold, true, true, true, now.Add(-time.Hour), false},
+		{"unknown activity", threshold, true, true, false, time.Time{}, false},
+		{"at threshold", threshold, true, true, false, now.Add(-threshold), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionClaimHolderStalled(tc.threshold, tc.holdsClaim, tc.providerHealthy, tc.exempt, tc.lastProgress, now); got != tc.want {
+				t.Fatalf("sessionClaimHolderStalled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMinPositiveDuration(t *testing.T) {
+	tests := []struct {
+		first, second time.Duration
+		want          time.Duration
+	}{
+		{0, 0, 0},
+		{0, time.Minute, time.Minute},
+		{time.Minute, 0, time.Minute},
+		{time.Minute, 2 * time.Minute, time.Minute},
+		{2 * time.Minute, time.Minute, time.Minute},
+	}
+	for _, tc := range tests {
+		if got := minPositiveDuration(tc.first, tc.second); got != tc.want {
+			t.Errorf("minPositiveDuration(%s, %s) = %s, want %s", tc.first, tc.second, got, tc.want)
+		}
+	}
+}
+
 // TestProgressStall_MinFloorIdleWorker_NotRecycled verifies that a pool worker
 // sitting below the min_active_sessions floor is exempt from the stall recycler.
 func TestProgressStall_MinFloorIdleWorker_NotRecycled(t *testing.T) {

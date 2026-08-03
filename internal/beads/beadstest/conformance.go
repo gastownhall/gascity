@@ -147,6 +147,44 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("CreateEchoMatchesGetOnMetadata", func(t *testing.T) {
+		// The Create return value (the "echo") must carry the same id, status, and
+		// metadata a subsequent Get returns. session.CreateSessionInfo projects the
+		// echo instead of issuing a post-create Get, so any backend whose Create echo
+		// diverges from Get on the projection surface would silently corrupt the typed
+		// create front door. This pins the parity across every backend, not just memstore.
+		s := newStore()
+		meta := map[string]string{
+			"session_name": "polecat-1",
+			"state":        "start_pending",
+			"alias":        "pc-1",
+			"pool_slot":    "3",
+			"agent_name":   "tower/polecat",
+		}
+		created, err := s.Create(beads.Bead{Title: "polecat", Type: "gc:session", Labels: []string{"gc:session"}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ID != created.ID {
+			t.Errorf("Get ID = %q, create echo ID = %q", got.ID, created.ID)
+		}
+		if got.Status != created.Status {
+			t.Errorf("Get Status = %q, create echo Status = %q", got.Status, created.Status)
+		}
+		for k, v := range meta {
+			if created.Metadata[k] != v {
+				t.Errorf("create echo Metadata[%q] = %q, want %q", k, created.Metadata[k], v)
+			}
+			if got.Metadata[k] != created.Metadata[k] {
+				t.Errorf("Metadata[%q]: Get=%q, create echo=%q — backend must echo created metadata on Create", k, got.Metadata[k], created.Metadata[k])
+			}
+		}
+	})
+
 	t.Run("GetExistingBead", func(t *testing.T) {
 		s := newStore()
 		created, err := s.Create(beads.Bead{Title: "round trip", Type: "bug"})
@@ -802,6 +840,116 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got := titlesOf(both); !hasExactly(got, "tier-ephemeral", "tier-history", "tier-no-history") {
 			t.Errorf("both tier titles = %v, want [tier-ephemeral tier-history tier-no-history]", got)
+		}
+	})
+
+	// SetLocalString/GetLocalString cover only behavior common to every Store
+	// implementation. Unknown-bead-id handling is deliberately excluded here:
+	// in-process stores validate and return ErrNotFound while external-process
+	// stores (BdStore, NativeDoltStore, exec.Store) do not, by design (see the
+	// Store interface doc comment) — that asymmetry, if tested at all, belongs
+	// in each implementation's own test file, not this shared suite.
+	t.Run("SetLocalStringRoundTrip", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		got, err := s.GetLocalString(b.ID, "last_woke_at")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "2026-07-14T00:00:00Z" {
+			t.Errorf("GetLocalString = %q, want 2026-07-14T00:00:00Z", got)
+		}
+	})
+
+	t.Run("GetLocalStringUnsetReturnsEmpty", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-unset"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetLocalString(b.ID, "never_set")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLocalString unset = %q, want empty", got)
+		}
+	})
+
+	t.Run("SetLocalStringEmptyClears", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-clear"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "k", "v"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		if err := s.SetLocalString(b.ID, "k", ""); err != nil {
+			t.Fatalf("SetLocalString empty: %v", err)
+		}
+		got, err := s.GetLocalString(b.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString: %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLocalString after clear = %q, want empty", got)
+		}
+	})
+
+	t.Run("SetLocalStringNotInDurableMetadata", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "local-string-not-durable"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(b.ID, "clone_local_key", "v"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if _, ok := got.Metadata["clone_local_key"]; ok {
+			t.Error("SetLocalString leaked into durable Metadata, want clone-local key absent from Metadata")
+		}
+	})
+
+	t.Run("SetLocalStringPerBeadIsolation", func(t *testing.T) {
+		s := newStore()
+		a, err := s.Create(beads.Bead{Title: "local-string-bead-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := s.Create(beads.Bead{Title: "local-string-bead-b"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLocalString(a.ID, "k", "a-value"); err != nil {
+			t.Fatalf("SetLocalString a: %v", err)
+		}
+		if err := s.SetLocalString(b.ID, "k", "b-value"); err != nil {
+			t.Fatalf("SetLocalString b: %v", err)
+		}
+		gotA, err := s.GetLocalString(a.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString a: %v", err)
+		}
+		if gotA != "a-value" {
+			t.Errorf("GetLocalString a = %q, want a-value", gotA)
+		}
+		gotB, err := s.GetLocalString(b.ID, "k")
+		if err != nil {
+			t.Fatalf("GetLocalString b: %v", err)
+		}
+		if gotB != "b-value" {
+			t.Errorf("GetLocalString b = %q, want b-value", gotB)
 		}
 	})
 }

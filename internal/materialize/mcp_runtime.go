@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -58,10 +59,7 @@ func MCPTemplateData(
 	}
 	rigName := workdirutil.ConfiguredRigName(cityPath, *agent, rigs)
 	rigRoot := workdirutil.RigRootForName(rigName, rigs)
-	templateName := agent.QualifiedName()
-	if agent.PoolName != "" {
-		templateName = agent.PoolName
-	}
+	templateName := agentutil.RoutedToIdentity(agent)
 	if templateName == "" {
 		templateName = identity
 	}

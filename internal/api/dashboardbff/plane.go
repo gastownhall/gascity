@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +85,9 @@ type Plane struct {
 	samplers   *samplerManager
 	runTailers *runTailerManager
 	localTools *localToolsCache
+	// healthSnapshot is a per-plane seam so sampler failures can be exercised
+	// without mutating package-global state or the host running the test.
+	healthSnapshot func(context.Context) (systemHealth, error)
 
 	wg   sync.WaitGroup
 	stop context.CancelFunc
@@ -94,7 +96,13 @@ type Plane struct {
 // New builds the /api plane. Call Start to enable background samplers and Stop
 // to drain them on shutdown.
 func New(deps Deps) *Plane {
-	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux(), localTools: &localToolsCache{}}
+	p := &Plane{
+		deps:           deps,
+		exec:           newExecRunner(),
+		mux:            http.NewServeMux(),
+		localTools:     &localToolsCache{},
+		healthSnapshot: currentSystemHealth,
+	}
 	p.samplers = newSamplerManager(deps, p.exec)
 	p.runTailers = newRunTailerManager(deps)
 	p.registerRoutes()
@@ -129,34 +137,19 @@ func (p *Plane) Stop() {
 	p.wg.Wait()
 }
 
-// readOnlySafePostRE matches the run-diff endpoint — the one POST on the plane
-// that only READS git state. It carries its execution path in the request body
-// (so it cannot be a GET) but mutates nothing, so it must stay reachable on a
-// read-only supervisor; classifying the plane's write policy by HTTP method
-// alone would otherwise 405 the SPA's run Diff tab on every non-loopback bind.
-var readOnlySafePostRE = regexp.MustCompile(`^/api/city/[^/]+/runs/[^/]+/diff$`)
-
-// isReadOnlySafeRequest reports whether an unsafe-method request is in fact a
-// pure read that must survive the read-only gate. Only the run-diff POST
-// qualifies today; it is still subject to the CSRF checks in guard.
-func isReadOnlySafeRequest(r *http.Request) bool {
-	return r.Method == http.MethodPost && readOnlySafePostRE.MatchString(r.URL.Path)
-}
-
 // guard enforces the plane's write policy. Unsafe-method requests must (a) be
 // same-origin and (b) carry a non-empty X-GC-Request header (the supervisor's
 // CSRF convention); the same-origin assertion is defense-in-depth so a CORS
-// regression elsewhere cannot reopen CSRF on its own. In read-only mode a
-// genuine mutation is refused outright, but a read-only-SAFE request (run-diff,
-// which only reads git) is classified by semantics rather than method, so it
-// passes the read-only gate while staying behind CSRF. Safe methods pass
-// straight through. One shared gate so no per-handler check can be forgotten.
+// regression elsewhere cannot reopen CSRF on its own. In read-only mode every
+// mutation is refused outright — the plane serves only reads (GET/HEAD), which
+// pass straight through. One shared gate so no per-handler check can be
+// forgotten.
 func (p *Plane) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
-			if p.deps.ReadOnly && !isReadOnlySafeRequest(r) {
+			if p.deps.ReadOnly {
 				writeError(w, http.StatusMethodNotAllowed, "dashboard is read-only")
 				return
 			}
@@ -207,7 +200,6 @@ func (p *Plane) registerRoutes() {
 	p.registerBuilds()
 	p.registerClientLog()
 	p.registerHealth()
-	p.registerRunDiff()
 	p.registerSamplers()
 	p.registerRunSummary()
 	p.registerRunDetail()
@@ -218,7 +210,7 @@ func (p *Plane) registerRoutes() {
 // returns ("", false) for an unknown or malformed name; callers translate that
 // into a 404.
 func (p *Plane) resolveCityPath(name string) (string, bool) {
-	if !validCityName(name) || p.deps.Resolver == nil {
+	if !ValidCityName(name) || p.deps.Resolver == nil {
 		return "", false
 	}
 	return p.deps.Resolver.CityPath(name)

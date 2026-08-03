@@ -372,3 +372,31 @@ type errMalformed string
 func (e errMalformed) Error() string {
 	return string(e)
 }
+
+// TestScaffoldNoiseIsSkipped locks in defense against the two scaffold-noise
+// shapes that have tripped sibling repo-root walkers (test/docsync/docsync_test.go,
+// internal/api/apierr_guard_test.go via PR#4118): stray ga-* bead-worktree
+// checkouts and .gascity-worktree-stage.* staging dirs landing at/under repo
+// root. See ga-5vzfgb.
+func TestScaffoldNoiseIsSkipped(t *testing.T) {
+	t.Run("dot-prefixed worktree-stage dir is skipped by name", func(t *testing.T) {
+		if !skipRepoLintDir(".gascity-worktree-stage.abc123") {
+			t.Fatal("skipRepoLintDir must skip .gascity-worktree-stage.* scaffold dirs")
+		}
+	})
+
+	t.Run("nested ga-* worktree checkout is skipped structurally", func(t *testing.T) {
+		dir := t.TempDir()
+		nested := filepath.Join(dir, "ga-5vzfgb-scaffold-dir-guard")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitFile := filepath.Join(nested, ".git")
+		if err := os.WriteFile(gitFile, []byte("gitdir: /somewhere/.git/worktrees/ga-5vzfgb-scaffold-dir-guard\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !isNestedWorktreeRoot(nested) {
+			t.Fatal("isNestedWorktreeRoot must detect a ga-*-named nested worktree checkout by its .git file, regardless of directory name")
+		}
+	})
+}

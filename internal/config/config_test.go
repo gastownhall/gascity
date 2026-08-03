@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1206,9 +1207,10 @@ func TestGastownCity(t *testing.T) {
 func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
 	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
 
-	// City-scope formulas/skills import is unchanged.
-	if len(c.Imports) != 1 || c.Imports["gascity"].Source != PublicGascityPackSource || c.Imports["gascity"].Version != PublicGascityPackVersion {
-		t.Errorf("Imports = %v, want gascity=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	// City-scope formulas, skills, and commands use the gc binding expected by
+	// role prompts such as `gc gc claim`.
+	if len(c.Imports) != 1 || c.Imports["gc"].Source != PublicGascityPackSource || c.Imports["gc"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gc=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
 	}
 
 	// Roles ride along as a default rig import, bound "gc" so the formula's
@@ -1999,8 +2001,20 @@ case "$*" in
   *) printf '[]' ;;
 esac
 `)
-	if strings.TrimSpace(out) != `[{"id":"assigned-in-progress","ephemeral":true}]` {
+	// The row is compared field-wise rather than byte-wise: the in_progress
+	// tier now attaches a blocked_by array (empty here — the fake bd reports
+	// no dependencies) so the hook-side unready filter can see readiness state
+	// that `bd list` does not compute. What matters is that unblocked assigned
+	// work is still surfaced for crash recovery.
+	var gotRows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRows); err != nil {
+		t.Fatalf("EffectiveAssignedInProgressQuery() output is not JSON: %v (%q)", err, out)
+	}
+	if len(gotRows) != 1 || gotRows[0]["id"] != "assigned-in-progress" {
 		t.Fatalf("EffectiveAssignedInProgressQuery() output = %q, want assigned in-progress work", out)
+	}
+	if _, ok := gotRows[0]["blocked_by"]; !ok {
+		t.Errorf("EffectiveAssignedInProgressQuery() row missing blocked_by: %q", out)
 	}
 }
 
@@ -2347,6 +2361,9 @@ esac
 }
 
 func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
+	// Pool instance: the stamped gc.routed_to must be the collapsed PoolName
+	// (template identity), not the raw per-instance QualifiedName() — matching
+	// the PoolName-first idiom in poolDemandTarget/effectiveOnDeath/effectiveOnBoot.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -2354,9 +2371,20 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSlingQueryPoolNameCollapse(t *testing.T) {
+	// Same PoolName-collapse idiom, asserted directly against DefaultSlingQuery()
+	// rather than through the EffectiveSlingQuery() wrapper.
+	a := Agent{Name: "dog-1", Dir: "hello-world", PoolName: "hello-world/dog"}
+	got := a.DefaultSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
+	if got != want {
+		t.Errorf("DefaultSlingQuery() = %q, want %q", got, want)
 	}
 }
 
@@ -3652,6 +3680,56 @@ func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
 	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
 	if d.AutoReapClosedBeadWorktreesEnabled() {
 		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if !d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	want := time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	if got != want {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want %v (default)", got, want)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitValue(t *testing.T) {
+	v := 30
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 30*time.Minute {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitZeroDisables(t *testing.T) {
+	v := 0
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 0 {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 0 (quarantine disabled)", got)
 	}
 }
 
@@ -5995,6 +6073,46 @@ name = "a"
 	}
 }
 
+func TestParseSessionNudgePollInterval(t *testing.T) {
+	toml := `
+[workspace]
+name = "test"
+
+[session]
+nudge_poll_interval = "15s"
+
+[[agent]]
+name = "a"
+`
+	cfg, err := Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.NudgePollIntervalDuration(); got != 15*time.Second {
+		t.Errorf("NudgePollIntervalDuration() = %v, want 15s", got)
+	}
+}
+
+func TestNudgePollIntervalDurationUnsetOrInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"unset", ""},
+		{"unparseable", "banana"},
+		{"zero", "0s"},
+		{"negative", "-5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SessionConfig{NudgePollInterval: tc.value}
+			if got := s.NudgePollIntervalDuration(); got != 0 {
+				t.Errorf("NudgePollIntervalDuration() = %v, want 0 (unconfigured)", got)
+			}
+		})
+	}
+}
+
 func TestAPIConfigParsing(t *testing.T) {
 	toml := `
 [workspace]
@@ -7859,10 +7977,9 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	return tracePath, args
 }
 
-// TestPreferredDeterministicControlDispatcher locks the singleton-first
-// selection both graphroute and dispatch route control beads with. The city-
-// level singleton (Dir == "") must win for every scope; a rig-scoped instance is
-// used only when no city-level deterministic dispatcher exists. Non-deterministic
+// TestPreferredDeterministicControlDispatcher locks the scope-local selection
+// shared by graphroute and dispatch. City graphs use the city dispatcher and
+// rig graphs use the dispatcher configured for that exact rig. Non-deterministic
 // control-dispatcher agents (no convoy-control StartCommand) are ignored.
 func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 	deterministic := func(dir string) Agent {
@@ -7886,25 +8003,31 @@ func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 		wantOK     bool
 	}{
 		{
-			name:       "singleton preferred over rig copy for rig scope",
+			name:       "rig copy selected for rig scope",
 			agents:     []Agent{rigCopy, citySingleton},
 			rigContext: "fixture",
-			wantQN:     "core.control-dispatcher",
+			wantQN:     "fixture/core.control-dispatcher",
 			wantOK:     true,
 		},
 		{
-			name:       "singleton preferred for empty scope",
+			name:       "city dispatcher selected for empty scope",
 			agents:     []Agent{rigCopy, citySingleton},
 			rigContext: "",
 			wantQN:     "core.control-dispatcher",
 			wantOK:     true,
 		},
 		{
-			name:       "rig-scoped fallback when no singleton",
+			name:       "rig copy selected without city dispatcher",
 			agents:     []Agent{rigCopy},
 			rigContext: "fixture",
 			wantQN:     "fixture/core.control-dispatcher",
 			wantOK:     true,
+		},
+		{
+			name:       "city dispatcher does not satisfy rig scope",
+			agents:     []Agent{citySingleton},
+			rigContext: "fixture",
+			wantOK:     false,
 		},
 		{
 			name:       "no match when only a non-deterministic dispatcher exists",
@@ -7934,6 +8057,29 @@ func TestPreferredDeterministicControlDispatcher(t *testing.T) {
 
 	if _, ok := PreferredDeterministicControlDispatcher(nil, ""); ok {
 		t.Fatal("nil cfg should return ok=false")
+	}
+}
+
+func TestControlDispatcherForScopeSupportsExactPlainConfig(t *testing.T) {
+	cfg := &City{Agents: []Agent{
+		{Name: ControlDispatcherAgentName},
+		{Name: ControlDispatcherAgentName, Dir: "fixture"},
+	}}
+
+	for _, tt := range []struct {
+		rigContext string
+		want       string
+	}{
+		{want: ControlDispatcherAgentName},
+		{rigContext: "fixture", want: "fixture/" + ControlDispatcherAgentName},
+	} {
+		dispatcher, ok := ControlDispatcherForScope(cfg, tt.rigContext)
+		if !ok || dispatcher.QualifiedName() != tt.want {
+			t.Fatalf("ControlDispatcherForScope(%q) = (%q, %v), want (%q, true)", tt.rigContext, dispatcher.QualifiedName(), ok, tt.want)
+		}
+	}
+	if _, ok := ControlDispatcherForScope(cfg, "other"); ok {
+		t.Fatal("city dispatcher must not satisfy another rig scope")
 	}
 }
 

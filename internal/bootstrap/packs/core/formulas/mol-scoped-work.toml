@@ -50,15 +50,15 @@ metadata before doing anything destructive.
 
 ```bash
 gc prime
-bd prime
+gc bd prime
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-bd show "$WORK_BEAD_ID"
-bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
+gc bd show "$WORK_BEAD_ID"
+gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
 gc mail inbox
 ```
 """
@@ -96,11 +96,11 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-WORKTREE=$(bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
+WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
   WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
   git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
-  bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
+  gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
   WORKTREE="$WORKTREE_PATH"
 fi
 cd "$WORKTREE"
@@ -202,11 +202,11 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-WORKTREE=$(bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
+WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
 fi
-bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }

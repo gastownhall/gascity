@@ -102,6 +102,8 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		GCSessionID:           gcSessionID,
 		LogicalConversationID: strings.TrimSpace(req.LogicalID),
 		TailCompactions:       req.TailCompactions,
+		BeforeEntryID:         req.BeforeEntryID,
+		AfterEntryID:          req.AfterEntryID,
 	})
 	if err != nil {
 		return nil, err
@@ -109,7 +111,11 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 	h.maybePersistDerivedSessionKey(id, info, snapshot)
 	// After any session-key persist, so the keyed transcript path can resolve.
 	h.writeTranscriptSessionMeta()
-	if req.TailCompactions > 0 {
+	// Cursor and tail requests are bounded views, not authoritative continuity
+	// snapshots. Returning them through the generation cache can replace a
+	// successful page with a previously cached full (or different) view when
+	// the underlying transcript generation has not changed.
+	if req.TailCompactions > 0 || strings.TrimSpace(req.BeforeEntryID) != "" || strings.TrimSpace(req.AfterEntryID) != "" {
 		return cloneHistorySnapshot(snapshot), nil
 	}
 	return h.mergeLoadedHistorySnapshot(snapshot), nil
@@ -160,6 +166,17 @@ func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *Hist
 	if previous == nil || !sameHistoryConversation(previous, current) {
 		return merged
 	}
+	// A later generation of the same provider stream is authoritative: some
+	// structured transcripts are rewritten in place. Apply that in-place
+	// replacement only for a genuine single-file rewrite. A retained snapshot
+	// that already stitched a rotation reports the current stream ID even though
+	// it still carries pre-rotation entries from the prior file; letting the
+	// shared stream ID trigger replacement would drop that stitched history.
+	previousStreamID := strings.TrimSpace(previous.TranscriptStreamID)
+	if previousStreamID != "" && previousStreamID == strings.TrimSpace(current.TranscriptStreamID) &&
+		!historySnapshotSpansRotation(previous) {
+		return merged
+	}
 
 	priorComparable := historyComparableEntries(previous.Entries)
 	if len(priorComparable) == 0 || historyContainsSubsequence(merged.Entries, priorComparable) {
@@ -183,6 +200,30 @@ func mergeConversationHistorySnapshots(previous, current *HistorySnapshot) *Hist
 		merged.TailState.LastEntryID = merged.Cursor.AfterEntryID
 	}
 	return merged
+}
+
+// historySnapshotSpansRotation reports whether snapshot carries entries stitched
+// from a transcript stream other than the one it now identifies as. normalizeEntry
+// stamps each entry's Provenance.TranscriptPath from the same cleaned path used
+// for the snapshot's TranscriptStreamID, so within a single read they always
+// match; an entry whose source path differs was retained across a file rotation.
+// Such a snapshot reports the current stream ID yet still holds pre-rotation
+// history, so it must not take the same-stream in-place replacement path.
+func historySnapshotSpansRotation(snapshot *HistorySnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	streamID := strings.TrimSpace(snapshot.TranscriptStreamID)
+	if streamID == "" {
+		return false
+	}
+	for _, entry := range snapshot.Entries {
+		source := strings.TrimSpace(entry.Provenance.TranscriptPath)
+		if source != "" && source != streamID {
+			return true
+		}
+	}
+	return false
 }
 
 func sameHistoryConversation(previous, current *HistorySnapshot) bool {
@@ -289,6 +330,7 @@ func historyEntrySignature(entry HistoryEntry) string {
 		parts = append(parts,
 			string(block.Kind),
 			strings.TrimSpace(block.Text),
+			strings.TrimSpace(block.Signature),
 			strings.TrimSpace(block.ToolUseID),
 			strings.TrimSpace(block.Name),
 		)
@@ -304,7 +346,16 @@ func cloneHistorySnapshot(snapshot *HistorySnapshot) *HistorySnapshot {
 	cloned.Diagnostics = append([]HistoryDiagnostic(nil), snapshot.Diagnostics...)
 	cloned.TailState.OpenToolUseIDs = append([]string(nil), snapshot.TailState.OpenToolUseIDs...)
 	cloned.TailState.PendingInteractionIDs = append([]string(nil), snapshot.TailState.PendingInteractionIDs...)
+	cloned.Pagination = cloneTranscriptPagination(snapshot.Pagination)
 	cloned.Entries = cloneHistoryEntries(snapshot.Entries)
+	return &cloned
+}
+
+func cloneTranscriptPagination(pagination *TranscriptPagination) *TranscriptPagination {
+	if pagination == nil {
+		return nil
+	}
+	cloned := *pagination
 	return &cloned
 }
 
@@ -318,6 +369,10 @@ func cloneHistoryEntries(entries []HistoryEntry) []HistoryEntry {
 		if entry.Timestamp != nil {
 			ts := entry.Timestamp.UTC()
 			cloned[idx].Timestamp = &ts
+		}
+		if entry.Usage != nil {
+			usage := *entry.Usage
+			cloned[idx].Usage = &usage
 		}
 		cloned[idx].Blocks = cloneHistoryBlocks(entry.Blocks)
 		cloned[idx].Provenance.Raw = cloneHistoryRaw(entry.Provenance.Raw)
@@ -334,12 +389,59 @@ func cloneHistoryBlocks(blocks []HistoryBlock) []HistoryBlock {
 		cloned[idx] = block
 		cloned[idx].Input = cloneHistoryRaw(block.Input)
 		cloned[idx].Content = cloneHistoryRaw(block.Content)
+		if block.StructuredInput != nil {
+			input := *block.StructuredInput
+			input.Arguments = append([]StructuredArgument(nil), block.StructuredInput.Arguments...)
+			input.Options = append([]string(nil), block.StructuredInput.Options...)
+			input.Steps = append([]StructuredPlanStep(nil), block.StructuredInput.Steps...)
+			input.Todos = append([]StructuredTodoItem(nil), block.StructuredInput.Todos...)
+			cloned[idx].StructuredInput = &input
+		}
+		if block.StructuredResult != nil {
+			result := *block.StructuredResult
+			result.Filenames = append([]string(nil), block.StructuredResult.Filenames...)
+			result.FilePaths = append([]string(nil), block.StructuredResult.FilePaths...)
+			result.ResultItems = append([]StructuredSearchResultItem(nil), block.StructuredResult.ResultItems...)
+			result.Questions = cloneStructuredQuestions(block.StructuredResult.Questions)
+			result.Options = append([]string(nil), block.StructuredResult.Options...)
+			result.Answers = append([]StructuredArgument(nil), block.StructuredResult.Answers...)
+			result.Counts = append([]StructuredArgument(nil), block.StructuredResult.Counts...)
+			result.PatchHunks = cloneStructuredPatchHunks(block.StructuredResult.PatchHunks)
+			result.Steps = append([]StructuredPlanStep(nil), block.StructuredResult.Steps...)
+			result.OldTodos = append([]StructuredTodoItem(nil), block.StructuredResult.OldTodos...)
+			result.NewTodos = append([]StructuredTodoItem(nil), block.StructuredResult.NewTodos...)
+			cloned[idx].StructuredResult = &result
+		}
 		if block.Interaction != nil {
 			interaction := *block.Interaction
 			interaction.Options = append([]string(nil), block.Interaction.Options...)
 			interaction.Metadata = cloneStringMap(block.Interaction.Metadata)
 			cloned[idx].Interaction = &interaction
 		}
+	}
+	return cloned
+}
+
+func cloneStructuredQuestions(questions []StructuredQuestion) []StructuredQuestion {
+	if len(questions) == 0 {
+		return nil
+	}
+	out := make([]StructuredQuestion, len(questions))
+	for idx, question := range questions {
+		out[idx] = question
+		out[idx].Options = append([]StructuredQuestionOption(nil), question.Options...)
+	}
+	return out
+}
+
+func cloneStructuredPatchHunks(hunks []StructuredPatchHunk) []StructuredPatchHunk {
+	if len(hunks) == 0 {
+		return nil
+	}
+	cloned := make([]StructuredPatchHunk, len(hunks))
+	for idx, hunk := range hunks {
+		cloned[idx] = hunk
+		cloned[idx].Lines = append([]string(nil), hunk.Lines...)
 	}
 	return cloned
 }

@@ -6,11 +6,14 @@ package eventstest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // rotatableProvider is the small interface a Provider must satisfy
@@ -19,6 +22,20 @@ import (
 type rotatableProvider interface {
 	events.Provider
 	ForceRotate() (events.RotationResult, error)
+}
+
+type nextResult struct {
+	event events.Event
+	err   error
+}
+
+func startNext(w events.Watcher) <-chan nextResult {
+	result := make(chan nextResult, 1)
+	go func() {
+		e, err := w.Next()
+		result <- nextResult{event: e, err: err}
+	}()
+	return result
 }
 
 // RunProviderTests runs the core conformance suite against a Provider implementation.
@@ -543,11 +560,9 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		defer w.Close() //nolint:errcheck // test cleanup
 
-		// Record in a goroutine after a short delay.
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-new"})
-		}()
+		// The watcher is attached before the event is recorded. Providers must
+		// deliver that event without requiring an authored settling delay.
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-new"})
 
 		e, err := w.Next()
 		if err != nil {
@@ -585,11 +600,8 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		defer w.Close() //nolint:errcheck // test cleanup
 
-		// Record a new event.
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			p.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker-1"})
-		}()
+		// Record after the watcher is positioned at the retained tail.
+		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker-1"})
 
 		e, err := w.Next()
 		if err != nil {
@@ -600,6 +612,58 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		if e.Seq <= lastSeq {
 			t.Errorf("Seq = %d, want > %d", e.Seq, lastSeq)
+		}
+	})
+
+	// WatchReplaysRetainedHistory pins the Watch contract: a watcher attached
+	// with afterSeq below the retained head must replay every retained event
+	// with Seq > afterSeq, in order, exactly once — including events recorded
+	// before Watch was called. This is provider-neutral (no rotation); the
+	// FileRecorder-specific resume-across-rotation case lives in RunRotationTests.
+	t.Run("WatchReplaysRetainedHistory", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		for i := 0; i < 5; i++ {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: fmt.Sprintf("h-%d", i)})
+		}
+		all, err := p.List(events.Filter{})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(all) < 5 {
+			t.Fatalf("need 5 events, got %d", len(all))
+		}
+		// Resume from the 2nd event's seq: expect events 3,4,5 (indices 2,3,4).
+		afterSeq := all[1].Seq
+		want := all[2:]
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		w, err := p.Watch(ctx, afterSeq)
+		if err != nil {
+			t.Fatalf("Watch: %v", err)
+		}
+		defer w.Close() //nolint:errcheck // test cleanup
+
+		for i, wantEv := range want {
+			type res struct {
+				e   events.Event
+				err error
+			}
+			ch := make(chan res, 1)
+			go func() { e, err := w.Next(); ch <- res{e, err} }()
+			select {
+			case r := <-ch:
+				if r.err != nil {
+					t.Fatalf("Next %d: %v", i, r.err)
+				}
+				if r.e.Seq != wantEv.Seq {
+					t.Fatalf("replay event %d seq = %d, want %d (pre-Watch history skipped?)", i, r.e.Seq, wantEv.Seq)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("replay event %d (seq %d) never delivered", i, wantEv.Seq)
+			}
 		}
 	})
 
@@ -670,7 +734,15 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		// Phase 2: start a watcher BEFORE rotation. Drain any backlog
 		// so the watcher's offset is at end-of-active before we rotate.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		//
+		// The watcher's own context is cancel-only, not deadline-bound:
+		// ForceRotate's fsync+rename and the gzip+reap behind res.Done below
+		// are this subtest's heaviest I/O, and sit between here and the
+		// post-rotate reads. A shared deadline charges that setup I/O
+		// against the read's budget instead of the read itself — nextWithin
+		// gives each blocking read its own fresh deadline so a slow disk
+		// slows the test instead of failing it.
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		w, err := p.Watch(ctx, 0)
 		if err != nil {
@@ -678,9 +750,24 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 		defer w.Close() //nolint:errcheck // test cleanup
 
+		nextWithin := func(d time.Duration) (events.Event, error) {
+			type result struct {
+				e   events.Event
+				err error
+			}
+			ch := make(chan result, 1)
+			go func() { e, err := w.Next(); ch <- result{e, err} }()
+			select {
+			case r := <-ch:
+				return r.e, r.err
+			case <-time.After(d):
+				return events.Event{}, context.DeadlineExceeded
+			}
+		}
+
 		seen := make([]events.Event, 0, 5)
 		for i := 0; i < 5; i++ {
-			e, err := w.Next()
+			e, err := nextWithin(testutil.GoroutineRaceTimeout)
 			if err != nil {
 				t.Fatalf("Next pre %d: %v", i, err)
 			}
@@ -713,7 +800,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		// (c) The watcher should yield the anchor + the post-rotate
 		// events without gap.
 		for i := 0; i < 4; i++ { // 1 anchor + 3 post-rotate
-			e, err := w.Next()
+			e, err := nextWithin(testutil.GoroutineRaceTimeout)
 			if err != nil {
 				t.Fatalf("Next post %d: %v", i, err)
 			}
@@ -781,5 +868,151 @@ func RunConcurrencyTests(t *testing.T, newProvider func(t *testing.T) (events.Pr
 			}
 			seen[e.Seq] = true
 		}
+	})
+}
+
+// RunInMemoryWakeTests runs deterministic wake-up tests for in-memory
+// providers whose goroutines and synchronization are contained by synctest.
+// Wake-up, cancellation, and close must complete without advancing fake time.
+func RunInMemoryWakeTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
+	t.Helper()
+
+	t.Run("RecordWakesEveryBlockedWatcher", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p, cleanup := newProvider(t)
+			defer cleanup()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			const watcherCount = 2
+			watchers := make([]events.Watcher, watcherCount)
+			results := make([]<-chan nextResult, watcherCount)
+			for i := range watcherCount {
+				w, err := p.Watch(ctx, 0)
+				if err != nil {
+					t.Fatalf("Watch %d: %v", i, err)
+				}
+				watchers[i] = w
+				results[i] = startNext(w)
+			}
+
+			// Establish that both Next calls are blocked before recording.
+			synctest.Wait()
+			start := time.Now()
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-broadcast"})
+			synctest.Wait()
+			elapsed := time.Since(start)
+
+			got := make([]nextResult, watcherCount)
+			deliveredCount := 0
+			for i := range watcherCount {
+				select {
+				case got[i] = <-results[i]:
+					deliveredCount++
+				default:
+				}
+			}
+
+			// Unblock any watcher left behind by a non-broadcast implementation
+			// before reporting the contract failure.
+			for _, w := range watchers {
+				if err := w.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}
+			synctest.Wait()
+
+			if elapsed != 0 {
+				t.Fatalf("Record delivery advanced fake time by %v, want 0", elapsed)
+			}
+			if deliveredCount != watcherCount {
+				t.Fatalf("Record delivered to %d of %d blocked watchers without advancing fake time; wake was not broadcast", deliveredCount, watcherCount)
+			}
+			for i := range watcherCount {
+				if got[i].err != nil {
+					t.Fatalf("watcher %d Next: %v", i, got[i].err)
+				}
+				if got[i].event.Subject != "gc-broadcast" {
+					t.Fatalf("watcher %d Subject = %q, want %q", i, got[i].event.Subject, "gc-broadcast")
+				}
+			}
+			if got[0].event.Seq != got[1].event.Seq {
+				t.Fatalf("watchers received Seq %d and %d, want the same event", got[0].event.Seq, got[1].event.Seq)
+			}
+		})
+	})
+
+	t.Run("ContextCancelUnblocksBlockedWatcher", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p, cleanup := newProvider(t)
+			defer cleanup()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			w, err := p.Watch(ctx, 0)
+			if err != nil {
+				t.Fatalf("Watch: %v", err)
+			}
+			defer w.Close() //nolint:errcheck // test cleanup
+
+			result := startNext(w)
+			synctest.Wait()
+
+			start := time.Now()
+			cancel()
+			synctest.Wait()
+			elapsed := time.Since(start)
+
+			select {
+			case got := <-result:
+				if !errors.Is(got.err, context.Canceled) {
+					t.Fatalf("Next after cancel = %v, want context.Canceled", got.err)
+				}
+			default:
+				t.Fatal("Next remained blocked after context cancellation")
+			}
+			if elapsed != 0 {
+				t.Fatalf("context cancellation advanced fake time by %v, want 0", elapsed)
+			}
+		})
+	})
+
+	t.Run("CloseUnblocksBlockedWatcher", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p, cleanup := newProvider(t)
+			defer cleanup()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			w, err := p.Watch(ctx, 0)
+			if err != nil {
+				t.Fatalf("Watch: %v", err)
+			}
+
+			result := startNext(w)
+			synctest.Wait()
+
+			start := time.Now()
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			synctest.Wait()
+			elapsed := time.Since(start)
+
+			select {
+			case got := <-result:
+				if got.err == nil {
+					t.Fatal("Next after Close returned nil error")
+				}
+			default:
+				cancel()
+				synctest.Wait()
+				t.Fatal("Next remained blocked after Close")
+			}
+			if elapsed != 0 {
+				t.Fatalf("Close advanced fake time by %v, want 0", elapsed)
+			}
+		})
 	})
 }

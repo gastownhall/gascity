@@ -224,6 +224,33 @@ func TestValidateTimeoutInvalid(t *testing.T) {
 	}
 }
 
+func TestValidateCheckTimeout(t *testing.T) {
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: "60s"}
+	if err := Validate(a); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestValidateCheckTimeoutInvalid(t *testing.T) {
+	// A missing-unit typo like "60" must fail at load, not silently revert to
+	// the 10s default at dispatch (the exact starvation check_timeout prevents).
+	a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: "60"}
+	if err := Validate(a); err == nil {
+		t.Error("Validate should fail: invalid check_timeout")
+	}
+}
+
+func TestValidateCheckTimeoutNonPositive(t *testing.T) {
+	// A zero or negative check_timeout parses cleanly but CheckTimeoutOrDefault
+	// reverts it to the default, so it must be rejected at load.
+	for _, v := range []string{"0s", "-5s"} {
+		a := Order{Name: "t", Formula: "mol-t", Trigger: "condition", Check: "true", CheckTimeout: v}
+		if err := Validate(a); err == nil {
+			t.Errorf("Validate should fail for non-positive check_timeout %q", v)
+		}
+	}
+}
+
 func TestIsExec(t *testing.T) {
 	exec := Order{Name: "e", Exec: "scripts/x.sh"}
 	if !exec.IsExec() {
@@ -253,6 +280,44 @@ func TestTimeoutOrDefault(t *testing.T) {
 				t.Errorf("TimeoutOrDefault() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCheckTimeoutOrDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		a    Order
+		want time.Duration
+	}{
+		{"unset preserves 10s default", Order{Trigger: "condition", Check: "true"}, 10 * time.Second},
+		{"custom check timeout", Order{Trigger: "condition", Check: "true", CheckTimeout: "60s"}, 60 * time.Second},
+		{"invalid falls back to default", Order{Trigger: "condition", Check: "true", CheckTimeout: "bad"}, 10 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.a.CheckTimeoutOrDefault()
+			if got != tt.want {
+				t.Errorf("CheckTimeoutOrDefault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseOrderCheckTimeout(t *testing.T) {
+	a, err := Parse([]byte(`[order]
+trigger = "condition"
+check = "pr_merge queue-pending"
+exec = "drain.sh"
+check_timeout = "60s"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.CheckTimeout != "60s" {
+		t.Errorf("CheckTimeout = %q, want %q", a.CheckTimeout, "60s")
+	}
+	if got := a.CheckTimeoutOrDefault(); got != 60*time.Second {
+		t.Errorf("CheckTimeoutOrDefault() = %v, want %v", got, 60*time.Second)
 	}
 }
 
@@ -559,5 +624,42 @@ func TestValidateRequiredParams(t *testing.T) {
 	// A whitespace-only value is likewise treated as missing.
 	if err := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": "   "}); err == nil {
 		t.Fatal("ValidateRequiredParams with whitespace-only pr = nil, want error")
+	}
+}
+
+func TestParseCronTZ(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-digest-generate"
+trigger = "cron"
+schedule = "30 19 * * *"
+tz = "America/New_York"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.TZ != "America/New_York" {
+		t.Errorf("TZ = %q, want %q", a.TZ, "America/New_York")
+	}
+}
+
+func TestValidateCronTZ(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "30 19 * * *", TZ: "America/New_York"}
+	if err := Validate(a); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// A misspelled zone must fail order load loudly — a silent fallback would
+// move the order's schedule onto a different wall clock.
+func TestValidateCronBadTZ(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "30 19 * * *", TZ: "America/New_Yrok"}
+	err := Validate(a)
+	if err == nil {
+		t.Fatal("Validate should fail: bad tz")
+	}
+	if !strings.Contains(err.Error(), `invalid tz "America/New_Yrok"`) {
+		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }

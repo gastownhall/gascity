@@ -39,6 +39,7 @@ type fakeState struct {
 	cfg               *config.City
 	rawCfg            *config.City // optional: raw config for provenance detection
 	sp                *runtime.Fake
+	sessionProvider   runtime.Provider // optional override for SessionProvider
 	stores            map[string]beads.Store
 	cityBeadStore     beads.Store // city-level store for session beads
 	nudgesBeadStore   beads.Store // relocated nudges store; nil falls back to cityBeadStore (default backend)
@@ -59,6 +60,7 @@ type fakeState struct {
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
+	usageSink         usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
 	// matching the real implementation's answer for the MemStore fakes most
@@ -96,8 +98,13 @@ func newFakeState(t testing.TB) *fakeState {
 	}
 }
 
-func (f *fakeState) Config() *config.City                { return f.cfg }
-func (f *fakeState) SessionProvider() runtime.Provider   { return f.sp }
+func (f *fakeState) Config() *config.City { return f.cfg }
+func (f *fakeState) SessionProvider() runtime.Provider {
+	if f.sessionProvider != nil {
+		return f.sessionProvider
+	}
+	return f.sp
+}
 func (f *fakeState) BeadStore(rig string) beads.Store    { return f.stores[rig] }
 func (f *fakeState) BeadStores() map[string]beads.Store  { return f.stores }
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }
@@ -107,8 +114,13 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	}
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
-func (f *fakeState) EventProvider() events.Provider        { return f.eventProv }
-func (f *fakeState) UsageSink() usage.Sink                 { return usage.Discard }
+func (f *fakeState) EventProvider() events.Provider { return f.eventProv }
+func (f *fakeState) UsageSink() usage.Sink {
+	if f.usageSink != nil {
+		return f.usageSink
+	}
+	return usage.Discard
+}
 func (f *fakeState) CityName() string                      { return f.cityName }
 func (f *fakeState) CityPath() string                      { return f.cityPath }
 func (f *fakeState) Version() string                       { return "test" }
@@ -187,6 +199,24 @@ type fakeMutatorState struct {
 	// assert mutations route through it.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
+	// or receives — lets a test hold a provision in flight to exercise the
+	// live-index replay path deterministically.
+	provisionGate chan struct{}
+
+	// Rollback/teardown injection for the C4c G14 tests, guarded by provisionMu.
+	// provisionFailN makes the next N ProvisionRigFromGit calls return
+	// provisionErr AFTER emitting a created-dir manifest (a failure once the dir
+	// exists). teardownCalls records every TeardownPartialRig manifest;
+	// teardownErr, when set, makes TeardownPartialRig fail.
+	provisionMu             sync.Mutex
+	provisionCalls          int
+	provisionFailN          int
+	provisionErr            error
+	provisionCtxHadDeadline bool
+	teardownCalls           []RigProvisionManifest
+	teardownErr             error
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -328,6 +358,95 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
+}
+
+// ProvisionRigFromGit is the fake async-clone path: it skips the real
+// clone/SSRF and just appends the rig (emitting synthetic progress) so handler
+// tests can exercise the 202 flow without a network. If onStep is set it emits
+// a clone + done step. onManifest is invoked record-then-create with the
+// created dir so persistence/rollback wiring is exercised; mirroring the real
+// path, a pre-clone onManifest error is fail-closed (abort before appending the
+// rig) while the post-init one is best-effort. When provisionFailN is set it
+// returns provisionErr after the manifest is reported (a failure once the dir
+// exists), without appending the rig.
+func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest) error) (config.Rig, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.provisionMu.Lock()
+	f.provisionCtxHadDeadline = hasDeadline
+	f.provisionMu.Unlock()
+	if f.provisionGate != nil {
+		// Honor the caller's deadline while gated so a bounded provisioning context
+		// can terminalize a "stalled clone" instead of blocking forever.
+		select {
+		case <-f.provisionGate:
+		case <-ctx.Done():
+			return config.Rig{}, ctx.Err()
+		}
+	}
+	if onStep != nil {
+		onStep("clone", "cloning "+gitURL, false)
+	}
+	if r.Path == "" {
+		r.Path = "rigs/" + r.Name
+	}
+	// Record-then-create: manifest the dir before "cloning". A pre-clone persist
+	// failure is fail-closed (mirror the real ProvisionRigFromGit): abort before
+	// appending the rig so no un-manifested rig is created.
+	if onManifest != nil {
+		if err := onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path}); err != nil {
+			return config.Rig{}, err
+		}
+	}
+
+	f.provisionMu.Lock()
+	f.provisionCalls++
+	fail := f.provisionFailN > 0
+	if fail {
+		f.provisionFailN--
+	}
+	provErr := f.provisionErr
+	f.provisionMu.Unlock()
+	if fail {
+		return config.Rig{}, provErr
+	}
+
+	f.cfg.Rigs = append(f.cfg.Rigs, r)
+	// Post-init manifest is best-effort in the real path (a complete rig is
+	// forward-reconciled, never torn down), so a persist error here does not fail
+	// the provision.
+	if onManifest != nil {
+		_ = onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+	}
+	if onStep != nil {
+		onStep("done", "Rig added.", false)
+	}
+	return r, nil
+}
+
+// TeardownPartialRig records the manifest it was asked to tear down (and,
+// unless teardownErr is set, reports success) so tests can assert the
+// drop-then-mark rollback, the re-clone pre-drop, and the boot sweep invoked it
+// with the right created_dir.
+func (f *fakeMutatorState) TeardownPartialRig(_ context.Context, m RigProvisionManifest) error {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	f.teardownCalls = append(f.teardownCalls, m)
+	return f.teardownErr
+}
+
+// teardownManifests returns a copy of the recorded teardown manifests.
+func (f *fakeMutatorState) teardownManifests() []RigProvisionManifest {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	return append([]RigProvisionManifest(nil), f.teardownCalls...)
+}
+
+// provisionHadDeadline reports whether the last ProvisionRigFromGit was called
+// with a context carrying a deadline (the server-owned provisioning bound).
+func (f *fakeMutatorState) provisionHadDeadline() bool {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	return f.provisionCtxHadDeadline
 }
 
 func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {

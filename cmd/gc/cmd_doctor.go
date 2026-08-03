@@ -13,9 +13,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	doctorchecks "github.com/gastownhall/gascity/internal/doctor/checks"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -29,6 +32,7 @@ var (
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fix, verbose, jsonOut, explainPostgresAuth bool
+	var checkTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -50,7 +54,7 @@ legacy-to-current pack rewrites that are available on this branch.`,
   gc doctor --explain-postgres-auth`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, checkTimeout, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -61,6 +65,8 @@ legacy-to-current pack rewrites that are available on this branch.`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
 	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false,
 		"after running checks, print per-scope Postgres credential resolution table (no values printed)")
+	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 60*time.Second,
+		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
 	return cmd
 }
 
@@ -168,6 +174,11 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning    bool
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
+	SkipRigDoltChecks    bool
+	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
+	// is set when resolving it failed (an out-of-enum config value).
+	RolloutFlags      rollout.Flags
+	RolloutResolveErr error
 }
 
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
@@ -180,7 +191,7 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcrossStores(unwrapOrdersStores(stores)...)(order.ScopedName())
+		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
 }
 
@@ -217,6 +228,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		// Rollout gates section: one advisory line per registered gate (value +
+		// origin + notices). Never blocks the exit code.
+		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
+			register(c)
+		}
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
@@ -229,6 +245,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), doctorLiveSessionSinks(cityPath, cfg)))
 		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
@@ -280,11 +297,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if cfgErr == nil && cfg != nil && !controllerRunning {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
-		sp := newSessionProvider()
-
-		register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
-		register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-		register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+		sp, err := newSessionProvider()
+		if err != nil {
+			register(doctor.ErrorCheck("session-provider", err.Error()))
+		} else {
+			register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+		}
 	}
 
 	storeFactory := openStoreForCity(cityPath)
@@ -292,9 +312,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
-		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+		register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+		register(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
 		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
@@ -306,7 +328,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
-		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
+		register(doctorchecks.NewPostgresAuthCheck(cityPath, cfg))
 	}
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
@@ -345,6 +367,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
+	register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -362,14 +385,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
+			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
 			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
-			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !opts.SkipRigDoltChecks {
 				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
 				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
 			}
@@ -397,14 +421,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
-func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time.Duration, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	d := &doctor.Doctor{}
+	d := &doctor.Doctor{CheckTimeout: checkTimeout}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose, ExplainPostgresAuth: explainPostgresAuth}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -412,14 +436,28 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
 	supervisorRunning := supervisorAliveHook() != 0
-	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipRigDoltChecks := gcDoltSkip()
+	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
+	// Resolve the rollout-gate snapshot for the doctor section from the on-disk
+	// config plus THIS doctor process's env (Resolve's default LookupEnv); a
+	// running controller may have latched a different value from its own boot
+	// env, so the rendered lines are advisory, not the live latch (guarded:
+	// Resolve errors on a nil cfg).
+	var rolloutFlags rollout.Flags
+	var rolloutResolveErr error
+	if cfgErr == nil && cfg != nil {
+		rolloutFlags, rolloutResolveErr = rollout.Resolve(cfg, rollout.ResolveOptions{})
+	}
 	for _, check := range buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
 		SupervisorRunning:    supervisorRunning,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
+		SkipRigDoltChecks:    skipRigDoltChecks,
+		RolloutFlags:         rolloutFlags,
+		RolloutResolveErr:    rolloutResolveErr,
 	}) {
 		d.Register(check)
 	}
@@ -551,6 +589,10 @@ type doctorJSONResult struct {
 	FixAttempted bool     `json:"fix_attempted,omitempty"`
 	FixError     string   `json:"fix_error,omitempty"`
 	Fixed        bool     `json:"fixed,omitempty"`
+	// TimedOut projects CheckResult.TimedOut so automation can structurally
+	// distinguish an abandoned check (outcome unknown, worth retrying) from a
+	// check that ran and returned an ordinary advisory error.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -605,6 +647,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixAttempted: r.FixAttempted,
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
+			TimedOut:     r.TimedOut,
 		})
 	}
 	return writeCLIJSONLine(w, out)
@@ -638,5 +681,14 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
+	}
+}
+
+// openStoreResultForCity is openStoreForCity's counterpart for checks that
+// need the native/fallback selection diagnostic openStoreForCity discards
+// (gastownhall/gascity#4245).
+func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
+	return func(dirPath string) (beads.StoreOpenResult, error) {
+		return openStoreResultAtForCity(dirPath, cityPath)
 	}
 }

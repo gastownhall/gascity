@@ -13,9 +13,13 @@ formatters:
     - goimports
 
 linters:
-  # Default linters (errcheck, govet, ineffassign, staticcheck, unused)
-  # are always enabled. Add extras here.
+  # Keep govet explicit in configured lint. The changed-scope target bounds
+  # both this copy and the Go tool's vet to the same affected graph, preserving
+  # their distinct diagnostics without repeating either across the whole repo.
+  # Other default linters (errcheck, ineffassign, staticcheck, unused) remain
+  # enabled alongside these configured extras.
   enable:
+    - govet
     - errorlint
     - misspell
     - gocritic

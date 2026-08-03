@@ -1,10 +1,9 @@
 package api
 
 import (
-	"time"
-
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // livenessReporter is implemented by stores that expose cache liveness.
@@ -13,6 +12,21 @@ import (
 type livenessReporter interface {
 	IsLive() bool
 	Stats() beads.CacheStats
+}
+
+// livenessClock is the clock cacheAgeSeconds reads to compute cache age. It is
+// clock.Real in production; SetLivenessClockForTest swaps it so the
+// CLI-unification characterization harness can freeze the Tier-B cache-age lane
+// (the _cache_age_s field and the >30s stale-read banner) deterministically.
+// Process-global: bracket clock-sensitive lanes serially, never concurrently.
+var livenessClock clock.Clock = clock.Real{}
+
+// SetLivenessClockForTest overrides the clock cacheAgeSeconds uses and returns a
+// restore func. Test/harness only — production never mutates it.
+func SetLivenessClockForTest(c clock.Clock) (restore func()) {
+	prev := livenessClock
+	livenessClock = c
+	return func() { livenessClock = prev }
 }
 
 // cacheLiveOr503 returns a 503 typed error when the given store is a
@@ -48,7 +62,7 @@ func cacheAgeSeconds(store beads.Store) float64 {
 	if s.LastFreshAt.IsZero() {
 		return 0
 	}
-	age := time.Since(s.LastFreshAt).Seconds()
+	age := livenessClock.Now().Sub(s.LastFreshAt).Seconds()
 	if age < 0 {
 		return 0
 	}

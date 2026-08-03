@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -220,11 +221,28 @@ func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad)
 }
 
 func agentHasPoolControls(agentCfg config.Agent) bool {
+	if agentPoolExplicitlyDisabled(agentCfg) {
+		return false
+	}
 	return agentCfg.MinActiveSessions != nil ||
 		agentCfg.MaxActiveSessions != nil ||
 		strings.TrimSpace(agentCfg.ScaleCheck) != "" ||
 		strings.TrimSpace(agentCfg.Namepool) != "" ||
 		len(agentCfg.NamepoolNames) > 0
+}
+
+// agentPoolExplicitlyDisabled reports whether agentCfg uses the documented
+// min_active_sessions=0 + max_active_sessions=0 form to intentionally
+// disable pooling (TestValidateAgentsPoolMaxZeroIsValid in
+// internal/config), as opposed to an actual pool configuration. That form
+// genuinely suppresses pool spawns, so it is not a pool/named-session
+// conflict.
+func agentPoolExplicitlyDisabled(agentCfg config.Agent) bool {
+	return agentCfg.MinActiveSessions != nil && *agentCfg.MinActiveSessions == 0 &&
+		agentCfg.MaxActiveSessions != nil && *agentCfg.MaxActiveSessions == 0 &&
+		strings.TrimSpace(agentCfg.ScaleCheck) == "" &&
+		strings.TrimSpace(agentCfg.Namepool) == "" &&
+		len(agentCfg.NamepoolNames) == 0
 }
 
 func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) ([]lintPromptTarget, []lintDiagnostic) {
@@ -316,12 +334,18 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	if err != nil {
 		return []lintDiagnostic{diagnosticFromError(sourcePath, err)}
 	}
-	_, body := promptmeta.Parse(string(data))
-	if !isPromptTemplatePath(target.templatePath) {
-		return nil
-	}
 
 	var diagnostics []lintDiagnostic
+	for _, finding := range bdflags.ScanUnknownFlags(data) {
+		diagnostics = append(diagnostics, newLintDiagnostic(sourcePath, finding.Line,
+			fmt.Sprintf("bd-unknown-flag: bd %s uses unrecognized flag %q", finding.Subcommand, finding.Flag)))
+	}
+
+	_, body := promptmeta.Parse(string(data))
+	if !isPromptTemplatePath(target.templatePath) {
+		return diagnostics
+	}
+
 	var tmpl *template.Template
 	tmpl = template.New("prompt").
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).

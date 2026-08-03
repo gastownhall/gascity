@@ -2,6 +2,8 @@ package eventexport
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -124,9 +126,8 @@ func TestProjectEvent_RunSessionGating(t *testing.T) {
 	}
 }
 
-// step_id (the acting work bead) is gated exactly like run/session: EmitCorrelation
-// fail-closed, safeRef-opaque-only, never on mail-reduced types, empty when the
-// subject bead carries no gc.step_id.
+// step_id is native execution identity: it uses its established nonblank,
+// 256-byte domain rather than the 64-byte lowercase correlation-slug gate.
 func TestProjectEvent_StepIDGating(t *testing.T) {
 	te := func(step string) TaggedEvent {
 		return TaggedEvent{Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: step}
@@ -136,12 +137,12 @@ func TestProjectEvent_StepIDGating(t *testing.T) {
 		t.Fatalf("EmitCorrelation=false must drop step_id, got %q", g.StepID)
 	}
 	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
-	if g, ok := ProjectEvent(te("mc-step-7"), on); !ok || g.StepID != "mc-step-7" {
-		t.Fatalf("opaque step_id must round-trip when emitted, got %q ok=%v", g.StepID, ok)
+	if g, ok := ProjectEvent(te("Step A / provider:value"), on); !ok || g.StepID != "Step A / provider:value" {
+		t.Fatalf("native step_id must retain its established domain, got %q ok=%v", g.StepID, ok)
 	}
-	for _, bad := range []string{"gascity/codex", "user@host", "Up Per", "a b"} {
+	for _, bad := range []string{"", "   ", strings.Repeat("x", 257)} {
 		if g, _ := ProjectEvent(te(bad), on); g.StepID != "" {
-			t.Fatalf("non-opaque step_id %q must drop to empty, got %q", bad, g.StepID)
+			t.Fatalf("invalid execution step_id %q must drop to empty, got %q", bad, g.StepID)
 		}
 	}
 	mail := te("mc-step-7")
@@ -152,6 +153,66 @@ func TestProjectEvent_StepIDGating(t *testing.T) {
 	// A non-work bead carries no gc.step_id → empty, omitted cleanly (no error).
 	if g, ok := ProjectEvent(te(""), on); !ok || g.StepID != "" {
 		t.Fatalf("empty step_id must be omitted cleanly, got %q ok=%v", g.StepID, ok)
+	}
+}
+
+func TestProjectEventNormalizesNativeStepDependencies(t *testing.T) {
+	deps := []string{"step-c", "step-a"}
+	env, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "step-b", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil {
+		t.Fatalf("ProjectEvent() = %+v, %v; want emitted topology", env, ok)
+	}
+	if got, want := *env.DependsOnStepIDs, []string{"step-a", "step-c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("depends_on_step_ids = %v, want %v", got, want)
+	}
+	if env.DependsOnStepIDs == &deps {
+		t.Fatal("ProjectEvent retained caller-owned dependency slice")
+	}
+
+	root := []string{}
+	env, ok = ProjectEvent(TaggedEvent{
+		Seq: 2, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-2",
+		StepID: "step-root", DependsOnStepIDs: &root,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil || len(*env.DependsOnStepIDs) != 0 {
+		t.Fatalf("explicit root = %+v, %v; want present empty dependency list", env, ok)
+	}
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"depends_on_step_ids":[]`) {
+		t.Fatalf("explicit root wire = %s; want empty dependency array", wire)
+	}
+}
+
+func TestProjectEventRejectsInvalidPresentNativeTopology(t *testing.T) {
+	deps := []string{"step-a", "step-a"}
+	if _, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "step-b", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true}); ok {
+		t.Fatal("ProjectEvent emitted invalid present topology")
+	}
+}
+
+func TestProjectEventAcceptsMoreThanSixtyFourNativeDependencies(t *testing.T) {
+	deps := make([]string, 65)
+	for i := range deps {
+		deps[i] = fmt.Sprintf("dependency-%03d", i)
+	}
+	env, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "target", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil || len(*env.DependsOnStepIDs) != len(deps) {
+		t.Fatalf("ProjectEvent() = %+v, %v; want all %d dependencies", env, ok, len(deps))
+	}
+	if err := ValidateEnvelope(env); err != nil {
+		t.Fatalf("ValidateEnvelope() = %v, want accepted unbounded topology", err)
 	}
 }
 

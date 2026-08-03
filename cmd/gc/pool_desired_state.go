@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -174,7 +175,7 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
-			routedTo = normalizeAgentTemplateIdentity(cfg, routedTo)
+			routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
 			if sessionBeadID != "" {
 				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
 				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
@@ -200,10 +201,20 @@ func computePoolDesiredStates(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 				})
+				continue
+			}
+			if isConfiguredNamedSessionIdentity(cfg, assignee) {
+				// A configured named session's own bare identity never
+				// generates pool demand — namedWorkReady recovers it
+				// instead (ga-i1d0tr Candidate B). Mirrors the resume
+				// tier's namedSessionBeadIDs skip above, extended to the
+				// case where no live session bead resolves the assignee
+				// at all.
 				continue
 			}
 			if !agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg) {
@@ -224,6 +235,7 @@ func computePoolDesiredStates(
 				BeadPriority:   beadPriority(wb),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
@@ -350,10 +362,19 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 			if sb.Closed || isPoolManagedSessionInfo(sb) || isDrainedSessionInfo(sb) || isFailedCreateSessionInfo(sb) {
 				continue
 			}
-			if strings.TrimSpace(sb.MetadataState) == "asleep" {
-				continue
-			}
 			if strings.TrimSpace(sb.Alias) == template {
+				held[template] = struct{}{}
+				break
+			}
+			// A named session's Alias holds its own configured identity, not
+			// the backing template (build_desired_state.go sets tp.Alias =
+			// identity for every named session, e.g. "primary" bound to
+			// template "worker"). When identity != template, the Alias check
+			// above never matches even though this bead is the singleton
+			// slot's sole occupant. Its Template field is always the backing
+			// template's qualified name, so use that as the named-session
+			// match instead of Alias.
+			if isNamedSessionInfo(sb) && strings.TrimSpace(sb.Template) == template {
 				held[template] = struct{}{}
 				break
 			}
@@ -409,20 +430,12 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 	return requests
 }
 
-func poolSessionConsumesNewDemand(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
-		return true
-	}
-	// This pure desired-state pass has no reconciler clock. Creating sessions
-	// still represent already-spent new demand; lifecycle code owns stale
-	// creating recovery with its clock-aware predicate.
-	state := strings.TrimSpace(session.Metadata["state"])
-	return state == "creating" || state == string(sessionpkg.StateStartPending)
-}
-
-// poolSessionConsumesNewDemandInfo is the session.Info sibling of
-// poolSessionConsumesNewDemand, reading PendingCreateClaim and the raw
-// MetadataState instead of raw bead metadata. Equivalence-proven.
+// poolSessionConsumesNewDemandInfo reports whether a pool session already
+// represents spent "new" demand: it holds an active pending_create_claim, or
+// its raw state is creating/start-pending. It reads PendingCreateClaim and the
+// raw MetadataState. This pure desired-state pass has no reconciler clock:
+// creating sessions still represent already-spent new demand; lifecycle code
+// owns stale-creating recovery with its clock-aware predicate.
 func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 	if info.PendingCreateClaim {
 		return true
@@ -785,4 +798,24 @@ func isKnownPoolTemplate(assignee string, cfg *config.City) bool {
 
 func isResumeLikeTier(tier string) bool {
 	return tier == "resume" || tier == "wake-known-identity"
+}
+
+// isConfiguredNamedSessionIdentity reports whether assignee names a
+// configured [[named_session]]'s own identity — checked structurally via
+// cfg.NamedSessions, with no live-session/store lookup, so it holds even
+// when the named session has no live session bead at all. A named session
+// whose backing agent is suspended is excluded: the named-session tier
+// never claims work for a suspended agent (mirrors the namedSpecs filter in
+// build_desired_state.go), so exempting it here too would orphan the bead
+// with neither side picking it up.
+func isConfiguredNamedSessionIdentity(cfg *config.City, assignee string) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || cfg == nil {
+		return false
+	}
+	spec, ok := findNamedSessionSpec(cfg, "", assignee)
+	if !ok || spec.Agent == nil {
+		return false
+	}
+	return !spec.Agent.Suspended
 }

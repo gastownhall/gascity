@@ -92,6 +92,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	}
 	return sessiontmux.Config{
 		SetupTimeout:       sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
 		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
 		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
 		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
@@ -177,27 +178,31 @@ func isLegacyT3BridgeExecScript(script string) bool {
 // newSessionProvider returns a runtime.Provider based on the session provider
 // name (env var → city.toml → default). When the city-level provider is not
 // "acp" but some agents have session = "acp", returns an auto.Provider that
-// routes per-session. Startup path — exits on error.
-func newSessionProvider() runtime.Provider {
+// routes per-session. Provider-construction failures return to the command
+// funnel so output, cleanup, and lifecycle defers remain reachable.
+func newSessionProvider() (runtime.Provider, error) {
 	ctx := loadSessionProviderContext()
 	sessionBeads := loadProviderSessionSnapshot(ctx)
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
-func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
+func newSessionProviderForCity(cfg *config.City, cityPath string) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sessionBeads := loadProviderSessionSnapshot(ctx)
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
-func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
-	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, nil))
+func newStatusSessionProviderForCity(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	return newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
 }
 
-func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
+func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, sessionBeads))
+	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
+	if err != nil {
+		return nil, err
+	}
+	return newBoundedStatusProvider(sp), nil
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
@@ -225,24 +230,26 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	// closes the gap on both the CLI and controller provider-construction paths.
 	// Identity to the opened store today (resolveClassStore is pure identity).
 	sessStore := cliSessionStore(store, ctx.cfg, ctx.cityPath)
-	all, err := sessStore.ListByLabel(sessionBeadLabel, 0)
+	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
+	// lister is byte-identical to the retired newSessionBeadSnapshot(ListByLabel(
+	// gc:session)) set: same gc:session label scope, same closed exclusion, same
+	// no-narrowing (a damaged non-"session"-typed labeled bead is still surfaced).
+	infos, err := session.NewStore(beads.SessionStore{Store: sessStore}).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil
 	}
-	return newSessionBeadSnapshot(all)
+	return newSessionBeadSnapshotFromInfos(infos)
 }
 
-func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) runtime.Provider {
-	sp, err := newSessionProviderFromContextWithError(ctx, sessionBeads)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err) //nolint:errcheck // best-effort stderr
-		os.Exit(1)
-	}
-	return sp
-}
-
-func newSessionProviderFromContextWithError(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
+func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	return resolveSessionTransportProvider(ctx, sessionBeads)
+}
+
+func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {
+	if err != nil {
+		return nil, fmt.Errorf("constructing session provider: %w", err)
+	}
+	return sp, nil
 }
 
 // resolveSessionTransportProvider is the single Resolver seam that composes the
@@ -536,8 +543,10 @@ func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg
 		}
 		sessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
 		if snapshot != nil {
-			if snapName := snapshot.FindSessionNameByNamedIdentity(named.QualifiedName()); snapName != "" {
-				sessionName = snapName
+			if info, ok := snapshot.FindInfoByNamedIdentity(named.QualifiedName()); ok {
+				if snapName := strings.TrimSpace(info.SessionNameMetadata); snapName != "" {
+					sessionName = snapName
+				}
 			}
 		}
 		if sessionName == "" || seen[sessionName] {
@@ -649,29 +658,44 @@ func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, false)
+}
+
+// authoritativeBeadsProviderForScope resolves the provider for a store chosen
+// from an arbitrary bead ID rather than from the caller's current scope. An
+// unscoped GC_BEADS value describes the caller's command context and must not
+// mask the selected store's on-disk identity. Scope-pinned overrides and
+// custom exec providers remain deliberate selections and retain precedence.
+func authoritativeBeadsProviderForScope(scopeRoot, cityPath string) string {
+	return resolveRawBeadsProviderForScope(scopeRoot, cityPath, true)
+}
+
+func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative bool) string {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
 	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
-	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok {
+	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok && (!authoritative || strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "") {
 		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
 	}
 	provider := rawBeadsProvider(runtimeCityPath)
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
-	if samePath(resolvedScopeRoot, runtimeCityPath) {
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}
-	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+	if !authoritative && samePath(resolvedScopeRoot, runtimeCityPath) {
 		return provider
 	}
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
 	// file-backed city (and vice versa). Prefer explicit scope-local store
-	// markers over the city default so scoped commands keep talking to the
-	// rig's actual beads backend. The bd routing identity is metadata.json;
-	// config.yaml is a compatibility mirror and can survive migrations.
+	// markers over the configured default so scoped commands keep talking to
+	// the actual beads backend for that scope. Authoritative arbitrary-bead
+	// resolution also applies this check at the city root. The bd routing
+	// identity is metadata.json; config.yaml is a compatibility mirror and can
+	// survive migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
 		return "bd"
 	}

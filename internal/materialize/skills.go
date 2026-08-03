@@ -36,27 +36,43 @@ package materialize
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bootstrap"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // vendorSinks maps an agent provider to the relative directory under the
 // agent's scope-root or session WorkDir where skills are materialized.
 //
-// Only the providers with verified skill-reading behavior are included.
+// Each path is the project-scoped skills directory that the provider's own
+// CLI actually scans (a directory of <name>/SKILL.md), verified against
+// vendor docs (2026-06):
+//
+//	claude   → .claude/skills   (code.claude.com/docs/en/skills)
+//	codex    → .agents/skills   (developers.openai.com/codex/skills — Codex
+//	                             scans .agents/skills from cwd up to the repo
+//	                             root; it does NOT read a project-scoped
+//	                             .codex/skills, only ~/.codex for user state)
+//	gemini   → .gemini/skills   (github.com/google-gemini/gemini-cli docs/cli/skills.md)
+//	opencode → .opencode/skills (opencode.ai/docs/skills)
+//	mimocode → .mimocode/skills (mimo.xiaomi.com/mimocode/skills)
+//
 // The other providers recognized by hooks.go (copilot, cursor, pi, omp)
 // intentionally have no entry — VendorSink returns ok=false so the caller
 // can log a single skip line per session.
 var vendorSinks = map[string]string{
 	"claude":   ".claude/skills",
-	"codex":    ".codex/skills",
+	"codex":    ".agents/skills",
 	"gemini":   ".gemini/skills",
 	"opencode": ".opencode/skills",
 	"mimocode": ".mimocode/skills",
@@ -172,9 +188,15 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 
 	addEntry := func(entry SkillEntry) {
 		if existing, dup := nameOwner[entry.Name]; dup {
+			winner := cat.Entries[existing].Origin
+			slog.Debug("skill shared-catalog name shadowed",
+				"name", entry.Name,
+				"winner", winner,
+				"loser", entry.Origin,
+			)
 			cat.Shadowed = append(cat.Shadowed, ShadowedEntry{
 				Name:   entry.Name,
-				Winner: cat.Entries[existing].Origin,
+				Winner: winner,
 				Loser:  entry.Origin,
 			})
 			return
@@ -318,6 +340,19 @@ type Request struct {
 	// symlinks. Pass nil to skip legacy migration. Use LegacyStubNames()
 	// for the canonical list.
 	LegacyNames []string
+	// LegacyOwnedRoots lists RETIRED gc-managed source roots whose
+	// stranded symlinks the cleanup walk should still recognize as
+	// gc-owned: targets under them are gc's own leftover property, never
+	// user content. The motivating case is the .gc/system/packs
+	// projection retired by #3344 with a config-only migration —
+	// pre-manifest sink links pointing into it classify as "user-owned"
+	// under OwnedRoots+manifest alone and are skipped forever
+	// (hq-38je). Links under these roots are re-pointed when their name
+	// is desired and deleted only once dangling when undesired; a
+	// still-resolving legacy link for an undesired name is left alone.
+	// Use LegacyOwnedRootsFor for the canonical list. Pass nil to keep
+	// the historical behavior.
+	LegacyOwnedRoots []string
 }
 
 // SkippedConflict records a name in the desired set that could not be
@@ -350,6 +385,69 @@ type Result struct {
 	// (typically I/O errors on individual entries). The pass continued
 	// past each warning.
 	Warnings []string
+}
+
+// ownershipManifestFile is the name of the small bookkeeping file the
+// materializer keeps inside each sink directory (gastownhall/gascity#4130).
+const ownershipManifestFile = ".gc-skill-ownership.json"
+
+// ownershipManifest durably records, per sink entry name, the last
+// canonicalized absolute target this materializer wrote a symlink to.
+// It exists solely so a symlink can still be recognized as gc's own once
+// its target's root falls out of the CURRENT pass's OwnedRoots — e.g. a
+// pinned pack sha bump moves an imported catalog's root to a new
+// content-addressed cache checkout with an unrelated path (cache keys
+// are sha256(source+commit), so there is no stable parent directory to
+// widen ownership to instead). Without this, the cleanup walk's
+// targetUnderOwnedRoot check treats the old-sha symlink as
+// user-placed and leaves it alone, and the create step then finds the
+// occupied path and reports "user-owned symlink at sink path" forever
+// (gastownhall/gascity#4130).
+//
+// A missing or corrupt manifest is treated as empty: ownership
+// recognition falls back to today's targetUnderOwnedRoot-only behavior,
+// so there is no migration step and no new failure mode for existing
+// sinks — self-healing only starts working going forward from the first
+// pass that writes a manifest entry for a given name.
+type ownershipManifest struct {
+	Targets map[string]string `json:"targets"`
+}
+
+// loadOwnershipManifest is best-effort: any read or parse failure (file
+// absent, corrupt JSON, permission error) yields an empty manifest so
+// the cleanup walk falls back to today's targetUnderOwnedRoot-only
+// ownership check rather than failing the pass.
+func loadOwnershipManifest(absSink string) ownershipManifest {
+	data, err := os.ReadFile(filepath.Join(absSink, ownershipManifestFile))
+	if err != nil {
+		return ownershipManifest{Targets: map[string]string{}}
+	}
+	var m ownershipManifest
+	if err := json.Unmarshal(data, &m); err != nil || m.Targets == nil {
+		return ownershipManifest{Targets: map[string]string{}}
+	}
+	return m
+}
+
+// saveOwnershipManifest writes the manifest atomically (temp file +
+// rename, matching this package's other on-disk writes). Callers treat a
+// save failure as a warning, not a pass-level error: it only affects
+// self-healing on a future pass, not the correctness of this one.
+func saveOwnershipManifest(absSink string, m ownershipManifest) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("encoding ownership manifest: %w", err)
+	}
+	return fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(absSink, ownershipManifestFile), data, 0o644)
+}
+
+// manifestRecordsTarget reports whether the manifest's last-known target
+// for name matches canonTarget exactly — i.e. this materializer itself
+// wrote this symlink in a previous pass, even if canonTarget's root is no
+// longer in the current pass's OwnedRoots.
+func manifestRecordsTarget(m ownershipManifest, name, canonTarget string) bool {
+	recorded, ok := m.Targets[name]
+	return ok && recorded == canonTarget
 }
 
 // Run runs one materialization pass for an agent's sink.
@@ -403,6 +501,22 @@ func Run(req Request) (Result, error) {
 		owned = append(owned, canon)
 	}
 
+	manifest := loadOwnershipManifest(absSink)
+	manifestDirty := false
+
+	legacyOwned := make([]string, 0, len(req.LegacyOwnedRoots))
+	for _, root := range req.LegacyOwnedRoots {
+		if root == "" {
+			continue
+		}
+		canon, err := canonicalizePath(root)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize legacy owned root %q: %v", root, err))
+			continue
+		}
+		legacyOwned = append(legacyOwned, canon)
+	}
+
 	// Step 2: legacy stub migration.
 	for _, name := range req.LegacyNames {
 		path := filepath.Join(absSink, name)
@@ -449,15 +563,36 @@ func Run(req Request) (Result, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize target %q: %v", target, terr))
 			continue
 		}
-		if !targetUnderOwnedRoot(canonTarget, owned) {
-			// External target — symlink the user placed themselves.
-			continue
+		legacyTarget := false
+		if !targetUnderOwnedRoot(canonTarget, owned) && !manifestRecordsTarget(manifest, name, canonTarget) {
+			// Not under any currently-owned root, and not a target this
+			// materializer's own manifest remembers writing for this name
+			// in a previous pass. Retired gc-managed roots
+			// (LegacyOwnedRoots) still mark the link as gc's own stranded
+			// property — e.g. a pre-#3344 .gc/system/packs projection
+			// target orphaned by the config-only retirement migration.
+			if !targetUnderOwnedRoot(canonTarget, legacyOwned) {
+				// External target — symlink the user placed themselves.
+				continue
+			}
+			legacyTarget = true
 		}
 		desired, want := desiredByName[name]
 		if !want {
+			if legacyTarget {
+				// Stranded legacy-root links are removed only once they
+				// dangle; a still-resolving link for an undesired name may
+				// be serving content the user relies on.
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					continue
+				}
+			}
 			// Owned but not desired — delete (covers dangling and orphaned).
 			if rmErr := os.Remove(path); rmErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("removing orphan symlink %q: %v", path, rmErr))
+			} else if _, had := manifest.Targets[name]; had {
+				delete(manifest.Targets, name)
+				manifestDirty = true
 			}
 			continue
 		}
@@ -475,6 +610,10 @@ func Run(req Request) (Result, error) {
 			// Already correct — record and move on. The create loop
 			// will see this name has been satisfied via desiredByName
 			// removal below.
+			if manifest.Targets[name] != canonTarget {
+				manifest.Targets[name] = canonTarget
+				manifestDirty = true
+			}
 			result.Materialized = append(result.Materialized, name)
 			delete(desiredByName, name)
 			continue
@@ -486,6 +625,8 @@ func Run(req Request) (Result, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("replacing symlink %q: %v", path, rerr))
 			continue
 		}
+		manifest.Targets[name] = canonDesired
+		manifestDirty = true
 		result.Materialized = append(result.Materialized, name)
 		delete(desiredByName, name)
 	}
@@ -534,7 +675,17 @@ func Run(req Request) (Result, error) {
 		if cerr := atomicSymlink(desiredAbs, path); cerr != nil {
 			return result, fmt.Errorf("creating symlink %q -> %q: %w", path, desiredAbs, cerr)
 		}
+		if canonDesired, cerr := canonicalizePath(desiredAbs); cerr == nil {
+			manifest.Targets[name] = canonDesired
+			manifestDirty = true
+		}
 		result.Materialized = append(result.Materialized, name)
+	}
+
+	if manifestDirty {
+		if serr := saveOwnershipManifest(absSink, manifest); serr != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("saving ownership manifest: %v", serr))
+		}
 	}
 
 	sort.Strings(result.Materialized)
@@ -542,6 +693,52 @@ func Run(req Request) (Result, error) {
 	sort.Strings(result.LegacyMigrated)
 	sort.Strings(result.Warnings)
 	return result, nil
+}
+
+// TargetUnderManagedRoot reports whether target falls under one of the
+// given gc-managed roots, canonicalizing both sides the same way the
+// cleanup walk does so /var ↔ /private/var aliases compare equal. It
+// exists so the doctor dangling-sink check classifies link ownership
+// with exactly the materializer's logic instead of drifting into a
+// second convention. Canonicalization failures classify as false (not
+// owned) — the safe direction for a deletion decision.
+func TargetUnderManagedRoot(target string, roots []string) bool {
+	canonTarget, err := canonicalizePath(target)
+	if err != nil {
+		return false
+	}
+	canonRoots := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		canon, err := canonicalizePath(root)
+		if err != nil {
+			continue
+		}
+		canonRoots = append(canonRoots, canon)
+	}
+	return targetUnderOwnedRoot(canonTarget, canonRoots)
+}
+
+// LegacyOwnedRootsFor returns the canonical retired gc-managed source
+// roots for Request.LegacyOwnedRoots:
+//
+//   - <cityPath>/.gc/system/packs — the per-city projection retired by
+//     #3344, whose config-only migration stranded every pre-manifest
+//     sink symlink that pointed into it (hq-38je).
+//   - <GC_HOME>/cache/repos — the global content-addressed pack
+//     checkout cache; a pruned checkout strands pre-manifest links
+//     that #4130's manifest only covers going forward.
+//
+// The cache root is omitted when GC_HOME is unresolvable (hermetic
+// test binaries) rather than erroring the whole materialization pass.
+func LegacyOwnedRootsFor(cityPath string) []string {
+	roots := []string{filepath.Join(cityPath, citylayout.SystemPacksRoot)}
+	if cacheRoot, err := config.GlobalRepoCacheRoot(); err == nil {
+		roots = append(roots, cacheRoot)
+	}
+	return roots
 }
 
 // LegacyStubNames returns the canonical list of v0.15.0 stub names that

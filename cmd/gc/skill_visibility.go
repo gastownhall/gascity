@@ -62,13 +62,14 @@ func resolveVisibilityAgent(cityPath string, cfg *config.City, sessFront *sessio
 		if err != nil {
 			return nil, err
 		}
-		bead, err := store.Get(id)
+		info, err := sessFront.Get(id)
 		if err != nil {
+			// Name the user-supplied identifier, not the resolved bead id.
 			return nil, fmt.Errorf("loading session %q: %w", sessionID, err)
 		}
-		template := normalizedSessionTemplate(bead, cfg)
+		template := normalizedSessionTemplateInfo(info, cfg)
 		if template == "" {
-			template = strings.TrimSpace(session.InfoFromPersistedBead(bead).AgentName)
+			template = strings.TrimSpace(info.AgentName)
 		}
 		template = resolveAgentTemplate(template, cfg)
 		agent := findAgentByTemplate(cfg, template)

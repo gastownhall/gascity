@@ -175,9 +175,12 @@ and `BEADS_*` compatibility output.
 - [ ] Mixed raw `bd` / `gc bd` / GC-initiated flows continue to agree.
 
 **Verification:**
-- [ ] `go test ./cmd/gc -run 'Test(ManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|ManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore|InheritedExternalBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|GcBdUsesProjectionNotAmbientEnv)' -count=1`
+- [ ] `command -v bd && command -v dolt && command -v jq`
+- [ ] `GC_FAST_UNIT=0 go test ./cmd/gc -run 'Test(ManagedBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore|GcBdUsesProjectionNotAmbientEnv|OpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv|BdStoreBridgeGetCmdReturnsBead)' -count=1`
+- [ ] `go test ./internal/beads -run TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore -count=1`
+- [ ] `go test ./internal/beads/contract -run TestResolveDoltConnectionTargetInheritedExternalRig -count=1`
 - [ ] `go test ./internal/runtime/k8s -run 'Test(BuildPodEnv|ManagedServiceAlias)' -count=1`
-- [ ] `go test ./internal/beads/exec -run TestRunSanitizesAmbientLegacyAndStoreTargetEnv -count=1`
+- [ ] `go test ./internal/beads/exec -run 'Test(ExecStoreConformance|RunSanitizesAmbientLegacyAndStoreTargetEnv)' -count=1`
 
 **Dependencies:** Task 3
 

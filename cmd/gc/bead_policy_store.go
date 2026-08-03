@@ -35,7 +35,25 @@ type beadPolicyGraphStore struct {
 	applier beads.GraphApplyStore
 }
 
-var _ beads.ConditionalAssignmentReleaser = (*beadPolicyStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+)
+
+// ConditionalWritesResolveTarget declares the wrapped store as the
+// conditional-writes resolution target. The policy layer shapes creation and
+// reads; it does not intercept metadata writes (SetMetadata promotes from the
+// embedded store), so fenced writes resolve against the inner store — without
+// this declaration, interface embedding would hide the factory stamp and a
+// require deployment would silently collapse to legacy writes through the
+// wrapper. beadPolicyGraphStore inherits this via its embedded
+// *beadPolicyStore.
+func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+var (
+	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+)
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
 	if store == nil {
@@ -79,6 +97,17 @@ func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error)
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
 }
 
+// ReadyContext preserves the policy-expanded read tier for deadline-sensitive
+// Ready projections. Optional capabilities are hidden by the embedded Store
+// interface, so forward explicitly just like Count.
+func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads through policy store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
+}
+
 // Count implements beads.Counter with the same read-tier expansion as List.
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report
@@ -89,6 +118,22 @@ func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excl
 		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
 	}
 	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
+}
+
+// DeleteBatch implements beads.BatchDeleter by forwarding to the wrapped store
+// when it supports batched deletion. Like Count, this delegation must be
+// explicit: the embedded Store interface does not promote optional
+// capabilities, so a policy-wrapped caching/bd store would otherwise hide
+// BatchDeleter and force the wisp-GC closure teardown back onto the per-bead
+// subprocess path. Inner stores without BatchDeleter report
+// ErrBatchDeleteUnsupported, signaling callers to fall back to per-bead delete.
+// beadPolicyGraphStore embeds *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DeleteBatch(ids []string) error {
+	deleter, ok := s.Store.(beads.BatchDeleter)
+	if !ok {
+		return beads.ErrBatchDeleteUnsupported
+	}
+	return deleter.DeleteBatch(ids)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {

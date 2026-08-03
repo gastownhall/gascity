@@ -20,12 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/warmup"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -346,6 +348,55 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 	return tr
 }
 
+// buildAssignedWorkDeferTracker creates an assignedWorkDeferTracker from the
+// config, registering a consecutive-defer limit override for every agent
+// that has assigned_work_defer_limit set. Unlike buildIdleTracker /
+// buildMaxSessionAgeTracker, this always returns a non-nil tracker: the
+// backstop (ga-nllza6) must stay live even when no agent configures an
+// override, falling back to defaultAssignedWorkDeferLimit for any session
+// with no direct or template registration. Mirrors buildIdleTracker's
+// registration-loop shape so the set of session names registered matches
+// what the reconciler observes.
+func buildAssignedWorkDeferTracker(cfg *config.City, cityName string, sp runtime.Provider) assignedWorkDeferTracker {
+	tr := newAssignedWorkDeferTracker()
+	st := cfg.Workspace.SessionTemplate
+	for _, a := range cfg.Agents {
+		if a.AssignedWorkDeferLimit == nil {
+			continue
+		}
+		limit := *a.AssignedWorkDeferLimit
+		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
+		if named != nil {
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setLimit(namedSessionName, limit)
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
+			}
+			if !a.SupportsInstanceExpansion() {
+				continue
+			}
+		}
+		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
+				tr.setLimit(sn, limit)
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setLimitForTemplate(template, limit)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
+			}
+			continue
+		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		tr.setLimit(sn, limit)
+	}
+	return tr
+}
+
 func lifecycleTemplateFallbackKey(a config.Agent) string {
 	return a.QualifiedName()
 }
@@ -564,6 +615,14 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	return 0
 }
 
+// resolveStartDir resolves the city directory for start/restart. The
+// no-argument case deliberately keeps the plain cwd fallback rather than
+// routing through resolveImplicitCWD: start and restart cannot bootstrap
+// anything. Every caller feeds this into requireBootstrappedCity, which walks
+// up for an existing city.toml/.gc and errors before any side effect when
+// there is none, so an unattended no-path invocation in an arbitrary checkout
+// fails loudly instead of leaving state behind. The implicit-cwd guard is for
+// the entry points that create state — see resolveImplicitCWD.
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
@@ -733,11 +792,24 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
-	warmupOpts := WarmupOpts{
+	warmupCityPath := cityPath
+	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
+		warmupCityPath = absCityPath
+	}
+	skipRigDoltChecks := gcDoltSkip()
+	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
+		Stderr:               io.Discard,
+		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
+	})
+	warmupOpts := warmup.WarmupOpts{
+		Checks: warmupChecks,
 		Mailer: defaultMailProvider(cityPath),
 		Stderr: stderr,
 	}
-	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
+	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
 
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.
@@ -812,7 +884,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// beaconTime is captured once so the beacon timestamp remains stable
 	// across reconcile ticks. Without this, FormatBeacon(time.Now()) would
@@ -900,7 +976,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// syncSessionBeadsWithSnapshotAndRigStores / reconcileSessionBeadsAtPathWithNamedDemand,
 	// with rigStores as the per-rig WORK tail. That leading store is
 	// agentBuildParams.beadStore (creates/updates session beads) and the
-	// collectAllOpenSessionBeads "city" arm; it also still carries the city-work "city"
+	// collectAllOpenSessionInfos "city" arm; it also still carries the city-work "city"
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
@@ -926,8 +1002,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	open := sessionBeads.Open()
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, open, dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -940,7 +1015,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
 			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 		)
-		open = sessionBeads.Open()
 	}
 
 	dt := newDrainTracker()
@@ -959,9 +1033,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
-		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, sessStore,
+		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
+		dsResult.NamedSessionRoutedDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

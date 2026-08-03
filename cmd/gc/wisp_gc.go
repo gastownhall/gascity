@@ -196,16 +196,16 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	}
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
-		mailEntries, mailErr := beadmail.ReadMessageWispEntries(mailStore.Store)
-		if mailErr == nil {
-			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(mailStore.Store, mailEntries, now.Add(-m.mailRetentionTTL))
-			purged += mailPurged
-			deleteErr = errors.Join(deleteErr, mailDeleteErr)
-			if mailPurged > 0 {
-				log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
-			}
-		} else {
-			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing read message wisps: %w", mailErr))
+		// The read-message retention arm is messaging-class: its candidate query
+		// and wisp-tier delete loop live inside the messaging edge (beadmail),
+		// against the messaging store — disjoint from the graph-class purge above.
+		mailPurged, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL))
+		purged += mailPurged
+		if mailErr != nil {
+			deleteErr = errors.Join(deleteErr, mailErr)
+		}
+		if mailPurged > 0 {
+			log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
 		}
 	}
 
@@ -550,14 +550,6 @@ func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff ti
 	return purgeExpiredBeads(store, entries, cutoff, batchCap, deleteExpiredBeadClosure)
 }
 
-// purgeExpiredBeadRoots purges aged single-row roots (the read-message mail
-// retention sweep). It is intentionally unbounded (batchCap=0): it predates the
-// wisp-GC reaper caps and its candidate set is not the first-deploy backlog the
-// closure-purge cap guards against.
-func purgeExpiredBeadRoots(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
-	return purgeExpiredBeads(store, entries, cutoff, 0, deleteWorkflowBead)
-}
-
 // purgeExpiredBeads deletes each entry older than cutoff via deleteFn and
 // returns the count successfully purged. When batchCap > 0 it bounds the number
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
@@ -586,19 +578,19 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
-	// deleteWorkflowBead removes every dependency attached to each closure
-	// member before deleting the bead. Only use the closure deleter for roots
-	// whose full ownership tree is safe to collect.
+	// The closure is deleted as one batch: a store that supports
+	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
+	// ownership tree with a single `bd delete … --force`, which deletes exactly
+	// those ids and lets ON DELETE CASCADE drop their edges while orphaning any
+	// external dependents; other stores fall back to per-bead deletion. Because
+	// the delete is not dependent-recursive, collectExpiredBeadClosure must (and
+	// does) gather only the ownership closure so live work outside it is never
+	// reached.
 	ids, err := collectExpiredBeadClosure(store, rootID)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := deleteWorkflowBead(store, id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return deleteWorkflowBeadsBatch(store, ids)
 }
 
 func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, error) {

@@ -32,15 +32,23 @@ type phaseMapping struct {
 	hasRound    bool // TS reviewRound: number | null
 }
 
-// mapRunPhase classifies a run group into a phase. Port of TS mapRunPhase.
-func mapRunPhase(issues []runIssue) phaseMapping {
-	// Status-based branches first — authoritative.
-	for _, i := range issues {
-		if i.status == "blocked" || strings.Contains(textForIssue(i), "blocked") {
-			return phaseMapping{phase: "blocked", label: "blocked"}
-		}
+// mapRunPhase classifies a run group into a phase. Port of TS mapRunPhase,
+// with the terminal check hoisted above the blocked check: a fully-closed run
+// is history, even when a member's status or text mentions "blocked" (the old
+// order pinned aborted runs into the blocked lane with a claim-a-worker remedy
+// that could do nothing). rootID names the group root so a terminal run whose
+// ROOT closed with gc.outcome=fail keeps the honest "failed" label — the phase
+// stays "complete" (the RunPhase union has no failed member, and complete is
+// what routes the lane to history).
+func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
+	// Root-terminality wins (mirrors CanonicalRunStatusForLane): a closed root is
+	// history even when a member lingers in_progress or blocked because its own
+	// close event never landed. The RunPhase union has no failed member, so the
+	// honest failure rides the label while the phase stays "complete" — which
+	// routes the lane to history and collapses the stage ladder.
+	if root, ok := findIssue(issues, rootID); ok && strings.TrimSpace(root.status) == "closed" {
+		return phaseMapping{phase: "complete", label: terminalRunLabel(root)}
 	}
-
 	if len(issues) > 0 {
 		allClosed := true
 		for _, i := range issues {
@@ -50,7 +58,26 @@ func mapRunPhase(issues []runIssue) phaseMapping {
 			}
 		}
 		if allClosed {
-			return phaseMapping{phase: "complete", label: "complete"}
+			// Rootless (dangling-root) fallback: no root issue to consult, so the
+			// label defaults to "complete".
+			return phaseMapping{phase: "complete", label: terminalRunLabelByID(rootID, issues)}
+		}
+	}
+
+	// Status-based blocked branch — keyed on the authoritative bd status only.
+	// A substring scan of step text cannot distinguish a run that IS blocked from
+	// one that merely says the word: a step whose title or description contains
+	// "blocked" (a verdict enum, a prompt, an instruction) false-flagged the whole
+	// run. mol-review-quorum is the standing example — its review step lists
+	// "pass, pass_with_findings, fail, or blocked" as the verdict enum, so every
+	// mid-review quorum run landed in the blocked lane with a claim-a-worker
+	// remedy that can do nothing about it. This matches the invariant already
+	// stated in detail_displaystate_fixes_test.go: "blocked" is reserved for nodes
+	// the store itself marks blocked. textForIssue is still used for the "review"
+	// keyword path below.
+	for _, i := range issues {
+		if i.status == "blocked" {
+			return phaseMapping{phase: "blocked", label: "blocked"}
 		}
 	}
 
@@ -60,6 +87,29 @@ func mapRunPhase(issues []runIssue) phaseMapping {
 	}
 
 	return fallbackPhase(issues)
+}
+
+// terminalRunLabel returns the honest phase label for a run whose root bead
+// closed: "failed" when the ROOT recorded a fail outcome, else "complete". Only
+// the root outcome speaks for the run — a failed-then-retried attempt bead leaves
+// outcome=fail on the attempt, not the root. Shared by the root-closed and
+// all-closed branches of mapRunPhase.
+func terminalRunLabel(root runIssue) string {
+	outcome := strings.ToLower(stringValue(root.metadata[beadmeta.OutcomeMetadataKey]))
+	if outcome == "fail" || outcome == "failed" {
+		return "failed"
+	}
+	return "complete"
+}
+
+// terminalRunLabelByID resolves the terminal label for the root identified by
+// rootID, defaulting to "complete" when no such issue is present (a rootless
+// all-closed group).
+func terminalRunLabelByID(rootID string, issues []runIssue) string {
+	if root, ok := findIssue(issues, rootID); ok {
+		return terminalRunLabel(root)
+	}
+	return "complete"
 }
 
 // structuredPhase derives the phase from the run's current step.
@@ -125,9 +175,22 @@ var (
 	approvalStageTokens       = map[string]bool{"approval": true, "approve": true, "approved": true, "gate": true}
 	finalizationStageTokens   = map[string]bool{"finalize": true, "finalization": true, "merge": true, "cleanup": true, "publish": true}
 	reviewStageTokens         = map[string]bool{"review": true, "reviewer": true, "scorecard": true, "persona": true, "personas": true, "audit": true, "repro": true, "baseline": true, "investigation": true, "classify": true, "classification": true}
-	implementationStageTokens = map[string]bool{"implement": true, "implementation": true, "patch": true, "fixes": true, "work": true, "design": true}
+	implementationStageTokens = map[string]bool{"implement": true, "implementation": true, "patch": true, "fixes": true, "repair": true, "work": true, "design": true}
 	intakeStageTokens         = map[string]bool{"intake": true, "bootstrap": true, "context": true, "router": true, "request": true, "preflight": true, "setup": true, "rebase": true}
 )
+
+// reviewPrepImplementationSteps names review-preparation steps that are
+// themselves implementation work rather than the review gate or intake. Such a
+// step carries a review lead-up qualifier (so the review classifier rejects it)
+// plus a generic intake token, so neither the review nor the implementation
+// token set resolves it; it must be pinned explicitly. Keys are authored base
+// step ids (attempt suffix stripped). prepare-review-context builds the review
+// context a later code review consumes and belongs to the bug-implementation
+// formula's "implement" stage, yet its only non-rejected token is the intake
+// token "context"; without this it falls through to intake.
+var reviewPrepImplementationSteps = map[string]bool{
+	"prepare-review-context": true,
+}
 
 // stepIDPhase classifies a single gc.step_id into a generic RunPhase.
 // Port of TS stepIdPhase.
@@ -139,8 +202,20 @@ func stepIDPhase(stepID string) string {
 	if hasStageToken(tokens, finalizationStageTokens, true) {
 		return "finalization"
 	}
-	if hasStageToken(tokens, reviewStageTokens, false) {
+	// Review rejects lead-up qualifiers like approval/finalization do: a
+	// pre-review CI repair step ("repair-PRE-REVIEW-ci-failures") leads up to
+	// review, it is not the review.
+	if hasStageToken(tokens, reviewStageTokens, true) {
 		return "review"
+	}
+	// A named review-preparation step that is implementation work (e.g.
+	// prepare-review-context) is rejected as review above and would otherwise be
+	// misread as intake by its "context" token; pin it to implementation before
+	// the token fallthrough. pre-review-ci / repair-pre-review-ci-failures are
+	// deliberately absent: the CI gate leads up to review without being
+	// implementation, and its repair step already resolves via the "repair" token.
+	if reviewPrepImplementationSteps[stripAttemptSuffix(strings.ToLower(strings.TrimSpace(stepID)))] {
+		return "implementation"
 	}
 	if hasStageToken(tokens, implementationStageTokens, false) {
 		return "implementation"
@@ -370,6 +445,14 @@ var runStages = [][2]string{
 func stageProgress(phase phaseMapping, formula string, hasFormula bool, issues []runIssue) []RunStage {
 	formulaStages := stagesForFormula(formula, hasFormula)
 	if len(formulaStages) > 0 {
+		if phase.phase == "complete" {
+			// Terminal root: present the ladder without ever re-deriving active or
+			// blocked from lingering raw member statuses. A stage that ran is
+			// complete; a stage that never materialized (a run that exited early)
+			// stays pending — collapsing every stage to complete would falsely show
+			// a preflight-failed run finishing Human approval and Merge-ready.
+			return formulaStageProgressTerminal(formulaStages, issues)
+		}
 		return formulaStageProgress(formulaStages, issues)
 	}
 
@@ -443,6 +526,7 @@ func stagesForFormula(formula string, hasFormula bool) []formulaStage {
 		return []formulaStage{
 			{"preflight", "Preflight", []string{"preflight"}},
 			{"rebase", "Worktree / rebase", []string{"rebase-check"}},
+			{"pre-review-ci", "Pre-review CI", []string{"pre-review-ci", "repair-pre-review-ci-failures"}},
 			{"review", "Review loop", []string{
 				"review-loop",
 				"review-pipeline.review-claude",
@@ -452,7 +536,8 @@ func stagesForFormula(formula string, hasFormula bool) []formulaStage {
 				"review-pipeline.quality-scorecard",
 				"apply-fixes",
 			}},
-			{"ci", "Pre-approval CI", []string{"pre-approval-ci", "repair-ci-failures"}},
+			// repair-ci-failures is the pre-rename id kept for older runs.
+			{"ci", "Pre-approval CI", []string{"pre-approval-ci", "repair-pre-approval-ci-failures", "repair-ci-failures"}},
 			{"approval", "Human approval", []string{"human-approval"}},
 			{"finalize", "Merge-ready", []string{"finalize"}},
 			{"cleanup", "Cleanup", []string{"cleanup-worktree"}},
@@ -516,6 +601,45 @@ func formulaStageProgress(stages []formulaStage, issues []runIssue) []RunStage {
 	return out
 }
 
+// formulaStageProgressTerminal renders the stage ladder for a terminal run
+// without emitting active or blocked. A stage is complete iff it RAN — carries a
+// step that reached closed/in_progress/blocked — or precedes the furthest-run
+// stage; a stage that never materialized (a run that exited early) stays pending.
+// This matches formulaStageProgress's own no-active-step derivation for a fully
+// closed run, so a preflight-failed run keeps its trailing stages pending instead
+// of falsely reporting Human approval and Merge-ready complete.
+func formulaStageProgressTerminal(stages []formulaStage, issues []runIssue) []RunStage {
+	primary := primaryStepIssues(issues)
+	ran := make([]bool, len(stages))
+	furthest := -1
+	for idx, s := range stages {
+		for _, step := range s.steps {
+			for _, i := range stepIssues(primary, step) {
+				if i.status == "closed" || i.status == "in_progress" || i.status == "blocked" {
+					ran[idx] = true
+					break
+				}
+			}
+			if ran[idx] {
+				break
+			}
+		}
+		if ran[idx] {
+			furthest = idx
+		}
+	}
+
+	out := make([]RunStage, len(stages))
+	for idx, s := range stages {
+		status := "pending"
+		if ran[idx] || idx < furthest {
+			status = "complete"
+		}
+		out[idx] = RunStage{Key: s.key, Label: s.label, Status: status}
+	}
+	return out
+}
+
 // primaryStepIssues keeps only the primary-step issues, mirroring the
 // isPrimaryStepIssue filter formulaStageProgress applies before stage mapping.
 func primaryStepIssues(issues []runIssue) []runIssue {
@@ -541,12 +665,45 @@ func formulaActiveStageIndex(stages []formulaStage, primary []runIssue) int {
 	if !hasActiveStep {
 		return firstOpenStageIndex(stages, primary)
 	}
+	// Retry iterations carry attempt-suffixed step ids
+	// (repair-x-failures.attempt.1); the tables list the authored base ids.
+	activeStepID = stripAttemptSuffix(activeStepID)
 	for idx, s := range stages {
 		if containsString(s.steps, activeStepID) {
 			return idx
 		}
 	}
 	return -1
+}
+
+// attemptSuffixRE matches the .attempt.N suffix runtime retries append to a
+// step id (possibly stacked, e.g. ".attempt.1.attempt.2").
+var attemptSuffixRE = regexp.MustCompile(`(\.attempt\.\d+)+$`)
+
+// stripAttemptSuffix reduces an attempt-suffixed step id to its authored base
+// id. A value that is nothing but the suffix is returned unchanged rather than
+// stripped to the empty string.
+func stripAttemptSuffix(id string) string {
+	stripped := attemptSuffixRE.ReplaceAllString(id, "")
+	if stripped == "" {
+		return id
+	}
+	return stripped
+}
+
+// iterationSegmentRE matches the .iteration.N path segments loop
+// materialization inserts into a step ref (scope.iteration.2.step).
+var iterationSegmentRE = regexp.MustCompile(`\.iteration\.\d+`)
+
+// stripIterationSegments removes every .iteration.N segment from a step ref,
+// yielding the iteration-agnostic authored form. A value that is nothing but
+// segments is returned unchanged rather than stripped to the empty string.
+func stripIterationSegments(id string) string {
+	stripped := iterationSegmentRE.ReplaceAllString(id, "")
+	if stripped == "" {
+		return id
+	}
+	return stripped
 }
 
 // formulaStageStatus resolves one stage's status relative to the active and
@@ -694,12 +851,17 @@ func byMostRecentThenStage(a, b runIssue) int {
 	return 0
 }
 
-// stepIssues returns the issues whose gc.step_id equals step. Port of TS
-// stepIssues.
+// stepIssues returns the issues whose gc.step_id equals step, treating an
+// attempt-suffixed id (step.attempt.N) as its authored base id on BOTH sides.
+// The authored stage tables query with base ids, but a live retry's active step
+// id (runStepAttempt) still carries the suffix; stripping the query too keeps
+// the match symmetric so attempt lookup resolves for in-flight retries. Port of
+// TS stepIssues, extended to normalize the query side.
 func stepIssues(issues []runIssue, step string) []runIssue {
+	base := stripAttemptSuffix(step)
 	var out []runIssue
 	for _, i := range issues {
-		if stringValue(i.metadata[beadmeta.StepIDMetadataKey]) == step {
+		if stripAttemptSuffix(stringValue(i.metadata[beadmeta.StepIDMetadataKey])) == base {
 			out = append(out, i)
 		}
 	}

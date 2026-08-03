@@ -21,7 +21,10 @@ import (
 // are preserved).
 var (
 	// sessionsCacheTTL bounds how long a cached sessions read is served before a
-	// refetch. A var (not a const) so tests can shorten it.
+	// refetch. A var (not a const) so tests can shorten it — but it is captured
+	// by newRunTailerManager at construction (the sessions compute can run on
+	// the tailer loop's detached prime goroutine, where a live read of this var
+	// would race with a test mutating it), so set it BEFORE building the plane.
 	sessionsCacheTTL = 3 * time.Second
 	// formulaCacheTTL bounds how long a successfully-compiled formula detail is
 	// served. Compiled formulas change rarely (an authored TOML edit), so this is
@@ -319,6 +322,30 @@ func (c *singleFlightCache[K, V]) invalidate(key K) {
 		// false, so the next get recomputes. An in-flight compute is unaffected —
 		// it publishes and bumps the version as usual.
 		e.ttl = 0
+	}
+	c.mu.Unlock()
+}
+
+// discard removes one ownership generation from the cache. Unlike invalidate,
+// an already-running compute may still finish for callers that joined it, but
+// it publishes only to the detached entry and cannot repopulate this key. A
+// subsequent get creates a fresh entry and compute. Version reset is deliberate:
+// discard is reserved for identity changes whose downstream memos are replaced
+// at the same boundary, not ordinary same-identity refreshes.
+func (c *singleFlightCache[K, V]) discard(key K) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
+// discardMatching applies discard semantics to every matching key. It is used
+// for formula entries whose composite keys share a rebound city name.
+func (c *singleFlightCache[K, V]) discardMatching(match func(K) bool) {
+	c.mu.Lock()
+	for key := range c.entries {
+		if match(key) {
+			delete(c.entries, key)
+		}
 	}
 	c.mu.Unlock()
 }

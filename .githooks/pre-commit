@@ -4,8 +4,9 @@ set -euo pipefail
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
+staged_spec=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
 
-if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ]; then
+if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ] && [ -z "$staged_spec" ]; then
   exit 0
 fi
 
@@ -44,12 +45,28 @@ if [ -n "$staged_docs" ]; then
   make check-docs
 fi
 
-# Dashboard SPA rebuild: whenever the spec changes OR the SPA source
-# changes, regenerate the TS types, typecheck, and rebuild the compiled
-# bundle. Guarded on `npm` availability so contributors without Node
-# tooling aren't blocked; CI enforces the full regeneration.
+# Re-read the index rather than reusing the pre-hook staged_spec snapshot:
+# the Go block above runs `go run ./cmd/genspec` and stages the regenerated
+# internal/api/openapi.json, so a Go-only commit that moves the API surface
+# only shows up here (#4627, #4607). Shared by both branches below so the
+# npm-absent fail-closed branch sees the same side effect the npm-present
+# branch already accounts for (ga-jg89a5) -- the branches must not diverge
+# on which snapshot of "is the spec staged" they trust.
+spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+
+# Dashboard SPA rebuild: when internal/api/openapi.json changes, regenerate
+# the generated TS API client from the new spec and stage it. When the spec
+# OR the SPA source changes, typecheck and rebuild the compiled bundle.
+# Guarded on `npm` availability so contributors without Node tooling aren't
+# blocked; CI enforces the full regeneration via make dashboard-ci.
 if command -v npm >/dev/null 2>&1; then
-  spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+  if [ -n "$spec_changed" ]; then
+    # Regenerate BEFORE typecheck/build below: a client that no longer
+    # matches the new spec must fail typecheck immediately instead of
+    # silently building/committing a stale client (#4627, #4607).
+    (cd internal/api/dashboardspa/web && npm ci --silent && npm run generate:client)
+    git add internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client
+  fi
   if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
     # Typecheck BEFORE build: vite's build transpiles TS to JS and
     # silently ignores type errors. The Makefile target also runs the
@@ -60,5 +77,12 @@ if command -v npm >/dev/null 2>&1; then
     git add internal/api/dashboardspa/dist
   fi
 else
+  if [ -n "$spec_changed" ]; then
+    echo "error: internal/api/openapi.json is staged but npm is not on PATH — the generated TS API client" >&2
+    echo "cannot be regenerated, so this commit would ship a stale client with no enforcement until CI runs." >&2
+    echo "Install Node/npm, or regenerate manually:" >&2
+    echo "  cd internal/api/dashboardspa/web && npm ci && npm run generate:client" >&2
+    exit 1
+  fi
   echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
 fi

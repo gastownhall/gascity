@@ -9,12 +9,15 @@
     },
     "server": {
       "type": "object",
-      "required": ["running", "reachable", "pid", "port", "latency_ms"],
+      "required": ["running", "reachable", "external", "pid", "port", "latency_ms"],
       "properties": {
         "running": {
           "type": "boolean"
         },
         "reachable": {
+          "type": "boolean"
+        },
+        "external": {
           "type": "boolean"
         },
         "pid": {
@@ -75,6 +78,25 @@
           },
           "size": {
             "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "quarantine": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["db", "reason", "age_sec"],
+        "properties": {
+          "db": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "age_sec": {
+            "type": "integer"
           }
         },
         "additionalProperties": true

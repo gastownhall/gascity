@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -25,32 +24,27 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
+	// Validate the cursor before the read-model listing and per-session
+	// runtime enrichment — a garbage cursor gets its 400 without paying the
+	// full probe cost (matching the convoy and mail handlers).
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
-	sessions := listResult.Sessions
+	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
-
-	wantPeek := input.Peek
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	items := make([]sessionResponse, len(sessions))
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
-	}
-
-	// Pagination support.
-	limit := maxPaginationLimit
+	// Unified page contract (S4): default 100 like every other keyset list.
+	// The offset-cursor era defaulted sessions to the 1000-row server cap;
+	// truncated responses now always mint next_cursor, so a default-size
+	// fetch of a large fleet is walkable instead of silently oversized.
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
 		limit = input.Limit
 		if limit > maxPaginationLimit {
@@ -58,34 +52,37 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		}
 	}
 
-	pp := pageParams{
-		Offset:   decodeCursor(input.Cursor),
-		Limit:    limit,
-		IsPaging: input.cursorPresent,
+	// The read model returns sessions in the canonical (created_at DESC, id
+	// DESC) total order. Resolve the page before runtime/transcript enrichment:
+	// Codex exact-key lookup can probe bounded date directories, so off-page
+	// rows must not pay that I/O on every dashboard poll. The keyset boundary is
+	// compared and minted from the UNDERLYING session times (sessions[i]),
+	// never the response's RFC3339-formatted string, so sub-second precision
+	// survives the round trip — hence the index-keyed reuse of the shared
+	// helpers. Total keeps its full-match-count meaning, and a truncated
+	// response always carries next_cursor — cursor-less requests previously
+	// truncated silently, the #3208 defect class the bead list already fixed.
+	rowIdx := make([]int, len(sessions))
+	for i := range rowIdx {
+		rowIdx[i] = i
 	}
-
-	if !pp.IsPaging {
-		// No pagination cursor — capture the full match count BEFORE truncating
-		// so clients can tell how many items exist vs. how many fit the page.
-		total := len(items)
-		if pp.Limit < len(items) {
-			items = items[:pp.Limit]
-		}
-		return &ListOutput[sessionResponse]{
-			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(store.Store),
-			Body: ListBody[sessionResponse]{
-				Items:         items,
-				Total:         total,
-				Partial:       len(partialErrors) > 0,
-				PartialErrors: partialErrors,
-			},
-		}, nil
+	infoKey := func(i int) keysetKey {
+		return keysetKey{CreatedAt: sessions[i].CreatedAt, ID: sessions[i].ID}
 	}
+	pageIdx, total, hasMore := resolveKeysetPage(rowIdx, infoKey, seek, limit)
+	nextCursor := mintKeysetNextCursor(pageIdx, infoKey, hasMore)
 
-	page, total, nextCursor := paginate(items, pp)
-	if page == nil {
-		page = []sessionResponse{}
+	wantPeek := input.Peek
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	pageSessions := make([]session.Info, len(pageIdx))
+	for j, i := range pageIdx {
+		pageSessions[j] = sessions[i]
+	}
+	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
+	page := make([]sessionResponse, len(pageSessions))
+	for j, sess := range pageSessions {
+		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
 	return &ListOutput[sessionResponse]{
 		Index:     s.latestIndex(),
@@ -117,7 +114,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	info, pr, err := mgr.GetWithPersistedResponse(id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -135,7 +132,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
-func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
+func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -158,6 +155,17 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 	}
 
 	wantRaw := input.Format == "raw"
+	wantStructured := input.Format == "structured"
+	before := strings.TrimSpace(input.Before)
+	after := strings.TrimSpace(input.After)
+	if before != "" && after != "" {
+		return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
+	}
+	if path == "" {
+		if cursorErr := transcriptCursorAbsentError(before, after); cursorErr != nil {
+			return nil, transcriptCursorInvalidatedProblem(cursorErr, "reading session log")
+		}
+	}
 
 	if path != "" {
 		// Compactions() returns (n, provided). When the client omitted
@@ -165,24 +173,54 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		// entries, so default to 0 (sessionlog's "no pagination"
 		// sentinel) rather than 1 compaction.
 		tail, _ := input.Compactions()
-		before := input.Before
-		after := input.After
+		handle, handleErr := s.workerHandleForSession(store.Store, id)
+		if handleErr != nil {
+			return nil, humaSessionManagerError(handleErr)
+		}
 
-		if before != "" && after != "" {
-			return nil, apierr.ValidationFailed.Msg("before and after are mutually exclusive")
+		if wantStructured {
+			history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
+			})
+			if historyErr != nil {
+				if errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+					return s.structuredTranscriptFallback(info, input.IncludeThinking)
+				}
+				if problem := transcriptCursorInvalidatedProblem(historyErr, "reading session history"); problem != nil {
+					return nil, problem
+				}
+				return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
+			}
+			messages, _ := historySnapshotStructuredMessages(history, input.IncludeThinking)
+			projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
+				ID:                 info.ID,
+				Template:           info.Template,
+				Provider:           info.Provider,
+				Format:             "structured",
+				SchemaVersion:      sessionStructuredSchemaVersion,
+				History:            structuredHistoryFromSnapshot(history),
+				StructuredMessages: messages,
+				Pagination:         history.Pagination,
+			}, input.IncludeThinking)
+			return &IndexOutput[sessionTranscriptGetResponse]{
+				Index: s.latestIndex(),
+				Body:  structuredTranscriptResponseFromEvent(projection),
+			}, nil
 		}
 
 		if wantRaw {
-			var rawSess *sessionlog.Session
-			switch {
-			case before != "":
-				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			case after != "":
-				rawSess, err = sessionlog.ReadProviderFileRawNewer(info.Provider, path, tail, after)
-			default:
-				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
-			}
+			transcript, err := handle.Transcript(ctx, worker.TranscriptRequest{
+				TailCompactions: tail,
+				BeforeEntryID:   before,
+				AfterEntryID:    after,
+				Raw:             true,
+			})
 			if err != nil {
+				if problem := transcriptCursorInvalidatedProblem(err, "reading session log"); problem != nil {
+					return nil, problem
+				}
 				return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 			}
 			return &IndexOutput[sessionTranscriptGetResponse]{
@@ -192,24 +230,24 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 					Template:   info.Template,
 					Provider:   info.Provider,
 					Format:     "raw",
-					Messages:   wrapRawFrameBytes(rawSess.RawPayloadBytes()),
-					Pagination: rawSess.Pagination,
+					Messages:   rawMessagesField(wrapRawFrameBytes(transcript.RawMessages)),
+					Pagination: transcript.Session.Pagination,
 				},
 			}, nil
 		}
 
-		var sess *sessionlog.Session
-		switch {
-		case before != "":
-			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		case after != "":
-			sess, err = sessionlog.ReadProviderFileNewer(info.Provider, path, tail, after)
-		default:
-			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
-		}
+		transcript, err := handle.Transcript(ctx, worker.TranscriptRequest{
+			TailCompactions: tail,
+			BeforeEntryID:   before,
+			AfterEntryID:    after,
+		})
 		if err != nil {
+			if problem := transcriptCursorInvalidatedProblem(err, "reading session log"); problem != nil {
+				return nil, problem
+			}
 			return nil, apierr.Internal.Msg("reading session log: " + err.Error())
 		}
+		sess := transcript.Session
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
@@ -232,6 +270,10 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		}, nil
 	}
 
+	if wantStructured {
+		return s.structuredTranscriptFallback(info, input.IncludeThinking)
+	}
+
 	if wantRaw {
 		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),
@@ -240,7 +282,7 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 				Template: info.Template,
 				Provider: info.Provider,
 				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
+				Messages: rawMessagesField(nil),
 			},
 		}, nil
 	}
@@ -275,6 +317,32 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 			Format:   "conversation",
 			Turns:    []outputTurn{},
 		},
+	}, nil
+}
+
+func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
+	activity := string(worker.TailActivityIdle)
+	output := ""
+	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
+		activity = string(worker.TailActivityInTurn)
+		peekOutput, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+		if peekErr != nil {
+			return nil, apierr.Internal.Msg("peeking session: " + peekErr.Error())
+		}
+		output = peekOutput
+	}
+	projection := structuredSnapshotProjection(SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}, includeThinking)
+	return &IndexOutput[sessionTranscriptGetResponse]{
+		Index: s.latestIndex(),
+		Body:  structuredTranscriptResponseFromEvent(projection),
 	}, nil
 }
 
@@ -349,7 +417,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	}
 	mgr := s.sessionManager(store.Store)
 
-	all, partialErrors, err := sessionReadModelRows(store.Store)
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -363,11 +431,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	// runtime that could be holding a pending decision. Pending() itself
 	// degrades gracefully (runtime-gone -> no pending), so over-including a
 	// dormant empty-state bead is harmless.
-	// ListFullFromBeads takes a comma-separated state filter; StateNone is the
-	// empty string, so this resolves to "active," — both states, closed beads
-	// still excluded by ListFullFromBeads' status guard.
+	// ListFromInfos takes a comma-separated state filter; StateNone is the empty
+	// string, so this resolves to "active," — both states, closed beads still
+	// excluded by the status guard (sessionMatchesFiltersInfo).
 	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
-	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
+	sessions := mgr.ListFromInfos(infos, stateFilter, "")
 
 	// Probe sessions concurrently with bounded fan-out. Pending() can be
 	// expensive per session (e.g. a tmux pane capture), so probing a

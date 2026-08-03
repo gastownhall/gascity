@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -196,8 +197,22 @@ func IsServerError(err error) bool {
 // should fall back to direct bd. Read-path commands tolerate generic 5xx
 // server errors (IsServerError) in addition to the cases ShouldFallback
 // already covers.
-func ShouldFallbackForRead(err error) bool {
-	if ShouldFallback(err) {
+//
+// c is the client that produced err (nil-safe). Any error from a REMOTE client
+// is non-fallbackable regardless of type: a remote read has no local store to
+// fall back to, and silently reading a local store instead would be the exact
+// hazard the remote-city design exists to prevent (gate G1). errors.As unwraps
+// transport wrappers, so the remoteness of the error cannot be recovered from
+// err alone — it must come from the client. Pass the client you called; pass
+// nil for a pure error-classification check (treated as local).
+func ShouldFallbackForRead(c *Client, err error) bool {
+	if c.IsRemote() {
+		return false
+	}
+	if ShouldFallback(c, err) {
+		return true
+	}
+	if IsRouteMissing(err) {
 		return true
 	}
 	return IsServerError(err)
@@ -208,8 +223,12 @@ func ShouldFallbackForRead(err error) bool {
 // failures (connection refused, timeout), read-only API rejections (server
 // bound to non-localhost, mutations disabled), client-init failures
 // (malformed base URL), and cache-not-live 503 responses during supervisor
-// priming.
-func ShouldFallback(err error) bool {
+// priming. Always false for a REMOTE client (gate G1); see ShouldFallbackForRead
+// for why the client, not the error, carries remoteness. c is nil-safe.
+func ShouldFallback(c *Client, err error) bool {
+	if c.IsRemote() {
+		return false
+	}
 	if IsConnError(err) {
 		return true
 	}
@@ -226,15 +245,23 @@ func ShouldFallback(err error) bool {
 }
 
 // FallbackReason returns a stable reason code for err when
-// ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
-// "read-only", "client-init", "conn-refused". Generic 5xx server errors
-// collapse to "conn-refused" since from the CLI's read-path perspective an
-// unhealthy server is equivalent to an unreachable one. Non-fallbackable error
-// types such as store_slow are intentionally absent from this set. Returns
-// "unknown" for non-fallbackable errors so callers that invoke FallbackReason
-// unconditionally produce a token instead of panicking; gate on
-// ShouldFallbackForRead first to avoid that sentinel.
-func FallbackReason(err error) string {
+// ShouldFallbackForRead(c, err) is true. The set is closed: "remote",
+// "cache-not-live", "read-only", "client-init", "route-missing", "conn-refused".
+// A REMOTE client yields "remote" — reported for observability, never used to
+// pick a local path (the caller gates on ShouldFallbackForRead first, which
+// returns false for remote, so a remote error is surfaced, not fallen back).
+// "route-missing" is a new-CLI/old-server route gap (a 404 with no problem+json
+// body). Generic 5xx server errors collapse to "conn-refused" since from the
+// CLI's read-path perspective an unhealthy server is equivalent to an
+// unreachable one. Non-fallbackable error types such as store_slow are
+// intentionally absent from this set. Returns "unknown" for non-fallbackable
+// errors so callers that invoke FallbackReason unconditionally produce a token
+// instead of panicking; gate on ShouldFallbackForRead first to avoid that
+// sentinel. c is nil-safe.
+func FallbackReason(c *Client, err error) string {
+	if c.IsRemote() {
+		return "remote"
+	}
 	var cnl *cacheNotLiveError
 	if errors.As(err, &cnl) {
 		return "cache-not-live"
@@ -246,6 +273,9 @@ func FallbackReason(err error) string {
 	var ci *clientInitError
 	if errors.As(err, &ci) {
 		return "client-init"
+	}
+	if IsRouteMissing(err) {
+		return "route-missing"
 	}
 	if IsConnError(err) || IsServerError(err) {
 		return "conn-refused"
@@ -261,6 +291,39 @@ type Client struct {
 	baseURL  string // stored for SSE stream connections
 	cityName string // non-empty for city-scoped clients; passed to every per-city call
 	initErr  error  // set when NewClient failed to build the transport (malformed baseURL, etc.)
+
+	// Remote-city fields (set only by NewRemoteCityScopedClient). isRemote makes
+	// no-fallback a compiler-checkable instance property (gate G1): any error
+	// from a remote client is non-fallbackable regardless of type. streamClient
+	// is the dedicated SSE transport shape (Timeout:0 + CheckRedirect + TLS);
+	// tokenSource is called live before every request AND every SSE (re)connect
+	// so a per-attempt 401 re-mint takes effect (never captured once).
+	isRemote     bool
+	streamClient *http.Client
+	tokenSource  TokenSource
+	tokenMu      sync.Mutex
+	// grantSource, when set, mints a single-use X-GC-City-Write grant for each
+	// MUTATING request (gate G18). Like tokenSource it is invoked live per
+	// request, never captured. nil means no grant is attached (a city that
+	// authenticates on X-GC-Request alone, or one fronted by a bearer edge).
+	grantSource GrantSource
+}
+
+// IsRemote reports whether this client targets a remote city over the control
+// plane. Remote clients never fall back to a local store (gate G1).
+func (c *Client) IsRemote() bool { return c != nil && c.isRemote }
+
+// bearerToken returns the current transport bearer from the token source, or ""
+// when no source is configured. The call is serialized so a non-reentrant
+// source (e.g. one that execs a credential command) is safe under concurrent
+// REST + SSE use.
+func (c *Client) bearerToken() (string, error) {
+	if c == nil || c.tokenSource == nil {
+		return "", nil
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.tokenSource()
 }
 
 const sessionMessageTimeout = 4 * time.Minute
@@ -288,43 +351,135 @@ type sseEvent struct {
 	Data  string
 }
 
-// sseEnvelope is the JSON envelope of a typed event on the stream.
+// sseEnvelope is the JSON envelope of a typed event on the stream. Seq is the
+// per-city monotonic sequence number the wire emits on every typed envelope
+// (convoy_event_stream.go:135); a reconnecting wait resumes from the last
+// consumed frame via after_seq=<seq>. Heartbeat frames carry no seq/type key,
+// so they decode to Seq:0, Type:"" — skipped by the type match, and (because a
+// cursor only advances on env.Seq > lastSeq) unable to regress the resume point.
 type sseEnvelope struct {
+	Seq     uint64          `json:"seq"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
 
-// waitForEvent connects to the appropriate SSE stream, reads frames
-// until it finds an event matching the given request_id (in success or
-// failure payloads), and returns the envelope. The caller decodes the
-// typed payload.
+// sseConnectError is a non-2xx SSE connect response carried as a typed error so
+// a reconnecting wait can classify the status (transient vs permanent) and honor
+// Retry-After. Error() renders the exact string waitForEvent produced before the
+// reconnect core was split out, so single-shot session waits stay byte-stable.
+type sseConnectError struct {
+	Status     int    // HTTP status code, for retry classification
+	StatusLine string // raw resp.Status ("401 Unauthorized"), for byte-stable rendering
+	RetryAfter string // Retry-After header value, if any
+	Detail     string // response body detail (or the status line when the body was empty)
+}
+
+func (e *sseConnectError) Error() string {
+	return fmt.Sprintf("SSE connect failed: %s: %s", e.StatusLine, e.Detail)
+}
+
+// ssePayloadDecodeError is a matching (success- or failed-type) frame whose
+// typed payload failed to decode. It carries the frame's seq so a reconnecting
+// caller can re-read the SAME frame once (a transient truncation decodes cleanly
+// on the retry) and, if the identical seq fails to decode again, surface a
+// permanent "malformed terminal event at seq N" error — instead of advancing the
+// resume cursor past the terminal and hanging to the absolute watchdog.
+//
+// Its Error() delegates to the wrapped error so the single-shot session wait
+// (waitForEvent) keeps its byte-stable "decode <type> payload: ..." string.
+type ssePayloadDecodeError struct {
+	Seq uint64
+	Err error
+}
+
+func (e *ssePayloadDecodeError) Error() string { return e.Err.Error() }
+func (e *ssePayloadDecodeError) Unwrap() error { return e.Err }
+
+// waitForEvent connects to the appropriate SSE stream, reads frames until it
+// finds an event matching the given request_id (in success or failure
+// payloads), and returns the envelope. The caller decodes the typed payload.
+//
+// It is single-shot — one connect, scan to a match or die — and is the wait
+// every session async op (SendSessionMessage, SubmitSession) transits, so its
+// behavior and error strings are byte-stable. It delegates to waitForEventOnce
+// with no progress tap and surfaces its error as-is. Rig-create uses the
+// reconnecting waitForEventReconnecting instead.
 func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp, eventCursor string) (*sseEnvelope, error) {
+	env, _, _, err := c.waitForEventOnce(ctx, requestID, successType, failOp, eventCursor, nil)
+	return env, err
+}
+
+// waitForEventOnce is one SSE connect-and-scan, the shared core of the
+// single-shot waitForEvent and the reconnecting waitForEventReconnecting.
+// afterSeq is the cursor for THIS connection (the 202 EventCursor on the first
+// attempt, the last consumed seq on a reconnect). onEnvelope, when non-nil, is
+// invoked for every decoded typed envelope before matching (the progress tap).
+//
+// It returns the matched envelope, the resume cursor (the max seq of a frame
+// FULLY processed without error — a decode failure returns the PRE-frame cursor
+// so the reconnect re-reads the failing frame rather than skipping past it),
+// whether any line at all was scanned (a live-peer signal — including a ': ping'
+// comment keepalive — that resets the reconnect budget), and any error. A non-2xx
+// connect returns a *sseConnectError; a matching frame whose payload fails to
+// decode returns an *ssePayloadDecodeError carrying its seq; a
+// transport/scan/idle-watchdog failure returns a plain wrapped error (all treated
+// as transient by the reconnecting caller).
+func (c *Client) waitForEventOnce(ctx context.Context, requestID, successType, failOp, afterSeq string, onEnvelope func(*sseEnvelope)) (env *sseEnvelope, lastSeq uint64, sawFrame bool, err error) {
 	streamURL := c.baseURL + "/v0/events/stream"
-	cursor := strings.TrimSpace(eventCursor)
+	cursor := strings.TrimSpace(afterSeq)
 	if c.cityName != "" {
 		if cursor == "" {
 			cursor = "0"
 		}
 		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=" + url.QueryEscape(cursor)
-	} else {
-		if cursor == "" {
-			cursor = "0"
-		}
+	} else if cursor != "" {
+		// A resume cursor from a 202 (including the literal "0" the supervisor
+		// returns when no provider existed at capture) is passed through so the
+		// caller resumes at the intended boundary. An empty cursor must NOT be
+		// coerced to after_cursor=0: "0" now requests a full replay from zero
+		// for every provider, whereas an absent after_cursor starts at the
+		// current supervisor event head with no backlog.
 		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	// For a remote client, an idle watchdog cancels a stalled stream: the stream
+	// transport has no hard http.Client.Timeout (a long-lived SSE stream must
+	// not be capped), so a per-frame-reset timer is the only bound on a silent
+	// connection. Local clients keep the caller's context unchanged.
+	readCtx := ctx
+	var resetIdle func()
+	if c.streamClient != nil {
+		var cancel context.CancelFunc
+		readCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		idle := time.AfterFunc(remoteStreamIdleTimeout, cancel)
+		defer idle.Stop()
+		resetIdle = func() { idle.Reset(remoteStreamIdleTimeout) }
+	}
+
+	req, err := http.NewRequestWithContext(readCtx, http.MethodGet, streamURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build SSE request: %w", err)
+		return nil, lastSeq, sawFrame, fmt.Errorf("build SSE request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("X-GC-Request", "true")
+	// Attach a fresh bearer per (re)connect so a rotated/re-minted credential
+	// takes effect on reconnect. No-op for a local client (nil token source).
+	if tok, terr := c.bearerToken(); terr != nil {
+		return nil, lastSeq, sawFrame, terr
+	} else if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
-	resp, err := (&http.Client{}).Do(req)
+	httpClient := c.streamClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return nil, lastSeq, sawFrame, ctxErr
 		}
-		return nil, fmt.Errorf("SSE connect: %w", err)
+		return nil, lastSeq, sawFrame, fmt.Errorf("SSE connect: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -333,13 +488,27 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 		if detail == "" {
 			detail = resp.Status
 		}
-		return nil, fmt.Errorf("SSE connect failed: %s: %s", resp.Status, detail)
+		return nil, lastSeq, sawFrame, &sseConnectError{
+			Status:     resp.StatusCode,
+			StatusLine: resp.Status,
+			RetryAfter: resp.Header.Get("Retry-After"),
+			Detail:     detail,
+		}
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var current sseEvent
 	for scanner.Scan() {
+		// Any scanned line — a data/event line, a blank frame terminator, or a
+		// ': ping' comment keepalive — is proof the peer is alive: reset both the
+		// per-frame idle watchdog and the cross-connection silent-attempt budget
+		// (sawFrame). An intermediary that emits only comment keepalives plus
+		// periodic clean closes must not burn the silent budget on a live provision.
+		sawFrame = true
+		if resetIdle != nil {
+			resetIdle()
+		}
 		line := scanner.Text()
 		switch {
 		case strings.HasPrefix(line, "event:"):
@@ -357,41 +526,62 @@ func (c *Client) waitForEvent(ctx context.Context, requestID string, successType
 				current = sseEvent{}
 				continue
 			}
-			var env sseEnvelope
-			if err := json.Unmarshal([]byte(current.Data), &env); err != nil {
-				return nil, fmt.Errorf("decode SSE event: %w", err)
+			var evt sseEnvelope
+			if uerr := json.Unmarshal([]byte(current.Data), &evt); uerr != nil {
+				return nil, lastSeq, sawFrame, fmt.Errorf("decode SSE event: %w", uerr)
 			}
-			if env.Type == successType {
-				matches, err := payloadContainsRequestID(env.Payload, requestID)
-				if err != nil {
-					return nil, fmt.Errorf("decode %s payload: %w", successType, err)
+			// The resume cursor (lastSeq) must advance ONLY for a frame this
+			// connection fully processed. A matching frame whose payload fails to
+			// decode returns below WITHOUT advancing lastSeq, so the reconnect
+			// resumes at the pre-frame cursor and re-reads THIS frame (the server
+			// delivers strictly-greater than after_seq).
+			if onEnvelope != nil {
+				onEnvelope(&evt)
+			}
+			if evt.Type == successType {
+				matches, merr := payloadContainsRequestID(evt.Payload, requestID)
+				if merr != nil {
+					return nil, lastSeq, sawFrame, &ssePayloadDecodeError{Seq: evt.Seq, Err: fmt.Errorf("decode %s payload: %w", successType, merr)}
 				}
 				if matches {
-					return &env, nil
+					out := evt
+					if evt.Seq > lastSeq {
+						lastSeq = evt.Seq
+					}
+					return &out, lastSeq, sawFrame, nil
 				}
 			}
-			if env.Type == events.RequestFailed {
-				matches, err := payloadMatchesRequest(env.Payload, requestID, failOp)
-				if err != nil {
-					return nil, fmt.Errorf("decode %s payload: %w", events.RequestFailed, err)
+			if evt.Type == events.RequestFailed {
+				matches, merr := payloadMatchesRequest(evt.Payload, requestID, failOp)
+				if merr != nil {
+					return nil, lastSeq, sawFrame, &ssePayloadDecodeError{Seq: evt.Seq, Err: fmt.Errorf("decode %s payload: %w", events.RequestFailed, merr)}
 				}
 				if matches {
-					return &env, nil
+					out := evt
+					if evt.Seq > lastSeq {
+						lastSeq = evt.Seq
+					}
+					return &out, lastSeq, sawFrame, nil
 				}
+			}
+			// Fully processed (heartbeat, non-matching, or a decoded match for
+			// another request_id): now it is safe to advance past this frame.
+			if evt.Seq > lastSeq {
+				lastSeq = evt.Seq
 			}
 			current = sseEvent{}
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if serr := scanner.Err(); serr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return nil, lastSeq, sawFrame, ctxErr
 		}
-		return nil, fmt.Errorf("SSE scan: %w", err)
+		return nil, lastSeq, sawFrame, fmt.Errorf("SSE scan: %w", serr)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
+		return nil, lastSeq, sawFrame, ctxErr
 	}
-	return nil, fmt.Errorf("SSE stream closed before event for %s arrived", requestID)
+	return nil, lastSeq, sawFrame, fmt.Errorf("SSE stream closed before event for %s arrived", requestID)
 }
 
 func payloadContainsRequestID(raw json.RawMessage, requestID string) (bool, error) {
@@ -625,29 +815,63 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]SessionView]{}, err
 	}
-	params := &genclient.GetV0CityByCityNameSessionsParams{}
-	if stateFilter != "" {
-		params.State = &stateFilter
+	// gc session list means "all sessions". Walk the keyset pages until the
+	// server stops minting next_cursor and merge them, so a fleet larger than
+	// one server-cap page is fully listed instead of silently truncated at the
+	// first page. Each page requests the 1000-row server cap to minimize round
+	// trips; the cache age is taken from the first page.
+	capLimit := int64(maxPaginationLimit)
+	var (
+		all        []SessionView
+		ageSeconds float64
+		cursor     string
+	)
+	for page := 0; ; page++ {
+		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
+		if stateFilter != "" {
+			params.State = &stateFilter
+		}
+		if templateFilter != "" {
+			params.Template = &templateFilter
+		}
+		if peek {
+			params.Peek = &peek
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
+		if err != nil {
+			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		}
+		if resp == nil {
+			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+		}
+		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+			return CachedRead[[]SessionView]{}, err
+		}
+		all = append(all, sessionsFromGenList(resp.JSON200)...)
+		if page == 0 {
+			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
+		}
+		next := ""
+		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
+			next = *resp.JSON200.NextCursor
+		}
+		// Stop at the last page. The equal-cursor guard is a safety net against
+		// a server that fails to advance the cursor, so the walk can never spin
+		// forever on a degenerate response.
+		if next == "" || next == cursor {
+			break
+		}
+		cursor = next
 	}
-	if templateFilter != "" {
-		params.Template = &templateFilter
-	}
-	if peek {
-		params.Peek = &peek
-	}
-	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
-	if err != nil {
-		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	if resp == nil {
-		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return CachedRead[[]SessionView]{}, err
+	if all == nil {
+		all = []SessionView{}
 	}
 	return CachedRead[[]SessionView]{
-		Body:       sessionsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+		Body:       all,
+		AgeSeconds: ageSeconds,
 	}, nil
 }
 
@@ -800,20 +1024,29 @@ type ListBeadsOpts struct {
 	Label    string
 	Assignee string
 	Rig      string
-	Limit    int
-	All      bool
+	// Limit is a client-side TOTAL bound on the number of beads returned across
+	// all pages. 0 means "drain every page" (unbounded), matching the offline
+	// direct-bd lane (beads.ListQuery.Limit 0 = unlimited) so the two lanes have
+	// the same coverage. A positive value stops paginating once reached.
+	Limit int
+	All   bool
 }
 
-// ListBeads fetches beads across all rigs via
-// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
-// query parameters. The CachedRead.AgeSeconds field carries the supervisor
-// CachingStore age from the X-GC-Cache-Age-S response header so callers can
-// surface _cache_age_s on --json output and a staleness banner on human
-// output.
-func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
-	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
-	}
+// maxBeadDrainPages hard-bounds the cursor-drain loop. The seenCursors guard
+// already aborts on a repeated cursor (immediate A,A or a longer A,B,A,B cycle),
+// but a server returning infinitely many DISTINCT, strictly-advancing cursors
+// with empty or all-duplicate pages is caught by neither that guard (cursors
+// never repeat) nor opts.Limit (dedup stops `all` from growing, so a positive
+// Limit is never reached). This cap fails loudly instead of spinning. At
+// maxPaginationLimit (1000) beads/page it admits 100M distinct beads — orders of
+// magnitude past any real city — so a legitimate drain never trips it.
+const maxBeadDrainPages = 100_000
+
+// listBeadsParams maps the caller's ListBeadsOpts filters onto the generated
+// query-parameter struct. Split out of ListBeads so the branch-heavy filter
+// mapping is a small, independently testable unit and does not inflate the
+// pagination loop's complexity.
+func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsParams {
 	params := &genclient.GetV0CityByCityNameBeadsParams{}
 	if opts.Status != "" {
 		params.Status = &opts.Status
@@ -830,28 +1063,114 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	if opts.Rig != "" {
 		params.Rig = &opts.Rig
 	}
-	if opts.Limit > 0 {
-		lim := int64(opts.Limit)
-		params.Limit = &lim
-	}
 	if opts.All {
 		t := true
 		params.All = &t
 	}
-	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
-	if err != nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	if resp == nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+	return params
+}
+
+// ListBeads fetches beads across all rigs via
+// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
+// query parameters. The CachedRead.AgeSeconds field carries the supervisor
+// CachingStore age from the X-GC-Cache-Age-S response header so callers can
+// surface _cache_age_s on --json output and a staleness banner on human
+// output.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
-	return CachedRead[[]beads.Bead]{
-		Body:       beadsFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
-	}, nil
+	return c.drainBeadPages(listBeadsParams(opts), opts.Limit, maxBeadDrainPages)
+}
+
+// drainBeadPages follows next_cursor from the beads-list endpoint until the
+// server reports no further pages, or (when limit > 0) until limit beads have
+// been collected. Without this the server's page default (50) silently
+// truncated the result, so an offline `gc beads list` in a >50-bead city showed
+// only the first page while the direct-bd lane returned everything. Extracted
+// from ListBeads so the pagination invariants — non-nil empty slice, cross-page
+// ID dedup, and the cursor-repeat + hard-page bounds — live behind one focused,
+// separately tested seam.
+//
+// Cost: with all=true the server runs bounded mode where every page after the
+// first is a SEEKED page that disables the store's native LIMIT and re-hydrates
+// O(H) matching history (server comment, gascity#3253), and the all=true
+// response cache is keyed on cursor, so each page is a distinct cold rebuild. A
+// cold `--all` drain is therefore ≈O(H²/pageLimit) server work — much costlier
+// than the direct-bd single O(H) pass it matches. Correctness is unaffected;
+// prefer filters over `--all` on very large cities.
+func (c *Client) drainBeadPages(params *genclient.GetV0CityByCityNameBeadsParams, limit, maxPages int) (CachedRead[[]beads.Bead], error) {
+	// Initialize non-nil: an empty city (or an all-filtered-out result) must
+	// serialize as `[]`, not `null`. A nil []beads.Bead marshals to JSON null,
+	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
+	// direct-bd lane, which always emits an empty array.
+	all := []beads.Bead{}
+	var ageSeconds float64
+	// Cursors are non-snapshot offsets into a created_at-DESC list rebuilt per
+	// request, so a bead created mid-drain can shift the tail and re-appear at a
+	// page boundary. Dedupe by ID so JSON/table output never carries a duplicate
+	// (a closed/deleted bead can still be skipped — inherent to offset paging
+	// without a snapshot token; the drain is still strictly better than the old
+	// page-1 truncation). AgeSeconds comes from the first page.
+	seen := make(map[string]bool)
+	// seenCursors records every next_cursor already requested. Cursors must
+	// strictly advance, so any repeat — an immediate A,A or a longer A,B,A,B
+	// cycle — is a buggy or hostile server; abort instead of looping. This
+	// catches repeated cursors only; maxBeadDrainPages backstops a distinct-
+	// cursor flood.
+	seenCursors := make(map[string]bool)
+	for page := 0; ; page++ {
+		if page >= maxPages {
+			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination exceeded %d pages; aborting", maxPages)
+		}
+		pageLimit := maxPaginationLimit
+		if limit > 0 {
+			remaining := limit - len(all)
+			if remaining <= 0 {
+				break
+			}
+			if remaining < pageLimit {
+				pageLimit = remaining
+			}
+		}
+		lim := int64(pageLimit)
+		params.Limit = &lim
+
+		resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+		if err != nil {
+			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		}
+		if resp == nil {
+			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+		}
+		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+			return CachedRead[[]beads.Bead]{}, err
+		}
+		if page == 0 {
+			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
+		}
+		for _, b := range beadsFromGenList(resp.JSON200) {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
+
+		next := ""
+		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
+			next = *resp.JSON200.NextCursor
+		}
+		if next == "" {
+			break
+		}
+		if seenCursors[next] {
+			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", next)
+		}
+		seenCursors[next] = true
+		params.Cursor = &next
+	}
+	return CachedRead[[]beads.Bead]{Body: all, AgeSeconds: ageSeconds}, nil
 }
 
 // GetBead fetches one bead by ID via
@@ -1195,6 +1514,121 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		Queued: p.Queued,
 		Intent: session.SubmitIntent(p.Intent),
 	}, nil
+}
+
+// SlingRequest carries the parameters of a sling mutation for Client.Sling.
+// It mirrors the SlingInput body: Target is required; exactly one of Bead or
+// Formula selects the work.
+type SlingRequest struct {
+	Rig            string
+	Target         string
+	Bead           string
+	Formula        string
+	AttachedBeadID string
+	Title          string
+	Vars           map[string]string
+	ScopeKind      string
+	ScopeRef       string
+	Force          bool
+	Reassign       bool
+	Merge          string
+	NoConvoy       bool
+	Owned          bool
+	NoFormula      bool
+}
+
+// SlingResult is the outcome of a sling mutation.
+type SlingResult struct {
+	Status         string
+	Target         string
+	Formula        string
+	Bead           string
+	WorkflowID     string
+	RootBeadID     string
+	AttachedBeadID string
+	Mode           string
+	Warnings       []string
+}
+
+// Sling routes work to a target agent or pool over the control plane
+// (POST /v0/city/{city}/sling). It is synchronous: the server materializes the
+// work, hooks it, creates any auto-convoy, and returns the result. A remote
+// client attaches the X-GC-City-Write grant automatically for this mutating
+// request (gate G18); a remote error is non-fallbackable (gate G1).
+func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return SlingResult{}, err
+	}
+	body := genclient.PostV0CityByCityNameSlingJSONRequestBody{Target: req.Target}
+	setStrPtr(&body.Rig, req.Rig)
+	setStrPtr(&body.Bead, req.Bead)
+	setStrPtr(&body.Formula, req.Formula)
+	setStrPtr(&body.AttachedBeadId, req.AttachedBeadID)
+	setStrPtr(&body.Title, req.Title)
+	setStrPtr(&body.ScopeKind, req.ScopeKind)
+	setStrPtr(&body.ScopeRef, req.ScopeRef)
+	if req.Force {
+		f := true
+		body.Force = &f
+	}
+	if req.Reassign {
+		r := true
+		body.Reassign = &r
+	}
+	setStrPtr(&body.Merge, req.Merge)
+	if req.NoConvoy {
+		b := true
+		body.NoConvoy = &b
+	}
+	if req.Owned {
+		b := true
+		body.Owned = &b
+	}
+	if req.NoFormula {
+		b := true
+		body.NoFormula = &b
+	}
+	if len(req.Vars) > 0 {
+		v := req.Vars
+		body.Vars = &v
+	}
+	params := &genclient.PostV0CityByCityNameSlingParams{XGCRequest: "true"}
+	resp, err := c.cw.PostV0CityByCityNameSlingWithResponse(context.Background(), c.cityName, params, body)
+	if err != nil {
+		return SlingResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return SlingResult{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return SlingResult{}, err
+	}
+	if resp.JSON200 == nil {
+		return SlingResult{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	r := resp.JSON200
+	out := SlingResult{
+		Status:         r.Status,
+		Target:         r.Target,
+		Formula:        derefStr(r.Formula),
+		Bead:           derefStr(r.Bead),
+		WorkflowID:     derefStr(r.WorkflowId),
+		RootBeadID:     derefStr(r.RootBeadId),
+		AttachedBeadID: derefStr(r.AttachedBeadId),
+		Mode:           derefStr(r.Mode),
+	}
+	if r.Warnings != nil {
+		out.Warnings = *r.Warnings
+	}
+	return out, nil
+}
+
+// setStrPtr points *dst at a copy of v when v is non-empty, leaving it nil
+// otherwise, so an omitempty pointer field is only set for a present value.
+func setStrPtr(dst **string, v string) {
+	if v != "" {
+		*dst = &v
+	}
 }
 
 var errClientUninitialized = errors.New("api client not initialized")

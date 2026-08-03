@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -172,9 +171,67 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
+}
+
+// inProgressBlockedByEnrichmentScript hardens the in_progress "crash recovery"
+// work-query tier against re-serving a bead that cannot progress.
+//
+// `bd list --status in_progress` does no readiness computation: unlike
+// `bd ready` it emits neither blocked_by nor is_blocked. That makes the
+// defensive hook-side filter (filterUnreadyHookCandidates ->
+// isDepBlockedHookCandidate) a structural no-op for this tier, because an
+// absent blocked_by is correctly read as "not blocked". A step that is
+// in_progress + assigned but held by an open gate or an unclosed blocking
+// dependency is therefore re-served on every hook tick, forever.
+//
+// `bd ready` cannot be substituted here: it excludes in_progress by design,
+// so it would return nothing and defeat crash recovery entirely. Instead we
+// read the candidate's own dependency rows and attach the blocked_by array
+// the rest of the pipeline already knows how to interpret. When the candidate
+// is blocked we skip it and fall through to the ready-gated tier, so a session
+// holding one blocked step can still be served its other ready assigned work.
+//
+// Only ready-blocking dependency types are considered, matching
+// beads.IsReadyBlockingDependencyType; parent-child and tracks edges never
+// block readiness. Status interpretation is left to the shared Go filter:
+// any non-closed blocker counts.
+//
+// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
+// degrades to the stock behavior of serving the candidate unchanged, never to
+// dropping it, so a malformed or log-prefixed bd stdout can never disable
+// crash recovery.
+func inProgressBlockedByEnrichmentScript(shellVar string) string {
+	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
+		`.dependency_type == "conditional-blocks") | {id, status}]`
+	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+
+	const enrichJQ = `map(. + {blocked_by: $bb})`
+
+	v := `$` + shellVar
+	// The enriched payload lands in a scratch var derived from shellVar so the
+	// candidate itself is never clobbered: if jq fails (non-JSON or
+	// log-prefixed `bd list` stdout) the original is served unchanged.
+	enrichedVar := shellVar + `_enriched`
+	e := `$` + enrichedVar
+	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`bb="[]"; ` +
+		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
+		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); ` +
+		`[ -z "$bb" ] && bb="[]"; ` +
+		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
+		`[ -z "$nblocked" ] && nblocked=0; ` +
+		`if [ "$nblocked" = "0" ]; then ` +
+		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`printf "%s" "` + v + `" && exit 0; ` +
+		`fi; `
 }
 
 func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
@@ -198,7 +255,9 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `
@@ -255,6 +314,60 @@ func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) s
 	return shellquote.Join(args)
 }
 
+// queryKind names one of the built-in agent query shapes.
+type queryKind int
+
+const (
+	queryWork queryKind = iota
+	queryAssignedInProgress
+	queryAssignedReady
+	queryRoutedPool
+	queryPoolDemand
+	queryOnDeath
+	queryOnBoot
+)
+
+// querySpec describes how one query kind resolves: which user override
+// field short-circuits the default, and how the default script is built.
+type querySpec struct {
+	// override returns the user-supplied command that replaces the
+	// default entirely, or "" when the default applies.
+	override func(*Agent) string
+	// build returns the default command. includeEphemeralReady carries
+	// beads.UsesBD105ReadySemantics(); the onDeath/onBoot builders ignore
+	// it today and MUST keep ignoring it (S04b invariant I6).
+	build func(a *Agent, includeEphemeralReady bool) string
+}
+
+// queryTable maps every query kind to its override field and default
+// builder. It is populated once at init and only read afterward.
+var queryTable = map[queryKind]querySpec{
+	queryWork:               {override: func(a *Agent) string { return a.WorkQuery }, build: buildWorkQuery},
+	queryAssignedInProgress: {override: func(a *Agent) string { return a.WorkQuery }, build: buildAssignedInProgressQuery},
+	queryAssignedReady:      {override: func(a *Agent) string { return a.WorkQuery }, build: buildAssignedReadyQuery},
+	queryRoutedPool:         {override: func(a *Agent) string { return a.WorkQuery }, build: buildRoutedPoolQuery},
+	queryPoolDemand:         {override: func(a *Agent) string { return a.ScaleCheck }, build: buildPoolDemandQuery},
+	queryOnDeath:            {override: func(a *Agent) string { return a.OnDeath }, build: buildOnDeath},
+	queryOnBoot:             {override: func(a *Agent) string { return a.OnBoot }, build: buildOnBoot},
+}
+
+// effectiveQuery is the single resolver behind every Effective*Query
+// accessor: the kind's user override verbatim if set, else the kind's
+// default builder.
+func (a *Agent) effectiveQuery(kind queryKind, includeEphemeralReady bool) string {
+	spec := queryTable[kind]
+	if o := spec.override(a); o != "" {
+		return o
+	}
+	return spec.build(a, includeEphemeralReady)
+}
+
+// effectiveQueryForBeads resolves a kind using the bd compatibility
+// semantics configured for the city.
+func (a *Agent) effectiveQueryForBeads(kind queryKind, beads BeadsConfig) string {
+	return a.effectiveQuery(kind, beads.UsesBD105ReadySemantics())
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -292,19 +405,16 @@ func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) s
 // EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
-	return a.effectiveWorkQuery(false)
+	return a.effectiveQuery(queryWork, false)
 }
 
 // EffectiveWorkQueryForBeads returns the default work query using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryWork, beads)
 }
 
-func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
@@ -329,19 +439,16 @@ func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
 // A custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedInProgressQuery() string {
-	return a.effectiveAssignedInProgressQuery(false)
+	return a.effectiveQuery(queryAssignedInProgress, false)
 }
 
 // EffectiveAssignedInProgressQueryForBeads returns the assigned-in-progress
 // query using the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveAssignedInProgressQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedInProgressQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryAssignedInProgress, beads)
 }
 
-func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
 		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
@@ -354,19 +461,16 @@ func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) str
 // custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedReadyQuery() string {
-	return a.effectiveAssignedReadyQuery(false)
+	return a.effectiveQuery(queryAssignedReady, false)
 }
 
 // EffectiveAssignedReadyQueryForBeads returns the assigned-ready-only query
 // using the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveAssignedReadyQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveAssignedReadyQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryAssignedReady, beads)
 }
 
-func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
 		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
@@ -378,19 +482,16 @@ func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
 // templates that spell out claim-first startup in separate tiers. It is the
 // prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
 func (a *Agent) EffectiveRoutedPoolQuery() string {
-	return a.effectiveRoutedPoolQuery(false)
+	return a.effectiveQuery(queryRoutedPool, false)
 }
 
 // EffectiveRoutedPoolQueryForBeads returns the routed-pool-only command using
 // the bd compatibility semantics configured for the city.
 func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveRoutedPoolQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryRoutedPool, beads)
 }
 
-func (a *Agent) effectiveRoutedPoolQuery(includeEphemeralReady bool) string {
-	if a.WorkQuery != "" {
-		return a.WorkQuery
-	}
+func buildRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
@@ -429,32 +530,11 @@ func (a *Agent) EffectiveSlingQuery() string {
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
 func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + a.QualifiedName()
-}
-
-// EffectiveDefaultSlingFormula returns the default sling formula for
-// this agent, or "" if none is set.
-func (a *Agent) EffectiveDefaultSlingFormula() string {
-	if a.DefaultSlingFormula != nil {
-		return *a.DefaultSlingFormula
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
 	}
-	if a.InheritedDefaultSlingFormula != nil {
-		return *a.InheritedDefaultSlingFormula
-	}
-	return ""
-}
-
-// DrainTimeoutDuration returns the drain timeout as a time.Duration.
-// Defaults to 5m if empty or unparseable.
-func (a *Agent) DrainTimeoutDuration() time.Duration {
-	if a.DrainTimeout == "" {
-		return 5 * time.Minute
-	}
-	dur, err := time.ParseDuration(a.DrainTimeout)
-	if err != nil {
-		return 5 * time.Minute
-	}
-	return dur
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the
@@ -474,19 +554,16 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // correspondence" and the protocol-mismatch class regression addressed
 // by PR #1516.
 func (a *Agent) EffectivePoolDemandQuery() string {
-	return a.effectivePoolDemandQuery(false)
+	return a.effectiveQuery(queryPoolDemand, false)
 }
 
 // EffectivePoolDemandQueryForBeads returns the count-form demand query using
 // the bd compatibility semantics configured for the city.
 func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
-	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryPoolDemand, beads)
 }
 
-func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {
-	if a.ScaleCheck != "" {
-		return a.ScaleCheck
-	}
+func buildPoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	return poolDemandCountShell(target, includeEphemeralReady)
 }
@@ -500,161 +577,28 @@ func (a *Agent) EffectiveScaleCheck() string {
 	return a.EffectivePoolDemandQuery()
 }
 
-// EffectiveMaxActiveSessions returns the agent's max active sessions.
-// Priority: agent.MaxActiveSessions > pool.Max > nil (unlimited).
-func (a *Agent) EffectiveMaxActiveSessions() *int {
-	return a.MaxActiveSessions // nil = unlimited (default)
-}
-
-// EffectiveMinActiveSessions returns the agent's min active sessions.
-func (a *Agent) EffectiveMinActiveSessions() int {
-	if a.MinActiveSessions != nil && *a.MinActiveSessions > 0 {
-		return *a.MinActiveSessions
-	}
-	return 0
-}
-
-// SupportsGenericEphemeralSessions reports whether the template may satisfy
-// generic controller demand with ephemeral sessions.
-func (a *Agent) SupportsGenericEphemeralSessions() bool {
-	if a == nil {
-		return false
-	}
-	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
-		return false
-	}
-	return true
-}
-
-// SupportsMultipleSessions reports whether the template may materialize more
-// than one distinct concrete session identity. Unlike
-// SupportsGenericEphemeralSessions, max_active_sessions = 0 still represents a
-// multi-session template shape even though generic ephemeral session creation
-// is disabled.
-func (a *Agent) SupportsMultipleSessions() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	maxSessions := a.EffectiveMaxActiveSessions()
-	return maxSessions == nil || *maxSessions != 1
-}
-
-// UsesCanonicalSingletonPoolIdentity reports whether singleton pool-shaped
-// surfaces should use the configured agent identity instead of synthesizing a
-// slot identity such as "{name}-1".
-func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return false
-	}
-	maxSessions := a.EffectiveMaxActiveSessions()
-	return maxSessions != nil && *maxSessions == 1
-}
-
-// SupportsExpandedSessionIdentities reports whether callers should expose or
-// discover concrete member identities instead of only the configured identity.
-func (a *Agent) SupportsExpandedSessionIdentities() bool {
-	if a == nil {
-		return false
-	}
-	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
-		return false
-	}
-	return a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity()
-}
-
-// SupportsInstanceExpansion reports whether the template may have multiple
-// simultaneously addressable concrete instances and therefore needs instance
-// discovery / synthetic member naming.
-//
-// max_active_sessions=1 has two distinct flavors:
-//
-//   - Pool agents (MinActiveSessions or ScaleCheck set) keep pool controller
-//     semantics. Non-namepool singleton pools still use the canonical
-//     configured identity; see UsesCanonicalSingletonPoolIdentity.
-//   - Named-session agents (MaxActiveSessions=1 with a [[named_session]]
-//     entry, no Min/ScaleCheck) addressed as just "{name}" — they have a
-//     stable canonical identity and a phantom "-1" suffix breaks tools that
-//     resolve by qualified name.
-//
-// We keep instance expansion on for the pool flavor so controller paths still
-// run pool reconciliation, and turn it off for the named-session flavor so the
-// bare name resolves correctly.
-func (a *Agent) SupportsInstanceExpansion() bool {
-	if a == nil {
-		return false
-	}
-	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
-		return true
-	}
-	m := a.EffectiveMaxActiveSessions()
-	if m == nil {
-		return true
-	}
-	if *m < 0 || *m > 1 {
-		return true
-	}
-	// *m == 1: distinguish pool agents (keep numbered instances) from
-	// named-session agents (collapse to base identity). Pool agents are
-	// identified by an explicit MinActiveSessions or a ScaleCheck override.
-	if a.MinActiveSessions != nil || strings.TrimSpace(a.ScaleCheck) != "" {
-		return true
-	}
-	return false
-}
-
-// HasUnlimitedSessionCapacity reports whether max_active_sessions is unbounded.
-func (a *Agent) HasUnlimitedSessionCapacity() bool {
-	if a == nil {
-		return false
-	}
-	m := a.EffectiveMaxActiveSessions()
-	return m == nil || *m < 0
-}
-
-// ResolvedMaxActiveSessions returns the effective max for this agent,
-// inheriting from rig then workspace if not set on the agent directly.
-func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
-	if m := a.EffectiveMaxActiveSessions(); m != nil {
-		return m
-	}
-	// Inherit from rig.
-	if a.Dir != "" && cfg != nil {
-		for _, rig := range cfg.Rigs {
-			if rig.Name == a.Dir && rig.MaxActiveSessions != nil {
-				return rig.MaxActiveSessions
-			}
-		}
-	}
-	// Inherit from workspace.
-	if cfg != nil && cfg.Workspace.MaxActiveSessions != nil {
-		return cfg.Workspace.MaxActiveSessions
-	}
-	return nil // unlimited
-}
+// RecoveryHookMarker prefixes every diagnostic the DEFAULT on_death/on_boot
+// recovery hooks print to stdout when a bd release fails. It is the contract
+// between the generated templates (which emit it) and the controller callers
+// (which surface only marked output): a user-supplied on_death/on_boot override
+// is passed through verbatim and carries no marker, so its stdout is not
+// mislabeled or spammed into the recovery log.
+const RecoveryHookMarker = "gc-recovery:"
 
 // EffectiveOnDeath returns the on_death command for this agent.
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
-	return a.effectiveOnDeath(false)
+	return a.effectiveQuery(queryOnDeath, false)
 }
 
 // EffectiveOnDeathForBeads returns the default on_death command using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
-	return a.effectiveOnDeath(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryOnDeath, beads)
 }
 
-func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
-	if a.OnDeath != "" {
-		return a.OnDeath
-	}
+func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
@@ -677,8 +621,8 @@ func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>/dev/null; ` +
+		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }
@@ -687,19 +631,16 @@ func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
 // If OnBoot is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
-	return a.effectiveOnBoot(false)
+	return a.effectiveQuery(queryOnBoot, false)
 }
 
 // EffectiveOnBootForBeads returns the default on_boot command using the bd
 // compatibility semantics configured for the city.
 func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
-	return a.effectiveOnBoot(beads.UsesBD105ReadySemantics())
+	return a.effectiveQueryForBeads(queryOnBoot, beads)
 }
 
-func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
-	if a.OnBoot != "" {
-		return a.OnBoot
-	}
+func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
@@ -715,5 +656,5 @@ func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
 		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} bd update {} --status open 2>/dev/null`
+		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
 }

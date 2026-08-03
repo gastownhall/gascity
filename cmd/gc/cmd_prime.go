@@ -15,7 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -95,7 +95,11 @@ to empty output from valid conditional logic, or on suspended states
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		if jsonOut {
 			var buf strings.Builder
-			if doPrimeWithHookFormat(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
+			// Preview only: a strings.Builder write never fails, so a
+			// consuming run here would archive durable handoff mail before
+			// the real stdout write — and even on success would eat the
+			// continuation the next SessionStart hook must deliver.
+			if doPrimeWithHookFormatOpts(args, &buf, stderr, hookMode, hookFormat, strictMode, false) != 0 {
 				return errExit
 			}
 			agentName, _ := primeInvocationAgentName(args)
@@ -175,6 +179,15 @@ func primeInvocationAgentName(args []string) (string, bool) {
 }
 
 func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+	return doPrimeWithHookFormatOpts(args, stdout, stderr, hookMode, hookFormat, strictMode, true)
+}
+
+// doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
+// the invocation non-destructive: durable auto-handoff mail is still rendered
+// into the output, but is not archived. Preview callers (--json) pass false so
+// that a diagnostic run cannot eat the continuation the real SessionStart hook
+// is supposed to deliver.
+func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) int {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false
@@ -192,7 +205,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		persistPrimeHookProviderSessionKey(hookContext.ProviderSessionID, stderr)
 	}
-	if !strictMode {
+	if !strictMode && !primeHookSessionStart(hookContext) {
 		runHookSideEffects()
 	}
 
@@ -202,8 +215,20 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+		if hookMode && primeHookSessionStart(hookContext) {
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0
+		}
+		injection := primeHookContextSuffix("", hookMode, hookContext, stderr, consumeHandoff)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
+	}
+	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
+		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+		return 0
+	}
+	if !strictMode && primeHookSessionStart(hookContext) {
+		runHookSideEffects()
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
@@ -211,7 +236,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -318,7 +344,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
+				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0
 			}
 			// File is present but rendered empty. Treat as a legitimate
@@ -341,7 +368,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt)
+					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0
 				}
 			}
@@ -352,7 +380,8 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
+	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
+	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0
 }
 
@@ -398,11 +427,13 @@ func primeHookSessionTemplate(cityPath string) string {
 	// A failed load yields nil cfg, which cliSessionStore treats as identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionBead, err := sessStore.Get(sessionID)
+	// The front-door Get rejects a present-but-non-session bead (ErrSessionNotFound)
+	// where the prior raw store.Get projected it; here that only tightens a
+	// crafted/stale id to the empty-return path below — not a regression.
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
 		return ""
 	}
-	info := session.InfoFromPersistedBead(sessionBead)
 	if template := strings.TrimSpace(info.Template); template != "" {
 		return template
 	}
@@ -466,7 +497,59 @@ func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
-func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool) {
+func primeHookSessionStart(ctx primeHookContext) bool {
+	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+func primeHookHasLiveManagedSession(cityPath string) bool {
+	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	if sessionID == "" {
+		return false
+	}
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if sessionName == "" {
+		return false
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return false
+	}
+	// Route the session-bead read through the session coordination-class store so
+	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
+	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
+	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
+	// identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	// The front-door Get rejects a present-but-non-session bead
+	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
+	if err != nil {
+		return false
+	}
+	if info.Closed {
+		return false
+	}
+	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
+	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
+	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
+		return false
+	}
+	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
+		strings.TrimSpace(info.Template) != template {
+		return false
+	}
+	// MetadataState is the RAW state metadata; Info.State is blanked on closed
+	// beads, so the raw mirror preserves the original exact comparison.
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
+		return true
+	default:
+		return false
+	}
+}
+
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
 		// launch payload or nudge path. SessionStart hooks add context only.
@@ -474,12 +557,20 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 	}
 	if hookMode {
 		prompt = prependHookBeacon(cityName, agentName, prompt)
+		// The step reminder is hook-only context, not the startup prompt, so it
+		// survives suppression — managed SessionStart hooks still carry it. Folded
+		// into the single write below to keep exactly one provider hook context.
+		prompt += hookContextSuffix
 	}
 	if hookMode && hookFormat != "" {
-		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)
+		if err := writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt); err == nil && afterDelivery != nil {
+			afterDelivery()
+		}
 		return
 	}
-	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
+	if _, err := fmt.Fprint(stdout, prompt); err == nil && afterDelivery != nil { //nolint:errcheck // best-effort stdout
+		afterDelivery()
+	}
 }
 
 func readPrimeHookContext() primeHookContext {
@@ -590,19 +681,28 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	// (see primeHookSessionTemplate); nil cfg → cliSessionStore identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionBead, err := sessStore.Get(gcSessionID)
+	// WI-6 R5: route the read through the session front door → Info. Get wraps
+	// absence as "loading session %q" and rejects non-session beads with
+	// ErrSessionNotFound; on this hook path both surface through the existing
+	// warn-and-return diagnostic (a foreign/absent bead never reaches the write),
+	// and the codex guard now resolves the family off Info (Provider precedence:
+	// builtin_ancestor → provider_kind → provider, all carried on Info).
+	sessFront := sessionFrontDoor(sessStore)
+	info, err := sessFront.Get(gcSessionID)
 	if err != nil {
-		warn("loading session bead %q: %v", gcSessionID, err)
+		// The front-door Get already wraps with `loading session %q`, carrying the
+		// id — don't re-prefix (that would double-wrap the stderr).
+		warn("%v", err)
 		return
 	}
-	if fromHookStdin && sessionProviderFamily(sessionBead) != "codex" {
+	if fromHookStdin && sessionProviderFamily(info) != "codex" {
 		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
 		return
 	}
-	if existing := strings.TrimSpace(session.InfoFromPersistedBead(sessionBead).SessionKey); existing != "" {
+	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
 		return
 	}
-	if err := sessionFrontDoor(sessStore).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
+	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
 	}
 }

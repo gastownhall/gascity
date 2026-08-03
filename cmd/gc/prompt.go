@@ -315,7 +315,7 @@ func effectivePromptFragments(global, inject, appendFragments, inherited, defaul
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+19)
+	m := make(map[string]string, len(ctx.Env)+20)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -326,6 +326,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["BindingName"] = ctx.BindingName
 	m["BindingPrefix"] = ctx.BindingPrefix
 	m["RigName"] = ctx.RigName
+	m["Rig"] = ctx.RigName // {{.Rig}} contract alias (config.go); matches work_dir/work_query rendering
 	m["RigRoot"] = ctx.RigRoot
 	m["WorkDir"] = ctx.WorkDir
 	m["IssuePrefix"] = ctx.IssuePrefix

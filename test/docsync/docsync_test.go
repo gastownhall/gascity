@@ -34,7 +34,7 @@ var (
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
@@ -49,6 +49,18 @@ var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts",
 func isNestedWorktreeRoot(path string) bool {
 	info, err := os.Lstat(filepath.Join(path, ".git"))
 	return err == nil && !info.IsDir()
+}
+
+// isSessionScaffoldRoot reports whether path is a per-session scaffold
+// directory created by the outer gc orchestration (e.g. a bead-specific
+// agent session directory holding .claude/.codex/.gc state) rather than a
+// source or doc tree. These are untracked, gitignored-in-spirit working
+// directories that can be checked out as siblings of the repo's own
+// top-level directories; a .gc marker directory identifies them the same
+// way a .git file identifies a linked worktree above.
+func isSessionScaffoldRoot(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".gc"))
+	return err == nil && info.IsDir()
 }
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
@@ -815,6 +827,9 @@ func TestDocDirCoverage(t *testing.T) {
 		}
 		dirPath := filepath.Join(root, name)
 		if isNestedWorktreeRoot(dirPath) {
+			continue
+		}
+		if isSessionScaffoldRoot(dirPath) {
 			continue
 		}
 		// Check if this directory contains any markdown.

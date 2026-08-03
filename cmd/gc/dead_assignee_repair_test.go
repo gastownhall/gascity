@@ -57,7 +57,7 @@ func TestRepairStrandedPoolWorkerBead_ReopensAfterConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	repaired := repairStrandedPoolWorkerBead(store, nil, &session, "worker", &clock.Fake{Time: now}, &stderr)
+	repaired := repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr)
 	if !repaired {
 		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
 	}
@@ -83,7 +83,7 @@ func TestRepairStrandedPoolWorkerBead_DefersInsideConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339) // just observed
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, &session, "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair inside the confirmation window")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -119,7 +119,7 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, &session, "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatal("repair must return false when an unassign does not land")
 	}
 	gotWork, _ := base.Get(work.ID)
@@ -143,7 +143,7 @@ func TestRepairStrandedPoolWorkerBead_DefersWithoutStrandedMarker(t *testing.T) 
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, &session, "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair without a stranded marker")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -184,7 +184,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 		store,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
-		[]beads.Bead{live},
+		sessionInfosFromBeads([]beads.Bead{live}),
 		[]beads.Bead{work},
 		nil, nil, nil,
 	)

@@ -20,6 +20,10 @@ permissions:
 
 jobs:
   verify:
+    # Canonical PR branches already run the complete Blacksmith CI graph.
+    # This lightweight fallback exists only for forks that cannot use those
+    # runners or repository secrets.
+    if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"

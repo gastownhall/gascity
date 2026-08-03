@@ -19,6 +19,24 @@ func ExactMetadataSessionCandidatesWithStatus(store beads.Store, status string, 
 	return exactMetadataSessionCandidates(store, false, strings.TrimSpace(status), filters...)
 }
 
+// ExactMetadataSessionCandidatesInfo is the session.Info-projecting sibling of
+// ExactMetadataSessionCandidates: it returns the projected session.Info of each
+// candidate bead, applying the codec once here at the store edge so no raw bead
+// escapes. It shares the dedup / query order / IsSessionBeadOrRepairable
+// semantics of ExactMetadataSessionCandidates. It is the typed feed for the
+// named-session retire lane, which needs only Info fields per candidate.
+func ExactMetadataSessionCandidatesInfo(store beads.Store, includeClosed bool, filters ...map[string]string) ([]Info, error) {
+	candidates, err := exactMetadataSessionCandidates(store, includeClosed, "", filters...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Info, 0, len(candidates))
+	for _, b := range candidates {
+		out = append(out, infoFromPersistedBead(b))
+	}
+	return out, nil
+}
+
 func exactMetadataSessionCandidates(store beads.Store, includeClosed bool, status string, filters ...map[string]string) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil

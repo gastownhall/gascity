@@ -1,4 +1,5 @@
 scope = "city"
+work_dir = ".gc/agents/{{.AgentBase}}"
 nudge = "Check your hook for Dolt maintenance work."
 idle_timeout = "2h"
 min_active_sessions = 0

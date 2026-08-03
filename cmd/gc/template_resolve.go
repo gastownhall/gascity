@@ -27,7 +27,9 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -221,9 +223,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
+		// Operational/host-tooling scripts (city-*.sh, update-*.sh) are not part
+		// of any agent's runtime behavior, so they are excluded from the content
+		// hash: editing one must not flip every agent's ContentHash and cascade a
+		// fleet-wide config-drift restart (#3840). This mirrors the path-only
+		// treatment .gc/settings.json already gets above. Agent-relevant scripts
+		// (pack-served helpers, etc.) stay content-hashed so their edits still
+		// propagate.
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
-			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
+			Probed:      true,
+			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
@@ -429,7 +439,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
-	prependGCBinDirToPATH(env, env["GC_BIN"])
+	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
@@ -484,6 +494,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
+	// Managed agents are Gas City-owned recursive execution environments. Set
+	// the GC-only opt-out after configurable layers so child gc commands cannot
+	// re-enable product metrics; Beads telemetry remains independent.
+	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
 
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath
@@ -677,6 +691,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
 	return params, nil
+}
+
+// isOperationalScript reports whether rel (a slash-separated path relative to
+// the .gc/scripts directory) names an operational/host-tooling script that is
+// not part of any agent's runtime behavior — city lifecycle (city-*.sh) and
+// updaters (update-*.sh). Such scripts are excluded from the .gc/scripts content
+// hash so editing one does not cascade a fleet-wide config-drift restart (#3840).
+// Conservative by design: only these unambiguous host-tooling name patterns are
+// excluded; any other script stays content-hashed (keep-probing is the safe
+// default so legit pack-served / agent-relevant script edits still propagate).
+func isOperationalScript(rel string) bool {
+	base := path.Base(rel)
+	for _, pat := range []string{"city-*.sh", "update-*.sh"} {
+		if ok, _ := path.Match(pat, base); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {

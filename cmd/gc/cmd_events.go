@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,11 @@ type eventsAPIScope struct {
 	explicitAPI        bool
 	localOnly          bool
 	localSupervisorAPI bool
+	// gen, when non-nil, is a pre-built AUTHENTICATED genclient for a remote
+	// --context/--city-url city (bearer + TLS + 401 re-mint, backed by the
+	// no-timeout stream client). client() returns it instead of the bare local
+	// genclient so `gc events --context` streams from a hosted city.
+	gen *genclient.ClientWithResponses
 }
 
 type eventsAPIError struct {
@@ -129,6 +135,9 @@ var eventsControllerAliveHook = controllerAlive
 func (s eventsAPIScope) isSupervisor() bool { return s.cityName == "" }
 
 func (s eventsAPIScope) client() (*genclient.ClientWithResponses, error) {
+	if s.gen != nil {
+		return s.gen, nil // authenticated remote (--context/--city-url) client
+	}
 	httpClient := &http.Client{}
 	return genclient.NewClientWithResponses(
 		s.apiURL,
@@ -171,6 +180,14 @@ DTO or SSE envelope.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if afterFlag > 0 && strings.TrimSpace(afterCursor) != "" {
 				fmt.Fprintln(stderr, "gc events: --after and --after-cursor are mutually exclusive") //nolint:errcheck
+				return errExit
+			}
+			// --after/--after-cursor resume a stream; the plain list and --seq
+			// paths do not consume them. Reject rather than silently ignore
+			// (a dropped --after otherwise returns the newest tail, masquerading
+			// as an events-after-N result). Time-bound a list with --since.
+			if (afterFlag > 0 || strings.TrimSpace(afterCursor) != "") && !followFlag && !watchFlag {
+				fmt.Fprintln(stderr, "gc events: --after/--after-cursor require --follow or --watch (they resume a stream); use --since to bound a list by time") //nolint:errcheck
 				return errExit
 			}
 			if seqFlag {
@@ -321,6 +338,14 @@ func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, i
 }
 
 func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
+	// --api is an alias of --city-url: both name a remote terminus and share the
+	// flag tier, so combining them (or --api with --context) is a loud conflict
+	// rather than a silent shadow (gate G3, Decision 4). A remote target set
+	// WITHOUT --api is instead refused by the capability gate below, when
+	// resolveDashboardContext -> resolveCity resolves it.
+	if strings.TrimSpace(apiURLOverride) != "" && remoteFlagPresent() {
+		return eventsAPIScope{}, fmt.Errorf("cannot combine --api with --city-url/--context: both select a remote city; use one")
+	}
 	if override := strings.TrimSpace(apiURLOverride); override != "" {
 		localSupervisorAPI := matchesLocalSupervisorAPI(override)
 		// Try local city context for display (soft fail — no-city and remote-
@@ -339,6 +364,32 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 			cityPath:           cityPath,
 			explicitAPI:        true,
 			localSupervisorAPI: localSupervisorAPI,
+		}, nil
+	}
+
+	// Remote target (--context/--city-url/env/sticky default): stream events from
+	// the hosted city with its context auth. Intercept here, before the local
+	// resolveDashboardContext path (which gates a remote target loudly). A
+	// city-discovery "not in a city directory" error is NOT fatal — the local
+	// path soft-fails it into the supervisor scope, so fall through instead of
+	// breaking `gc events` run outside a city directory against a supervisor.
+	rctx, rerr := resolveContextAllowRemote()
+	if rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		return eventsAPIScope{}, rerr
+	}
+	if rerr == nil && rctx.Remote != nil {
+		opts, oerr := remoteClientOptions(rctx.Remote)
+		if oerr != nil {
+			return eventsAPIScope{}, oerr
+		}
+		gen, gerr := gcapi.NewRemoteEventsClient(rctx.Remote.BaseURL, opts)
+		if gerr != nil {
+			return eventsAPIScope{}, gerr
+		}
+		return eventsAPIScope{
+			apiURL:   strings.TrimRight(rctx.Remote.BaseURL, "/"),
+			cityName: rctx.Remote.CityName,
+			gen:      gen,
 		}, nil
 	}
 
@@ -523,7 +574,7 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
-	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag)
+	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
 		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
 			if fallbackErr != nil {
@@ -825,7 +876,7 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 
 	resumeSeq := afterSeq
 	if resumeSeq > 0 {
-		items, err := fetchCityEvents(ctx, client, scope.cityName, "", "")
+		items, err := fetchCityEventsAfterSeq(ctx, client, scope.cityName, resumeSeq)
 		if err != nil {
 			if shouldUseLocalCityEventsFallback(scope, err) {
 				printStreamingCityAPIRequirement("--watch", stderr)
@@ -860,6 +911,14 @@ func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) i
 	}
 	if scope.isSupervisor() {
 		fmt.Fprintln(stderr, "gc events: rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
+		return 1
+	}
+	// rotate is a MUTATION (POST /events/rotate). The remote events client is
+	// read-only (no city-write grant), so a hardened city would 401 even with a
+	// configured grant_command. Refuse it clearly rather than route a mutation
+	// through the read lane; the read events subcommands still stream remotely.
+	if scope.gen != nil {
+		fmt.Fprintln(stderr, "gc events rotate: not supported for a remote city (it mutates the events log; run it from the city's own host)") //nolint:errcheck
 		return 1
 	}
 
@@ -962,21 +1021,41 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
-func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string) ([]cliWireEvent, error) {
-	limit := int64(500)
-	var all []cliWireEvent
-	var cursor *string
+// cityEventsPageLimit bounds one page of the city event list. The endpoint
+// serves seq-DESC pages and mints next_cursor when more matching rows exist
+// strictly below the page's oldest seq (#4194).
+const cityEventsPageLimit = int64(500)
 
+// fetchCityEvents fetches city events matching the type/since filter and
+// returns them chronologically (ascending seq). The endpoint is a keyset,
+// seq-DESC (newest first) paginated list; a truncated page carries a
+// next_cursor pointing strictly below the page's oldest seq.
+//
+// A bounded --since window is drained across pages so the requested window is
+// reported in full — otherwise any window holding more than one page of events
+// silently under-reports (the bug this fixes). Without --since the request is
+// unbounded, so the fetch stays a single page: gc events means "recent
+// activity", and a full descending drain of a 100 MB+ event history would blow
+// the command timeout for no user benefit. In that single-page case, when the
+// server signals more via next_cursor, an explicit truncation notice is written
+// to warn rather than silently dropping the older matches.
+func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string, warn io.Writer) ([]cliWireEvent, error) {
+	paginate := strings.TrimSpace(sinceFlag) != ""
+	var all []cliWireEvent
+	cursor := ""
 	for {
+		limit := cityEventsPageLimit
 		params := &genclient.GetV0CityByCityNameEventsParams{
-			Cursor: cursor,
-			Limit:  &limit,
+			Limit: &limit,
 		}
 		if strings.TrimSpace(typeFilter) != "" {
 			params.Type = &typeFilter
 		}
 		if strings.TrimSpace(sinceFlag) != "" {
 			params.Since = &sinceFlag
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
 		}
 		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
 		if err != nil {
@@ -986,7 +1065,7 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 			return nil, err
 		}
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
-			return all, nil
+			break
 		}
 		for _, item := range *resp.JSON200.Items {
 			wire, err := cityWireEventFromTyped(item)
@@ -995,11 +1074,86 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 			}
 			all = append(all, wire)
 		}
-		if resp.JSON200.NextCursor == nil || strings.TrimSpace(*resp.JSON200.NextCursor) == "" {
-			return all, nil
+		next := ""
+		if resp.JSON200.NextCursor != nil {
+			next = strings.TrimSpace(*resp.JSON200.NextCursor)
 		}
-		cursor = resp.JSON200.NextCursor
+		if next == "" {
+			break // window (or the whole history) exhausted
+		}
+		if !paginate {
+			fmt.Fprintf(warn, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+			break
+		}
+		if next == cursor {
+			// Defensive: a conforming server advances the keyset boundary
+			// strictly downward each page, so the cursor never repeats. Bail
+			// rather than spin forever on a misbehaving server.
+			break
+		}
+		cursor = next
 	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	return all, nil
+}
+
+// fetchCityEventsAfterSeq returns every city event with Seq > afterSeq in
+// ascending seq order, walking the seq-DESC keyset list (#4194) from the head
+// and following next_cursor until a page descends to afterSeq (or the history
+// is exhausted). Unlike fetchCityEvents this paginates: the --watch buffered
+// replay needs the whole gap since the resume seq, and a single newest page
+// would silently drop events whenever more than one page arrived since afterSeq.
+// The walk is bounded by (head - afterSeq); --watch resumes are normally recent.
+func fetchCityEventsAfterSeq(ctx context.Context, client *genclient.ClientWithResponses, cityName string, afterSeq uint64) ([]cliWireEvent, error) {
+	var all []cliWireEvent
+	cursor := ""
+	for {
+		limit := int64(500)
+		params := &genclient.GetV0CityByCityNameEventsParams{
+			Limit: &limit,
+		}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		if err != nil {
+			return nil, &eventsAPITransportError{err: err}
+		}
+		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
+			return nil, err
+		}
+		if resp.JSON200 == nil || resp.JSON200.Items == nil {
+			break
+		}
+		// Collect every event above the resume seq; note if this page reached
+		// down to or below it. Order-agnostic: a page that already spans the
+		// resume seq needs no older page, whichever way its rows are ordered.
+		reachedFloor := false
+		for _, item := range *resp.JSON200.Items {
+			wire, err := cityWireEventFromTyped(item)
+			if err != nil {
+				return nil, fmt.Errorf("decoding city event list item: %w", err)
+			}
+			if wire.Seq <= int64(afterSeq) {
+				reachedFloor = true
+				continue
+			}
+			all = append(all, wire)
+		}
+		if reachedFloor {
+			break // the page descended past the resume seq — history below is covered
+		}
+		next := ""
+		if resp.JSON200.NextCursor != nil {
+			next = strings.TrimSpace(*resp.JSON200.NextCursor)
+		}
+		if next == "" || next == cursor {
+			break // history exhausted (or a non-advancing cursor — bail rather than spin)
+		}
+		cursor = next
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	return all, nil
 }
 
 func fetchCityHeadIndex(ctx context.Context, client *genclient.ClientWithResponses, cityName string) (string, error) {
@@ -1237,6 +1391,92 @@ func streamReconnectBackoff(attempt int) time.Duration {
 	return d
 }
 
+// streamRetry is the decision for a non-200 SSE response: whether to reconnect,
+// an explicit backoff floor from a Retry-After header, and whether the failure
+// was a credential rejection (401) that a re-auth could recover.
+type streamRetry struct {
+	reconnect bool          // retry the connection (a transient server condition)
+	delay     time.Duration // Retry-After floor; 0 => use the caller's exponential backoff
+	reauth    bool          // 401 — the presented credential was rejected
+}
+
+// classifyStreamStatus maps a non-200 SSE status to a retry decision, shared by
+// the city and supervisor streams so both react identically. 429 (rate limited)
+// and 503 (server priming/unavailable) are transient → reconnect, honoring a
+// Retry-After header. 401 is a credential rejection → reauth (recoverable only
+// with a fresh credential, which the remote-events path supplies). 403/404/421
+// and any other status are permanent → no reconnect.
+func classifyStreamStatus(statusCode int, retryAfter string) streamRetry {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return streamRetry{reconnect: true, delay: parseRetryAfter(retryAfter)}
+	case http.StatusUnauthorized:
+		return streamRetry{reauth: true}
+	default:
+		return streamRetry{}
+	}
+}
+
+// parseRetryAfter parses a Retry-After header value. Only the delta-seconds form
+// is honored (an HTTP-date is over-precise for a client backoff and is ignored);
+// the result is bounded so a hostile server cannot pin a client offline.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs < 0 {
+		return 0
+	}
+	d := time.Duration(secs) * time.Second
+	if maxDelay := streamReconnectMax * 4; d > maxDelay {
+		d = maxDelay
+	}
+	return d
+}
+
+// waitForReconnectDelay sleeps for delay honoring ctx cancellation. It returns
+// false when ctx was canceled during the wait (the caller should stop). A zero
+// delay returns true immediately, leaving the caller's own backoff to apply.
+func waitForReconnectDelay(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(delay):
+		return true
+	}
+}
+
+// handleStreamNon200 decides what a non-200 SSE response means for a follow/
+// watch stream, shared by the city and supervisor streams. A transient status
+// (429/503) reconnects after any Retry-After floor; a 401 is a terminal
+// credential rejection on this (unauthenticated) local path — the remote-events
+// path re-invokes the credential command instead; anything else prints the
+// server's error. --watch (stopAfterMatch) never reconnects: it is bounded by
+// its own timeout and exits on any setup failure, matching the connect-failed
+// path. Returns (exitCode, reconnect).
+func handleStreamNon200(ctx context.Context, resp *http.Response, stopAfterMatch bool, stderr io.Writer) (int, bool) {
+	class := classifyStreamStatus(resp.StatusCode, resp.Header.Get("Retry-After"))
+	if class.reauth {
+		resp.Body.Close()                                                                            //nolint:errcheck
+		fmt.Fprintln(stderr, "gc events: unauthorized (401); the presented credential was rejected") //nolint:errcheck
+		return 1, false
+	}
+	if class.reconnect && !stopAfterMatch {
+		resp.Body.Close()                                                                    //nolint:errcheck
+		fmt.Fprintf(stderr, "gc events: transient HTTP %d, reconnecting\n", resp.StatusCode) //nolint:errcheck
+		if !waitForReconnectDelay(ctx, class.delay) {
+			return 0, false
+		}
+		return 0, true
+	}
+	return printStreamError(resp, stderr), false
+}
+
 func streamCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName string, afterSeq uint64, typeFilter string, payloadMatch map[string][]string, stopAfterMatch bool, stdout, stderr io.Writer) int {
 	resumeSeq := afterSeq
 	attempt := 0
@@ -1286,7 +1526,8 @@ func streamCityEventsOnce(ctx context.Context, client *genclient.ClientWithRespo
 		return 1, afterSeq, false
 	}
 	if resp.StatusCode != http.StatusOK {
-		return printStreamError(resp, stderr), afterSeq, false
+		exit, reconnect := handleStreamNon200(ctx, resp, stopAfterMatch, stderr)
+		return exit, afterSeq, reconnect
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -1384,7 +1625,8 @@ func streamSupervisorEventsOnce(ctx context.Context, client *genclient.ClientWit
 		return 1, afterCursor, false
 	}
 	if resp.StatusCode != http.StatusOK {
-		return printStreamError(resp, stderr), afterCursor, false
+		exit, reconnect := handleStreamNon200(ctx, resp, stopAfterMatch, stderr)
+		return exit, afterCursor, reconnect
 	}
 	defer resp.Body.Close() //nolint:errcheck
 

@@ -133,8 +133,20 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			action: TimerActionGatherPending,
 		},
 		{
-			name:    "idle session stops",
-			facts:   TimerFacts{Triggered: true, Pending: PendingNo},
+			name:   "unknown assigned work must be gathered",
+			facts:  TimerFacts{Triggered: true, Pending: PendingNo},
+			action: TimerActionGatherAssignedWork,
+		},
+		{
+			name:    "assigned work defers the stop",
+			facts:   TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkHas},
+			action:  TimerActionDefer,
+			reason:  "assigned_work",
+			outcome: "deferred_busy",
+		},
+		{
+			name:    "free idle session stops",
+			facts:   TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone},
 			action:  TimerActionStop,
 			reason:  "idle_timeout",
 			outcome: "stop",
@@ -187,15 +199,50 @@ func TestDecideMaxSessionAgePendingKeepsWakePass(t *testing.T) {
 	}
 }
 
-// Idle-timeout never consults assigned work; an unknown work fact must not
-// trigger a gather action or change the stop decision.
-func TestDecideIdleTimeoutIgnoresAssignedWork(t *testing.T) {
-	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkUnknown})
-	if dec.Action != TimerActionStop {
-		t.Fatalf("action = %v, want stop", dec.Action)
-	}
+func TestDecideIdleTimeoutStopSleepReason(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone})
 	if dec.SleepReason != "idle-timeout" {
 		t.Fatalf("sleep reason = %q, want %q", dec.SleepReason, "idle-timeout")
+	}
+	if dec.CancelDrain || dec.SkipWakePass {
+		t.Fatalf("idle stop must not request drain cancel or wake-pass skip: %+v", dec)
+	}
+}
+
+// Assigned work defers the idle-timeout stop the same way it defers
+// max-session-age, so ComputeAwakeSet's assigned-work exemption and the
+// idle-kill ladder agree instead of fighting (ga-3ox7rk).
+func TestDecideIdleTimeoutDefersOnAssignedWork(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkHas})
+	if dec.Action != TimerActionDefer {
+		t.Fatalf("action = %v, want defer", dec.Action)
+	}
+	if dec.TraceReason != "assigned_work" || dec.TraceOutcome != "deferred_busy" {
+		t.Fatalf("trace = %q/%q, want assigned_work/deferred_busy", dec.TraceReason, dec.TraceOutcome)
+	}
+	if dec.CancelDrain || dec.SkipWakePass {
+		t.Fatalf("assigned-work deferral must not cancel drain or skip wake pass: %+v", dec)
+	}
+}
+
+// DecideAssignedWorkExhausted is the caller-invoked override for a session
+// that has deferred the idle-timeout stop on the same assigned-work bead more
+// times than the reconciler's configured consecutive-defer limit. Unlike a
+// plain idle-timeout stop it carries its own trace reason and sleep reason so
+// the override is distinguishable in traces and metadata (ga-nllza6 part 2).
+func TestDecideAssignedWorkExhausted(t *testing.T) {
+	dec := DecideAssignedWorkExhausted()
+	if dec.Action != TimerActionStop {
+		t.Fatalf("action = %v, want %v", dec.Action, TimerActionStop)
+	}
+	if dec.TraceReason != "assigned_work_exhausted" || dec.TraceOutcome != "stop_defer_exhausted" {
+		t.Fatalf("trace = %q/%q, want assigned_work_exhausted/stop_defer_exhausted", dec.TraceReason, dec.TraceOutcome)
+	}
+	if dec.SleepReason != string(SleepReasonAssignedWorkExhausted) {
+		t.Fatalf("sleep reason = %q, want %q", dec.SleepReason, SleepReasonAssignedWorkExhausted)
+	}
+	if dec.CancelDrain || dec.SkipWakePass {
+		t.Fatalf("defer-exhausted stop must not request drain cancel or wake-pass skip: %+v", dec)
 	}
 }
 

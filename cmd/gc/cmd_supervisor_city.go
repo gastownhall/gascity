@@ -38,6 +38,11 @@ var (
 	registerCityWithSupervisorTestHook func(cityPath, commandName string, stdout, stderr io.Writer) (bool, int)
 	supervisorCityErrorHook            = supervisorCityError
 	reloadSupervisorNoWaitHook         = reloadSupervisorNoWait
+	// controllerAliveHook is the standalone-controller probe. Defaults to the
+	// real socket probe; tests override it to detect a controller without
+	// depending on a live socket-accept handshake racing the probe's read
+	// deadline under parallel/high-load runs (#3847).
+	controllerAliveHook = controllerAlive
 )
 
 // assumeYesForSupervisorCycle is set by the --yes flag on commands that
@@ -134,9 +139,6 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
-	}
 	return normalizePathForCompare(abs), nil
 }
 
@@ -179,7 +181,7 @@ func cityUsesManagedReconciler(cityPath string) bool {
 var justRestartedSupervisorPID int
 
 func ensureNoStandaloneController(cityPath string) (int, error) {
-	if pid := controllerAlive(cityPath); pid != 0 {
+	if pid := controllerAliveHook(cityPath); pid != 0 {
 		// If we just auto-restarted the supervisor in this invocation,
 		// the new supervisor process is briefly visible on the controller
 		// socket before the registry catches up. Treat that as our own
@@ -641,7 +643,16 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if opts.Force && supervisorAliveHook() != 0 {
-		tryStopControllerWithForce(cityPath, io.Discard, true)
+		stopResult := tryStopControllerWithForce(cityPath, io.Discard, true)
+		switch stopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
