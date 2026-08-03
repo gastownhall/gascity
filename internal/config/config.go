@@ -2968,8 +2968,12 @@ func (c *City) AllPackDirs() []string {
 // determinism. A fragment name defined identically in more than one rig's pack
 // resolves fine (that's the common case: a shared vocabulary like
 // handoff-routing, meant to render identically everywhere). A name defined with
-// DIFFERENT content in two rigs' packs silently picks whichever rig sorts first
-// alphabetically — a pack-authoring collision this function does not detect.
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
 // See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
 	if rigName == "" {

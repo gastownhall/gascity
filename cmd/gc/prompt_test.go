@@ -1481,6 +1481,34 @@ func TestRenderPromptResolvesMultiRigPackFragmentsForCityScopeAgent(t *testing.T
 	}
 }
 
+// TestRenderPromptCityScopeFragmentCollisionLastRigWins pins the *direction* of
+// a same-named fragment collision across rigs. PackDirsForRig("") returns rig
+// dirs sorted by rig name and renderPrompt parses them in order, so a later
+// {{ define }} replaces an earlier one: the alphabetically last rig wins. The
+// PackDirsForRig doc comment documents this; without this test a change to
+// pack-dir ordering or loadSharedTemplates override semantics would flip the
+// winner silently.
+func TestRenderPromptCityScopeFragmentCollisionLastRigWins(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/a/template-fragments/x.template.md"] = []byte(
+		`{{ define "x" }}FROM-ALPHA{{ end }}`)
+	f.Files["/z/template-fragments/x.template.md"] = []byte(
+		`{{ define "x" }}FROM-ZULU{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(`{{ template "x" . }}`)
+
+	cfg := &config.City{
+		RigPackDirs: map[string][]string{
+			"alpha": {"/a"},
+			"zulu":  {"/z"},
+		},
+	}
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md",
+		PromptContext{}, "", io.Discard, cfg.PackDirsForRig(""), nil, nil)
+	if got != "FROM-ZULU" {
+		t.Errorf("renderPrompt(colliding fragment across rigs) = %q, want %q (last rig alphabetically wins)", got, "FROM-ZULU")
+	}
+}
+
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
 // check: when the city root has no template-fragments/ or prompts/shared/,
 // rendered output is byte-identical to pre-fix behavior (i.e. the new
