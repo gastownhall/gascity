@@ -74,16 +74,16 @@ func TestSyntheticCacheVerifierDoesNotMemoizeNegativeVerdicts(t *testing.T) {
 
 	pass := newSyntheticCacheVerifier()
 	corruptCachedPackFileForTest(t, cacheDir)
-	if pass.Valid(cacheDir, commit) {
+	if pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Fatal("corrupted cache reported valid")
 	}
 
 	// Stand in for the repair every caller performs after a negative verdict.
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("re-materializing the cache: %v", err)
 	}
 
-	if !pass.Valid(cacheDir, commit) {
+	if !pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("the verifier memoized a negative verdict; a repaired cache still reads as broken")
 	}
 }
@@ -144,7 +144,11 @@ func materializeSyntheticCacheForTest(t *testing.T, source, commit string) strin
 	if err != nil {
 		t.Fatalf("RepoCachePath(%q): %v", source, err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	repository, known := builtinpacks.RepositoryForSource(source)
+	if !known {
+		t.Fatalf("RepositoryForSource(%q): not a bundled source", source)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	return cacheDir

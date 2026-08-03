@@ -913,12 +913,15 @@ func TestEnsureBundledPacksCurrentRepairsStaleSyntheticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	staleMarker := `.gc-bundled-pack-cache.toml`
 	stalePath := filepath.Join(cacheDir, staleMarker)
-	staleData := `schema = 1
+	// schema must match the current marker schema: the point of this fixture is
+	// the CONTENT-HASH skew branch, and a stale schema would trip the earlier
+	// schema check instead, leaving the skew case unexercised.
+	staleData := `schema = 2
 repository = "https://github.com/gastownhall/gascity.git"
 commit = "` + commit + `"
 content_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -927,7 +930,7 @@ content_hash = "sha256:000000000000000000000000000000000000000000000000000000000
 		t.Fatalf("WriteFile(stale marker): %v", err)
 	}
 	// Confirm the cache is stale before the repair.
-	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err == nil {
 		t.Fatal("expected stale cache to fail validation before repair")
 	}
 
@@ -936,7 +939,7 @@ content_hash = "sha256:000000000000000000000000000000000000000000000000000000000
 	}
 
 	// After repair the cache must pass validation.
-	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo after repair: %v", err)
 	}
 
@@ -947,7 +950,7 @@ content_hash = "sha256:000000000000000000000000000000000000000000000000000000000
 	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
 		t.Fatalf("WriteFile(sentinel): %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err == nil {
 		t.Fatal("expected full validation to reject the unrelated sentinel")
 	}
 

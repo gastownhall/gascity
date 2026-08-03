@@ -298,14 +298,18 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
-	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit) == nil {
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return "", true, fmt.Errorf("resolving bundled repository for %q", source)
+	}
+	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit) == nil {
 		return cacheDir, true, nil
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
-		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
-		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit)
 	}); err != nil {
 		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
 	}
@@ -439,16 +443,20 @@ func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string)
 		// Present (possibly drifted/tampered) or unstattable: do not auto-heal.
 		return false
 	}
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return false
+	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
 		// Re-check under the lock: another writer may have materialized it.
-		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
-		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit)
 	}); err != nil {
 		return false
 	}
-	return builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil
+	return builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil
 }
 
 // ResetRemoteCacheValidationCache clears memoized remote-cache validations
@@ -463,8 +471,8 @@ func ResetRemoteCacheValidationCache() {
 func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
-	if IsBundledSourceAtCanonicalPin(source, commit) {
-		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit)
+	if repository, ok := builtinpacks.RepositoryForSource(source); ok && IsBundledSourceAtCanonicalPin(source, commit) {
+		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit)
 		if err == nil {
 			return nil
 		}
