@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
 
 func TestIsOperationalScript(t *testing.T) {
 	cases := []struct {
@@ -61,7 +65,15 @@ func TestT3BridgeStartupEnvelopeModel_UsesCurrentProviderDefaults(t *testing.T) 
 		{
 			name: "codex-mini",
 			tp:   TemplateParams{Env: map[string]string{"GC_PROVIDER": "codex-mini"}},
-			want: "claude-opus-4-6",
+			want: "gpt-5-codex",
+		},
+		{
+			name: "custom provider with codex ancestor",
+			tp: TemplateParams{
+				Env:              map[string]string{"GC_PROVIDER": "speedy"},
+				ResolvedProvider: &config.ResolvedProvider{Name: "speedy", BuiltinAncestor: "codex"},
+			},
+			want: "gpt-5-codex",
 		},
 		{
 			name: "claude",

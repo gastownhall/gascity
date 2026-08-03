@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func applyT3BridgeRuntimeConfig(tp TemplateParams, env map[string]string) {
@@ -121,7 +123,13 @@ func t3BridgeStartupEnvelopeModel(provider string, tp TemplateParams) string {
 	if v := tp.Env["GC_MODEL"]; v != "" {
 		return v
 	}
-	if provider == "codex" {
+	// Resolve custom-provider ancestry and aliases before selecting the Codex
+	// default. Preserve the existing Claude fallback for every other provider.
+	source := resolvedProviderLaunchFamily(tp.ResolvedProvider)
+	if source == "" {
+		source = provider
+	}
+	if sessionpkg.ProviderFamilyFromMetadata(nil, source) == "codex" {
 		return "gpt-5-codex"
 	}
 	return "claude-opus-4-6"
