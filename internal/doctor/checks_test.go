@@ -4365,3 +4365,25 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 		t.Error("CanFix() = true, want false")
 	}
 }
+
+// TestSameDoctorScope_ResolvesSymlinkedAncestorWithMissingLeaf pins the
+// ga-iawy13.7 canonical-path-at-ingest migration: sameDoctorScope must
+// classify two paths as the same scope when they reach an identical,
+// not-yet-existing leaf through different routes (one direct, one via a
+// symlinked ancestor). The pre-migration bare EvalSymlinks call returns
+// false whenever either side fails to resolve, with no missing-path
+// fallback; pathutil.SamePath's ancestor-walk fallback fixes that.
+func TestSameDoctorScope_ResolvesSymlinkedAncestorWithMissingLeaf(t *testing.T) {
+	realDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	direct := filepath.Join(realDir, "missing-child")
+	viaLink := filepath.Join(linkDir, "missing-child")
+
+	if !sameDoctorScope(direct, viaLink) {
+		t.Errorf("sameDoctorScope(%q, %q) = false, want true (both resolve through pathutil to the same not-yet-existing leaf)", direct, viaLink)
+	}
+}
