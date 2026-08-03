@@ -210,7 +210,22 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	}
 }
 
-func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
+// TestHandleOrdersFeedCachesAcrossIndexChanges pins the orders feed to a
+// wall-clock TTL bucket rather than the event sequence. The feed body is
+// O(store history) to build — a full active scan plus a closed-history
+// workflow-roots scan per rig, with a latest-run lookup per tracked order — so
+// on a busy city whose sequence advances every poll, an index-keyed cache
+// missed on nearly every request and rebuilt the body each time. Recording an
+// event must NOT bust the feed cache within the TTL window, matching /status
+// and /formulas/feed.
+func TestHandleOrdersFeedCachesAcrossIndexChanges(t *testing.T) {
+	// Pin a wide TTL so every request in this test lands in the same time
+	// bucket; this isolates the "index churn must not bust the cache" property
+	// from wall-clock bucket-boundary timing.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
 	state := newFakeState(t)
 	rigStore := &countingStore{Store: beads.NewMemStore()}
 	cityStore := &countingStore{Store: beads.NewMemStore()}
@@ -256,17 +271,21 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 		t.Fatalf("city ListByLabel calls after cached repeat = %d, want 1", cityStore.listByLabelCalls)
 	}
 
-	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third feed = %d, want 200", rec.Code)
+	// A moving event sequence — the busy-city scenario — must keep hitting the
+	// time-bucketed cache, not force a rebuild on every poll.
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("feed after event %d = %d, want 200", i, rec.Code)
+		}
 	}
-	if rigStore.listCalls != 2 {
-		t.Fatalf("rig List calls after index change = %d, want 2", rigStore.listCalls)
+	if rigStore.listCalls != 1 {
+		t.Fatalf("rig List calls after 5 index changes = %d, want 1 (time-bucketed cache must survive sequence churn)", rigStore.listCalls)
 	}
-	if cityStore.listByLabelCalls != 2 {
-		t.Fatalf("city ListByLabel calls after index change = %d, want 2", cityStore.listByLabelCalls)
+	if cityStore.listByLabelCalls != 1 {
+		t.Fatalf("city ListByLabel calls after 5 index changes = %d, want 1 (time-bucketed cache must survive sequence churn)", cityStore.listByLabelCalls)
 	}
 }
 
