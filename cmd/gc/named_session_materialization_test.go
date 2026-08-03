@@ -78,27 +78,25 @@ func TestCmdSessionNew_NamedSessionGetsOriginNamed(t *testing.T) {
 	}
 }
 
-// TestCmdSessionNew_NonNamedSessionKeepsOriginManual verifies that launching
-// a plain agent template (not a configured named session) still gets
-// session_origin="manual", so Fix B has no unintended side effects.
+// TestCmdSessionNew_NonNamedSessionKeepsOriginManual verifies that a
+// user-supplied --alias keeps session_origin="manual". The configured-identity
+// stamp is gated on the caller supplying no alias, so an explicit --alias must
+// leave the session on the pre-existing manual path even when the template does
+// have a [[named_session]] entry.
 func TestCmdSessionNew_NonNamedSessionKeepsOriginManual(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeNamedSessionCityTOML(t, cityDir) // has "mayor" as named session
+	// The fixture declares [[named_session]] template = "mayor", so
+	// sessionNewAliasOwner does resolve a configured owner for this template.
+	// That makes it the sharper case: the stamp must still not apply, because
+	// it is additionally gated on the caller passing no alias. Launching
+	// "mayor" with --alias my-mayor therefore exercises the pre-existing
+	// user-alias path unchanged.
+	writeNamedSessionCityTOML(t, cityDir)
 
-	// Use --alias to exercise the existing alias path without Fix B changes.
-	// "mayor" IS a named session in this config, so we test with an alias
-	// that is NOT a configured named session identity.
-	//
-	// Actually we need a template that isn't in named_sessions. Use "mayor"
-	// without --alias since writeNamedSessionCityTOML only has [[named_session]] template="mayor".
-	// The test below creates a bead via a template that has NO named_session entry.
-	// We re-use the mayor template but pass a user-supplied alias; sessionNewAliasOwner
-	// matches only when the agent IS in named_sessions AND no user alias is provided
-	// — so passing alias="my-mayor" will NOT trigger Fix B.
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionNew([]string{"mayor"}, "my-mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
