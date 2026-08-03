@@ -1028,3 +1028,18 @@ func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
 	}
 }
+
+// TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs pins that a
+// logical store sentinel is not absolutized. LockScopeForStoreRef returns the
+// literal "rig:<name>" when the rig cannot be resolved to a path; if that were
+// made cwd-relative, two gc processes started from different directories would
+// derive different lock keys and lock files for the same logical scope.
+func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T) {
+	for _, ref := range []string{"rig:alpha", "city:main"} {
+		a := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		b := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		if a != ref || b != ref {
+			t.Errorf("canonicalScopeRef(%q) = %q / %q, want %q verbatim from both dirs", ref, a, b, ref)
+		}
+	}
+}
