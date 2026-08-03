@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -1119,5 +1120,28 @@ func TestDefaultBranchCtx_DeadlineDuringShowRefReturnsErrorNotMain(t *testing.T)
 	}
 	if n := strings.Count(calls, "show-ref"); n != 1 {
 		t.Fatalf("show-ref ran %d times, want 1: a done ctx must stop the loop at main\n%s", n, calls)
+	}
+}
+
+// TestCanonicalWorktreePath_ResolvesSymlinkedAncestorWithMissingLeaf pins
+// the ga-iawy13.7 canonical-path-at-ingest migration: canonicalWorktreePath
+// must resolve a not-yet-existing leaf reached through a symlinked ancestor
+// to the same canonical location pathutil would produce. The pre-migration
+// bare EvalSymlinks call falls back to the raw, unresolved input on
+// failure -- callers already have to re-normalize wt.Path through pathutil
+// themselves (cmd/gc/bead_worktree_reaper.go, checks_semantic.go) because of
+// this gap; migrating the source removes the need.
+func TestCanonicalWorktreePath_ResolvesSymlinkedAncestorWithMissingLeaf(t *testing.T) {
+	realDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	viaLink := filepath.Join(linkDir, "missing-child")
+	want := filepath.Join(pathutil.NormalizePathForCompare(realDir), "missing-child")
+
+	if got := canonicalWorktreePath(viaLink); got != want {
+		t.Errorf("canonicalWorktreePath(%q) = %q, want %q", viaLink, got, want)
 	}
 }

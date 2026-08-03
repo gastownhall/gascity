@@ -1279,3 +1279,25 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability
 		t.Fatalf("reachability probe = %s:%s, want 192.0.2.1:3307", gotHost, gotPort)
 	}
 }
+
+// TestSameScope_ResolvesSymlinkedAncestorWithMissingLeaf pins the
+// ga-iawy13.7 canonical-path-at-ingest migration: sameScope must classify
+// two paths as the same scope when they reach an identical, not-yet-existing
+// leaf through different routes (one direct, one via a symlinked ancestor).
+// The pre-migration normalizeScopePathForCompare silently keeps the
+// unresolved path on EvalSymlinks failure, with no missing-path fallback;
+// pathutil.NormalizePathForCompare's ancestor-walk fallback fixes that.
+func TestSameScope_ResolvesSymlinkedAncestorWithMissingLeaf(t *testing.T) {
+	realDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	direct := filepath.Join(realDir, "missing-child")
+	viaLink := filepath.Join(linkDir, "missing-child")
+
+	if !sameScope(direct, viaLink) {
+		t.Errorf("sameScope(%q, %q) = false, want true (both resolve through pathutil to the same not-yet-existing leaf)", direct, viaLink)
+	}
+}

@@ -398,3 +398,29 @@ func TestServiceSecretsPermsCheckSkipsAncestorSymlinkEscape(t *testing.T) {
 	configured := filepath.Join(cityPath, ".gc", "services", "bridge", "secrets")
 	assertSkippedOutOfCityRoot(t, cfg, cityPath, configured, loose)
 }
+
+// TestWithinCity_ResolvesSymlinkedAncestorWithMissingLeaf pins the
+// ga-iawy13.7 canonical-path-at-ingest migration: withinCity must still
+// recognize containment when the configured city path is reached through a
+// symlinked ancestor and does not yet exist on disk. The pre-migration bare
+// EvalSymlinks call silently keeps the unresolved city path on failure (no
+// missing-path fallback), so a not-yet-materialized symlinked city path is
+// wrongly classified as outside itself; pathutil.PathWithin's ancestor-walk
+// fallback fixes that.
+func TestWithinCity_ResolvesSymlinkedAncestorWithMissingLeaf(t *testing.T) {
+	realBase := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realBase, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Neither "city" leaf exists yet -- both are reached through different
+	// routes to the same not-yet-materialized location.
+	cityViaLink := filepath.Join(linkDir, "city")
+	cityDirect := filepath.Join(realBase, "city")
+
+	c := &ServiceSecretsPermsCheck{cityPath: cityViaLink}
+	if !c.withinCity(cityDirect) {
+		t.Errorf("withinCity(%q) = false with cityPath %q, want true (both resolve through pathutil to the same not-yet-existing city dir)", cityDirect, cityViaLink)
+	}
+}
