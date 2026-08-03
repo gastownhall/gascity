@@ -1062,12 +1062,7 @@ func activeBDStoreFromMetadata(path string) (string, string) {
 }
 
 func sameDoctorScope(a, b string) bool {
-	if filepath.Clean(a) == filepath.Clean(b) {
-		return true
-	}
-	resolvedA, errA := filepath.EvalSymlinks(a)
-	resolvedB, errB := filepath.EvalSymlinks(b)
-	return errA == nil && errB == nil && filepath.Clean(resolvedA) == filepath.Clean(resolvedB)
+	return pathutil.SamePath(a, b)
 }
 
 func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRepos []string) []string {

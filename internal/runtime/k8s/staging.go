@@ -259,6 +259,13 @@ func tarDir(dir string, w io.Writer) error {
 
 		// Dereference symlinks: use the resolved path for both stat and open
 		// to avoid TOCTOU issues if the symlink target changes.
+		//
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. A broken symlink must be silently
+		// skipped from the tar archive, which relies on EvalSymlinks'
+		// raw error; pathutil's never-errors missing-path fallback would
+		// synthesize a path for a target that doesn't exist and break
+		// the skip-on-broken-symlink contract.
 		if info.Mode()&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {

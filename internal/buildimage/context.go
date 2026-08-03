@@ -169,6 +169,12 @@ func copyDirFiltered(src, dst string, stderr io.Writer) error {
 		}
 
 		if info.Mode()&os.ModeSymlink != 0 {
+			// canonical-path-exception: existence/resolvability only, not
+			// comparison preparation. The build context copy must know
+			// whether the symlink target actually exists (IsNotExist means a
+			// broken symlink to skip) and its real mode for the copy below;
+			// pathutil's never-errors missing-path fallback would hide a
+			// broken symlink instead of letting it be skipped.
 			resolvedPath, err := filepath.EvalSymlinks(path)
 			if err != nil {
 				if os.IsNotExist(err) {

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/gitcred"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func deriveImportName(source string) string {
@@ -189,10 +190,7 @@ func canonicalizeLocalGitImportSource(targetDir string) (string, bool, error) {
 	if err != nil || !ok {
 		return "", ok, err
 	}
-	resolvedTarget, err := filepath.EvalSymlinks(targetDir)
-	if err != nil {
-		resolvedTarget = targetDir
-	}
+	resolvedTarget := pathutil.NormalizePathForCompare(targetDir)
 	rel, err := filepath.Rel(repoRoot, resolvedTarget)
 	if err != nil {
 		return "", false, fmt.Errorf("computing import subpath: %w", err)

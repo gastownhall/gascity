@@ -65,6 +65,12 @@ func Write(transcriptPath, gcSessionID string) (ok bool, err error) {
 	if transcriptPath == "" || gcSessionID == "" {
 		return false, nil
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. Write must distinguish "not on disk yet" (return false,
+	// nil so the caller retries later) from a genuine fault (return the
+	// error), which requires EvalSymlinks' raw error; pathutil's
+	// never-errors missing-path fallback would collapse both cases into a
+	// synthesized path and hide a real fault as a silent no-op retry.
 	resolved, err := filepath.EvalSymlinks(transcriptPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

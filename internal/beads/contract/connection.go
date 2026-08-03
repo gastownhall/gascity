@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -785,21 +786,7 @@ func validateExternalHostValue(host, port string) error {
 }
 
 func sameScope(a, b string) bool {
-	return normalizeScopePathForCompare(a) == normalizeScopePathForCompare(b)
-}
-
-func normalizeScopePathForCompare(path string) string {
-	if path == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return filepath.Clean(path)
+	return pathutil.SamePath(a, b)
 }
 
 func resolveCityTopologyState(fs fsys.FS, cityRoot string) (ConfigState, error) {
