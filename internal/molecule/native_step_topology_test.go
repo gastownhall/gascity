@@ -203,3 +203,173 @@ func TestNativeStepDependenciesMaterializeThroughGraphAndSequentialPaths(t *test
 		t.Fatalf("sequential bead topology = %q, want %q", got, want)
 	}
 }
+
+func TestAttachPreservesNativeStepDependenciesAcrossRetryAttempts(t *testing.T) {
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title: "Build retry control",
+		Metadata: map[string]string{
+			beadmeta.StepIDMetadataKey:                 "build",
+			beadmeta.StepRefMetadataKey:                "workflow.build",
+			beadmeta.NativeStepDependenciesMetadataKey: `["prepare"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	recipe := &formula.Recipe{
+		Name: "workflow.build.attempt.2",
+		Steps: []formula.RecipeStep{{
+			ID:     "workflow.build.attempt.2",
+			Title:  "Build",
+			IsRoot: true,
+			Metadata: map[string]string{
+				beadmeta.StepIDMetadataKey:  "build",
+				beadmeta.StepRefMetadataKey: "workflow.build.attempt.2",
+			},
+		}},
+	}
+
+	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	attempt, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("get attempt: %v", err)
+	}
+	if got, want := attempt.Metadata[beadmeta.NativeStepDependenciesMetadataKey], `["prepare"]`; got != want {
+		t.Fatalf("retry attempt topology = %q, want immutable %q", got, want)
+	}
+}
+
+func TestAttachKeepsRetryTopologyUnknownWhenParentTopologyIsUnknown(t *testing.T) {
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title: "Build retry control",
+		Metadata: map[string]string{
+			beadmeta.StepIDMetadataKey:  "build",
+			beadmeta.StepRefMetadataKey: "workflow.build",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	recipe := &formula.Recipe{
+		Name: "workflow.build.attempt.2",
+		Steps: []formula.RecipeStep{{
+			ID:     "workflow.build.attempt.2",
+			Title:  "Build",
+			IsRoot: true,
+			Metadata: map[string]string{
+				beadmeta.StepIDMetadataKey:  "build",
+				beadmeta.StepRefMetadataKey: "workflow.build.attempt.2",
+			},
+		}},
+	}
+
+	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	attempt, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("get attempt: %v", err)
+	}
+	if got, present := attempt.Metadata[beadmeta.NativeStepDependenciesMetadataKey]; present {
+		t.Fatalf("retry attempt topology = %q, want omitted UNKNOWN", got)
+	}
+}
+
+func TestInstantiateFragmentIncludesCompleteExternalNativeStepDependencies(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "Workflow"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	predecessor, err := store.Create(beads.Bead{
+		Title:    "Prepare",
+		Metadata: map[string]string{beadmeta.StepIDMetadataKey: "prepare"},
+	})
+	if err != nil {
+		t.Fatalf("create predecessor: %v", err)
+	}
+	fragment := &formula.FragmentRecipe{
+		Name:    "late-build",
+		Steps:   []formula.RecipeStep{{ID: "build", Title: "Build"}},
+		Entries: []string{"build"},
+		Sinks:   []string{"build"},
+	}
+	opts := FragmentOptions{
+		RootID: root.ID,
+		ExternalDeps: []ExternalDep{{
+			StepID:      "build",
+			DependsOnID: predecessor.ID,
+			Type:        "blocks",
+		}},
+	}
+	plan, err := buildFragmentApplyPlan(store, fragment, opts)
+	if err != nil {
+		t.Fatalf("buildFragmentApplyPlan: %v", err)
+	}
+	if got, want := plan.Nodes[0].Metadata[beadmeta.NativeStepDependenciesMetadataKey], `["prepare"]`; got != want {
+		t.Fatalf("graph fragment topology = %q, want %q", got, want)
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, fragment, opts)
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+	build, err := store.Get(result.IDMapping["build"])
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if got, want := build.Metadata[beadmeta.NativeStepDependenciesMetadataKey], `["prepare"]`; got != want {
+		t.Fatalf("fragment topology = %q, want %q", got, want)
+	}
+}
+
+func TestInstantiateFragmentOmitsTopologyWhenExternalNativeStepIsUnknown(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "Workflow"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	unknownPredecessor, err := store.Create(beads.Bead{Title: "Unidentified prerequisite"})
+	if err != nil {
+		t.Fatalf("create predecessor: %v", err)
+	}
+	fragment := &formula.FragmentRecipe{
+		Name:    "late-build",
+		Steps:   []formula.RecipeStep{{ID: "build", Title: "Build"}},
+		Entries: []string{"build"},
+		Sinks:   []string{"build"},
+	}
+	opts := FragmentOptions{
+		RootID: root.ID,
+		ExternalDeps: []ExternalDep{{
+			StepID:      "build",
+			DependsOnID: unknownPredecessor.ID,
+			Type:        "blocks",
+		}},
+	}
+	plan, err := buildFragmentApplyPlan(store, fragment, opts)
+	if err != nil {
+		t.Fatalf("buildFragmentApplyPlan: %v", err)
+	}
+	if got, present := plan.Nodes[0].Metadata[beadmeta.NativeStepDependenciesMetadataKey]; present {
+		t.Fatalf("graph fragment topology = %q, want omitted UNKNOWN", got)
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, fragment, opts)
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+	build, err := store.Get(result.IDMapping["build"])
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if got, present := build.Metadata[beadmeta.NativeStepDependenciesMetadataKey]; present {
+		t.Fatalf("fragment topology = %q, want omitted UNKNOWN", got)
+	}
+}
