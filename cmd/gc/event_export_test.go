@@ -80,6 +80,34 @@ func TestExportProvidersForCitiesFiltersDynamicProviders(t *testing.T) {
 	}
 }
 
+func TestExportProvidersForCitiesExcludesRegisteredAliasAfterInitFailure(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := newCityRegistry()
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("registry-only providers = %#v, want no matching configured city", got)
+	}
+
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("providers after init failure = %#v, want no matching configured city", got)
+	}
+}
+
 // TestResolveExportCredentials_EmptyTokenFileErrors proves a configured but
 // empty (or whitespace-only) token_file fails closed: the provider returns an
 // error so the cursor holds and the empty credential surfaces, instead of
