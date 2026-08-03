@@ -45,17 +45,21 @@ if [ -n "$staged_docs" ]; then
   make check-docs
 fi
 
+# Re-read the index rather than reusing the pre-hook staged_spec snapshot:
+# the Go block above runs `go run ./cmd/genspec` and stages the regenerated
+# internal/api/openapi.json, so a Go-only commit that moves the API surface
+# only shows up here (#4627, #4607). Shared by both branches below so the
+# npm-absent fail-closed branch sees the same side effect the npm-present
+# branch already accounts for (ga-jg89a5) -- the branches must not diverge
+# on which snapshot of "is the spec staged" they trust.
+spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+
 # Dashboard SPA rebuild: when internal/api/openapi.json changes, regenerate
 # the generated TS API client from the new spec and stage it. When the spec
 # OR the SPA source changes, typecheck and rebuild the compiled bundle.
 # Guarded on `npm` availability so contributors without Node tooling aren't
 # blocked; CI enforces the full regeneration via make dashboard-ci.
 if command -v npm >/dev/null 2>&1; then
-  # Re-read the index rather than reusing the pre-hook snapshot: the Go
-  # block above runs `go run ./cmd/genspec` and stages the regenerated
-  # internal/api/openapi.json, so a Go-only commit that moves the API
-  # surface only shows up here (#4627, #4607).
-  spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
   if [ -n "$spec_changed" ]; then
     # Regenerate BEFORE typecheck/build below: a client that no longer
     # matches the new spec must fail typecheck immediately instead of
@@ -73,5 +77,12 @@ if command -v npm >/dev/null 2>&1; then
     git add internal/api/dashboardspa/dist
   fi
 else
+  if [ -n "$spec_changed" ]; then
+    echo "error: internal/api/openapi.json is staged but npm is not on PATH — the generated TS API client" >&2
+    echo "cannot be regenerated, so this commit would ship a stale client with no enforcement until CI runs." >&2
+    echo "Install Node/npm, or regenerate manually:" >&2
+    echo "  cd internal/api/dashboardspa/web && npm ci && npm run generate:client" >&2
+    exit 1
+  fi
   echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
 fi

@@ -109,6 +109,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantPromptFlag:        "--prompt",
 			wantReadyDelayMs:      8000,
 			wantProcessNames:      []string{"opencode", "node", "bun"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
 			wantModelOverride:     "opencode/deepseek-v4-flash-free",
 			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
 		},

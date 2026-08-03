@@ -139,9 +139,6 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
-	}
 	return normalizePathForCompare(abs), nil
 }
 

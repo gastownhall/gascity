@@ -946,6 +946,7 @@ type AgentOutputResponse struct {
 type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
 	Args                    *[]string         `json:"Args"`
+	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`

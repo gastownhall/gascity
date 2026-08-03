@@ -220,6 +220,17 @@ func TestPackCommandExitHelper(t *testing.T) {
 		return
 	}
 
+	// TestMain's clearProcessLiveEnvForTests scrubs GC_CITY_PATH (and the
+	// rest of inheritedCityRoutingEnvVars) before m.Run reaches this test,
+	// so any GC_CITY_PATH the parent set on cmd.Env is already gone by now.
+	// cmd.Dir pins this process's cwd to the intended city, so restore the
+	// override from there rather than threading the path through argv.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CITY_PATH", cwd)
+
 	code := func() int {
 		defer func() {
 			if err := os.WriteFile(invocation.afterRun, []byte("reached\n"), 0o600); err != nil {
@@ -539,6 +550,12 @@ func TestE1PreLeafBooleanHelpSemantics(t *testing.T) {
 }
 
 func TestE1PreLeafBooleanHelpNoScopeEager(t *testing.T) {
+	t.Skip("ga-klo4gz: this test's purpose is exercising ambient cwd-based city " +
+		"resolution (resolveContextFromDir step 10) to distinguish the ambient " +
+		"city's commands from an explicitly-selected one, which is now " +
+		"unconditionally refused inside test binaries; an explicit override " +
+		"would make it a no-op test rather than a fix")
+
 	cityA, _, _ := setupE1PreLeafHelpFixture(t)
 	oldWD, err := os.Getwd()
 	if err != nil {
@@ -1728,6 +1745,7 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", cityA)
 	tests := []struct {
 		name string
 		args []string
@@ -1814,6 +1832,7 @@ func TestE1EagerLazyControlDifferentialMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", cityA)
 
 	tests := []struct {
 		name       string
@@ -2095,6 +2114,7 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", cityA)
 
 	tests := []struct {
 		name string
@@ -2578,6 +2598,7 @@ func TestTryPackCommandFallbackReturnsTypedNonzeroOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", cityPath)
 
 	var stdout, stderr bytes.Buffer
 	got := tryPackCommandFallback([]string{"backstage", "hello"}, &stdout, &stderr)

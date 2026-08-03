@@ -49,6 +49,33 @@ func TestBuildRegistryPublishRequestUsesCleanPushedGitHubHead(t *testing.T) {
 	}
 }
 
+// TestBuildRegistryPublishRequestResolvesSymlinkedPackRoot proves the
+// absPackRoot and repoRoot normalization in buildRegistryPublishRequest
+// (cmd_registry.go) resolves a symlinked pack root before computing the
+// repo-relative PackPath, mirroring
+// TestResolveLocalPackReleaseSourceResolvesSymlinkedSource. Without it,
+// filepath.Rel compares the symlink path against git's resolved toplevel and
+// wrongly reports the pack root as outside the repository.
+func TestBuildRegistryPublishRequestResolvesSymlinkedPackRoot(t *testing.T) {
+	repo, _ := setupRegistryPublishRepo(t)
+
+	link := filepath.Join(t.TempDir(), "link-repo")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	request, err := buildRegistryPublishRequest(t.Context(), filepath.Join(link, "packs", "demo"), registryPublishOptions{}, false)
+	if err != nil {
+		t.Fatalf("buildRegistryPublishRequest: %v", err)
+	}
+	if request.PackPath != "packs/demo" {
+		t.Fatalf("PackPath = %q, want %q (real repo root, not the %q symlink)", request.PackPath, "packs/demo", link)
+	}
+	if request.RepoURL != "https://github.com/gastownhall/demo-packs" {
+		t.Fatalf("RepoURL = %q", request.RepoURL)
+	}
+}
+
 func TestBuildRegistryPublishRequestAcceptsWebFormFieldOverrides(t *testing.T) {
 	_, packDir := setupRegistryPublishRepo(t)
 
@@ -2472,4 +2499,21 @@ func runRegistryPublishGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, string(out))
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestWriteRegistryPublishSubmittedPinsRegistryURL(t *testing.T) {
+	// The requests command resolves its registry independently, so the printed
+	// handoff must pin the effective publish base URL or a follow-up can query
+	// the wrong Registry.
+	var buf bytes.Buffer
+	writeRegistryPublishSubmitted(&buf, "https://registry.example.com", registryPublishSubmitted{
+		ID:               "prq_x",
+		Status:           "pending_review",
+		RequestedName:    "demo-pack",
+		RequestedVersion: "1.2.0",
+	})
+	want := "Next: gc pack registry requests --registry-url https://registry.example.com prq_x"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("handoff missing %q:\n%s", want, buf.String())
+	}
 }

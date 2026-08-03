@@ -2,6 +2,7 @@ package gitcred
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -116,6 +117,92 @@ func TestLoadInsecurePermissions(t *testing.T) {
 	_, err := Load(city)
 	if !errors.Is(err, ErrInsecurePermissions) {
 		t.Fatalf("want ErrInsecurePermissions, got %v", err)
+	}
+}
+
+func TestSecureMode(t *testing.T) {
+	const egid = 1001
+	const me = 1001
+	tests := []struct {
+		name string
+		perm fs.FileMode
+		uid  uint32
+		gid  uint32
+		want bool
+	}{
+		{"owner read only", 0o400, me, egid, true},
+		{"owner read write", 0o600, me, egid, true},
+		{"kubernetes secret mount", 0o440, 0, egid, true},
+		{"world readable", 0o644, 0, egid, false},
+		{"world readable owner only otherwise", 0o404, me, egid, false},
+		{"group writable", 0o660, 0, egid, false},
+		{"group executable", 0o450, 0, egid, false},
+		{"group readable foreign gid", 0o440, 0, egid + 1, false},
+		{"group readable not root owned", 0o440, me, egid, false},
+		{"group readable owner unknown", 0o440, unknownID, unknownID, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secureMode(tc.perm, tc.uid, tc.gid, egid); got != tc.want {
+				t.Fatalf("secureMode(%v, uid=%d, gid=%d, egid=%d) = %v, want %v",
+					tc.perm, tc.uid, tc.gid, egid, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsUserOwnedGroupRead(t *testing.T) {
+	// The group-read exemption is for root-owned Secret mounts only. A 0640
+	// file the user created themselves is still insecure, which is what keeps
+	// laptop and CI behavior identical to the pre-exemption check.
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are POSIX-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a file we create is root-owned and would be exempt")
+	}
+	city := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv(EnvCredentialCommand, "")
+	writeCredFile(t, filepath.Join(city, ".gc", "credentials.toml"), "[[credential]]\nmatch=\"a.com\"\nhelper=\"x\"\n", 0o640)
+
+	_, err := Load(city)
+	if !errors.Is(err, ErrInsecurePermissions) {
+		t.Fatalf("want ErrInsecurePermissions, got %v", err)
+	}
+}
+
+func TestLoadAcceptsRootOwnedGroupReadable(t *testing.T) {
+	// The accept path end to end, on a real file. Only a root test process can
+	// produce the root:ourgid 0440 shape kubelet mounts, so this is skipped
+	// everywhere else; TestSecureMode covers the predicate unprivileged.
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are POSIX-only")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown the fixture to the Secret-mount shape")
+	}
+	city := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvCredentialsFile, "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv(EnvCredentialCommand, "")
+	path := filepath.Join(city, ".gc", "credentials.toml")
+	writeCredFile(t, path, "[[credential]]\nmatch=\"a.com\"\ntoken_file=\"/run/x\"\n", 0o440)
+	if err := os.Chown(path, 0, os.Getegid()); err != nil {
+		t.Fatalf("chown: %v", err)
+	}
+
+	rules, err := Load(city)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if all := rules.All(); len(all) != 1 || all[0].Match != "a.com" {
+		t.Fatalf("want the root-owned rule loaded, got %+v", all)
 	}
 }
 

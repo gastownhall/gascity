@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -662,14 +664,47 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||
 	// gc.root_bead_id || bead.ID) always resolves to a non-empty id since b.ID is
 	// non-empty; session id is a direct, optional metadata read. Both are
-	// safeRef-gated again at the export boundary.
+	// Run/session are safeRef-gated at the export boundary; native step topology
+	// retains its own established 256-byte domain there.
 	runID := beadmeta.ResolveRunID(b.Metadata, b.ID, "")
 	sessionID := b.Metadata[beadmeta.SessionIDMetadataKey]
-	// step_id is the acting work bead the lifecycle event is about: a work/dispatch
-	// bead carries its own gc.step_id, so a bead.created/closed on one stamps that
-	// step. Non-work beads (sessions, mail, …) carry none → empty, omitted at export.
+	// step_id is the semantic native execution step carried explicitly by the
+	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+}
+
+// nativeStepDependencies returns the explicit, canonical native topology fact.
+// It never derives edges from physical bead dependencies or other mutable state:
+// absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
+func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+	if !validTopologyStepID(stepID) {
+		return nil
+	}
+	raw, ok := metadata[beadmeta.NativeStepDependenciesMetadataKey]
+	if !ok {
+		return nil
+	}
+	var dependencies []string
+	if err := json.Unmarshal([]byte(raw), &dependencies); err != nil || dependencies == nil {
+		return nil
+	}
+	previous := ""
+	for _, dependency := range dependencies {
+		if !validTopologyStepID(dependency) || dependency == stepID || (previous != "" && dependency <= previous) {
+			return nil
+		}
+		previous = dependency
+	}
+	canonical, err := json.Marshal(dependencies)
+	if err != nil || raw != string(canonical) {
+		return nil
+	}
+	return &dependencies
+}
+
+func validTopologyStepID(id string) bool {
+	return len(id) <= 256 && utf8.ValidString(id) && strings.TrimSpace(id) != ""
 }
 
 type cacheNotification struct {

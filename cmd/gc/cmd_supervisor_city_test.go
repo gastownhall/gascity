@@ -2806,3 +2806,24 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
 	}
 }
+
+func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	realCity := filepath.Join(root, "real-city")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-city")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got, err := normalizeRegisteredCityPath(link)
+	if err != nil {
+		t.Fatalf("normalizeRegisteredCityPath(%q): %v", link, err)
+	}
+	want := normalizePathForCompare(realCity)
+	if got != want {
+		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
+	}
+}

@@ -1295,12 +1295,20 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 	}
 }
 
-func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
-	// Backward-compat: when gc.run_target is not set on the source bead
-	// (legacy beads stamped before the field existed), reopen-source clears
-	// gc.routed_to so the caller's explicit re-sling can write the correct
-	// route.  A blank gc.routed_to is not ideal (route-reclaim skips it) but
-	// is no worse than the pre-FR-C0.1 behavior for this legacy class.
+func TestCmdWorkflowReopenSourcePreservesRouteWithoutRunTarget(t *testing.T) {
+	// ga-20zd: when gc.run_target is absent, reopen-source must fall back to
+	// the route the bead already carries instead of blanking it. Blanking made
+	// the reopen destructive and order-dependent: the refinery's rejection path
+	// writes the pool route with `gc bd update` and calls reopen-source as a
+	// separate command, so a reopen that landed after the metadata write
+	// silently erased the route. The bead then looked correctly re-pooled
+	// (rejection_reason set, branch intact) but was invisible to pool-demand
+	// dispatch, which filters on gc.routed_to.
+	//
+	// Preserving is safe for the caller's follow-up re-sling: a re-sling to a
+	// different target overwrites the route, and a re-sling to the same target
+	// hits resolveConvoyRecovery, which detects the just-deleted workflow and
+	// re-runs finalize rather than short-circuiting as idempotent.
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1325,7 +1333,7 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
 		t.Fatalf("SetMetadata(workflow_id): %v", err)
 	}
-	if err := store.SetMetadata(source.ID, "gc.routed_to", "mayor"); err != nil {
+	if err := store.SetMetadata(source.ID, "gc.routed_to", "myrig/voxist.executor"); err != nil {
 		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
 	}
 	if err := store.SetMetadata(source.ID, "gc.session_affinity", "require"); err != nil {
@@ -1354,14 +1362,66 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 	if got := strings.TrimSpace(updated.Metadata["workflow_id"]); got != "" {
 		t.Fatalf("workflow_id = %q, want cleared", got)
 	}
-	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
-		t.Fatalf("gc.routed_to = %q, want cleared (no gc.run_target → legacy blank)", got)
+	const wantRoute = "myrig/voxist.executor"
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != wantRoute {
+		t.Fatalf("gc.routed_to = %q, want %q preserved (no gc.run_target → keep existing route)", got, wantRoute)
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.session_affinity"]); got != "" {
 		t.Fatalf("gc.session_affinity = %q, want cleared with unassigned reopen", got)
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.continuation_group"]); got != "" {
 		t.Fatalf("gc.continuation_group = %q, want cleared with unassigned reopen", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
+func TestCmdWorkflowReopenSourceLeavesRouteBlankWhenNoRouteAvailable(t *testing.T) {
+	// ga-20zd: preserving an existing route must not invent one. A bead
+	// carrying neither gc.run_target nor gc.routed_to still reopens blank —
+	// the pre-existing behavior for that class is unchanged.
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
+		t.Fatalf("gc.routed_to = %q, want blank (no run_target, no prior route)", got)
 	}
 	if updated.Status != "open" {
 		t.Fatalf("status = %q, want open", updated.Status)

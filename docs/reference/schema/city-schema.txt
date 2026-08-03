@@ -243,6 +243,10 @@
           "type": "string",
           "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
         },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the\nidle-timeout ladder may defer on the same assigned-work bead\n(DecideIdleTimeout's AssignedWorkHas rung) before the reconciler\noverrides the defer and forces a stop via DecideAssignedWorkExhausted.\nNil means use the built-in default. Without this backstop a session\nanchored to a bead that never clears assigned-work (e.g. a bead stuck\nopen due to an upstream status-mapping bug) would defer indefinitely,\nreproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at\nthe single-tick level. The counter resets whenever the anchor bead\nchanges or the session is not idle-kill-eligible; see\nsessionHasAwakeAssignedWorkForReachableStore's caller in\nsession_reconciler.go."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
@@ -521,6 +525,10 @@
         "max_session_age_jitter": {
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
+        },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -802,6 +810,10 @@
         "max_session_age_jitter": {
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
+        },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
         },
         "sleep_after_idle": {
           "type": "string",

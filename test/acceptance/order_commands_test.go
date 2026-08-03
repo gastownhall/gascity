@@ -38,8 +38,9 @@ func TestOrderGastownCity(t *testing.T) {
 	})
 
 	t.Run("Show_DisplaysDetails", func(t *testing.T) {
-		// List orders to find a real name.
-		listOut, err := c.GC("order", "list")
+		// List orders to find a real name. Parse stdout only: config
+		// advisories on stderr would otherwise shift the data rows.
+		listOut, err := c.GCStdout("order", "list")
 		if err != nil {
 			t.Fatalf("gc order list: %v\n%s", err, listOut)
 		}
@@ -88,8 +89,9 @@ func TestOrderRunGastownCity(t *testing.T) {
 	})
 
 	t.Run("Run_RealOrder_DoesNotCrash", func(t *testing.T) {
-		// List orders to find a real name.
-		listOut, err := c.GC("order", "list")
+		// List orders to find a real name. Parse stdout only: config
+		// advisories on stderr would otherwise shift the data rows.
+		listOut, err := c.GCStdout("order", "list")
 		if err != nil {
 			t.Fatalf("gc order list: %v\n%s", err, listOut)
 		}
