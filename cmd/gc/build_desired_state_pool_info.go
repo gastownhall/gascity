@@ -154,13 +154,6 @@ func claimPreferredPoolSlotWithConfigInfo(
 			return slot
 		}
 	}
-	if slot := existingPoolSlotWithConfigInfo(cfg, cfgAgent, info); slot > 0 {
-		if used[slot] {
-			return 0
-		}
-		used[slot] = true
-		return slot
-	}
 	return claimPoolSlotWithConfigInfo(cfg, cfgAgent, info, used)
 }
 
