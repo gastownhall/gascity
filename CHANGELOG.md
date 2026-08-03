@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dry-run default, where they are the only backend cost) so the scan never
   does unbounded reads per tick. Fixes #3780.
 
+- **The legacy workspace-identity deprecation warning now caveats that
+  following it can silently break packs pinned to an older revision.**
+  `city.toml`'s `workspace.name`/`workspace.prefix` deprecation hint told
+  operators to move those fields to `.gc/site.toml`, but any installed pack
+  still pinned to a revision that reads `workspace.name` directly (rather
+  than the newer site-binding-aware resolution) would silently lose its
+  identity/routing once the field was removed — reported after one
+  deployment lost inbound Discord messages for ~2 days with zero alarms
+  before anyone checked delivery receipts. The warning now says so
+  explicitly, so operators check pack compatibility before acting on it.
+  (#3887)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
