@@ -27,10 +27,13 @@ type TaggedEvent struct {
 	Subject   string
 	RunID     string
 	SessionID string
-	StepID    string   // opaque acting-work-bead (run step) id; safeRef-gated at projection (EmitCorrelation)
-	Title     string   // FREE-FORM bead title; emitted only under the content opt-in (Options.emitContent)
-	Formula   string   // FREE-FORM run formula name; emitted only under the content opt-in (Options.emitContent)
-	_         struct{} // force keyed literals; blocks positional field transposition
+	StepID    string // native execution-step identity (nonblank UTF-8, <=256 bytes; EmitCorrelation)
+	// DependsOnStepIDs is nil when native topology is unknown; an explicit empty
+	// slice represents a known root.
+	DependsOnStepIDs *[]string
+	Title            string   // FREE-FORM bead title; emitted only under the content opt-in (Options.emitContent)
+	Formula          string   // FREE-FORM run formula name; emitted only under the content opt-in (Options.emitContent)
+	_                struct{} // force keyed literals; blocks positional field transposition
 }
 
 // Source yields tagged events in per-city seq order. The real Source wraps the
@@ -49,7 +52,7 @@ type Config struct {
 	TokenProvider     func() (string, error)
 	Salt              []byte
 	ExportRef         bool
-	EmitCorrelation   bool // emit opaque run_id/session_id/step_id (default false)
+	EmitCorrelation   bool // emit run/session correlation plus native step topology (default false)
 	Profile           Profile
 	BatchMax          int           // max events per POST (default 1000)
 	BatchInterval     time.Duration // max time between POSTs (default 5s)
@@ -179,8 +182,8 @@ func (e *Exporter) ingest(te TaggedEvent) {
 		return // already processed (resume overlap)
 	}
 	e.high[te.City] = te.Seq
-	// Correlation ids (run_id/session_id/step_id) are emitted only when
-	// EmitCorrelation is set (default false), so the projection stays envelope-only
+	// Run/session correlation plus native execution-step topology are emitted only
+	// when EmitCorrelation is set (default false), so the projection stays envelope-only
 	// unless opted in. The Exporter intentionally exposes no content (title/formula)
 	// opt-in: the producer path — a reachable Config knob plus the typed source
 	// fields — is staged behind ga-mt1e99, and the projection's content gate

@@ -51,9 +51,6 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 }
 
 func TestStartTimeStableForLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time reads /proc/<pid>/stat on linux")
-	}
 	first, err := StartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
@@ -81,9 +78,6 @@ func TestStartTimeRejectsInvalidPID(t *testing.T) {
 // one (the recycled-PID case) reports dead even though the PID is live, and an
 // empty start time falls back to plain liveness.
 func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time identity uses /proc on linux")
-	}
 	self := os.Getpid()
 	st, err := StartTime(self)
 	if err != nil {

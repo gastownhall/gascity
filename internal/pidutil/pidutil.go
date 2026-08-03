@@ -17,6 +17,9 @@ import (
 const (
 	psZombieTimeout  = 100 * time.Millisecond
 	childEnumTimeout = 1 * time.Second
+	// psStartTimeTimeout bounds the portable start-time probe. Callers sit in a
+	// post-SIGKILL reap loop, so a hung ps must not stall them.
+	psStartTimeTimeout = 1 * time.Second
 )
 
 // psCmdlineTimeout bounds the portable argv probe. Callers run on reconciler
@@ -50,9 +53,12 @@ func Alive(pid int) bool {
 // recycled PID from the original target. The kernel never reuses a (pid,
 // starttime) pair for the lifetime of a boot, so a changed start time on the
 // same PID proves the original process is gone and an unrelated one now holds
-// the number. It returns an error on platforms without /proc (e.g. darwin) or
-// when the process record is unreadable; callers treat that as "no identity
-// signal available" and fall back to plain liveness.
+// the number. Where /proc is unavailable (e.g. darwin) it falls back to ps,
+// which reports a wall-clock start date rather than jiffies; the token is
+// opaque and only ever compared against another read the same way on the same
+// host, so the differing format does not matter. It returns an error only when
+// neither mechanism can answer; callers treat that as "no identity signal
+// available" and fall back to plain liveness.
 //
 // The comm field (field 2) is wrapped in parens and may itself contain spaces
 // and parens, so parsing anchors on the final ')' and counts fields from
@@ -64,7 +70,7 @@ func StartTime(pid int) (string, error) {
 	}
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return "", err
+		return psStartTime(pid)
 	}
 	stat := string(data)
 	rparen := strings.LastIndexByte(stat, ')')
@@ -86,11 +92,11 @@ func StartTime(pid int) (string, error) {
 // wrongly report the (dead) target as still alive.
 //
 // An empty startTime disables the identity check and falls back to Alive — used
-// on platforms without /proc start-time support (darwin) or when the original
-// start time could not be captured before the wait. A non-empty startTime that
-// no longer matches means the PID was recycled: the original target is dead, so
-// this returns false. When the current start time cannot be read despite Alive
-// reporting true (a transient race, no /proc), it keeps the conservative Alive
+// when the original start time could not be captured before the wait. A
+// non-empty startTime that no longer matches means the PID was recycled: the
+// original target is dead, so this returns false. When the current start time
+// cannot be read despite Alive reporting true (a transient race, or a host
+// where neither /proc nor ps can answer), it keeps the conservative Alive
 // answer rather than inventing a death.
 func AliveWithStartTime(pid int, startTime string) bool {
 	if !Alive(pid) {
@@ -252,6 +258,35 @@ func ChildPIDs(parent int) ([]int, error) {
 		}
 	}
 	return children, nil
+}
+
+// psStartTime reads a PID's start time with ps, for hosts without /proc.
+//
+// The two mechanisms return different formats — /proc gives jiffies since boot,
+// ps gives a wall-clock date — and that is fine, because the identity check only
+// ever compares a value captured earlier against one read later on the SAME
+// host, so the same mechanism produces both. The values are never compared
+// across platforms.
+//
+// One granularity limitation: ps -o lstart= has one-second resolution, so a PID
+// recycled within the same second as its predecessor started would compare equal
+// and the reuse would go undetected. That is strictly narrower than the window
+// the check closes today, where the identity check does not run at all off
+// Linux, and the consequence of a miss is the pre-existing conservative answer
+// rather than a wrong death.
+func psStartTime(pid int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), psStartTimeTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading start time for pid %d via ps: %w", pid, err)
+	}
+	identity := strings.TrimSpace(string(out))
+	if identity == "" {
+		return "", fmt.Errorf("no start time reported for pid %d", pid)
+	}
+	return identity, nil
 }
 
 // psCmdline reads a PID's argv with ps, for hosts without /proc.
