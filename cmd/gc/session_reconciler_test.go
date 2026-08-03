@@ -7743,6 +7743,28 @@ func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLas
 	}
 }
 
+func TestPendingCreateLeaseExpiredForRollbackChecksInFlightBeforeAsleepRecovery(t *testing.T) {
+	startedAt := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: startedAt.Add(90 * time.Second)}
+	startupTimeout := 5 * time.Minute
+	session := makeBead("b1", map[string]string{
+		"pending_create_claim":      "true",
+		"pending_create_started_at": startedAt.Format(time.RFC3339),
+		"last_woke_at":              startedAt.Format(time.RFC3339),
+		"state":                     "asleep",
+	})
+	session.CreatedAt = startedAt
+
+	if pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+		t.Fatal("asleep projection bypassed the active provider-start lease")
+	}
+
+	clk.Time = startedAt.Add(308 * time.Second)
+	if !pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+		t.Fatal("asleep recovery did not expire after the configured provider-start lease")
+	}
+}
+
 func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
 	trace := &sessionReconcilerTraceCycle{
 		tracer: &SessionReconcilerTracer{
