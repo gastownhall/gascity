@@ -359,10 +359,13 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				Name:            "agent",
 				Image:           p.image,
 				ImagePullPolicy: corev1.PullAlways,
-				// Not podWorkDir: the kubelet chdirs here before the entrypoint
+				// Not podWorkDir: the runtime resolves this before the entrypoint
 				// runs, so naming a per-bead directory that nothing has created
-				// yet fails the container outright. The entrypoint creates and
-				// enters podWorkDir itself.
+				// yet is unsafe. containerd creates the whole chain itself as
+				// root:root 0755, leaving the non-root agent unable to write into
+				// its own working directory; other runtimes may refuse to start
+				// the container. The entrypoint creates and enters podWorkDir
+				// itself, as the agent user, so it comes out owned correctly.
 				WorkingDir:      podWorkspaceRoot,
 				Command:         []string{"/bin/sh", "-c"},
 				Args:            []string{tmuxCmd},

@@ -121,8 +121,9 @@ func TestSessionScriptStartRigManifestUsesPodPaths(t *testing.T) {
 	}
 	// The manifest's workingDir is the workspace root, which always exists: the
 	// kubelet chdirs there before the entrypoint runs, so naming a directory
-	// that nothing has created yet (a per-bead pool/workflow workDir) would fail
-	// the container outright. The entrypoint enters the pod-mapped agent dir.
+	// that nothing has created yet (a per-bead pool/workflow workDir) would leave
+	// the agent in a root-owned directory it cannot write into. The entrypoint
+	// creates and enters the pod-mapped agent dir itself.
 	if got := result.containerWorkingDir; got != podWorkspaceRoot {
 		t.Fatalf("container workingDir = %q, want %q", got, podWorkspaceRoot)
 	}

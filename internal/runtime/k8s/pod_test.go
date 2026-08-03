@@ -161,7 +161,8 @@ const perBeadPodWorkDir = "/workspace/rigs/testrig/tr-abc-slug"
 // TestBuildPod_WorkingDirIsAlwaysAnExistingPath pins that the pod spec never
 // names a directory that may not exist yet. The kubelet chdirs into the
 // container's WorkingDir before the entrypoint runs, so a per-bead WorkingDir
-// fails the container before any command — including pre_start — can create it.
+// is created by the runtime as root:root (containerd) or rejected outright —
+// either way no command, including pre_start, gets to create it correctly.
 // The workspace root always exists (EmptyDir mount when staged, WORKDIR in the
 // prebaked image), so the spec points there and the entrypoint enters the
 // per-bead directory itself.
