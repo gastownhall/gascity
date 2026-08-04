@@ -75,10 +75,10 @@ import (
 // it implies.
 //
 // v2 replaced the cleartext city_id with a salted, non-reversible city_hash so
-// an operator-chosen city name (which can itself embed a customer/org
-// identifier) no longer leaves the box. v3 adds native execution-step
-// dependencies to the envelope.
-const SchemaVersion = 3
+// an operator-chosen city name no longer leaves the box. v3 adds native
+// execution-step dependencies to the envelope. v4 adds fail-closed execution
+// work-association and step-definition facts.
+const SchemaVersion = 4
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -120,6 +120,8 @@ var allowedTypes = map[string]bool{
 	"convoy.closed":                          true,
 	"controller.started":                     true,
 	"events.rotated":                         true,
+	"execution.step_defined":                 true,
+	"execution.work_associated":              true,
 	"session.drain_acked_with_assigned_work": true,
 	"session.reset_stalled":                  true,
 	"project.identity.stamped":               true,
@@ -138,9 +140,11 @@ var mailReduced = map[string]bool{"mail.sent": true}
 // session/rig name, a hostname) is free of paths, author text, or third-party
 // identifiers, so we never emit one.
 var refTypes = map[string]bool{
-	"bead.created":  true,
-	"bead.closed":   true,
-	"convoy.closed": true,
+	"bead.created":              true,
+	"bead.closed":               true,
+	"convoy.closed":             true,
+	"execution.step_defined":    true,
+	"execution.work_associated": true,
 }
 
 // IsAllowed reports whether an event type is on the export allowlist.
@@ -202,7 +206,7 @@ type Batch struct {
 // the envelope-only default, and keeping it package-private is what makes the
 // SchemaVersion no-bump exemption sound. An out-of-package importer constructs
 // Options with keyed literals and so CANNOT enable content, which means no caller
-// of the exported ProjectEvent can emit Title/Formula on a SchemaVersion==3
+// of the exported ProjectEvent can emit Title/Formula on a SchemaVersion==4
 // batch. The field exists only for in-package projection tests and the future
 // producer path (ga-mt1e99), which owns exposing a reachable opt-in and the
 // SchemaVersion decision that reachable content egress then requires.
@@ -270,6 +274,9 @@ func ProjectEvent(te TaggedEvent, opt Options) (Envelope, bool) {
 	if te.DependsOnStepIDs != nil && !opt.EmitCorrelation {
 		return Envelope{}, false
 	}
+	if executionFactTypes[te.Type] {
+		return projectExecutionFact(te, opt)
+	}
 	env := Envelope{Seq: te.Seq, Type: te.Type, TS: te.Ts.UTC().Format(time.RFC3339Nano)}
 	if mailReduced[te.Type] {
 		return env, true // {type, ts} only
@@ -309,6 +316,47 @@ func ProjectEvent(te TaggedEvent, opt Options) (Envelope, bool) {
 		if f := capContent(te.Formula); f != "" {
 			env.Formula = f
 		}
+	}
+	return env, true
+}
+
+var executionFactTypes = map[string]bool{
+	"execution.work_associated": true,
+	"execution.step_defined":    true,
+}
+
+func projectExecutionFact(te TaggedEvent, opt Options) (Envelope, bool) {
+	if !opt.EmitCorrelation || !opt.ExportRef || te.SessionID != "" || te.Title != "" || te.Formula != "" {
+		return Envelope{}, false
+	}
+	ref, runID := safeRef(te.Subject), safeRef(te.RunID)
+	if ref == "" || runID == "" {
+		return Envelope{}, false
+	}
+	env := Envelope{
+		Seq:       te.Seq,
+		Type:      te.Type,
+		TS:        te.Ts.UTC().Format(time.RFC3339Nano),
+		ActorHash: ActorHash(opt.Salt, te.Actor),
+		Ref:       ref,
+		RunID:     runID,
+	}
+	switch te.Type {
+	case "execution.work_associated":
+		if te.StepID != "" || te.DependsOnStepIDs != nil {
+			return Envelope{}, false
+		}
+	case "execution.step_defined":
+		stepID := validExecutionStepID(te.StepID)
+		if stepID == "" {
+			return Envelope{}, false
+		}
+		dependencies, ok := normalizeStepDependencies(stepID, te.DependsOnStepIDs)
+		if !ok {
+			return Envelope{}, false
+		}
+		env.StepID = stepID
+		env.DependsOnStepIDs = dependencies
 	}
 	return env, true
 }
@@ -361,6 +409,11 @@ func ValidateEnvelope(env Envelope) error {
 	if err := validateStepDependencies(env.StepID, env.DependsOnStepIDs); err != nil {
 		return err
 	}
+	if executionFactTypes[env.Type] {
+		if err := validateExecutionFact(env); err != nil {
+			return err
+		}
+	}
 	// Title/Formula are free-form content (the content opt-in exception): the wire
 	// invariant is a length bound, NOT opaqueness — charset is unrestricted.
 	if len(env.Title) > maxContentLen {
@@ -368,6 +421,26 @@ func ValidateEnvelope(env Envelope) error {
 	}
 	if len(env.Formula) > maxContentLen {
 		return fmt.Errorf("eventexport: formula exceeds %d bytes", maxContentLen)
+	}
+	return nil
+}
+
+func validateExecutionFact(env Envelope) error {
+	if env.Ref == "" || env.RunID == "" {
+		return fmt.Errorf("eventexport: %q requires nonempty ref and run_id", env.Type)
+	}
+	if env.SessionID != "" || env.Title != "" || env.Formula != "" {
+		return fmt.Errorf("eventexport: %q must not carry session_id or content", env.Type)
+	}
+	switch env.Type {
+	case "execution.work_associated":
+		if env.StepID != "" || env.DependsOnStepIDs != nil {
+			return fmt.Errorf("eventexport: %q must not carry step topology", env.Type)
+		}
+	case "execution.step_defined":
+		if env.StepID == "" {
+			return fmt.Errorf("eventexport: %q requires step_id", env.Type)
+		}
 	}
 	return nil
 }

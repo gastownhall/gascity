@@ -2454,6 +2454,195 @@ func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *te
 	}
 }
 
+func TestRunControlDispatcherReprojectsCurrentExecutionFactsAfterControl(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "expand.formula.toml"), []byte(`
+formula = "expand"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[vars.reviewer]
+required = true
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+`), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+	store := beads.NewMemStore()
+	root, source, control := createFanoutControl(t, store)
+	before, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("list workflow beads before fanout: %v", err)
+	}
+	for _, workflowBead := range before {
+		if workflowBead.Metadata[beadmeta.StepIDMetadataKey] != "" {
+			t.Fatalf("pre-control workflow bead %s already has a step id", workflowBead.ID)
+		}
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Metadata[beadmeta.FanoutStateMetadataKey] != beadmeta.SpawnStateSpawned {
+		t.Fatalf("fanout state = %q, want spawned", after.Metadata[beadmeta.FanoutStateMetadataKey])
+	}
+	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	childIDs := map[string]struct{}{}
+	workflowBeads, err := store.ListByMetadata(map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}, 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("list workflow beads: %v", err)
+	}
+	for _, workflowBead := range workflowBeads {
+		if workflowBead.ID != source.ID && workflowBead.Metadata[beadmeta.StepIDMetadataKey] != "" {
+			childIDs[workflowBead.ID] = struct{}{}
+		}
+	}
+	if len(childIDs) == 0 {
+		t.Fatal("fanout did not create a graph step")
+	}
+	if len(recorded) == 0 {
+		t.Fatal("no execution facts recorded after fanout")
+	}
+	foundNewStep := false
+	for _, event := range recorded {
+		if event.Type == events.ExecutionStepDefined && event.RunID == root.ID {
+			if _, ok := childIDs[event.Subject]; ok {
+				foundNewStep = true
+			}
+		}
+	}
+	if !foundNewStep {
+		t.Fatalf("execution events = %#v, want a fact for post-control graph steps %v", recorded, childIDs)
+	}
+}
+
+func TestRunControlDispatcherPreservesSuccessfulControlWhenReprojectionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	_, _, control := createProcessedScopeCheckControl(t, store, false)
+
+	var stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control, control.ID, &config.City{Workspace: config.Workspace{Name: "test-city"}}, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed despite projection failure", after.Status)
+	}
+	if !strings.Contains(stderr.String(), "projecting execution facts") {
+		t.Fatalf("stderr = %q, want observable projection failure", stderr.String())
+	}
+}
+
+func createProcessedScopeCheckControl(t *testing.T, store beads.Store, graphV2 bool) (beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	rootMetadata := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
+	if graphV2 {
+		rootMetadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+	}
+	root, err := store.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: rootMetadata})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	body, err := store.Create(beads.Bead{Title: "scope body", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScope,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+	}})
+	if err != nil {
+		t.Fatalf("create body: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{Title: "subject", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  "member",
+		beadmeta.StepIDMetadataKey:     "workflow.subject",
+	}})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	if err := store.Close(subject.ID); err != nil {
+		t.Fatalf("close subject: %v", err)
+	}
+	control, err := store.Create(beads.Bead{Title: "scope check", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "scope",
+		beadmeta.ScopeRoleMetadataKey:  "control",
+	}})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, subject.ID, "blocks"); err != nil {
+		t.Fatalf("add control dependency: %v", err)
+	}
+	if err := store.DepAdd(body.ID, control.ID, "blocks"); err != nil {
+		t.Fatalf("add body dependency: %v", err)
+	}
+	return root, subject, control
+}
+
+func createFanoutControl(t *testing.T, store beads.Store) (beads.Bead, beads.Bead, beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "prepare items", Type: "task", Status: "closed", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey:    "source",
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		beadmeta.OutputJSONMetadataKey: `{"items":[{"name":"reviewer"}]}`,
+	}})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	control, err := store.Create(beads.Bead{Title: "fan out items", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindFanout,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ControlForMetadataKey: "source",
+		beadmeta.ForEachMetadataKey:    "output.items",
+		beadmeta.BondMetadataKey:       "expand",
+		beadmeta.BondVarsMetadataKey:   `{"reviewer":"{item.name}"}`,
+		beadmeta.FanoutModeMetadataKey: "parallel",
+	}})
+	if err != nil {
+		t.Fatalf("create fanout: %v", err)
+	}
+	if err := store.DepAdd(control.ID, source.ID, "blocks"); err != nil {
+		t.Fatalf("add fanout dependency: %v", err)
+	}
+	return root, source, control
+}
+
 type transientGetStore struct {
 	beads.Store
 	failID string
