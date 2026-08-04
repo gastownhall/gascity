@@ -7,15 +7,18 @@ import { useAttentionModel } from '../attention/context';
 import { resourceAttentionSeverity } from '../attention/routeHighlight';
 import { BeadAttentionPanel } from '../components/beads/BeadAttentionPanel';
 import { BeadBoardSection } from '../components/beads/BeadBoardSection';
+import { BeadTreeSection } from '../components/beads/BeadTreeSection';
 import { BeadDetailModal } from '../components/BeadDetailModal';
 import { Button } from '../components/Button';
 import { FilterChips } from '../components/FilterChips';
 import { ListSearchBar } from '../components/ListSearchBar';
 import { Modal } from '../components/Modal';
 import { PageHeader } from '../components/PageHeader';
+import { SortToggle } from '../components/SortToggle';
 import { StatusBadge } from '../components/StatusBadge';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
 import { buildBeadGraph } from '../lib/beadGraph';
+import { readBrowserStorage, writeBrowserStorage } from '../lib/browserStorage';
 import { resolveRigName, rigNameOptions } from '../lib/rigNames';
 import { useCachedData } from '../hooks/useCachedData';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
@@ -38,6 +41,15 @@ const CLOSED_CHIP_ID = 'closed';
 // board's SSE-driven refresh into a much wider trailing window so churn yields
 // at most one refetch per window and a latency spike can no longer empty it.
 const BOARD_REFRESH_COALESCE_MS = 10_000;
+
+type BeadsView = 'list' | 'board';
+const VIEW_OPTIONS: ReadonlyArray<{ id: BeadsView; label: string }> = [
+  { id: 'list', label: 'List' },
+  { id: 'board', label: 'Board' },
+];
+const VIEW_STORAGE_PREFIX = 'gcd:beads:view:';
+const EXPANDED_STORAGE_PREFIX = 'gcd:beads:tree:expanded:';
+const STORAGE_COMPONENT = 'BeadsPage';
 
 interface ActionMessage {
   tone: 'ok' | 'error';
@@ -63,6 +75,10 @@ export function BeadsPage() {
   const readOnly = useReadOnly();
   const cityName = getActiveCity();
   const cityCacheKey = cityName ?? 'no-city';
+  const [view, setView] = useState<BeadsView>(() => loadBeadsView(cityCacheKey));
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() =>
+    loadExpandedIds(cityCacheKey),
+  );
   const [searchParams] = useSearchParams();
   const selectedBeadParam = normalizeSelectedBeadParam(searchParams.get('bead'));
   const [rigFilter, setRigFilter] = useState<string>(RIG_FILTER_ALL);
@@ -149,6 +165,11 @@ export function BeadsPage() {
     }
   }, [dispatchRigOptions, rigFilter]);
 
+  useEffect(() => {
+    setView(loadBeadsView(cityCacheKey));
+    setExpandedIds(loadExpandedIds(cityCacheKey));
+  }, [cityCacheKey]);
+
   const filteredRows = rows;
 
   const filters = useListFilters<SupervisorBead>({
@@ -174,6 +195,65 @@ export function BeadsPage() {
       toggleChip(id);
     },
     [toggleChip],
+  );
+
+  const changeView = useCallback(
+    (next: BeadsView) => {
+      setView(next);
+      writeBrowserStorage(
+        'localStorage',
+        `${VIEW_STORAGE_PREFIX}${cityCacheKey}`,
+        next,
+        STORAGE_COMPONENT,
+      );
+    },
+    [cityCacheKey],
+  );
+
+  const updateExpandedIds = useCallback(
+    (update: (current: ReadonlySet<string>) => ReadonlySet<string>) => {
+      setExpandedIds((current) => {
+        const next = update(current);
+        writeBrowserStorage(
+          'sessionStorage',
+          `${EXPANDED_STORAGE_PREFIX}${cityCacheKey}`,
+          JSON.stringify(Array.from(next)),
+          STORAGE_COMPONENT,
+        );
+        return next;
+      });
+    },
+    [cityCacheKey],
+  );
+
+  const toggleExpanded = useCallback(
+    (beadId: string) => {
+      updateExpandedIds((current) => {
+        const next = new Set(current);
+        if (next.has(beadId)) next.delete(beadId);
+        else next.add(beadId);
+        return next;
+      });
+    },
+    [updateExpandedIds],
+  );
+
+  const expandAll = useCallback(
+    (beadIds: readonly string[]) => {
+      updateExpandedIds((current) => new Set([...current, ...beadIds]));
+    },
+    [updateExpandedIds],
+  );
+
+  const collapseAll = useCallback(
+    (beadIds: readonly string[]) => {
+      updateExpandedIds((current) => {
+        const next = new Set(current);
+        for (const beadId of beadIds) next.delete(beadId);
+        return next;
+      });
+    },
+    [updateExpandedIds],
   );
 
   useGcEventRefresh([GC_EVENT_PREFIX.bead], () => void refresh(), {
@@ -262,7 +342,17 @@ export function BeadsPage() {
   }, [newAgent, newBody, newRig, newTitle, readOnly, refresh]);
 
   const matched = useMemo(() => filters.groups.flatMap((group) => group.rows), [filters.groups]);
-  const graph = useMemo(() => buildBeadGraph(matched), [matched]);
+  const graph = useMemo(() => buildBeadGraph(filteredRows), [filteredRows]);
+  const allRowsByProject = useMemo(() => {
+    const map = new Map<string, SupervisorBead[]>();
+    for (const row of filteredRows) {
+      const key = beadProject(row);
+      const projectRows = map.get(key);
+      if (projectRows) projectRows.push(row);
+      else map.set(key, [row]);
+    }
+    return map;
+  }, [filteredRows]);
   const groupIds = useMemo(() => {
     const map = new Map<string, Set<string>>();
     for (const group of filters.groups) {
@@ -271,8 +361,8 @@ export function BeadsPage() {
     return map;
   }, [filters.groups]);
   const selectedBead = useMemo(
-    () => matched.find((bead) => bead.id === selectedId) ?? null,
-    [matched, selectedId],
+    () => filteredRows.find((bead) => bead.id === selectedId) ?? null,
+    [filteredRows, selectedId],
   );
   const selectedNode = useMemo(
     () => (selectedId === null ? null : (graph.nodes.get(selectedId) ?? null)),
@@ -282,6 +372,7 @@ export function BeadsPage() {
     () => (beadId: string) => resourceAttentionSeverity(attention, 'beads', beadId),
     [attention],
   );
+  const forceExpanded = filters.search.trim().length > 0 || filters.activeChipIds.size > 0;
 
   // The "Needs you" section (gascity-dashboard-2j8e.3) renders the same
   // beads-domain attention items the nav badge counts, so the page count and the
@@ -420,6 +511,13 @@ export function BeadsPage() {
           ariaLabel="Search beads"
         />
         <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
+          <SortToggle
+            value={view}
+            options={VIEW_OPTIONS}
+            onChange={changeView}
+            legend="View"
+            ariaLabel="Beads view"
+          />
           <FilterChips
             chips={BEAD_CHIPS}
             activeIds={filters.activeChipIds}
@@ -455,7 +553,7 @@ export function BeadsPage() {
             ? 'No beads match the current search or filter.'
             : 'Nothing on the queue right now.'}
         </p>
-      ) : (
+      ) : view === 'board' ? (
         <div className="space-y-12">
           {filters.groups.map((group) => (
             <BeadBoardSection
@@ -464,6 +562,28 @@ export function BeadsPage() {
               count={group.totalInProject}
               graph={graph}
               ids={groupIds.get(group.projectKey) ?? EMPTY_IDS}
+              selectedId={selectedId}
+              attentionSeverity={beadAttentionSeverity}
+              onSelect={setSelectedId}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-10">
+          {filters.groups.map((group) => (
+            <BeadTreeSection
+              key={group.projectKey}
+              label={group.project}
+              count={group.totalInProject}
+              rows={allRowsByProject.get(group.projectKey) ?? group.rows}
+              visibleIds={groupIds.get(group.projectKey) ?? EMPTY_IDS}
+              expandedIds={expandedIds}
+              collapsed={group.collapsed}
+              forceExpanded={forceExpanded}
+              onToggleProject={() => filters.toggleProject(group.projectKey)}
+              onToggleExpanded={toggleExpanded}
+              onExpandAll={expandAll}
+              onCollapseAll={collapseAll}
               selectedId={selectedId}
               attentionSeverity={beadAttentionSeverity}
               onSelect={setSelectedId}
@@ -650,4 +770,32 @@ function buildSynopsis(
   if (rigFilter !== RIG_FILTER_ALL) summary = `${rigFilter}: ${summary}`;
   if (totalShown > filtered.length) summary += ` Showing ${filtered.length} of ${totalShown}.`;
   return summary;
+}
+
+function loadBeadsView(cityCacheKey: string): BeadsView {
+  const stored = readBrowserStorage(
+    'localStorage',
+    `${VIEW_STORAGE_PREFIX}${cityCacheKey}`,
+    STORAGE_COMPONENT,
+  );
+  return stored.status === 'found' && stored.value === 'board' ? 'board' : 'list';
+}
+
+function loadExpandedIds(cityCacheKey: string): ReadonlySet<string> {
+  const stored = readBrowserStorage(
+    'sessionStorage',
+    `${EXPANDED_STORAGE_PREFIX}${cityCacheKey}`,
+    STORAGE_COMPONENT,
+  );
+  if (stored.status !== 'found') return new Set();
+  try {
+    const parsed: unknown = JSON.parse(stored.value);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((value): value is string => typeof value === 'string'));
+    }
+  } catch {
+    // Treat malformed browser state as empty. Storage access failures are
+    // already reported by readBrowserStorage.
+  }
+  return new Set();
 }

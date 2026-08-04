@@ -20,6 +20,8 @@ const fetchCalls: FetchCall[] = [];
 
 beforeEach(() => {
   setActiveCity('test-city');
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   fetchCalls.length = 0;
   invalidate('beads:board:');
   invalidate('sessions');

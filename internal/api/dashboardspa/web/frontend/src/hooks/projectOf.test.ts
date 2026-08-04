@@ -46,6 +46,8 @@ describe('beadProject', () => {
     ['code-intel-digest-mp5', 'code-intel-digest'],
     ['codeprobe-gg9f', 'codeprobe'],
     ['codeprobe-4cl6.2', 'codeprobe'],
+    ['cc-03g.1.1', 'cc'],
+    ['cc-03g.1.1.1', 'cc'],
     ['co-ysv', 'co'],
   ])('parses %s → %s', (id, expected) => {
     expect(beadProject({ id } as never)).toBe(expected);
