@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -253,6 +257,80 @@ func TestEventsReemitExecutionRejectsRunningStateAndAllowsStoppedSupervisorCity(
 			t.Fatalf("stopped reemit = %d; stderr=%q", code, stderr.String())
 		}
 	})
+}
+
+func TestEventsReemitExecutionHoldsControllerLockUntilCompletion(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath, root := setupExecutionReemitCity(t)
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	previousHook := executionReemitAfterLockAcquiredHook
+	executionReemitAfterLockAcquiredHook = func() {
+		close(acquired)
+		<-release
+	}
+	t.Cleanup(func() { executionReemitAfterLockAcquiredHook = previousHook })
+
+	result := make(chan struct {
+		code   int
+		stderr string
+	}, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		result <- struct {
+			code   int
+			stderr string
+		}{
+			code:   run([]string{"--city", cityPath, "events", "reemit-execution", "--run", root.ID}, &stdout, &stderr),
+			stderr: stderr.String(),
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	select {
+	case <-acquired:
+	case <-ctx.Done():
+		t.Fatalf("reemit command did not reach controller-lock barrier: %v", ctx.Err())
+	}
+
+	lockPath := filepath.Join(cityPath, ".gc", "controller.lock")
+	competitor, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open competing controller lock: %v", err)
+	}
+	defer competitor.Close() //nolint:errcheck // test cleanup
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("competing controller lock = %v, want EWOULDBLOCK or EAGAIN", err)
+	}
+
+	close(release)
+	select {
+	case got := <-result:
+		if got.code != 0 {
+			t.Fatalf("reemit command = %d; stderr=%q", got.code, got.stderr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("reemit command did not complete after releasing barrier: %v", ctx.Err())
+	}
+
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("controller lock remained held after reemit completion: %v", err)
+	}
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("unlock competing controller lock: %v", err)
+	}
 }
 
 func TestEventsReemitExecutionProjectionFailureDoesNotOpenEventLog(t *testing.T) {
