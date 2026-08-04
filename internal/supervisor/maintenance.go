@@ -457,7 +457,11 @@ func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath
 // gc.store.maintenance.done or gc.store.maintenance.failed event. The
 // failed variant fires when run.Err is non-empty; the done variant
 // otherwise. Emission failures are swallowed (the recorder itself is
-// best-effort). Callers hold m.mu (the alert state is mu-guarded).
+// best-effort). emitRunEvent does not lock: the alert-dedup state it
+// mutates is guarded by m.mu, which production callers already hold —
+// m.mu doubles as the cycle lease, held for the whole maintenance run
+// (finishCycleLocked), so the alert mail send under it adds negligible
+// hold time to a lease that already spans the multi-minute cycle.
 func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 	m.maybeSendAlertLocked(run)
 	if m.recorder == nil {
@@ -638,7 +642,9 @@ func (m *StoreMaintenanceLoop) sendFailureAlert(run MaintenanceRun) {
 // succeeds after an alerted failure streak, closing the loop opened by
 // sendFailureAlert. Caller must hold m.mu (it reads the alert dedup
 // state). No-op when Mail is unset, AlertTo is empty, or no failure
-// alert was actually sent for the streak.
+// alert was attempted for the streak (alertFingerprint is empty).
+// Send success is not tracked: if the failure alert's Send errored,
+// the recovery notice is still attempted — both are best-effort.
 func (m *StoreMaintenanceLoop) sendRecoveryNotice(run MaintenanceRun) {
 	if m.mail == nil || m.cfg.AlertTo == "" || m.alertFingerprint == "" {
 		return
