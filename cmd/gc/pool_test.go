@@ -111,6 +111,12 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 		t.Skip("jq not installed")
 	}
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
+	// Isolate HOME so this test can't pick up an ambient ~/.beads/config.yaml
+	// (e.g. dolt.shared-server: true) and collide with an unrelated dolt
+	// server on the machine's default shared-server port. bd and shellScaleCheck
+	// both fall back to the live process env for HOME, so t.Setenv here covers
+	// every subprocess spawned below.
+	t.Setenv("HOME", t.TempDir())
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -155,6 +161,12 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 		t.Skip("jq not installed")
 	}
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
+	// Isolate HOME so this test can't pick up an ambient ~/.beads/config.yaml
+	// (e.g. dolt.shared-server: true) and collide with an unrelated dolt
+	// server on the machine's default shared-server port. bd and shellScaleCheck
+	// both fall back to the live process env for HOME, so t.Setenv here covers
+	// every subprocess spawned below.
+	t.Setenv("HOME", t.TempDir())
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {

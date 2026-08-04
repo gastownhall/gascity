@@ -5849,6 +5849,13 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("BEADS_DIR", beadsDir)
+	// Isolate HOME so this test can't pick up an ambient ~/.beads/config.yaml
+	// (e.g. dolt.shared-server: true) and collide with an unrelated dolt
+	// server on the machine's default shared-server port. Both runExternal's
+	// bd subprocesses and buildDesiredState's internal shellScaleCheck/
+	// beads.ExecCommandRunnerWithEnv calls fall back to the live process env
+	// for HOME, so t.Setenv here covers every exec path below.
+	t.Setenv("HOME", t.TempDir())
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}

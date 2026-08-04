@@ -238,3 +238,44 @@ func TestResolveTemplateInjectsPerDispatcherTraceDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveTemplateSetsBeadsActorToQualifiedNameNotSessionName asserts that
+// BEADS_ACTOR matches GC_ALIAS (the qualified name the Work Loop claims beads
+// with via `bd update --claim --assignee=$GC_ALIAS`), not GC_SESSION_NAME (the
+// tmux-safe sanitized form, "/" -> "--"). Before this fix, BEADS_ACTOR was set
+// to the session name, so bd's cross-actor close guard rejected an agent's
+// own legitimately-claimed bead for every dir-qualified agent (refs
+// ga-jav9u9).
+func TestResolveTemplateSetsBeadsActorToQualifiedNameNotSessionName(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	qualifiedName := "app/builder"
+	agent := &config.Agent{Name: "builder", Dir: "app"}
+	tp, err := resolveTemplate(params, agent, qualifiedName, nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_SESSION_NAME"]; got == qualifiedName {
+		t.Fatalf("test setup invalid: GC_SESSION_NAME = %q should differ from qualifiedName %q to exercise the divergence this test targets", got, qualifiedName)
+	}
+	if got := tp.Env["BEADS_ACTOR"]; got != qualifiedName {
+		t.Fatalf("BEADS_ACTOR = %q, want %q (GC_ALIAS's qualified name); got session name %q instead", got, qualifiedName, tp.Env["GC_SESSION_NAME"])
+	}
+	if got := tp.Env["BEADS_ACTOR"]; got != tp.Env["GC_ALIAS"] {
+		t.Fatalf("BEADS_ACTOR = %q, want to match GC_ALIAS = %q", got, tp.Env["GC_ALIAS"])
+	}
+}
