@@ -1867,8 +1867,13 @@ func startPreparedStartCandidate(
 				// claim nudge once — the event-based symmetric counterpart to that
 				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
 				if store != nil {
-					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+					// Session beads are session-class: route the read and the
+					// marker write through the session coordination-class store so
+					// a [beads.classes.sessions] relocation reaches this path too.
+					// Identity to store at the default single-store backend.
+					sessStore := cliSessionStore(store, cfg, cityPath)
+					if raw, err := sessStore.Get(item.candidate.info.ID); err == nil {
+						deliverWarmBindClaimNudge(ctx, sp, sessStore, &raw, item.cfg.Nudge, warmClaim)
 					}
 				}
 				return false, nil
