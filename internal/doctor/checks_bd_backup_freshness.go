@@ -162,8 +162,18 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 // a scope with NO backup state at all, which is treated as safe — "no backup
 // configured" is DoltBackupCheck's concern, and failing closed there would
 // block bulk deletion on every unbacked city.
+//
+// maxAge is used as given and is not clamped, so a non-positive value reads
+// every scope as stale and blocks every deletion.
 func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now time.Time) (bool, string) {
 	check := NewBdBackupFreshnessCheckForConfig(cityPath, cfg, nil)
+	if cfg == nil {
+		// No config in hand: discover scopes from disk, the same fallback the
+		// check uses when city.toml fails to load. Silently narrowing to the
+		// city root here would leave every rig unscanned and fail this gate
+		// OPEN — the one direction a delete gate must never fail.
+		check = NewBdBackupFreshnessCheckForScopeRoots(cityPath, managedDoltScopeRoots(cityPath), maxAge, nil)
+	}
 	for _, target := range check.freshnessScanTargets() {
 		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, maxAge); ok {
 			return false, finding

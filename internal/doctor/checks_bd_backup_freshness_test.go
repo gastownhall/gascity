@@ -37,7 +37,6 @@ func TestBulkDeleteSafe(t *testing.T) {
 		stale := t.TempDir()
 		writeBackupStateForFreshness(t, fresh, now.Add(-1*time.Hour).Format(time.RFC3339))
 		writeBackupStateForFreshness(t, stale, now.Add(-48*time.Hour).Format(time.RFC3339))
-		// Use stale path as cityPath so it appears as a labeled scope
 		cfg := &config.City{Rigs: []config.Rig{
 			{Path: fresh},
 			{Path: stale},
@@ -46,8 +45,8 @@ func TestBulkDeleteSafe(t *testing.T) {
 		if safe {
 			t.Fatalf("stale scope: want safe=false, got safe=true")
 		}
-		if reason == "" {
-			t.Fatalf("stale scope: want non-empty reason")
+		if !strings.Contains(reason, stale) {
+			t.Fatalf("stale scope: reason should name the stale scope %q, got %q", stale, reason)
 		}
 	})
 
@@ -62,7 +61,45 @@ func TestBulkDeleteSafe(t *testing.T) {
 		if !safe {
 			t.Fatalf("no backup config: want safe=true, got safe=false, reason=%q", reason)
 		}
-		_ = reason
+		if reason != "" {
+			t.Fatalf("no backup config: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("migrated scope with a never-synced dolt backup → unsafe", func(t *testing.T) {
+		scope := t.TempDir()
+		writeDoltBackupRegistration(t, scope) // no dolt-backup-state.json
+		cfg := &config.City{Rigs: []config.Rig{{Path: scope}}}
+		safe, reason := BulkDeleteSafe(scope, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("never-synced dolt backup: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "never synced") {
+			t.Fatalf("reason should say the backup never synced, got %q", reason)
+		}
+	})
+
+	// With no config in hand the gate must discover scopes from disk. Narrowing
+	// to the city root would leave the rig unscanned and return safe=true —
+	// failing this gate OPEN on a destructive operation.
+	t.Run("nil config still scans rigs discovered on disk", func(t *testing.T) {
+		city := t.TempDir()
+		rig := filepath.Join(city, "rigs", "alpha")
+		if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir rig .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatalf("write metadata.json: %v", err)
+		}
+		writeBackupStateForFreshness(t, rig, now.Add(-48*time.Hour).Format(time.RFC3339))
+
+		safe, reason := BulkDeleteSafe(city, nil, maxAge, now)
+		if safe {
+			t.Fatalf("nil config with a stale rig: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "ago") {
+			t.Fatalf("reason should describe the stale age, got %q", reason)
+		}
 	})
 }
 
