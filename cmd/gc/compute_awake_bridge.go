@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 // existing data. Runtime liveness is populated from the already-computed
 // wakeTargets; attachment and pending interactions come from provider
 // capability probes.
+//
+//nolint:unparam // compatibility/report projection retains the production input shape
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
 	cityPath string,
@@ -30,6 +33,32 @@ func buildAwakeInputFromReconciler(
 	sp runtime.Provider,
 	clk time.Time,
 ) AwakeInput {
+	input, _ := buildAwakeInputFromReconcilerWithObservationErrors(
+		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand,
+		workSet, readyWaitSet, assignedWorkBeads, readyAssignedFlags, wakeTargets, sp, clk,
+	)
+	return input
+}
+
+// buildAwakeInputFromReconcilerWithObservationErrors is the lifecycle form of
+// buildAwakeInputFromReconciler. Attachment uncertainty is returned per target
+// so the reconciler can defer that target without removing its keep-awake
+// signal or spending wake/drain state.
+func buildAwakeInputFromReconcilerWithObservationErrors(
+	cfg *config.City,
+	cityPath string,
+	sessionInfos []session.Info,
+	poolDesired map[string]int,
+	namedSessionDemand map[string]bool,
+	namedRoutedDemand map[string]bool,
+	workSet map[string]bool,
+	readyWaitSet map[string]bool,
+	assignedWorkBeads []beads.Bead,
+	readyAssignedFlags []bool,
+	wakeTargets []wakeTarget,
+	sp runtime.Provider,
+	clk time.Time,
+) (AwakeInput, map[string]error) {
 	input := AwakeInput{
 		ScaleCheckCounts:         poolDesired,
 		NamedSessionDemand:       cloneBoolMap(namedSessionDemand),
@@ -43,6 +72,7 @@ func buildAwakeInputFromReconciler(
 		ManualGracePeriod:        cfg.ChatSessions.GracePeriodDuration(),
 		Now:                      clk,
 	}
+	observationErrors := make(map[string]error)
 
 	// Agents. Load runtime suspension state once against the in-scope
 	// city path so suspension resolves against the controlled city
@@ -193,7 +223,13 @@ func buildAwakeInputFromReconciler(
 			input.RunningSessions[name] = true
 		}
 		if shouldProbeAttachmentForAwakeInput(info, target.alive, cfg, poolDesired) {
-			if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
+			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name)
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				// Preserve the positive keep-awake side of the unknown observation;
+				// the owning reconciler also skips every mutation for this target.
+				input.AttachedSessions[name] = true
+				observationErrors[name] = err
+			} else if err == nil && attached {
 				input.AttachedSessions[name] = true
 			}
 		}
@@ -202,7 +238,7 @@ func buildAwakeInputFromReconciler(
 		}
 	}
 
-	return input
+	return input, observationErrors
 }
 
 func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, poolDesired map[string]int) bool {

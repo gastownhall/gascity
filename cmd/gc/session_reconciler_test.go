@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -97,6 +98,30 @@ func (p *transientPeekErrorProvider) Peek(name string, lines int) (string, error
 		return "", errors.New("peek failed")
 	}
 	return p.Fake.Peek(name, lines)
+}
+
+type secondLivenessObservationUnavailableProvider struct {
+	*runtime.Fake
+	mu               sync.Mutex
+	observationCalls int
+}
+
+func (p *secondLivenessObservationUnavailableProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	p.mu.Lock()
+	p.observationCalls++
+	call := p.observationCalls
+	p.mu.Unlock()
+	if call == 2 {
+		return runtime.Liveness{}, fmt.Errorf("preserved named observation: %w", runtime.ErrRuntimeUnavailable)
+	}
+	running := p.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+func (p *secondLivenessObservationUnavailableProvider) observationCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observationCalls
 }
 
 type blockingStopProvider struct {
@@ -5340,18 +5365,6 @@ func TestCachedSessionPeekRetriesAfterError(t *testing.T) {
 	}
 }
 
-func TestRateLimitAliveFromObservationDoesNotTreatObservationErrorAsAlive(t *testing.T) {
-	if rateLimitAliveFromObservation(true, errors.New("observe failed")) {
-		t.Fatal("observation errors must not reuse runtime-running state as process-alive")
-	}
-	if !rateLimitAliveFromObservation(true, nil) {
-		t.Fatal("successful live observation should report alive")
-	}
-	if rateLimitAliveFromObservation(false, nil) {
-		t.Fatal("successful dead observation should report dead")
-	}
-}
-
 func TestReconcileSessionBeads_RateLimitScreenReholdsAfterQuarantineExpiry(t *testing.T) {
 	env := newReconcilerTestEnv()
 	rec := events.NewFake()
@@ -6755,6 +6768,72 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("unexpected drain for configured named session: %+v", ds)
+	}
+}
+
+func TestReconcileSessionBeads_PreservedNamedSecondaryLivenessErrorDefersLifecycle(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"pending_create_claim":       "true",
+		"pending_create_started_at":  env.clk.Now().UTC().Format(time.RFC3339),
+		"last_woke_at":               env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":                "keep-session",
+		"started_config_hash":        "keep-hash",
+		"continuation_reset_pending": "keep-reset",
+		"wake_attempts":              "2",
+	})
+	before, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) before reconcile: %v", session.ID, err)
+	}
+	sp := &secondLivenessObservationUnavailableProvider{Fake: env.sp}
+	rec := events.NewFake()
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	woken := reconcileSessionBeads(
+		context.Background(), []beads.Bead{before}, env.desiredState, cfgNames,
+		env.cfg, sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, rec, 0, 0, &env.stdout, &env.stderr,
+		env.startOptions...,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 while preserved-named liveness is unavailable", woken)
+	}
+	after, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after reconcile: %v", session.ID, err)
+	}
+	if after.Status != before.Status {
+		t.Fatalf("status = %q, want preserved %q", after.Status, before.Status)
+	}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Fatalf("metadata after secondary liveness error = %#v, want byte-stable %#v", after.Metadata, before.Metadata)
+	}
+	if got := sp.observationCount(); got != 2 {
+		t.Fatalf("liveness observations = %d, want first absence plus failed richer observation", got)
+	}
+	if got := sp.CountCalls("Start", sessionName); got != 0 {
+		t.Fatalf("Start calls = %d, want 0 while preserved-named liveness is unavailable", got)
+	}
+	if got := sp.CountCalls("Stop", sessionName); got != 0 {
+		t.Fatalf("Stop calls = %d, want 0 while preserved-named liveness is unavailable", got)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("lifecycle events = %#v, want none while preserved-named liveness is unavailable", rec.Events)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("unexpected drain while preserved-named liveness is unavailable: %+v", ds)
 	}
 }
 

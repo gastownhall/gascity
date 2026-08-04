@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
+	"maps"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -847,6 +850,160 @@ func infoLookupFromBeadLookup(sessionLookup func(id string) *beads.Bead) func(id
 		// The looked-up bead has a non-empty id and is session-shaped; project it
 		// through the shared front-door seeder (type-stamp is a no-op / unread).
 		return seedSessionInfo(*b), true
+	}
+}
+
+type sequencedDrainLivenessProvider struct {
+	*runtime.Fake
+	observeCalls  atomic.Int64
+	unavailableAt int64
+}
+
+func (p *sequencedDrainLivenessProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	call := p.observeCalls.Add(1)
+	if call == p.unavailableAt {
+		return runtime.Liveness{}, fmt.Errorf("drain liveness observation %d: %w", call, runtime.ErrRuntimeUnavailable)
+	}
+	running := p.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+func TestAdvanceSessionDrains_LivenessUnavailableDefersOrdinaryDrainCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := &sequencedDrainLivenessProvider{Fake: runtime.NewFake(), unavailableAt: 1}
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "test-session",
+			"template":                   "worker",
+			"provider":                   "claude",
+			"work_dir":                   t.TempDir(),
+			"generation":                 "3",
+			"state":                      "active",
+			"wake_mode":                  "fresh",
+			"session_key":                "keep-session",
+			"started_config_hash":        "keep-hash",
+			"continuation_reset_pending": "",
+			"pending_create_claim":       "true",
+			"last_woke_at":               now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ds := &drainState{
+		startedAt:  now.Add(-10 * time.Second),
+		deadline:   now.Add(20 * time.Second),
+		reason:     "idle",
+		generation: 3,
+	}
+	dt.set(b.ID, ds)
+	before, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) before drain advance: %v", b.ID, err)
+	}
+
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
+
+	if got := dt.get(b.ID); got != ds {
+		t.Fatalf("drain tracker entry = %p, want retained entry %p", got, ds)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after drain advance: %v", b.ID, err)
+	}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Fatalf("metadata mutated while ordinary drain liveness was unavailable:\n before: %#v\n  after: %#v", before.Metadata, after.Metadata)
+	}
+	if got := sp.CountCalls("Stop", "test-session"); got != 0 {
+		t.Fatalf("Stop calls = %d, want 0", got)
+	}
+	if !sp.IsRunning("test-session") {
+		t.Fatal("runtime stopped while ordinary drain liveness was unavailable")
+	}
+}
+
+func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := &sequencedDrainLivenessProvider{Fake: runtime.NewFake(), unavailableAt: 2}
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("set pre-existing drain ack: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "test-session",
+			"template":                   "worker",
+			"provider":                   "claude",
+			"work_dir":                   t.TempDir(),
+			"generation":                 "3",
+			"state":                      "active",
+			"wake_mode":                  "fresh",
+			"session_key":                "keep-session",
+			"started_config_hash":        "keep-hash",
+			"continuation_reset_pending": "",
+			"pending_create_claim":       "true",
+			"last_woke_at":               now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ds := &drainState{
+		startedAt:  now.Add(-time.Minute),
+		deadline:   now.Add(-10 * time.Second),
+		reason:     "pool-excess",
+		generation: 3,
+		ackSet:     true,
+	}
+	dt.set(b.ID, ds)
+	before, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) before drain advance: %v", b.ID, err)
+	}
+
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
+
+	if got := dt.get(b.ID); got != ds {
+		t.Fatalf("drain tracker entry = %p, want retained entry %p after uncertain stop re-probe", got, ds)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after drain advance: %v", b.ID, err)
+	}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Fatalf("metadata mutated after unavailable post-stop liveness re-probe:\n before: %#v\n  after: %#v", before.Metadata, after.Metadata)
+	}
+	if got := sp.CountCalls("Stop", "test-session"); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 verified stop before unavailable re-probe", got)
+	}
+	if sp.IsRunning("test-session") {
+		t.Fatal("verified stop did not stop underlying fake runtime")
+	}
+	if got := sp.observeCalls.Load(); got != 2 {
+		t.Fatalf("liveness observations = %d, want initial probe plus post-stop re-probe", got)
 	}
 }
 

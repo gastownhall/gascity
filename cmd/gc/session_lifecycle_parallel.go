@@ -1426,11 +1426,27 @@ func runPreparedStartCandidate(
 		recoveryBegin := time.Now()
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
-		if runningErr == nil && runtimeObservationLive(obs) {
+		switch {
+		case errors.Is(runningErr, runtime.ErrRuntimeUnavailable):
+			err = fmt.Errorf("observing session %q after state-sync failure: %w", item.candidate.name(), runningErr)
+		case runningErr == nil && runtimeObservationLive(obs):
 			err = nil
 		}
 	}
 	phases.StartCall = time.Since(startCallBegin)
+	// ErrSessionExists can be a benign concurrent-start convergence only after a
+	// healthy re-observation. Preserve runtime observation uncertainty before
+	// computing rollback or failure bookkeeping; otherwise the original
+	// collision error would make an unknown pending create look definitively
+	// failed.
+	var sessionExistsObservation worker.LiveObservation
+	var sessionExistsObservationErr error
+	if err != nil && errors.Is(err, runtime.ErrSessionExists) && startCtxErr == nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		sessionExistsObservation, sessionExistsObservationErr = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+		if errors.Is(sessionExistsObservationErr, runtime.ErrRuntimeUnavailable) {
+			err = fmt.Errorf("observing session %q after start collision: %w", item.candidate.name(), sessionExistsObservationErr)
+		}
+	}
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
@@ -1442,22 +1458,25 @@ func runPreparedStartCandidate(
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
-				running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+				running, alive, err = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
 			} else {
 				var obs worker.LiveObservation
 				obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 				running = obs.Running
 				alive = obs.Alive
 			}
-			if err != nil || !running || !alive {
+			if err != nil {
+				err = fmt.Errorf("observing session %q after startup: %w", item.candidate.name(), err)
+			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
-	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
-	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
+	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
+	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
@@ -1474,6 +1493,13 @@ func runPreparedStartCandidate(
 	case errors.Is(err, runtime.ErrSessionInitializing):
 		outcome = TraceOutcomeSessionInitializing
 		err = nil
+	case livenessUnavailable:
+		// Runtime absence was not established, so this is a level-triggered
+		// deferral rather than a failed wake. Keep the pending-create claim (if
+		// any) and the wake-failure budget intact; commit only releases the
+		// in-flight last_woke_at lease so the next patrol can re-observe.
+		outcome = TraceOutcomeDeferred
+		err = nil
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -1487,9 +1513,8 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = TraceOutcomeSuccess
 	case errors.Is(err, runtime.ErrSessionExists):
-		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
-		case runningErr != nil || !runtimeObservationLive(obs):
+		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
 			outcome = TraceOutcomeProviderError
 		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
 			outcome = TraceOutcomeSessionExistsConverged
@@ -1517,6 +1542,10 @@ func runPreparedStartCandidate(
 		rateLimitScreen: rateLimitScreen,
 		phases:          phases,
 	}
+}
+
+func startOutcomeDefersCommit(outcome TraceOutcomeCode) bool {
+	return outcome == TraceOutcomeSessionInitializing || outcome == TraceOutcomeDeferred
 }
 
 func appendInitialMessageToStartupNudge(nudge, msg string) string {
@@ -1670,7 +1699,7 @@ func commitAsyncStartResultWithContext(
 		// session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime {
+		if cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
 		outcome := "stale_async_start"
@@ -1687,6 +1716,9 @@ func commitAsyncStartResultWithContext(
 		refreshed.rollbackPending = false
 	}
 	if ctx != nil && ctx.Err() != nil {
+		if startOutcomeDefersCommit(refreshed.outcome) {
+			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+		}
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
@@ -1697,7 +1729,7 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
 	}
-	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
+	if sp != nil && refreshed.err == nil && !startOutcomeDefersCommit(refreshed.outcome) {
 		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
@@ -1831,7 +1863,10 @@ func startPreparedStartCandidate(
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
-		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		running, alive, err := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		if err != nil {
+			return false, err
+		}
 		if running {
 			if alive {
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && !runningSessionMatchesPendingCreateInfo(item.candidate.info, name, sp) {
@@ -1887,12 +1922,12 @@ func runtimeObservationLive(obs worker.LiveObservation) bool {
 	return obs.Running && obs.Alive
 }
 
-func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool) {
+func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool, err error) {
 	if sp == nil || strings.TrimSpace(name) == "" {
-		return false, false
+		return false, false, nil
 	}
-	obs := runtime.ObserveLiveness(sp, name, processNames)
-	return obs.Running, obs.Alive
+	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
+	return obs.Running, obs.Alive, err
 }
 
 // staleResumeKeyProbe reports whether the keyed transcript a resume would
@@ -2066,9 +2101,9 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
-	// Session still starting up — back off silently without recording failure.
-	// The reconciler will retry on the next patrol tick.
-	if result.outcome == TraceOutcomeSessionInitializing {
+	// Session startup is not yet safe to decide — back off silently without
+	// recording failure. The reconciler will retry on the next patrol tick.
+	if startOutcomeDefersCommit(result.outcome) {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 		return false
@@ -2868,7 +2903,7 @@ func executePlannedStartsTraced(
 					wakeCount++
 					continue
 				}
-				if result.err == nil && result.outcome != TraceOutcomeSessionInitializing {
+				if result.err == nil && !startOutcomeDefersCommit(result.outcome) {
 					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, sessFront, clk, rec, wave, stdout, stderr, trace) {

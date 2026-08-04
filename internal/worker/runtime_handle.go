@@ -346,7 +346,10 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
 func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
-	liveness := runtime.ObserveLiveness(h.provider, h.sessionName, h.processNames)
+	liveness, err := runtime.ObserveLivenessWithError(h.provider, h.sessionName, h.processNames)
+	if err != nil {
+		return LiveObservation{}, err
+	}
 	obs := LiveObservation{
 		Running:     liveness.Running,
 		Alive:       liveness.Alive,
@@ -360,7 +363,11 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	}
 	if obs.Running {
 		obs.Attached = h.provider.IsAttached(h.sessionName)
-		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
+		last, err := h.provider.GetLastActivity(h.sessionName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return LiveObservation{}, fmt.Errorf("observe last activity for %q: %w", h.sessionName, err)
+		}
+		if err == nil && !last.IsZero() {
 			lastCopy := last
 			obs.LastActivity = &lastCopy
 		}

@@ -1038,3 +1038,154 @@ func TestListRunningSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 		t.Fatalf("ListRunning names = %v, want none alongside total observation failure", names)
 	}
 }
+
+// A per-session liveness observation must preserve the distinction between a
+// reachable snapshot that confirms absence and an unreachable snapshot that
+// cannot say whether the session exists. The production constructor is the
+// seam-backed provider used by cmd/gc, so this proof runs through that exact
+// composition rather than the raw provider alone.
+func TestSeamBackedLivenessObservationPreservesSnapshotUncertainty(t *testing.T) {
+	newUnavailableProvider := func(t *testing.T, wsURL string) (*seamBackedProvider, runtime.Provider) {
+		t.Helper()
+		resetBridgeAuthCacheForTest(t)
+		oldDefaults := defaultWSURLCandidates
+		defaultWSURLCandidates = nil
+		t.Cleanup(func() {
+			defaultWSURLCandidates = oldDefaults
+		})
+
+		t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
+		t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+		t.Setenv("T3_HOME", t.TempDir())
+		t.Setenv("T3_WS_URL", wsURL)
+		t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+		sp := NewSeamBacked()
+		backed, ok := sp.(*seamBackedProvider)
+		if !ok {
+			t.Fatalf("NewSeamBacked() type = %T, want *seamBackedProvider", sp)
+		}
+		return backed, sp
+	}
+
+	t.Run("outside startup grace reports runtime unavailable", func(t *testing.T) {
+		_, sp := newUnavailableProvider(t, "ws://127.0.0.1:1/ws")
+		obs, err := runtime.ObserveLivenessWithError(sp, "deacon", nil)
+		if err == nil {
+			t.Fatalf("ObserveLivenessWithError during bridge outage returned (%+v, nil); zero success would be read as authoritative absence", obs)
+		}
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveLivenessWithError error = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+		}
+		if obs != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError observation = %+v, want zero alongside total observation failure", obs)
+		}
+	})
+
+	t.Run("hard snapshot setup error reports runtime unavailable", func(t *testing.T) {
+		_, sp := newUnavailableProvider(t, "not-a-websocket-url")
+		obs, err := runtime.ObserveLivenessWithError(sp, "deacon", nil)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveLivenessWithError error = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+		}
+		if obs != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError observation = %+v, want zero alongside total observation failure", obs)
+		}
+	})
+
+	t.Run("startup grace remains live during bridge outage", func(t *testing.T) {
+		backed, sp := newUnavailableProvider(t, "ws://127.0.0.1:1/ws")
+		backed.raw.setRecentStart("deacon", time.Now())
+
+		obs, err := runtime.ObserveLivenessWithError(sp, "deacon", nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError during startup grace: %v", err)
+		}
+		if !obs.Running || !obs.Alive {
+			t.Fatalf("ObserveLivenessWithError during startup grace = %+v, want running+alive", obs)
+		}
+	})
+
+	for _, status := range []string{"none", "gone"} {
+		t.Run("startup grace remains live for reachable "+status+" status", func(t *testing.T) {
+			backed, sp := newUnavailableProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(map[string]interface{}{
+				"threads": []interface{}{
+					map[string]interface{}{
+						"id":        "thread-1",
+						"projectId": "project-1",
+						"customMetadata": map[string]interface{}{
+							"gc.sessionName": "deacon",
+						},
+						"session": map[string]interface{}{
+							"status": status,
+						},
+					},
+				},
+			})
+			backed.raw.setRecentStart("deacon", time.Now())
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "deacon", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError for reachable %s during startup grace: %v", status, err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("ObserveLivenessWithError for reachable %s during startup grace = %+v, want running+alive", status, obs)
+			}
+		})
+	}
+
+	t.Run("reachable snapshot confirms absence", func(t *testing.T) {
+		backed, sp := newUnavailableProvider(t, "ws://127.0.0.1:1/ws")
+		backed.raw.cacheSnapshot(map[string]interface{}{"threads": []interface{}{}})
+
+		obs, err := runtime.ObserveLivenessWithError(sp, "deacon", nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError for confirmed absence: %v", err)
+		}
+		if obs != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError for confirmed absence = %+v, want zero", obs)
+		}
+	})
+}
+
+// Activity is a second snapshot-bearing observation after liveness. The
+// production seam-backed composition must preserve a snapshot failure as
+// uncertainty rather than converting it to the zero timestamp lifecycle
+// callers interpret as inactivity.
+func TestSeamBackedLastActivityPreservesSnapshotUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wsURL string
+	}{
+		{name: "soft transport outage", wsURL: "ws://127.0.0.1:1/ws"},
+		{name: "hard snapshot setup error", wsURL: "not-a-websocket-url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetBridgeAuthCacheForTest(t)
+			oldDefaults := defaultWSURLCandidates
+			defaultWSURLCandidates = nil
+			t.Cleanup(func() {
+				defaultWSURLCandidates = oldDefaults
+			})
+
+			t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
+			t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+			t.Setenv("T3_HOME", t.TempDir())
+			t.Setenv("T3_WS_URL", tc.wsURL)
+			t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+			sp := NewSeamBacked()
+			lastActivity, err := sp.GetLastActivity("deacon")
+			if err == nil {
+				t.Fatalf("GetLastActivity during snapshot failure returned (%v, nil); zero success would be read as authoritative inactivity", lastActivity)
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("GetLastActivity error = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+			}
+			if !lastActivity.IsZero() {
+				t.Fatalf("GetLastActivity = %v, want zero alongside total observation failure", lastActivity)
+			}
+		})
+	}
+}

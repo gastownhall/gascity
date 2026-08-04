@@ -1982,6 +1982,30 @@ func (p *Provider) IsRunning(name string) bool {
 	return result
 }
 
+// ObserveLivenessWithError preserves snapshot uncertainty for lifecycle
+// callers while the legacy IsRunning(bool) and ProcessAlive(bool) surface keeps
+// its historical fail-closed behavior. A recent start remains provisionally
+// live while T3 is materializing the session.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		if p.withinRecentStart(name) {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		return runtime.Liveness{}, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
+	if binding == nil {
+		return runtime.Liveness{}, nil
+	}
+	status := p.threadSessionStatus(binding.ThreadID)
+	if (status == "none" || status == "gone") && p.withinRecentStart(name) {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	live := status == "running" || status == "ready"
+	return runtime.Liveness{Running: live, Alive: live}, nil
+}
+
 // ListRunning enumerates live GC-managed session names from the T3 snapshot.
 //
 // A soft-unavailable snapshot is a total observation failure, not proof that
@@ -2575,10 +2599,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 			defer p.mu.Unlock()
 			return p.recentStarts[name], nil
 		}
-		if isSoftBridgeUnavailable(err) {
-			return time.Time{}, nil
-		}
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("%w: t3bridge activity snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	if thread == nil {

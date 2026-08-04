@@ -1393,6 +1393,54 @@ func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T
 	}
 }
 
+type lastActivityErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *lastActivityErrorProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.err
+}
+
+func TestRuntimeHandleLiveObservationPreservesOnlyRuntimeUnavailableActivityErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantError bool
+	}{
+		{name: "runtime unavailable", err: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "legacy best effort", err: errors.New("malformed provider activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := runtime.NewFake()
+			if err := base.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:    &lastActivityErrorProvider{Fake: base, err: tc.err},
+				SessionName: "legacy-worker",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			obs, err := handle.LiveObservation(context.Background())
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("LiveObservation error = %v, want errors.Is(ErrRuntimeUnavailable)", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LiveObservation legacy best-effort error = %v, want nil", err)
+			}
+			if !obs.Running || obs.LastActivity != nil {
+				t.Fatalf("LiveObservation = %#v, want running with unknown activity", obs)
+			}
+		})
+	}
+}
+
 type falseNegativeRuntimeProvider struct {
 	*runtime.Fake
 	falseNames map[string]bool

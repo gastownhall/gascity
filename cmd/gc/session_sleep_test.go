@@ -205,7 +205,9 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 		t.Fatalf("policy capability = %q, want %q", policy.Capability, runtime.SessionSleepCapabilityFull)
 	}
 
-	reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now})
+	if _, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now}); err != nil {
+		t.Fatalf("reconcileDetachedAtInfo: %v", err)
+	}
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -279,6 +281,38 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	}
 	if !foundProbe {
 		t.Fatal("expected WaitForIdle probe before idle drain")
+	}
+}
+
+func TestShouldBeginIdleDrainInfoRuntimeUnavailableRetainsReadyProbe(t *testing.T) {
+	base := runtime.NewFake()
+	if err := base.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	sp := &sequencedRuntimeObservationProvider{
+		Fake:                  base,
+		activityUnavailableAt: map[int]bool{1: true},
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe("session-1")
+	completedAt := time.Date(2026, 3, 23, 12, 0, 0, 0, time.UTC)
+	dt.finishIdleProbe("session-1", probe, true, completedAt)
+	info := sessionpkg.Info{ID: "session-1", SessionNameMetadata: "worker"}
+	eval := wakeEvaluation{Policy: resolvedSessionSleepPolicy{
+		Class:      config.SessionSleepInteractiveResume,
+		Capability: runtime.SessionSleepCapabilityFull,
+	}}
+
+	begin, err := shouldBeginIdleDrainInfo(info, eval, dt, sp)
+	if begin {
+		t.Fatal("shouldBeginIdleDrainInfo = true while activity observation is unavailable")
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("shouldBeginIdleDrainInfo error = %v, want errors.Is(ErrRuntimeUnavailable)", err)
+	}
+	retained, ok := dt.idleProbe(info.ID)
+	if !ok || !retained.ready || !retained.success || !retained.completedAt.Equal(completedAt) {
+		t.Fatalf("ready probe after activity error = %+v, ok=%v; want unchanged", retained, ok)
 	}
 }
 

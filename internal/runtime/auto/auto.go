@@ -33,6 +33,7 @@ var (
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -246,6 +247,25 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 		other = p.defaultSP
 	}
 	return runtime.ObserveLiveness(other, name, processNames)
+}
+
+// ObserveLivenessWithError preserves routed-backend observation failures. A
+// confirmed absence still falls through to the other backend so stale route
+// recovery matches IsRunning and ObserveLiveness without collapsing an
+// unavailable primary into absence.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	primary, err := runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+	if err != nil || primary.Running {
+		return primary, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLivenessWithError(other, name, processNames)
 }
 
 // Nudge delegates to the routed backend.

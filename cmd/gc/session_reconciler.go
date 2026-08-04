@@ -367,7 +367,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
 	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
 	for {
-		running, alive := observeRuntimeProviderLiveness(sp, name, processNames)
+		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, processNames)
+		if livenessErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: deferring confirm-dead re-kill because liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+			return false
+		}
 		if !running && !alive {
 			return true
 		}
@@ -1664,7 +1668,39 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// 3a: capture the !desired path's OWN probe result (presence only,
 				// by bead ID). alive is unknown on this path; probe target is left
 				// empty because this path probes by ID, not name (no name to skew).
-				shadowTick.captureRuntime(id, "workerSessionTargetRunningWithConfig", "", triFromBool(providerAlive), convergeTriUnknown)
+				present := triFromBool(providerAlive)
+				if livenessErr != nil {
+					present = convergeTriUnknown
+				}
+				shadowTick.captureRuntime(id, "workerSessionTargetRunningWithConfig", "", present, convergeTriUnknown)
+			}
+			if livenessErr != nil {
+				// A configured named spec is positive control-plane evidence even
+				// though runtime state is unknown. Preserve #3630's consecutive-
+				// absence contract by clearing only its in-memory confirmation
+				// counter before deferring; do not touch bead metadata.
+				if preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
+					dt.clearSuspendDeferral(id)
+				}
+				// No absence-derived transition is safe while the runtime observation
+				// is unknown. Short-circuit before healStateWithRollbackInfo or any
+				// rollback/close/drain mutation so active/resume metadata remains
+				// byte-stable for the next level-triggered observation.
+				template := normalizedSessionTemplateInfo(info, cfg)
+				if template == "" {
+					template = info.Template
+				}
+				reason := "orphaned"
+				if configuredNames[name] {
+					reason = "suspended"
+				}
+				fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+						"liveness_error": livenessErr.Error(),
+					})
+				}
+				continue
 			}
 			// Run this before configured named-session preservation. A stale
 			// state=creating bead with an expired pending-create lease would
@@ -1760,9 +1796,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				preservedTP, preserveErr = resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, preservedInfos, info, clk, stderr)
 				if preserveErr == nil {
 					obs, obsErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
-					rateLimitAlive := rateLimitAliveFromObservation(obs.Alive, obsErr)
+					if obsErr != nil {
+						template := normalizedSessionTemplateInfo(info, cfg)
+						if template == "" {
+							template = info.Template
+						}
+						fmt.Fprintf(stderr, "session reconciler: skipping preserved named lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, obsErr) //nolint:errcheck
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerPreserveConfiguredNamed, TraceReasonPreserve, TraceOutcomeSkippedLivenessError, template, name, traceRecordPayload{
+								"liveness_error": obsErr.Error(),
+							})
+						}
+						continue
+					}
 					peek := cachedSessionPeek(cityPath, store, sp, cfg, id, preservedTP.Hints.ProcessNames)
-					rlNextNamed, rateLimitHit, rateLimitErr = checkRateLimitStability(info, cfg, rateLimitAlive, dt, sessFront, clk, peek)
+					rlNextNamed, rateLimitHit, rateLimitErr = checkRateLimitStability(info, cfg, obs.Alive, dt, sessFront, clk, peek)
 				}
 			}
 			if rateLimitHit || rateLimitErr != nil {
@@ -2152,11 +2200,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the expected child process is alive (when ProcessNames configured).
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
-		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
+		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		if shadowTick != nil {
 			// 3a: capture the desired fast path's OWN two-bit probe (present +
 			// alive) by name, enabling zombie (present && !alive) expression.
-			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
+			if livenessErr != nil {
+				shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, convergeTriUnknown, convergeTriUnknown)
+			} else {
+				shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
+			}
+		}
+		if livenessErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
+			continue
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
@@ -2306,6 +2362,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+							if errors.Is(attachErr, runtime.ErrRuntimeUnavailable) {
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttachmentError, TraceOutcomeSkippedLivenessError, tp.TemplateName, name, traceRecordPayload{
+										"error": attachErr.Error(),
+									})
+								}
+								continue
+							}
 							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
@@ -2656,9 +2720,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			tick.apply(id, sessionpkg.SleepPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle)))
 		}
 		// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
-		// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
-		// or nil on no-op. Pre-pass-masked (STEP6-PREPASS-AUDIT group 6).
-		tick.apply(id, reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk))
+		// An attachment-observation error is uncertainty, not detachment: defer
+		// this target before recording detached_at or consuming any later
+		// absence-derived lifecycle transition.
+		detachedBatch, detachedErr := reconcileDetachedAtInfo(infoByID[id], store, policy, alive, sp, clk)
+		if detachedErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: observing attachment for %s: %v\n", name, detachedErr) //nolint:errcheck
+			if trace != nil {
+				trace.RecordDecision(TraceSiteSessionReconcileWakeSleep, TraceReasonCode("runtime_observation"), TraceOutcomeSkippedLivenessError, tp.TemplateName, name, traceRecordPayload{
+					"error": detachedErr.Error(),
+				})
+			}
+			continue
+		}
+		tick.apply(id, detachedBatch)
 
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
@@ -2843,7 +2918,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// handoff. See gastownhall/gascity#119.
 							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(infoByID[id], sessFront, sp, name, clk, driftKey)
 							if deferErr != nil {
-								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
+								fmt.Fprintf(stderr, "session reconciler: deferring config-drift restart for %s: %v\n", name, deferErr) //nolint:errcheck
+								if errors.Is(deferErr, runtime.ErrRuntimeUnavailable) && trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeSkippedLivenessError, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+										"error": deferErr.Error(),
+									}))
+								}
+								if errors.Is(deferErr, runtime.ErrRuntimeUnavailable) {
+									continue
+								}
 							}
 							if active {
 								if trace != nil {
@@ -3380,7 +3463,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedIDs {
 		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
-	awakeInput := buildAwakeInputFromReconciler(
+	awakeInput, runtimeObservationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
@@ -3406,8 +3489,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 		eval.Policy = policy
 		name := info.SessionNameMetadata
+		if _, deferred := runtimeObservationErrors[name]; deferred {
+			wakeEvals[target.info.ID] = eval
+			continue
+		}
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" && configWakeSuppressedInfo(info, policy, sp, clk) {
+		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" {
+			configSuppressed, observationErr := configWakeSuppressedInfoWithError(info, policy, sp, clk)
+			if observationErr != nil {
+				runtimeObservationErrors[name] = observationErr
+				wakeEvals[target.info.ID] = eval
+				continue
+			}
+			if !configSuppressed {
+				wakeEvals[target.info.ID] = eval
+				continue
+			}
 			// Direct assigned work overrides sleep suppression for every
 			// sleep class — the assignment is session-specific, so a pool
 			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
@@ -3433,6 +3530,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 
 	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	for _, target := range wakeTargets {
+		if _, deferred := runtimeObservationErrors[infoByID[target.info.ID].SessionNameMetadata]; deferred {
+			delete(idleProbeTargets, target.info.ID)
+		}
+	}
 	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk, infoByID)
 	recordPhase(TraceSiteSessionReconcileAwakeSet, "session_reconcile.compute_awake_set_and_idle_probes", phaseStart, map[string]any{
 		"wake_target_count":      len(wakeTargets),
@@ -3457,12 +3559,49 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// by design.
 		info := infoByID[target.info.ID]
 		name := info.SessionNameMetadata
+		if observationErr, deferred := runtimeObservationErrors[name]; deferred {
+			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle for %s after runtime observation failure: %v\n", name, observationErr) //nolint:errcheck
+			if trace != nil {
+				trace.RecordDecision(TraceSiteSessionReconcileWakeSleep, TraceReasonCode("runtime_observation"), TraceOutcomeSkippedLivenessError, target.tp.TemplateName, name, traceRecordPayload{
+					"error": observationErr.Error(),
+				})
+			}
+			continue
+		}
 		decision, hasDec := awakeDecisions[name]
 		shouldWake := hasDec && decision.ShouldWake
 
 		eval := wakeEvals[target.info.ID]
 		if shouldWake && eval.ConfigSuppressed {
 			shouldWake = false
+		}
+		prospectiveDrainReason := ""
+		idleDrainDecisionKnown := false
+		idleDrainDecision := false
+		if !shouldWake && target.alive {
+			switch {
+			case info.SleepIntent == "idle-stop-pending":
+				prospectiveDrainReason = "idle"
+			case info.SleepIntent != "":
+				prospectiveDrainReason = info.SleepIntent
+			case hasDec && decision.Reason == "idle-sleep":
+				prospectiveDrainReason = "idle"
+			case eval.ConfigSuppressed:
+				prospectiveDrainReason = "idle"
+			default:
+				prospectiveDrainReason = "no-wake-reason"
+			}
+			if prospectiveDrainReason == "idle" && info.SleepIntent != "idle-stop-pending" && dt.get(target.info.ID) == nil {
+				if probe, ok := dt.idleProbe(target.info.ID); ok && probe.ready {
+					var observationErr error
+					idleDrainDecision, observationErr = shouldBeginIdleDrainInfo(info, eval, dt, sp)
+					if observationErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: deferring idle drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
+						continue
+					}
+					idleDrainDecisionKnown = true
+				}
+			}
 		}
 		tick.set(target.info.ID, persistSleepPolicyMetadataInfo(info, sessFront, eval.Policy, eval.ConfigSuppressed))
 		info = infoByID[target.info.ID]
@@ -3651,25 +3790,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				cancelSessionDrainInfo(info, sp, dt)
 				continue
 			}
-			var reason string
-			switch {
-			case intent == "idle-stop-pending":
-				reason = "idle"
-			case intent != "":
-				reason = intent
-			case hasDec && decision.Reason == "idle-sleep":
-				reason = "idle"
-			case eval.ConfigSuppressed:
-				reason = "idle"
-			default:
-				reason = "no-wake-reason"
-			}
+			reason := prospectiveDrainReason
 			if reason != "idle" {
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if reason == "idle" && dt.get(target.info.ID) == nil {
-				if intent != "idle-stop-pending" && !shouldBeginIdleDrainInfo(info, eval, dt, sp) {
-					continue
+				if intent != "idle-stop-pending" {
+					shouldBegin := idleDrainDecision
+					if !idleDrainDecisionKnown {
+						var observationErr error
+						shouldBegin, observationErr = shouldBeginIdleDrainInfo(info, eval, dt, sp)
+						if observationErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: deferring idle drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
+							continue
+						}
+					}
+					if !shouldBegin {
+						continue
+					}
 				}
 				if intent != "idle-stop-pending" {
 					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
@@ -3851,13 +3989,6 @@ func cachedSessionPeek(cityPath string, store beads.Store, sp runtime.Provider, 
 		cached = true
 		return content, nil
 	}
-}
-
-func rateLimitAliveFromObservation(alive bool, err error) bool {
-	if err != nil {
-		return false
-	}
-	return alive
 }
 
 func resolvePreservedConfiguredNamedSessionTemplate(
@@ -4877,7 +5008,10 @@ const (
 // treats the live named session as active because config-drift cannot prove the
 // session is idle.
 func namedSessionActivelyInUseInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) bool {
-	_, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	_, active, err := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	if err != nil {
+		return true
+	}
 	return active
 }
 
@@ -4907,7 +5041,10 @@ func shouldDeferNamedSessionConfigDrift(info sessionpkg.Info, sessFront *session
 		}
 		return "pinned", true, nil
 	}
-	reason, active := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	reason, active, observationErr := namedSessionActiveUseReasonInfo(info, sp, name, clk)
+	if observationErr != nil {
+		return "", false, observationErr
+	}
 	if !active {
 		return "", false, nil
 	}
@@ -5229,31 +5366,35 @@ func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpk
 // deferral, which threads through pendingInteractionKeepsAwakeInfo (wait_hold +
 // held/quarantine timers off Info); every other check is a live runtime probe
 // (sp.IsAttached, sessionActivityReportable, sp.GetLastActivity) and stays raw.
-func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
+func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool, error) {
 	if sp == nil || name == "" {
-		return "", false
+		return "", false, nil
 	}
 	// Pending interaction means a user is actively waiting.
 	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
-		return "pending_interaction", true
+		return "pending_interaction", true, nil
 	}
 	// Tmux attachment means a user is watching.
 	if sp.IsAttached(name) {
-		return "attached", true
+		return "attached", true, nil
 	}
 	// Providers that cannot report activity for this routed session cannot
 	// prove a live named session is idle. Defer config-drift rather than
 	// stopping a potentially working headless agent mid-task.
 	if !sessionActivityReportable(sp, name) {
-		return "activity_unknown", true
+		return "activity_unknown", true, nil
 	}
 	// Recent activity means the agent may still be in active use.
 	if clk != nil {
-		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
-			return "recent_activity", true
+		lastActivity, err := sp.GetLastActivity(name)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return "", false, fmt.Errorf("observe last activity for %q: %w", name, err)
+		}
+		if err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
+			return "recent_activity", true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // resetConfiguredNamedSessionForConfigDriftInfo repairs a configured-named
@@ -5330,26 +5471,32 @@ func shouldBeginIdleDrainInfo(
 	eval wakeEvaluation,
 	dt *drainTracker,
 	sp runtime.Provider,
-) bool {
+) (bool, error) {
 	if eval.Policy.Class == config.SessionSleepNonInteractive {
-		return true
+		return true, nil
 	}
 	if eval.Policy.Capability != runtime.SessionSleepCapabilityFull || sp == nil {
-		return false
+		return false, nil
 	}
 	probe, ok := dt.idleProbe(info.ID)
 	if !ok || !probe.ready {
-		return false
+		return false, nil
 	}
-	defer dt.clearIdleProbe(info.ID)
 	if !probe.success {
-		return false
+		dt.clearIdleProbe(info.ID)
+		return false, nil
 	}
 	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata)
-	if err != nil {
-		return false
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		// Retain the ready probe so the next healthy observation can consume
+		// exactly the same evidence without spending another wake/drain step.
+		return false, fmt.Errorf("observe last activity for %q: %w", info.SessionNameMetadata, err)
 	}
-	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt)
+	dt.clearIdleProbe(info.ID)
+	if err != nil {
+		return false, nil
+	}
+	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt), nil
 }
 
 func selectIdleProbeTargets(
