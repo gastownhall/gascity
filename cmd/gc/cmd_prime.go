@@ -330,15 +330,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			// broken; the possibly-nil provider is confined to the else branch so
 			// today's spawn still runs when construction fails.
 			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
-			if hookSPErr != nil {
-				// Fail open: a momentarily-broken provider config must not fail
-				// the hook. The nil provider below skips only the event-capable
-				// suppression, so the poller spawn keeps today's legacy behavior.
-				fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", hookSPErr) //nolint:errcheck
-				hookSP = nil
-			}
-			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
+			pollerTarget := withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
 				cfg:               cfg,
@@ -347,7 +339,17 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}), hookSP)
+			})
+			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
+			if hookSPErr != nil {
+				// Fail open: a momentarily-broken provider config must not fail
+				// the hook. A nil provider skips only the event-capable
+				// suppression, so the poller spawn keeps today's legacy behavior.
+				fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", hookSPErr) //nolint:errcheck
+				maybeStartNudgePoller(pollerTarget, nil)
+			} else {
+				maybeStartNudgePoller(pollerTarget, hookSP)
+			}
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
