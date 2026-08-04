@@ -313,6 +313,12 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// warmClaimProbe, when set, enables the warm-bind claim nudge: it reports
+	// whether a pool slot's newly-bound trigger bead is still unclaimed, read from
+	// the store named by the session's gc.trigger_bead_store_ref. Built by the
+	// reconciler where the cached rig stores are in scope and consumed in
+	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
+	warmClaimProbe warmClaimTriggerProbe
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -390,6 +396,14 @@ func resolveStartStabilityWaiter(waiter startStabilityWaiter) startStabilityWait
 		return waitForStartStability
 	}
 	return waiter
+}
+
+// withWarmClaimProbe installs the warm-bind claim-nudge probe for this reconcile
+// pass. Nil (or the option omitted) leaves the warm-bind claim nudge disabled.
+func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.warmClaimProbe = probe
+	}
 }
 
 // withDeferSessionClosesOnBoot defers the per-session orphan/failed-create
@@ -1371,7 +1385,7 @@ func executePreparedStartWaveForCity(
 				<-sem
 				done <- i
 			}()
-			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter)
+			results[i] = runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 		}()
 	}
 	for range prepared {
@@ -1390,6 +1404,7 @@ func runPreparedStartCandidate(
 	startupTimeout time.Duration,
 	stabilityWaiter startStabilityWaiter,
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaim warmClaimTriggerProbe,
 ) (result startResult) {
 	started := time.Now()
 	result = startResult{
@@ -1418,7 +1433,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -1585,6 +1600,7 @@ func enqueuePreparedStartWaveForCity(
 	asyncFollowUp func(),
 	stabilityWaiter startStabilityWaiter,
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaim warmClaimTriggerProbe,
 ) []startResult {
 	if len(prepared) == 0 {
 		return nil
@@ -1609,7 +1625,7 @@ func enqueuePreparedStartWaveForCity(
 			if release != nil {
 				defer release()
 			}
-			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter)
+			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -1831,7 +1847,12 @@ func startPreparedStartCandidate(
 	cfg *config.City,
 	phases *startPhaseTimings,
 	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
+	warmClaims ...warmClaimTriggerProbe,
 ) (bool, error) {
+	var warmClaim warmClaimTriggerProbe
+	if len(warmClaims) > 0 {
+		warmClaim = warmClaims[0]
+	}
 	name := item.candidate.name()
 	if sp != nil {
 		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
@@ -1839,6 +1860,16 @@ func startPreparedStartCandidate(
 			if alive {
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && !runningSessionMatchesPendingCreateInfo(item.candidate.info, name, sp) {
 					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
+				// Warm reuse: the slot is already up, so cold Start's startup nudge
+				// never fires. If on-demand work was bound to it since it last Started
+				// (bindPoolSessionTriggerBead) and is still unclaimed, deliver the
+				// claim nudge once — the event-based symmetric counterpart to that
+				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
+				if store != nil {
+					if raw, err := store.Get(item.candidate.info.ID); err == nil {
+						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+					}
 				}
 				return false, nil
 			}
@@ -2841,7 +2872,7 @@ func executePlannedStartsTraced(
 				return wakeCount
 			}
 			if startOpts.async {
-				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter)
+				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
@@ -2857,6 +2888,7 @@ func executePlannedStartsTraced(
 					batchSize,
 					withStartStabilityWaiter(stabilityWaiter),
 					withSessionStaleKeyDetectionWaiter(sessionStaleKeyDetectionWaiter),
+					withWarmClaimProbe(startOpts.warmClaimProbe),
 				)
 			}
 			for _, result := range results {

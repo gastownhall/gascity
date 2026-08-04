@@ -53,7 +53,12 @@ while IFS= read -r bead_id; do
     NEW=$((PREV + 1))
     COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
 
-    if [ "$NEW" -ge "$THRESHOLD" ]; then
+    # Edge-triggered (-eq, not -ge): mail once when the count CROSSES the
+    # threshold, not on every 5m sweep for as long as the storm persists.
+    # A new storm on the same bead re-alerts because the ledger prunes the
+    # count once the bead closes. --dedup guards the repeat-crossing case
+    # (ledger reset while the previous mail is still live in the inbox).
+    if [ "$NEW" -eq "$THRESHOLD" ]; then
         TITLE_JSON=$(gc bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
         gc mail send mayor/ \
@@ -65,6 +70,7 @@ Recommended actions:
 - Inspect the bead: gc bd show $bead_id --json
 - Check rejection history: metadata.rejection_reason
 - Consider quarantining the bead or investigating the root cause." \
+            --dedup "spawn-storm:$bead_id" \
             2>/dev/null || true
         STORMS=$((STORMS + 1))
     fi
