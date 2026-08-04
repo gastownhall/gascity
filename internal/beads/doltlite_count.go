@@ -48,7 +48,7 @@ func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeT
 	if err != nil {
 		return 0, err
 	}
-	wisps, err := s.countDurableWisps(ctx, query, excludeTypes, dedupeWhere, dedupeArgs)
+	wisps, err := s.countWispsTier(ctx, query, excludeTypes, dedupeWhere, dedupeArgs)
 	if err != nil {
 		return 0, err
 	}
@@ -64,15 +64,15 @@ func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeT
 func (s *DoltliteReadStore) countIssuesTier(ctx context.Context, query ListQuery, excludeTypes []string) (int, []string, []any, error) {
 	tables := doltliteIssueTables
 	dedupeWhere, dedupeArgs := doltliteCountWhere(query, tables)
-	// Apply the TierIssues row filter through the same shared helper List and
-	// countDurableWisps use, so the issues-table predicate has one source of
-	// truth and cannot drift from List's tier semantics (#3444). The issues
-	// table set never reports skipTable, so the durable count always runs.
+	// Apply the requested row filter through the same shared helper List and
+	// countWispsTier use, so the issues-table predicate has one source of truth
+	// and cannot drift from List's tier semantics. The issues table set never
+	// reports skipTable, so the durable count always runs.
 	flags, err := s.storageFlagExprsFor(tables)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("bd count: %w", err)
 	}
-	if tierWhere, _ := doltliteTierPredicate(TierIssues, tables, flags); tierWhere != "" {
+	if tierWhere, _ := doltliteTierPredicate(query.TierMode, tables, flags); tierWhere != "" {
 		dedupeWhere = append(dedupeWhere, tierWhere)
 	}
 	// The durable count itself layers excludeTypes on top of the dedupe
@@ -94,15 +94,13 @@ func (s *DoltliteReadStore) countIssuesTier(ctx context.Context, query ListQuery
 	return n, dedupeWhere, dedupeArgs, nil
 }
 
-// countDurableWisps counts the non-ephemeral (no_history) wisps rows the
-// aligned TierIssues List merges in (#3444). Legacy snapshots without the
-// wisps storage-flag columns contribute nothing: every row there is
-// ephemeral. dedupeWhere/dedupeArgs are the issues-table pass predicates
-// before excludeTypes, so a wisp whose durable twin List already returned is
-// suppressed by the shared anti-join even when that twin's type is excluded;
-// excludeTypes filters only the wisp row's own type, matching the post-List
-// exclusion (#3449 review).
-func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQuery, excludeTypes []string, dedupeWhere []string, dedupeArgs []any) (int, error) {
+// countWispsTier counts rows from the wisps table that belong to the requested
+// supported tier. Legacy snapshots without storage-flag columns contribute
+// nothing to TierHistory. dedupeWhere/dedupeArgs are the issues-table pass
+// predicates before excludeTypes, so a wisp whose durable twin List already
+// returned is suppressed by the shared anti-join even when that twin's type is
+// excluded.
+func (s *DoltliteReadStore) countWispsTier(ctx context.Context, query ListQuery, excludeTypes []string, dedupeWhere []string, dedupeArgs []any) (int, error) {
 	tables := doltliteWispTables
 	if !s.tableExists(tables.issues) {
 		return 0, nil
@@ -111,7 +109,7 @@ func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQue
 	if err != nil {
 		return 0, fmt.Errorf("bd count (wisps): %w", err)
 	}
-	tierWhere, skipTable := doltliteTierPredicate(TierIssues, tables, flags)
+	tierWhere, skipTable := doltliteTierPredicate(query.TierMode, tables, flags)
 	if skipTable {
 		return 0, nil
 	}
@@ -139,7 +137,7 @@ func doltliteCountSupported(query ListQuery) bool {
 	if len(query.Metadata) > 0 {
 		return false
 	}
-	if query.TierMode != TierIssues {
+	if query.TierMode != TierIssues && query.TierMode != TierHistory {
 		return false
 	}
 	if query.ParentID != "" {

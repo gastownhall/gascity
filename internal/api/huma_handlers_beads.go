@@ -106,6 +106,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	seen := map[string]bool{}
 	var pa partialAggregator
+	tierMode := beadListTierMode(input.Tier)
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		for _, assignee := range assigneeTerms {
@@ -116,6 +117,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				Assignee:      assignee,
 				IncludeClosed: input.All,
 				Live:          input.Status == "in_progress",
+				TierMode:      tierMode,
 				// Explicit sort: with SortDefault the CachingStore returns
 				// map-iteration order, so a bounded read truncated an
 				// arbitrary, per-call-different subset (#3208).
@@ -336,6 +338,22 @@ func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, ri
 	return true, counts
 }
 
+// beadListTierMode maps the optional public query value onto the internal
+// storage-tier contract. Empty preserves the legacy combined logical issues
+// view for existing API consumers; the dashboard opts into "issues" explicitly.
+func beadListTierMode(tier string) beads.TierMode {
+	switch tier {
+	case "issues":
+		return beads.TierHistory
+	case "operational":
+		return beads.TierWisps
+	case "all":
+		return beads.TierBoth
+	default:
+		return beads.TierIssues
+	}
+}
+
 // beadListCountQuery builds the count query for the all=true list path. It
 // carries the same filters as the list query so the count matches exactly;
 // Sort and Limit are omitted because they do not affect a count.
@@ -347,6 +365,7 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		Assignee:      assignee,
 		IncludeClosed: input.All,
 		Live:          input.Status == "in_progress",
+		TierMode:      beadListTierMode(input.Tier),
 	}
 	if !q.HasFilter() {
 		q.AllowScan = true

@@ -10460,6 +10460,10 @@ export type GetV0CityByCityNameBeadsData = {
          */
         rig?: string;
         /**
+         * Storage tier: issues returns history-backed durable issues, operational returns no-history or ephemeral records, and all preserves the combined legacy view.
+         */
+        tier?: 'issues' | 'operational' | 'all';
+        /**
          * Include closed beads.
          */
         all?: boolean;

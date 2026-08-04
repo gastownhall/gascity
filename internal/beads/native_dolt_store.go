@@ -2174,6 +2174,13 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 		// the final tier filter after all candidates are returned.
 	case TierBoth:
 		// no tier filter
+	case TierHistory:
+		// History-backed issues live in the issues table. SkipWisps prevents
+		// no-history and ephemeral operational rows from entering the result
+		// before the backing count, sort, and limit are applied.
+		ephemeral := false
+		filter.Ephemeral = &ephemeral
+		filter.SkipWisps = true
 	default:
 		ephemeral := false
 		filter.Ephemeral = &ephemeral

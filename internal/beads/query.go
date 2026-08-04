@@ -37,14 +37,18 @@ const (
 type TierMode int
 
 const (
-	// TierIssues reads only the permanent (issues) tier. Default.
+	// TierIssues reads the permanent logical tier. It includes history-backed
+	// issues and durable no-history work. Default.
 	TierIssues TierMode = iota
-	// TierWisps reads only the wisp-backed tier, including ephemeral and
+	// TierWisps reads only operational storage, including ephemeral and
 	// no-history rows.
 	TierWisps
 	// TierBoth unions the issues and wisps tiers, deduping by ID and
 	// preserving the query's sort.
 	TierBoth
+	// TierHistory reads only history-backed durable issues. It excludes both
+	// no-history operational rows and ephemeral wisps.
+	TierHistory
 )
 
 // TierModeFromOpts returns the tier mode implied by a slice of QueryOpts.
@@ -192,14 +196,17 @@ func (q ListQuery) IncludesClosed() bool {
 }
 
 // matchesTier reports whether the bead is in the storage tier(s) the query
-// selects. TierIssues (the zero value) excludes ephemeral wisps; TierWisps
-// keeps only ephemeral or no-history rows; TierBoth applies no tier filter.
+// selects. TierIssues excludes ephemeral wisps but keeps durable no-history
+// work; TierWisps keeps ephemeral or no-history rows; TierBoth applies no tier
+// filter; TierHistory keeps only history-backed durable issues.
 func (q ListQuery) matchesTier(b Bead) bool {
 	switch q.TierMode {
 	case TierWisps:
 		return b.Ephemeral || b.NoHistory
 	case TierBoth:
 		return true
+	case TierHistory:
+		return !b.Ephemeral && !b.NoHistory
 	default: // TierIssues
 		return !b.Ephemeral
 	}

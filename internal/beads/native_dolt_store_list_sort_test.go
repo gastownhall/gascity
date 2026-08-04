@@ -99,6 +99,19 @@ func TestNativeIssueFilterStillStripsLimitForWispTier(t *testing.T) {
 	}
 }
 
+func TestNativeIssueFilterHistoryTierSkipsWispsBeforeLimit(t *testing.T) {
+	filter := nativeIssueFilterFromListQuery(ListQuery{Limit: 10, TierMode: TierHistory})
+	if !filter.SkipWisps {
+		t.Fatal("SkipWisps = false, want true for TierHistory")
+	}
+	if filter.Ephemeral == nil || *filter.Ephemeral {
+		t.Fatalf("Ephemeral = %v, want false for TierHistory", filter.Ephemeral)
+	}
+	if filter.Limit != 10 {
+		t.Fatalf("Limit = %d, want 10 after history-tier pushdown", filter.Limit)
+	}
+}
+
 // Backing search results for a pushed-down sort arrive presorted; the
 // client-side ApplyListQuery re-sort must keep them stable and the limit cut
 // must match the server page. Models the dispatcher's RecentRunsAll aggregate
