@@ -1341,6 +1341,34 @@ func TestRegression_PolecatWithBlockedInProgressWork_DoesNotWake(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-p1")
 }
 
+// TestBlockedInProgressWorkDoesNotFillScaleSlot pins the second-order effect of
+// the blocked-work narrowing: workBeadHasAwakeDemand also feeds
+// countAssignedScaleSlots, so a session parked on blocked in_progress work no
+// longer occupies a scale slot. This is intended, not incidental — a session
+// that cannot progress should not hold a pool slot hostage — but it means the
+// change is not purely suppressive: releasing the slot lets a *different*
+// session wake as scaled:demand.
+//
+// mc-p1 is asleep holding blocked work, so it is not a scaled candidate itself
+// (collectActiveBeads requires state=active) but is still counted by
+// countAssignedScaleSlots. With scale_check=1, mc-p2 wakes only if mc-p1's
+// blocked bead released the slot.
+func TestBlockedInProgressWorkDoesNotFillScaleSlot(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep"},
+			{ID: "mc-p2", SessionName: "polecat-mc-p2", Template: "hello-world/polecat", State: "active"},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
+	assertAwake(t, result, "polecat-mc-p2")
+	assertReason(t, result, "polecat-mc-p2", "scaled:demand")
+}
+
 func TestRegression_SessionWithOpenWorkByBeadID_StaysAwake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},

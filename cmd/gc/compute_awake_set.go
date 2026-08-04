@@ -90,6 +90,11 @@ type AwakeWorkBead struct {
 	// meaningless for open work, whose blocker state is already folded into
 	// Ready. Zero value is false, so every existing in_progress caller that
 	// does not populate it keeps today's unconditional-wake behavior.
+	//
+	// Setting it is not purely suppressive: workBeadHasAwakeDemand also feeds
+	// countAssignedScaleSlots, so blocked in_progress work additionally
+	// releases the session's scale slot, which can wake a different session
+	// as scaled:demand.
 	Blocked bool
 }
 
