@@ -19,7 +19,6 @@ func warmBindPoolSession() *beads.Bead {
 		Metadata: map[string]string{
 			"session_name":                    "worker-1",
 			"pool_managed":                    "true",
-			"template":                        "polecat",
 			beadmeta.TriggerBeadIDMetadataKey: "w-1",
 		},
 	}
@@ -153,7 +152,7 @@ func TestDeliverWarmBindClaimNudge_NoopGuards(t *testing.T) {
 		"empty claim text": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) {
 			return runtime.NewFake(), warmBindPoolSession(), alwaysUnclaimed, "   "
 		},
-		"nil probe": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) {
+		"nil probe": func() (*runtime.Fake, *beads.Bead, warmClaimTriggerProbe, string) { //nolint:unparam // the always-nil probe IS this case
 			return runtime.NewFake(), warmBindPoolSession(), nil, warmClaimText
 		},
 	}

@@ -18,7 +18,7 @@ import (
 // which is precisely why that one re-nudge-stormed on every restart (test-5il). A
 // fresh binding writes a different trigger id, so the marker mismatches and the
 // nudge fires again: exactly once per binding.
-const warmBindNudgedForTriggerKey = "herdr.nudged_for_trigger"
+const warmBindNudgedForTriggerKey = "warm_bind_nudged_for_trigger"
 
 // warmBindNudgeIdleTimeout bounds how long the warm-bind claim nudge waits for
 // the slot to reach an idle input prompt before delivering, so it never injects
