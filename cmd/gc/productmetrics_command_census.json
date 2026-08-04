@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 195,
+  "next_id": 197,
   "permanent_ids": [
     {
       "name": "help",
@@ -292,7 +292,7 @@
       ],
       "hidden": false,
       "effective_hidden": false,
-      "disable_flag_parsing": true,
+      "disable_flag_parsing": false,
       "shape": "runnable",
       "recording_policy": "recordable",
       "mode": "standard",
@@ -309,7 +309,7 @@
       ],
       "hidden": false,
       "effective_hidden": false,
-      "disable_flag_parsing": true,
+      "disable_flag_parsing": false,
       "shape": "runnable",
       "recording_policy": "recordable",
       "mode": "standard",
@@ -1082,6 +1082,21 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc dolt-config doltlite-reindex",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
       "classification": "excluded",
       "notice_policy": "ineligible",
       "recording_policy": "excluded",
@@ -2827,6 +2842,21 @@
       "id": 106
     },
     {
+      "path": "gc pack registry requests",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-registry-requests",
+      "owner": "immediate",
+      "id": 196
+    },
+    {
       "path": "gc pack registry search",
       "aliases": [],
       "conditional_modes": [],
@@ -3336,6 +3366,21 @@
       "classification": "runtime-drain-check",
       "owner": "immediate",
       "id": 134
+    },
+    {
+      "path": "gc runtime heartbeat",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-heartbeat",
+      "owner": "immediate",
+      "id": 195
     },
     {
       "path": "gc runtime request-restart",

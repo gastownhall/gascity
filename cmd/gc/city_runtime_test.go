@@ -1212,6 +1212,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 
 func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
 
 	healthCalls := 0
 	cityPath := t.TempDir()
@@ -3117,6 +3118,115 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeRunsForReportActivityRuntime
 	}
 }
 
+// A warm pool slot can finish its startup turn before work is routed. When the
+// next demand snapshot binds a ready, routed, unassigned bead as that slot's
+// trigger, the idle-claim backstop must see the bead even though it is absent
+// from AssignedWorkBeads (which is intentionally assignee-only). Otherwise the
+// running worker stays idle forever after the sling, as acceptance-C observed.
+func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	work, err := rigStore.Create(beads.Bead{
+		ID:     "fx-ready",
+		Title:  "ready work routed after the warm worker went idle",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "fixture/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create routed work: %v", err)
+	}
+
+	sessionName := "fixture__worker-1"
+	staleObservation := time.Now().Add(-idleClaimNudgeGrace - time.Minute).UTC().Format(time.RFC3339)
+	sessionBead, err := cityStore.Create(beads.Bead{
+		ID:     "session-warm-worker",
+		Title:  "fixture/worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:fixture/worker"},
+		Metadata: map[string]string{
+			"session_name":                          sessionName,
+			"template":                              "fixture/worker",
+			"agent_name":                            "fixture/worker",
+			"pool_slot":                             "1",
+			poolManagedMetadataKey:                  boolMetadata(true),
+			"state":                                 "awake",
+			"generation":                            "1",
+			beadmeta.TriggerBeadIDMetadataKey:       work.ID,
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig:fixture",
+			idleClaimNudgeTriggerKey:                work.ID,
+			idleClaimNudgeCountKey:                  "0",
+			idleClaimNudgeAtKey:                     staleObservation,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create warm session: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "fixture",
+			StartCommand:      "true",
+			Nudge:             "Run gc hook --claim --json now.",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start warm session: %v", err)
+	}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+	rigStores := map[string]beads.Store{"fixture": rigStore}
+	var buildLog strings.Builder
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, sp,
+		cityStore, rigStores, snapshot, nil, &buildLog,
+	)
+	if len(result.AssignedWorkBeads) != 0 {
+		t.Fatalf("AssignedWorkBeads = %#v, want empty for ready routed unassigned work", result.AssignedWorkBeads)
+	}
+	if got := result.ScaleCheckCounts["fixture/worker"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[fixture/worker] = %d, want 1; log:\n%s", got, buildLog.String())
+	}
+
+	var stdout bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: cityStore,
+		standaloneRigStores: rigStores,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              &stdout,
+		stderr:              io.Discard,
+	}
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+
+	got, err := cityStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get warm session after tick: %v", err)
+	}
+	if count := got.Metadata[idleClaimNudgeCountKey]; count != "1" {
+		t.Fatalf("idle-claim nudge count = %q, want 1 for ready routed unassigned trigger; output=%q", count, stdout.String())
+	}
+}
+
 func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
 	store := beads.NewMemStore()
 	worker, err := store.Create(beads.Bead{
@@ -3756,9 +3866,7 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 		},
 	}
 
-	dirty := &atomic.Bool{}
-	var lastProviderName string
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.reconcilePoolDeaths(&prevPoolRunning)
 
 	data, err := os.ReadFile(outFile)
 	if err != nil {
@@ -3802,9 +3910,7 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 		},
 	}
 
-	dirty := &atomic.Bool{}
-	var lastProviderName string
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.reconcilePoolDeaths(&prevPoolRunning)
 
 	if _, err := os.Stat(outFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("on_death output err = %v, want no hook execution", err)
@@ -4797,8 +4903,19 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 	lastProviderName := "fake"
 	start := time.Now()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
-	if elapsed := time.Since(start); elapsed >= reloadOrderDrainTimeout {
-		t.Fatalf("reload drain took %s after tick context cancellation, want less than %s", elapsed, reloadOrderDrainTimeout)
+	// errs[0] below is the precise proof that the cancellation short-circuit
+	// fired: blockingOrderDispatcher.drain records ctx.Err() synchronously at
+	// entry, before its select, so it reads context.Canceled regardless of
+	// which select arm later wins. elapsed is not a latency SLO here -- that
+	// claim belongs to reloadOrderDrainTimeout's own test,
+	// TestCityRuntimeReloadDrainBoundedByTimeout. It spans the whole
+	// reloadConfig call (config read, order rescan, drain), not just the
+	// drain select, so a tight bound fails on unrelated I/O contention
+	// without proving anything errs[0] doesn't already prove on its own; it
+	// stays only as a hang detector against the short-circuit regressing into
+	// blocking indefinitely.
+	if elapsed := time.Since(start); elapsed > hangBudget {
+		t.Fatalf("reload drain took %s after tick context cancellation, want it to return well inside the hang budget", elapsed)
 	}
 	errs := od.drainContextErrors()
 	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
@@ -4840,7 +4957,13 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 	elapsed := time.Since(start)
-	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+500*time.Millisecond {
+	// elapsed is the subject under test (it proves reloadConfig actually
+	// bounds its wait on od.release rather than hanging on it forever), so
+	// this stays an explicit deadline rather than a hangBudget wait. The
+	// upper bound carries a generous tail to absorb CI scheduler jitter on
+	// top of the real reloadOrderDrainTimeout floor; the lower bound has no
+	// slop since contention only ever slows this down, never speeds it up.
+	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+3*time.Second {
 		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
 	}
 	close(od.release)
@@ -5277,6 +5400,183 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	}
 }
 
+// writeSkillMaterializationTestConfig writes a minimal city.toml with a
+// single city-scoped, stage-1-eligible agent (tmux session provider,
+// claude agent provider) — no builtin pack imports, so the config has
+// exactly one agent and no implicit extras to confuse a materialization
+// assertion. Extra raw TOML fragments (e.g. "[orders]\nskip = [...]\n")
+// may be appended to force a real revision change between two writes
+// without touching workspace.name, which rejects live reload.
+func writeSkillMaterializationTestConfig(t *testing.T, tomlPath string, extra ...string) {
+	t.Helper()
+	// A city-root pack.toml is required for the loader to discover
+	// PackSkillsDir at all — DiscoverPackAttachmentRoots only runs inside
+	// LoadWithIncludesOptions' city-pack.toml branch (the city IS the
+	// local/root pack, per the Pack primitive), not unconditionally.
+	packTomlPath := filepath.Join(filepath.Dir(tomlPath), "pack.toml")
+	if err := os.WriteFile(packTomlPath, []byte("[pack]\nname = \"test-city\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	var buf strings.Builder
+	buf.WriteString("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"tmux\"\n\n")
+	buf.WriteString("[providers.claude]\nbase = \"builtin:claude\"\n\n")
+	buf.WriteString("[[agent]]\nname = \"mayor\"\nscope = \"city\"\nprovider = \"claude\"\n\n")
+	for _, fragment := range extra {
+		buf.WriteString(fragment)
+	}
+	if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// TestCityRuntimeReloadMaterializesNewlyAddedSkill is the regression for
+// #3459: Stage-1 skill materialization (runStage1SkillMaterialization)
+// has exactly two call sites -- gc start, and prepareCityForSupervisor,
+// which reconcileCities invokes only for cities not yet running (the
+// toStart filter). A config reload on an already-adopted, already-running
+// city never ran it at all, so a skill added to a running city was
+// advertised in the catalog/prompt appendix but never materialized into
+// the vendor sink until a full supervisor restart -- contradicting the
+// code's own "runs on every tick" comment. reloadConfigTraced must also
+// materialize on every applied reload, not just at city start.
+func TestCityRuntimeReloadMaterializesNewlyAddedSkill(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// Add a skill to the running city (the reported live scenario: a
+	// skill added to a pack already in the city, discovered by the
+	// city-root skills/ convention) and force a real revision change via
+	// a harmless, live-reloadable field (orders.skip) -- not
+	// workspace.name, which rejects live reload and requires a restart --
+	// so the reload takes the "applied" branch, not the same-revision
+	// no-op.
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	writeSkillMaterializationTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
+
+	lastProviderName := "tmux"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	link := filepath.Join(cityPath, ".claude", "skills", "plan")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("skill not materialized after reload: lstat %q: %v; stdout=%q stderr=%q", link, err, stdout.String(), stderr.String())
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%q is not a symlink", link)
+	}
+}
+
+// TestCityRuntimeReloadRejectsCollidingSkillMaterialization guards the
+// collision gate the reload path shares with `gc start` and the
+// supervisor tick (checkSkillCollisions before materialize). Two
+// city-scoped claude agents that each provide an agent-local skill of
+// the same name collide on the shared city sink; on a live reload that
+// introduces the collision the reload must still be applied (the config
+// already passed agent validation), but materialization is skipped so no
+// half-written/conflicting symlink is produced, and a collision warning
+// is surfaced to the operator.
+func TestCityRuntimeReloadRejectsCollidingSkillMaterialization(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// Introduce a collision on reload: two city-scoped claude agents each
+	// carry an agent-local skill named "plan" (discovered by the
+	// agents/<name>/skills convention), which both target the same
+	// .claude/skills/plan sink under the city scope root. Adding the
+	// second agent bumps the revision, so the reload takes the applied
+	// branch.
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "mayor", "skills", "plan"))
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "deputy", "skills", "plan"))
+	writeSkillMaterializationTestConfig(t, tomlPath,
+		"[[agent]]\nname = \"deputy\"\nscope = \"city\"\nprovider = \"claude\"\n\n")
+
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+
+	// (a) The reload is still applied — a collision does not abort it.
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+
+	// (b) No conflicting symlink was written — materialization was skipped.
+	link := filepath.Join(cityPath, ".claude", "skills", "plan")
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected no materialized skill on collision, lstat %q err = %v", link, err)
+	}
+
+	// (c) The collision is surfaced to the operator, via the reply
+	// Warnings and the stderr warning channel.
+	var sawWarning bool
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, "skill collision") {
+			sawWarning = true
+			break
+		}
+	}
+	if !sawWarning {
+		t.Fatalf("reply warnings missing skill collision: %#v; stderr=%q", reply.Warnings, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "skill collision") {
+		t.Fatalf("stderr missing skill collision warning: %q", stderr.String())
+	}
+}
+
 func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -5546,12 +5846,7 @@ func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after panic+cancel")
-	}
+	awaitClose(t, done, "run returning after startup panic + cancel")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want >= 2 (startup panic + startup-poke recovery)", buildCalls.Load())
@@ -5612,12 +5907,7 @@ func TestCityRuntimeRun_RetriesStartupAfterRecoveredPanicBeforeStarted(t *testin
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return within 5s after startup retry")
-	}
+	awaitClose(t, done, "run returning after startup retry")
 
 	if buildCalls.Load() < 2 {
 		t.Fatalf("BuildFn invoked %d time(s), want startup retry after recovered panic", buildCalls.Load())
@@ -5704,12 +5994,7 @@ func TestCityRuntimeRun_ConvergenceStartupErrorDoesNotBlockStarted(t *testing.T)
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("run did not return after convergence startup list error")
-	}
+	awaitClose(t, done, "run returning after convergence startup list error")
 	if !started.Load() {
 		t.Fatal("OnStarted was not called after non-panic convergence startup error")
 	}
@@ -5761,25 +6046,13 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 		close(done)
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if scope := cr.convScope(""); scope != nil && scope.adapter.indexReady.Load() {
-			cancel()
-			break
-		}
-		select {
-		case <-deadline:
-			cancel()
-			t.Fatal("convergence active index was not populated after retry")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	awaitCond(t, func() bool {
+		scope := cr.convScope("")
+		return scope != nil && scope.adapter.indexReady.Load()
+	}, "convergence active index population")
+	cancel()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run did not stop after convergence retry test cancellation")
-	}
+	awaitClose(t, done, "run stopping after convergence retry cancellation")
 	if !store.panicked.Load() {
 		t.Fatal("test store did not inject convergence startup panic")
 	}

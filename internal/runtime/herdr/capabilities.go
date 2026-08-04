@@ -16,18 +16,24 @@ import (
 var (
 	_ runtime.IdleWaitProvider       = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider = (*Provider)(nil)
+	// LivenessObserver lets the reconciler read aliveness from herdr's own
+	// agent-status instead of the host process-table walk (see
+	// provider.go ObserveLiveness).
+	_ runtime.LivenessObserver = (*Provider)(nil)
 )
 
 // WaitForIdle blocks until herdr reports the agent idle or the timeout elapses,
-// via herdr's native `agent wait --status idle` — vs the pane-polling tmux does.
-// Either outcome (idle reached or timed out) means the caller may proceed, so
-// only context cancellation surfaces as an error; the timeout is a hard bound.
+// via herdr's native `agent wait --until idle` (the ≥0.7.5 flag spelling) — vs
+// the pane-polling tmux does. Either outcome (idle reached or timed out) means
+// the caller may proceed — as does an unregistered session (raw shell panes
+// have no agent to wait on) — so only context cancellation surfaces as an
+// error; the timeout is a hard bound.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	ms := int(timeout / time.Millisecond)
 	if ms < 1 {
 		ms = 1
 	}
-	_, _ = p.c.run(ctx, "agent", "wait", name, "--status", "idle", "--timeout", strconv.Itoa(ms))
+	_, _ = p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--timeout", strconv.Itoa(ms))
 	return ctx.Err()
 }
 

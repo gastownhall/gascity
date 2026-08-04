@@ -1185,6 +1185,38 @@ func TestCreateSessionBeadOnly(t *testing.T) {
 	}
 }
 
+// TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock pins
+// that pending_create_started_at is read from the Manager's injected clock,
+// not the real wall clock. The never-started pending-create lease
+// (cmd/gc/session_reconciler.go pendingCreateNeverStartedLeaseExpiredInfo)
+// anchors on this timestamp and compares it against clock.Fake in reconciler
+// tests; if the stamp comes from real time instead, the anchor and the
+// comparison live on different timelines and the lease can never expire in
+// those tests, silently disabling the rollback safety net.
+func TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+	fakeNow := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: fakeNow}
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
+	if err != nil {
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	got, err := time.Parse(time.RFC3339, b.Metadata["pending_create_started_at"])
+	if err != nil {
+		t.Fatalf("pending_create_started_at = %q, not RFC3339: %v", b.Metadata["pending_create_started_at"], err)
+	}
+	if !got.Equal(fakeNow) {
+		t.Errorf("pending_create_started_at = %v, want %v (manager clock, not real wall clock)", got, fakeNow)
+	}
+}
+
 func TestGetSurfacesAgentNameMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -4422,6 +4454,45 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 	if path != "" {
 		t.Errorf("TranscriptPath = %q, want empty when workdir fallback is ambiguous", path)
+	}
+}
+
+func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "one", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+		t.Fatalf("Create one: %v", err)
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create two: %v", err)
+	}
+	sessionID := "019d9845-abcd-7000-8000-000000000456"
+	if err := store.SetMetadata(info.ID, "session_key", sessionID); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	now := time.Now()
+	dayDir := filepath.Join(searchBase, now.Format("2006"), now.Format("01"), now.Format("02"))
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	keyedPath := filepath.Join(dayDir, "rollout-"+now.Format("2006-01-02T15-04-05")+"-"+sessionID+".jsonl")
+	meta := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + workDir + `"}}`
+	if err := os.WriteFile(keyedPath, []byte(meta+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile keyed: %v", err)
+	}
+
+	path, err := mgr.TranscriptPath(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if path != keyedPath {
+		t.Errorf("TranscriptPath = %q, want keyed Codex transcript %q", path, keyedPath)
 	}
 }
 

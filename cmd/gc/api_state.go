@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -239,16 +240,17 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 		if recorder != nil {
 			recorder.Record(events.Event{
-				Type:      eventType,
-				Actor:     "cache-reconcile",
-				Subject:   beadID,
-				RunID:     runID,
-				SessionID: sessionID,
-				StepID:    stepID,
-				Payload:   payload,
+				Type:             eventType,
+				Actor:            "cache-reconcile",
+				Subject:          beadID,
+				RunID:            runID,
+				SessionID:        sessionID,
+				StepID:           stepID,
+				DependsOnStepIDs: dependsOnStepIDs,
+				Payload:          payload,
 			})
 		}
 	}
@@ -1716,8 +1718,12 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // than a 500.
 func assertRigPathWithinCity(cityPath, resolved string) error {
 	// Lexical check first: rejects "../" escapes and absolute paths that resolve
-	// to a sibling/parent of the city.
-	if err := relWithinCity(cityPath, resolved); err != nil {
+	// to a sibling/parent of the city. Normalize both sides so a symlinked city
+	// ancestor (cityPath raw, resolved already resolveStoreScopeRoot-resolved)
+	// doesn't register as a false-positive escape.
+	normalizedCity := pathutil.NormalizePathForCompare(cityPath)
+	normalizedTarget := pathutil.NormalizePathForCompare(resolved)
+	if err := relWithinCity(normalizedCity, normalizedTarget); err != nil {
 		return err
 	}
 	// Symlink-aware check: a "../"-free lexical path can still escape through a
@@ -2252,7 +2258,8 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch:         func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ResolveRegistryPack: cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},

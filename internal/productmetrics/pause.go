@@ -25,10 +25,26 @@ type pausePublicKeyCatalog func(func(pausePublicKeyEntry))
 
 type pausePublicKeySet map[string]ed25519.PublicKey
 
-// productionPausePublicKeyCatalog remains empty until an approved activation
-// manifest supplies B3 key-custody evidence. Test keys are injected only into
-// same-package tests and must never be added here.
-func productionPausePublicKeyCatalog(func(pausePublicKeyEntry)) {}
+const (
+	// productionPauseKeyID names the compiled signed-pause (kill-switch) key.
+	productionPauseKeyID = "gc-pause-2026-1"
+	// productionPauseKeyBase64 is the ed25519 public key (base64 raw-std, 32
+	// bytes). Its private seed is held in OpenBao and is used only to sign a
+	// pause envelope that halts uploads for a release_version + metrics_epoch.
+	productionPauseKeyBase64 = "zNKeoRoMhfYJ0ZB82trzvK+7ZgIcRSbyBBp2NtX49vY"
+)
+
+// productionPausePublicKeyCatalog yields the approved signed-pause public keys
+// compiled into production artifacts. It must contain at least one key or the
+// production upload transport refuses to build (fail-closed). Test keys are
+// injected only into same-package tests and must never be added here.
+func productionPausePublicKeyCatalog(yield func(pausePublicKeyEntry)) {
+	key, err := base64.RawStdEncoding.DecodeString(productionPauseKeyBase64)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return
+	}
+	yield(pausePublicKeyEntry{id: productionPauseKeyID, key: ed25519.PublicKey(key)})
+}
 
 type pauseUnsigned struct {
 	SchemaVersion  int    `json:"schema_version"`

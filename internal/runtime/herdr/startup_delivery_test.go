@@ -33,9 +33,9 @@ func TestStartupDeliveryText(t *testing.T) {
 			want: "Run gc hook --claim --json now; execute the claimed formula.",
 		},
 		{
-			name: "nudge precedence when both set keeps pool path unchanged",
-			cfg:  runtime.Config{Nudge: "claim now", PromptSuffix: shellquote.Quote(prime)},
-			want: "claim now",
+			name: "named session with prime and startup nudge delivers both, prime first",
+			cfg:  runtime.Config{PromptSuffix: shellquote.Quote(prime), Nudge: "Read your brief. Triage your rig."},
+			want: prime + "\n\n" + "Read your brief. Triage your rig.",
 		},
 		{
 			name: "nothing to deliver (deterministic worker / suppressed prompt)",

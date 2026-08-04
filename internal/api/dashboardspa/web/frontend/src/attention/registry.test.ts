@@ -35,9 +35,14 @@ describe('createAttentionContributors', () => {
       createAttentionContributors({
         health: {
           system: systemHealth({
-            free_mem_bytes: 4,
-            total_mem_bytes: 100,
-            load_avg_1: 13,
+            memory: {
+              status: 'available',
+              value: { free_mem_bytes: 4, total_mem_bytes: 100 },
+            },
+            load: {
+              status: 'available',
+              value: { load_avg_1: 13, load_avg_5: 0.4, load_avg_15: 0.3 },
+            },
             cpu_count: 8,
           }),
           supervisor: { status: 'unavailable', error: 'connect ECONNREFUSED' },
@@ -93,7 +98,7 @@ describe('createAttentionContributors', () => {
             {},
             {
               heap_used_bytes: 1_400_000_000,
-              rss_bytes: 2_200_000_000,
+              rss: { status: 'available', value: 2_200_000_000 },
               uptime_sec: 8,
             },
           ),
@@ -169,8 +174,10 @@ describe('createAttentionContributors', () => {
         },
         health: {
           system: systemHealth({
-            free_mem_bytes: 4,
-            total_mem_bytes: 100,
+            memory: {
+              status: 'available',
+              value: { free_mem_bytes: 4, total_mem_bytes: 100 },
+            },
           }),
           supervisor: { status: 'available', data: presentSupervisor() },
           trend: healthyTrend(),
@@ -187,6 +194,32 @@ describe('createAttentionContributors', () => {
     expect(model.byDomain.mail.attention).toBe(1);
     expect(model.byDomain.activity.attention).toBe(1);
     expect(model.byDomain.health.attention).toBe(1);
+  });
+
+  it('does not synthesize pressure alerts from unavailable health metrics', () => {
+    const model = composeAttention(
+      createAttentionContributors({
+        health: {
+          system: systemHealth(
+            {
+              load: { status: 'unavailable', reason: 'sample_failed' },
+              memory: { status: 'unavailable', reason: 'sample_failed' },
+            },
+            { rss: { status: 'unavailable', reason: 'sample_failed' } },
+          ),
+          supervisor: { status: 'available', data: presentSupervisor() },
+          trend: healthyTrend(),
+        },
+      }),
+    );
+
+    expect(model.byDomain.health.items.map((item) => item.id)).not.toContain(
+      'health:dashboard-process-rss-high',
+    );
+    expect(model.byDomain.health.items.map((item) => item.id)).not.toContain(
+      'health:memory-critical',
+    );
+    expect(model.byDomain.health.items.map((item) => item.id)).not.toContain('health:load-high');
   });
 
   it('counts genuinely-blocked runs only — a needs-operator active lane does not count (gascity-dashboard-2j8e.2)', () => {
@@ -790,19 +823,22 @@ function systemHealth(
     admin: {
       pid: 123,
       uptime_sec: 600,
-      rss_bytes: 128_000_000,
+      rss: { status: 'available', value: 128_000_000 },
       heap_used_bytes: 64_000_000,
       node_version: 'v22.0.0',
       ...adminOverrides,
     },
     host: {
-      load_avg_1: 0.5,
-      load_avg_5: 0.4,
-      load_avg_15: 0.3,
-      total_mem_bytes: 100,
-      free_mem_bytes: 50,
+      load: {
+        status: 'available',
+        value: { load_avg_1: 0.5, load_avg_5: 0.4, load_avg_15: 0.3 },
+      },
+      memory: {
+        status: 'available',
+        value: { total_mem_bytes: 100, free_mem_bytes: 50 },
+      },
       cpu_count: 8,
-      uptime_sec: 86_400,
+      uptime: { status: 'available', value: 86_400 },
       ...overrides,
     },
   };

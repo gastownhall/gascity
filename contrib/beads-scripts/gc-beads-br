@@ -242,6 +242,12 @@ case "$op" in
 
   update)
     id="$1"
+    # KNOWN GAP: this op does not yet forward title, status, type, priority or
+    # remove_labels, all of which the update request may carry (see
+    # docs/reference/exec-beads-provider.md). The Store conformance suite's
+    # UpdateRoundTripsEveryDocumentedField subtest covers them, so
+    # TestBrProviderConformance (build tag: integration, requires br on PATH)
+    # will report exactly which ones br can express.
     input=$(cat)
     cmd_args=(br update --json "$id")
 

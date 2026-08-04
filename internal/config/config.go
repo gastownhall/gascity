@@ -710,6 +710,9 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -1549,12 +1552,28 @@ type SessionConfig struct {
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
+	// SetupMaxTimeout enables an activity-aware budget for session setup and
+	// pre_start commands. When set (e.g. "10m"), a setup command is no longer
+	// killed after setup_timeout of wall clock; instead setup_timeout bounds
+	// how long it may run without producing output (idle budget) and
+	// setup_max_timeout bounds its total runtime regardless of output (the
+	// runaway ceiling). A slow but healthy command — a large worktree checkout
+	// streaming progress — survives, while a hung one still dies after
+	// setup_timeout of silence. Duration string. Empty (the default) keeps
+	// the fixed setup_timeout deadline.
+	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// NudgePollInterval is the cycle interval for the per-session nudge
+	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
+	// checks the queued-nudge state, so on hosts running many sessions a
+	// longer interval trades nudge-delivery latency for less standing load.
+	// Duration string. Unset means the poller's built-in default (2s).
+	NudgePollInterval string `toml:"nudge_poll_interval,omitempty" jsonschema:"default=2s"`
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
@@ -1575,6 +1594,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that holds in-progress work but has stopped making
+	// progress. Because recycling a claim-holder interrupts work, set this above
+	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
+	// Duration string (e.g. "20m"). Unset/zero disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1625,6 +1650,13 @@ func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
 	return durationOr(s.SetupTimeout, 10*time.Second)
 }
 
+// SetupMaxTimeoutDuration returns the activity-aware setup ceiling as a
+// time.Duration. Zero — the feature disabled, keeping the fixed
+// setup_timeout deadline — if empty or unparseable.
+func (s *SessionConfig) SetupMaxTimeoutDuration() time.Duration {
+	return durationOr(s.SetupMaxTimeout, 0)
+}
+
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
@@ -1635,6 +1667,20 @@ func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// NudgePollIntervalDuration returns the configured nudge poller cycle
+// interval, or 0 when unset, unparseable, or non-positive — 0 means "not
+// configured" and callers fall back to their built-in default.
+func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
+	if s.NudgePollInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.NudgePollInterval)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.
@@ -1657,6 +1703,13 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
@@ -2006,9 +2059,11 @@ type FormulasConfig struct {
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
-	// MaxTimeout is an operator hard cap on per-order timeouts.
-	// No order gets more than this duration. Go duration string (e.g., "60s").
-	// Empty means uncapped (no override).
+	// MaxTimeout is an operator hard cap on the per-order dispatch timeout: no
+	// order's dispatched exec/formula runs longer than this. Go duration string
+	// (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch
+	// timeout only; a condition trigger's check_timeout is a separate probe
+	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2042,6 +2097,11 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// CheckTimeout overrides the condition trigger's check-command deadline.
+	// Go duration string. Lets a deployment tune check_timeout for a scanned
+	// shared-pack order (e.g. a slow-store queue check) without editing the
+	// pack source.
+	CheckTimeout *string `toml:"check_timeout,omitempty"`
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`
@@ -2508,6 +2568,29 @@ type DaemonConfig struct {
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the
+	// full worktree-reap classification each tick — discovery, closed-bead
+	// match, liveness gate, and git-safety probes — but emit
+	// bead.worktree.reap_skipped events describing what it WOULD reap and
+	// what it protected, without removing anything. This is the safe
+	// staged-rollout surface: an operator enables dry-run first, confirms via
+	// `gc events` that no live worktree appears in the would-reap set, then
+	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
+	// effect when AutoReapClosedBeadWorktrees is already true (real removal
+	// supersedes it). Defaults to false.
+	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
+	// in minutes, before a closed-bead worktree becomes eligible for reap
+	// classification at all (borrow-veto scan and beyond). This quarantines
+	// a worktree against the race between its creation and its owning
+	// bead's gc.work_dir/work_dir metadata being stamped by the next
+	// reconcile pass — without it, a just-created worktree could look
+	// unclaimed to the borrow-veto scan before the metadata that would
+	// protect it has been written. Nil (unset) defaults to
+	// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the
+	// quarantine entirely (every closed-bead worktree is immediately
+	// eligible for the rest of the gate chain, regardless of age).
+	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2559,6 +2642,34 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
 		return false
 	}
 	return *d.AutoReapClosedBeadWorktrees
+}
+
+// AutoReapClosedBeadWorktreesDryRunEnabled reports whether the patrol should
+// run the worktree-reap classification and emit would-reap/protected events
+// without removing anything. Defaults to false when the field is unset (nil).
+// Real removal (AutoReapClosedBeadWorktreesEnabled) supersedes dry-run: when
+// both are set, the reaper deletes for real, so callers should treat dry-run
+// as active only when this is true AND real reaping is off.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
+	if d.AutoReapClosedBeadWorktreesDryRun == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktreesDryRun
+}
+
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes is the quarantine window
+// applied when AutoReapClosedBeadWorktreesMinAgeMinutes is unset.
+const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
+
+// AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
+// closed-bead worktree is eligible for reap classification. Defaults to
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
+// zero disables the quarantine.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
+	if d.AutoReapClosedBeadWorktreesMinAgeMinutes == nil {
+		return time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	}
+	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
@@ -2827,9 +2938,11 @@ func (c *City) FormulasDir() string {
 
 // AllPackDirs returns the union of city-level and all rig-level pack directories
 // (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
-// global scans that intentionally need the full pack-fragment universe. Prompt
-// rendering for a specific rig should use PackDirsForRig so one rig's fragments
-// cannot override another rig's same-named fragments.
+// global scans that intentionally need the full pack-fragment universe, and as
+// the fallback PackDirsForRig("") uses for rig-less (scope="city") agents, which
+// have no single rig to scope to. Prompt rendering for a specific rig should use
+// PackDirsForRig so one rig's fragments cannot override another rig's
+// same-named fragments.
 func (c *City) AllPackDirs() []string {
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
@@ -2848,12 +2961,27 @@ func (c *City) AllPackDirs() []string {
 // directories imported by rigName, deduplicated with city-level dirs kept first.
 // Use this when rendering prompts for one agent so rig-imported template
 // fragments are available without exposing fragments imported by other rigs.
+//
+// rigName == "" means a rig-less (scope="city") agent — e.g. deep-investigator,
+// supervisor, pack-author — which has no single rig to scope to. Those agents
+// fall back to AllPackDirs(): the union across every rig, sorted by rig name for
+// determinism. A fragment name defined identically in more than one rig's pack
+// resolves fine (that's the common case: a shared vocabulary like
+// handoff-routing, meant to render identically everywhere). A name defined with
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
+// See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
+	if rigName == "" {
+		return c.AllPackDirs()
+	}
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
-	if rigName != "" {
-		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
-	}
+	dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
 	return dirs
 }
 
@@ -3147,6 +3275,19 @@ type Agent struct {
 	// disables jitter (every session restarts at exactly MaxSessionAge).
 	// Ignored when MaxSessionAge is unset.
 	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the
+	// idle-timeout ladder may defer on the same assigned-work bead
+	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
+	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
+	// Nil means use the built-in default. Without this backstop a session
+	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
+	// open due to an upstream status-mapping bug) would defer indefinitely,
+	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at
+	// the single-tick level. The counter resets whenever the anchor bead
+	// changes or the session is not idle-kill-eligible; see
+	// sessionHasAwakeAssignedWorkForReachableStore's caller in
+	// session_reconciler.go.
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -3340,6 +3481,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -3992,6 +4134,13 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
+			if agent.EffectiveWakeMode() == "fresh" {
+				warnings = append(warnings, fmt.Sprintf(
+					"named_session %q: mode %q with wake_mode %q on template %q %s; use only for a deliberate restart-per-cycle actor",
+					s.QualifiedName(), s.ModeOrDefault(), agent.EffectiveWakeMode(), agent.QualifiedName(),
+					alwaysFreshWakeModeMarker,
+				))
+			}
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
@@ -4008,6 +4157,20 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		}
 	}
 	return warnings, nil
+}
+
+// alwaysFreshWakeModeMarker is a stable substring on the warning emitted when a
+// mode="always" named session backs a wake_mode="fresh" template. CLI warning
+// classification keys off this marker, so keep it in sync with
+// IsAlwaysFreshWakeModeWarning.
+const alwaysFreshWakeModeMarker = "starts a fresh provider session after every drain"
+
+// IsAlwaysFreshWakeModeWarning reports whether a load warning is the non-fatal
+// always+fresh advisory. CLI warning filters use this to print the notice and
+// keep it non-fatal in strict mode. Keep in sync with
+// alwaysFreshWakeModeMarker.
+func IsAlwaysFreshWakeModeWarning(warning string) bool {
+	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a
@@ -4278,7 +4441,7 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] (skills and formulas) pinned to the registry release.
+// plus [imports.gc] (skills, formulas, and commands) pinned to the registry release.
 // The gascity formulas route their steps to role agents (gc.run-operator,
 // gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
 // the template also seeds that pack as a default rig import bound "gc" — every
@@ -4288,7 +4451,7 @@ func GastownCity(name, provider, startCommand string) City {
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
-		"gascity": {
+		"gc": {
 			Source:  PublicGascityPackSource,
 			Version: PublicGascityPackVersion,
 		},

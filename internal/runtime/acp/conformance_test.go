@@ -7,59 +7,97 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-func TestACPConformance(t *testing.T) {
-	// Build the fake ACP server binary.
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "fakeacp")
-	cmd := exec.Command("go", "build", "-o", binPath, "./testdata/fakeacp")
-	cmd.Dir = filepath.Join(mustModRoot(t), "internal", "runtime", "acp")
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("building fakeacp: %v", err)
-	}
+type acpConformanceFixture struct {
+	once    sync.Once
+	dir     string
+	command string
+	err     error
+}
 
-	// Unix socket paths are capped at 104 bytes on macOS (vs 108 on
-	// Linux). The default t.TempDir() on Darwin lives under
-	// /var/folders/.../T/ which already eats ~60 chars — a few more
-	// directory levels plus the hashed "s<8hex>.sock" filename puts
-	// us over the limit. testutil.ShortTempDir roots the directory
-	// under /tmp on Darwin to keep the socket path small.
-	dir := filepath.Join(testutil.ShortTempDir(t, "acp-conform"), "acp")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %q: %v", dir, err)
-	}
-	p := NewProviderWithDir(dir, Config{})
+func TestACPConformance(t *testing.T) {
+	var fixture acpConformanceFixture
 	var counter int64
 
-	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("gc-acp-conform-%d", id)
-		return p, runtime.Config{
-			Command: binPath,
-			WorkDir: t.TempDir(),
-		}, name
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBackedWithDir(acpConformanceDir(caseT, t, &fixture), Config{}), runtime.Config{
+			Command: acpConformanceCommand(caseT, t, &fixture),
+			WorkDir: caseT.TempDir(),
+		}, fmt.Sprintf("gc-acp-conform-%d", atomic.AddInt64(&counter, 1))
 	})
 }
 
-// mustModRoot returns the module root directory.
-func mustModRoot(t *testing.T) string {
-	t.Helper()
+func acpConformanceDir(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
+	caseT.Helper()
+	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {
+		caseT.Fatal(err)
+	}
+	return fixture.dir
+}
+
+func acpConformanceCommand(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
+	caseT.Helper()
+	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {
+		caseT.Fatal(err)
+	}
+	return fixture.command
+}
+
+func prepareACPConformanceFixture(ownerT *testing.T, fixture *acpConformanceFixture) error {
+	fixture.once.Do(func() {
+		// Unix socket paths are capped at 104 bytes on macOS (vs 108 on
+		// Linux), so root the fixture directly under /tmp on Darwin.
+		root := os.TempDir()
+		if goruntime.GOOS == "darwin" {
+			root = "/tmp"
+		}
+		fixtureRoot, err := os.MkdirTemp(root, "acp-conform")
+		if err != nil {
+			fixture.err = fmt.Errorf("create ACP conformance fixture: %w", err)
+			return
+		}
+		ownerT.Cleanup(func() { _ = os.RemoveAll(fixtureRoot) })
+
+		fixture.dir = filepath.Join(fixtureRoot, "acp")
+		if err := os.MkdirAll(fixture.dir, 0o755); err != nil {
+			fixture.err = fmt.Errorf("mkdir %q: %w", fixture.dir, err)
+			return
+		}
+
+		modRoot, err := moduleRoot()
+		if err != nil {
+			fixture.err = err
+			return
+		}
+		fixture.command = filepath.Join(fixtureRoot, "fakeacp")
+		cmd := exec.Command("go", "build", "-o", fixture.command, "./testdata/fakeacp")
+		cmd.Dir = filepath.Join(modRoot, "internal", "runtime", "acp")
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fixture.err = fmt.Errorf("building fakeacp: %w", err)
+		}
+	})
+	return fixture.err
+}
+
+func moduleRoot() (string, error) {
 	cmd := exec.Command("go", "env", "GOMOD")
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go env GOMOD: %v", err)
+		return "", fmt.Errorf("go env GOMOD: %w", err)
 	}
-	mod := string(out)
+	mod := strings.TrimSpace(string(out))
 	if mod == "" || mod == "/dev/null" {
-		t.Fatal("not in a Go module")
+		return "", fmt.Errorf("not in a Go module")
 	}
-	return filepath.Dir(filepath.Clean(mod[:len(mod)-1])) // trim trailing newline
+	return filepath.Dir(filepath.Clean(mod)), nil
 }

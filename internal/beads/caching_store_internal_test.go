@@ -2005,8 +2005,19 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	if stats.ProblemCount != int64(maxCacheSyncFailures) {
 		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
 	}
-	if len(logs) != 1 {
-		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	// Expect 2 logs: the deduplicated reconcile-cache problem (run 1) and the
+	// one-shot circuit-breaker trip (emitted when syncFailures reaches maxCacheSyncFailures).
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines, want 2 (1 reconcile problem + 1 circuit-breaker trip): %#v", len(logs), logs)
+	}
+	hasTrip := false
+	for _, l := range logs {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			hasTrip = true
+		}
+	}
+	if !hasTrip {
+		t.Fatalf("circuit-breaker trip not found in logs: %#v", logs)
 	}
 	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
 		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
@@ -2019,11 +2030,12 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	cache.mu.Unlock()
 
 	cache.runReconciliation()
-	if len(logs) != 2 {
-		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	// After window expiry: 1 new reconcile-cache problem log (with suppressed count) → total 3.
+	if len(logs) != 3 {
+		t.Fatalf("logged %d problem lines after window expiry, want 3: %#v", len(logs), logs)
 	}
-	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
-		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
+	if !strings.Contains(logs[2], "suppressed 4 duplicate logs") {
+		t.Fatalf("third problem log = %q, want suppressed duplicate count", logs[2])
 	}
 }
 

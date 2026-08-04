@@ -21,6 +21,8 @@ export interface ListSupervisorBeadsOptions {
   includeBookkeeping?: boolean;
   rigFilter?: string;
   limit?: number;
+  city?: string;
+  signal?: AbortSignal;
 }
 
 // Pre-exposure load bounds (gascity-dashboard-q89b): board and detail-fallback
@@ -47,7 +49,7 @@ const ENGINEERING_BEAD_TYPES: ReadonlySet<string> = new Set([
 export async function listSupervisorBeads(
   options: ListSupervisorBeadsOptions = {},
 ): Promise<SupervisorBeadList> {
-  const cityName = activeCityOrThrow('list supervisor beads');
+  const cityName = options.city ?? activeCityOrThrow('list supervisor beads');
   const limit = options.limit ?? BEADS_FETCH_LIMIT;
   const rigFilter = options.rigFilter?.trim() ?? '';
   const includeClosed = options.includeClosed ?? false;
@@ -57,7 +59,10 @@ export async function listSupervisorBeads(
     ...(includeClosed ? { all: true } : {}),
     ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
   };
-  const list = await supervisorApi().listBeads(cityName, baseQuery);
+  const list =
+    options.signal === undefined
+      ? await supervisorApi().listBeads(cityName, baseQuery)
+      : await supervisorApi().listBeads(cityName, baseQuery, options.signal);
   const items = uniqueById(list.items ?? []);
   const statusFiltered = includeClosed ? items : items.filter((bead) => bead.status !== 'closed');
   const filtered = includeBookkeeping ? statusFiltered : statusFiltered.filter(defaultBeadFilter);

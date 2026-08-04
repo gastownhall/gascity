@@ -34,6 +34,7 @@ named-always-min-conflict
 instructions-file
 service-secrets-perms
 skill-collision
+skill-dangling-sink
 order-firing-current
 codex-hooks-drift
 rig-pack-coverage
@@ -58,7 +59,9 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+census-owner-liveness
 run-target-routed-to-backfill
+hold-label-routed-to
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
@@ -77,4 +80,5 @@ bd-backup-freshness
 worktree-disk-size
 nested-worktree-prune
 custom-types:city
+hold-label-conventions:city
 worktrees

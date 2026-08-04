@@ -243,6 +243,10 @@
           "type": "string",
           "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
         },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the\nidle-timeout ladder may defer on the same assigned-work bead\n(DecideIdleTimeout's AssignedWorkHas rung) before the reconciler\noverrides the defer and forces a stop via DecideAssignedWorkExhausted.\nNil means use the built-in default. Without this backstop a session\nanchored to a bead that never clears assigned-work (e.g. a bead stuck\nopen due to an upstream status-mapping bug) would defer indefinitely,\nreproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at\nthe single-tick level. The counter resets whenever the anchor bead\nchanges or the session is not idle-kill-eligible; see\nsessionHasAwakeAssignedWorkForReachableStore's caller in\nsession_reconciler.go."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
@@ -521,6 +525,10 @@
         "max_session_age_jitter": {
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
+        },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -802,6 +810,10 @@
         "max_session_age_jitter": {
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
+        },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -1365,6 +1377,16 @@
           "type": "boolean",
           "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
           "default": false
+        },
+        "auto_reap_closed_bead_worktrees_dry_run": {
+          "type": "boolean",
+          "description": "AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the\nfull worktree-reap classification each tick — discovery, closed-bead\nmatch, liveness gate, and git-safety probes — but emit\nbead.worktree.reap_skipped events describing what it WOULD reap and\nwhat it protected, without removing anything. This is the safe\nstaged-rollout surface: an operator enables dry-run first, confirms via\n`gc events` that no live worktree appears in the would-reap set, then\nenables AutoReapClosedBeadWorktrees for real removal. Dry-run has no\neffect when AutoReapClosedBeadWorktrees is already true (real removal\nsupersedes it). Defaults to false.",
+          "default": false
+        },
+        "auto_reap_closed_bead_worktrees_min_age_minutes": {
+          "type": "integer",
+          "description": "AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,\nin minutes, before a closed-bead worktree becomes eligible for reap\nclassification at all (borrow-veto scan and beyond). This quarantines\na worktree against the race between its creation and its owning\nbead's gc.work_dir/work_dir metadata being stamped by the next\nreconcile pass — without it, a just-created worktree could look\nunclaimed to the borrow-veto scan before the metadata that would\nprotect it has been written. Nil (unset) defaults to\nDefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the\nquarantine entirely (every closed-bead worktree is immediately\neligible for the rest of the gate chain, regardless of age).",
+          "default": 10
         },
         "start_ready_timeout": {
           "type": "string",
@@ -2032,6 +2054,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "check_timeout": {
+          "type": "string",
+          "description": "CheckTimeout overrides the condition trigger's check-command deadline.\nGo duration string. Lets a deployment tune check_timeout for a scanned\nshared-pack order (e.g. a slow-store queue check) without editing the\npack source."
+        },
         "idempotent": {
           "type": "boolean",
           "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
@@ -2062,7 +2088,7 @@
         },
         "max_timeout": {
           "type": "string",
-          "description": "MaxTimeout is an operator hard cap on per-order timeouts.\nNo order gets more than this duration. Go duration string (e.g., \"60s\").\nEmpty means uncapped (no override)."
+          "description": "MaxTimeout is an operator hard cap on the per-order dispatch timeout: no\norder's dispatched exec/formula runs longer than this. Go duration string\n(e.g., \"60s\"). Empty means uncapped (no override). This bounds the dispatch\ntimeout only; a condition trigger's check_timeout is a separate probe\ndeadline and is not capped here."
         },
         "overrides": {
           "items": {
@@ -2734,6 +2760,10 @@
           "description": "SetupTimeout is the per-command/script timeout for session setup and\npre_start commands. Duration string (e.g., \"10s\", \"30s\"). Defaults to \"10s\".",
           "default": "10s"
         },
+        "setup_max_timeout": {
+          "type": "string",
+          "description": "SetupMaxTimeout enables an activity-aware budget for session setup and\npre_start commands. When set (e.g. \"10m\"), a setup command is no longer\nkilled after setup_timeout of wall clock; instead setup_timeout bounds\nhow long it may run without producing output (idle budget) and\nsetup_max_timeout bounds its total runtime regardless of output (the\nrunaway ceiling). A slow but healthy command — a large worktree checkout\nstreaming progress — survives, while a hung one still dies after\nsetup_timeout of silence. Duration string. Empty (the default) keeps\nthe fixed setup_timeout deadline."
+        },
         "nudge_ready_timeout": {
           "type": "string",
           "description": "NudgeReadyTimeout is how long to wait for the agent to be ready before\nsending nudge text. Duration string. Defaults to \"10s\".",
@@ -2743,6 +2773,11 @@
           "type": "string",
           "description": "NudgeRetryInterval is the retry interval between nudge readiness polls.\nDuration string. Defaults to \"500ms\".",
           "default": "500ms"
+        },
+        "nudge_poll_interval": {
+          "type": "string",
+          "description": "NudgePollInterval is the cycle interval for the per-session nudge\npoller sidecar (`gc nudge poll`). Each cycle observes the session and\nchecks the queued-nudge state, so on hosts running many sessions a\nlonger interval trades nudge-delivery latency for less standing load.\nDuration string. Unset means the poller's built-in default (2s).",
+          "default": "2s"
         },
         "nudge_lock_timeout": {
           "type": "string",
@@ -2767,6 +2802,10 @@
         "progress_stall_timeout": {
           "type": "string",
           "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+        },
+        "claim_holder_stall_timeout": {
+          "type": "string",
+          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it."
         },
         "socket": {
           "type": "string",

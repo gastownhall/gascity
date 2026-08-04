@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"golang.org/x/sync/singleflight"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -68,6 +68,10 @@ type Server struct {
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
+	// structuredPeekPoll overrides the structured fallback stream's periodic
+	// history check in tests. Nil uses outputStreamPollInterval.
+	structuredPeekPoll <-chan time.Time
+
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
@@ -92,14 +96,6 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
-	// runProj is the server-owned per-city warm run projection backing
-	// GET /v0/city/{name}/runs and the single-run/steps reads. It cold-loads the
-	// event log asynchronously, then tails only newly appended events, so a poll
-	// serves a warm read instead of re-replaying the whole history each request.
-	// Lazily created on first read; see runs_projector.go.
-	runProjMu sync.Mutex
-	runProj   *runProjector
-
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
@@ -107,7 +103,8 @@ type Server struct {
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
-	storeHealthComputer func(ctx context.Context) *StatusStoreHealth
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
@@ -285,13 +282,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
-	if formula.IsFormulaV2Enabled() != enabled {
-		formula.SetFormulaV2Enabled(enabled)
-	}
-	if molecule.IsGraphApplyEnabled() != enabled {
-		molecule.SetGraphApplyEnabled(enabled)
-	}
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
 type singleStateResolver struct {

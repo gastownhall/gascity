@@ -2,6 +2,7 @@ package orders
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -81,11 +82,18 @@ func TestCheckTriggerCronEveryMinuteStepMatched(t *testing.T) {
 
 func TestCheckTriggerCronNotMatched(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
-	// 12:00 UTC — should not match.
+	// 12:00 UTC — should not match. Uses a warm lastRun (a minute ago, not a
+	// scheduled boundary) rather than neverRan: since #3947's fix, a never-run
+	// order's own bounded catch-up window would otherwise legitimately find
+	// today's already-elapsed 03:00 occurrence and correctly report Due — this
+	// test isolates the plain "off-schedule minute, nothing to catch up"
+	// case instead of confounding it with that separate cold-start path.
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	result := CheckTrigger(a, now, neverRan, nil, nil)
+	lastRun := now.Add(-1 * time.Minute)
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	result := CheckTrigger(a, now, lastRunFn, nil, nil)
 	if result.Due {
-		t.Errorf("Due = true, want false (schedule doesn't match 12:00)")
+		t.Errorf("Due = true, want false (schedule doesn't match 12:00, nothing to catch up since lastRun)")
 	}
 }
 
@@ -103,6 +111,43 @@ func TestCheckTriggerCronCatchesUpMissedBoundary(t *testing.T) {
 	result := CheckTrigger(a, now, lastRunFn, nil, nil)
 	if !result.Due {
 		t.Errorf("Due = false, want true (catch up the missed 04:00 occurrence); reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary is the
+// regression for #3947: the catch-up scan added by the fix above was
+// gated on a non-zero lastRun, so a freshly-installed narrow-window order
+// (e.g. a daily-once schedule) that never happens to be evaluated on its
+// exact scheduled minute could never fire at all — not even once — since
+// there was no lastRun to catch up from and no restart recovers it either.
+func TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary(t *testing.T) {
+	a := Order{Name: "janitor-worktree-gc", Trigger: "cron", Schedule: "20 4 * * *"}
+	// Scheduled minute (04:20) elapsed less than an hour ago; the
+	// controller's coarse eval cadence never landed on it exactly.
+	now := time.Date(2026, 7, 5, 5, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (never-run order should catch up its recent missed 04:20 occurrence); reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence guards the
+// #3947 fix's own safety bound: a never-run order must not reach back
+// through its full history and fire for a schedule occurrence that
+// elapsed long before it was even installed — only the warm (non-zero
+// lastRun) catch-up path gets the full year-long lookback. A daily
+// schedule's most recent occurrence is always <=24h before now, so this
+// needs a weekly schedule to construct a "most recent occurrence is
+// clearly outside the never-run bootstrap window" case.
+func TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence(t *testing.T) {
+	a := Order{Name: "weekly-report", Trigger: "cron", Schedule: "0 4 * * 0"} // Sundays 04:00
+	// 2026-07-05 is a Sunday; evaluating three days later, the most recent
+	// occurrence (07-05 04:00) is ~74h in the past — well outside any
+	// reasonable never-run bootstrap window, and next Sunday hasn't come yet.
+	now := time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (never-run bootstrap window must not reach back days); reason=%q", result.Reason)
 	}
 }
 
@@ -147,6 +192,68 @@ func TestCheckTriggerConditionUsesOptions(t *testing.T) {
 	})
 	if !result.Due {
 		t.Errorf("Due = false, want true with condition cwd/env: %s", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionHonorsOrderCheckTimeoutWithoutOptions(t *testing.T) {
+	// Regression (PR #4190 iter-3 N1): check_timeout must be honored on every
+	// trigger-evaluation entry point, not only the callers (controller dispatch
+	// and the store-aware CLI check) that populate TriggerOptions.ConditionTimeout.
+	// Bare CheckTrigger callers — the API GET /v0/orders/check evaluator and the
+	// storeless CLI check — pass an empty TriggerOptions, so before the fix
+	// checkCondition fell back to the fixed 10s defaultConditionCheckTimeout and
+	// silently ignored the order's own check_timeout. A slow condition could then
+	// be reported timed-out at 10s by the dashboard/API while controller dispatch
+	// waited the configured duration. Prove the order-configured deadline now
+	// applies through the empty-opts path: a check that outlives a small
+	// check_timeout (but would finish within the 10s default) must be killed and
+	// reported timed out, not allowed to run to the default and pass.
+	a := Order{
+		Name:         "check",
+		Trigger:      "condition",
+		Check:        "sleep 2",
+		CheckTimeout: "200ms",
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if result.Due {
+		t.Fatalf("Due = true, want false: bare CheckTrigger must honor the order's 200ms check_timeout, not the 10s default")
+	}
+	if !strings.Contains(result.Reason, ConditionCheckTimedOutMarker) {
+		t.Fatalf("Reason = %q, want it to contain %q", result.Reason, ConditionCheckTimedOutMarker)
+	}
+}
+
+func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
+	// Regression (PR #4190 major finding): a condition check must derive its
+	// process deadline from the caller's context, not context.Background(). Now
+	// that check_timeout is operator-configurable well above the old fixed 10s, a
+	// canceled dispatch tick / controller shutdown / config reload must abort the
+	// check promptly instead of blocking for the full configured deadline. Before
+	// the fix opts.ConditionCtx was ignored: the check ran under a fresh 30s
+	// timeout and canceling the parent had no effect, so this call blocked for
+	// the whole deadline. The cancel is issued before the check can finish; the
+	// select proves prompt return without depending on wall-clock sleeps.
+	a := Order{Name: "check", Trigger: "condition", Check: "sleep 30"}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan TriggerResult, 1)
+	go func() {
+		done <- CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+			ConditionCtx:     ctx,
+			ConditionTimeout: 30 * time.Second,
+		})
+	}()
+	cancel()
+
+	select {
+	case result := <-done:
+		if result.Due {
+			t.Fatalf("Due = true, want false after parent context cancel: %s", result.Reason)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkCondition did not return within 10s of parent cancel; want prompt abort well under the 30s check_timeout")
 	}
 }
 

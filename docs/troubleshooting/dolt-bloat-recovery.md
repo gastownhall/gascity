@@ -137,6 +137,25 @@ succeed. Do **not** set the global opt-out in the shared `mol-dog-compactor`
 order for the same reason; set the per-database env on the affected city
 instead.
 
+## Compacting a database that must never reach a remote
+
+Some databases are deliberately local — a privacy boundary, or a store whose
+remote was configured by accident. Mark those `.no-sync` and compaction skips
+its remote phase entirely: no fetch, no push, and no deferred push recorded.
+The database still flattens and GCs, so it keeps the disk benefit:
+
+```bash
+# Exclude one database from all remote sync, compaction included.
+touch <cityPath>/.beads/dolt/<database>/.no-sync
+```
+
+`gc dolt sync` and `gc dolt pull` honor the same marker, so one file covers
+every remote path.
+
+Choose `.no-sync` over `--skip-fetch` when a database must never reach a
+remote. `--skip-fetch` defers the push and waits for the remote to become
+usable later; `.no-sync` states that it never will.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of
@@ -195,6 +214,35 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
+
+Quarantine markers also carry structured evidence. New markers include the
+database name, the preflight/flatten/post-verify HEADs, preflight and
+postflight database value hashes when available, `integrity_table_drift` for
+table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
+drift, and `decision=preserve_marker_manual_review_required`.
+
+Safe marker-clear procedure:
+
+1. Require a clean application worktree: `git status --short` should show no
+   product/config/test changes you have not accounted for.
+2. Confirm the Dolt server is reachable with `gc dolt status` and a live query
+   such as `gc dolt sql --db <database> -q "SELECT COUNT(*) FROM issues"`.
+3. Confirm bead queries are healthy for the affected store, for example
+   `bd list --limit 1` in that rig or `gc bd list --rig <rig> --limit 1`.
+4. Read the marker and retain it if the HEAD/hash/table evidence is incomplete
+   or points at row loss. For table drift, compare the recorded HEADs with
+   `DOLT_DIFF` / `DOLT_DIFF_STAT`; only clear when the diff proves preflight
+   rows are still reachable and no unexpected table disappeared.
+5. When the evidence proves no data loss, remove only that database's marker:
+   `rm .gc/runtime/packs/dolt/compact-quarantine/<database>`.
+6. Retry reclaim with `gc dolt compact --gc-only --only-db <database>`. If the
+   marker returns or health checks fail, preserve the marker and escalate with
+   the marker contents and command output.
+
+`gc dolt compact` and `gc dolt compact --gc-only` refuse databases with
+quarantine markers. The refusal output repeats the marker path, reason, key
+evidence fields, and the clear/retry command so operators have the next action
+without opening this runbook first.
 
 ## When to Escalate
 

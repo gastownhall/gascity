@@ -72,7 +72,7 @@ type backfillSource struct {
 // window; the streamed monotonic guard drops the duplicate, so both are safe to
 // include.
 func listBackfillSources(dir string, afterSeq uint64) ([]backfillSource, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readRotationDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

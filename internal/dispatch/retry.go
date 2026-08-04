@@ -180,8 +180,10 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	// A routeConfig error is intentionally tolerated here: retry preserves the
 	// prior attempt's already-stamped routes rather than scope-routing, so a nil
 	// cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
-	// (control.go, fanout.go) fail closed on this error because they scope-route
-	// through applyAttemptControlStepRoute.
+	// (control.go, fanout.go) cannot degrade to metadata-only because they
+	// scope-route fresh through applyAttemptControlStepRoute, so they instead
+	// classify a load/parse failure as a transient controller-boundary error and
+	// retry it as pending.
 	routeCfg, _ := opts.routeConfig()
 	if beadUsesMetadataPoolRouteWithConfig(subject, routeCfg) {
 		if opts.RecycleSession == nil {
@@ -425,11 +427,27 @@ func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
 	return pathutil.PathWithin(absWorktree, absPath), nil
 }
 
+// requiredArtifactTargetInWorktree reports whether path's symlink-resolved
+// target is contained within worktree's symlink-resolved root, tolerating a
+// missing path (treated as contained; the caller's earlier os.Stat is what
+// classifies missing artifacts as failures).
 func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. worktree is always an absolute git-worktree path stamped
+	// by the controller (never a bare "." or other unresolved relative
+	// value); a worktree that no longer resolves must fail this check,
+	// which pathutil.NormalizePathForCompare's never-errors contract would
+	// silently paper over.
 	resolvedWorktree, err := filepath.EvalSymlinks(filepath.Clean(worktree))
 	if err != nil {
 		return false, fmt.Errorf("resolving required artifact worktree symlinks %q: %w", worktree, err)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. A missing artifact target is deliberately treated as
+	// contained (true) here — validateRequiredArtifacts' earlier os.Stat
+	// call is what classifies missing/unreadable artifacts as failures;
+	// this function only needs to gate symlink escapes for targets that
+	// exist.
 	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		if os.IsNotExist(err) {

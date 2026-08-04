@@ -120,11 +120,18 @@ func TestPrepareStartCandidateStagesScaffoldInResolvedTaskWorkDirWhenCWDIsShared
 	for _, rel := range []string{
 		filepath.Join(".claude", "skills", "triage", "SKILL.md"),
 		filepath.Join(".codex", "hooks.json"),
-		filepath.Join(".gc", "settings.json"),
 	} {
 		if _, err := os.Stat(filepath.Join(targetWorkDir, rel)); err != nil {
 			t.Errorf("target scaffold %s missing under resolved workdir %q: %v", rel, targetWorkDir, err)
 		}
+	}
+	// A top-level .gc/ in the overlay source is a runtime mirror and must never
+	// be staged into a session workdir (overlay.skipRuntimeMirror). The session's
+	// own .gc/settings.json is staged separately through the hook-file path
+	// (see claudeSettingsSource/stageHookFiles), not copied verbatim from the
+	// pack overlay, so the mirror is expected to be skipped here.
+	if _, err := os.Stat(filepath.Join(targetWorkDir, ".gc", "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("overlay .gc runtime mirror must not be staged under resolved workdir %q (stat err = %v)", targetWorkDir, err)
 	}
 	if _, err := os.Stat(leakedWorkDir); err == nil {
 		t.Fatalf("shared cwd contains stray bead-slug scaffold directory %q; scaffold must stay under %q", leakedWorkDir, targetWorkDir)
@@ -220,6 +227,45 @@ func TestRetargetPreStartWorkDirPreservesShellQuoting(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestRetargetPreStartWorkDirPreservesUserAuthoredLiterals is the regression
+// for #4069: retargetPreStartWorkDir used to blindly ReplaceAll the
+// pre-override workdir across every PreStart entry, including user-authored
+// commands that reference the rig root as a deliberate hardcoded literal
+// (the canonical case: `git worktree add` must run against the main
+// checkout, not the not-yet-existing per-session directory). Only the
+// engine-generated materialize-skills / project-mcp entries should ever be
+// rewritten; {{.WorkDir}} already exists for users who want the session dir.
+func TestRetargetPreStartWorkDirPreservesUserAuthoredLiterals(t *testing.T) {
+	t.Parallel()
+
+	const (
+		oldWorkDir = "/Users/klashesselman/Claude/flow-city"
+		newWorkDir = "/Users/klashesselman/Claude/flow-city/fc-r1xz-load-context-and-verify-assignment"
+	)
+	userCmd := "worktree-setup.sh " + oldWorkDir + " \"$GC_DIR\" gc-worker --sync"
+
+	preStart := []string{userCmd}
+	preStart = appendMaterializeSkillsPreStart(preStart, "gascity/builder", oldWorkDir)
+
+	retargeted := retargetPreStartWorkDir(preStart, oldWorkDir, newWorkDir)
+	if len(retargeted) != 2 {
+		t.Fatalf("retarget produced %d entries, want 2: %v", len(retargeted), retargeted)
+	}
+
+	if retargeted[0] != userCmd {
+		t.Errorf("user-authored literal was rewritten:\n got:  %s\n want: %s", retargeted[0], userCmd)
+	}
+	// newWorkDir is old+suffix here (matching the real-world rig-scoped
+	// per-session worktree naming from the report), so a plain
+	// strings.Contains(retargeted[1], oldWorkDir) check would pass
+	// spuriously even on a correctly-retargeted value. Compare against
+	// what a fresh generation against newWorkDir produces instead.
+	want := appendMaterializeSkillsPreStart(nil, "gascity/builder", newWorkDir)[0]
+	if retargeted[1] != want {
+		t.Errorf("generated materialize-skills entry not retargeted:\n got:  %s\n want: %s", retargeted[1], want)
 	}
 }
 

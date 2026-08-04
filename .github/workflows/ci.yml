@@ -65,6 +65,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
+      credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
       integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
       openclaw_bridge: ${{ steps.filter.outputs.openclaw_bridge }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
@@ -108,6 +109,7 @@ jobs:
               - 'Makefile'
               - 'internal/worker/**'
               - 'internal/sessionlog/**'
+              - 'internal/modelwindow/**'
               - 'internal/runtime/**'
               - 'internal/config/**'
               - 'cmd/gc/template_resolve*.go'
@@ -120,6 +122,7 @@ jobs:
               - 'Makefile'
               - 'internal/worker/**'
               - 'internal/sessionlog/**'
+              - 'internal/modelwindow/**'
               - 'internal/runtime/**'
               - 'internal/config/**'
               - 'cmd/gc/**'
@@ -131,6 +134,12 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/**'
               - 'examples/gastown/**'
+            credential_provider:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/credentialprovider/**'
+              - 'internal/testenv/**'
+              - 'internal/testutil/**'
             integration:
               - 'go.mod'
               - 'go.sum'
@@ -139,6 +148,7 @@ jobs:
               - '**/*.go'
               - 'scripts/test-integration-shard'
               - 'scripts/test-go-test-shard'
+              - 'scripts/runtime-tmux-tests.manifest'
               - 'scripts/go-test-observable'
               - 'examples/gastown/**'
             openclaw_bridge:
@@ -176,11 +186,21 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: CI workflow policy
         run: make test-ci-policy
+      - name: Classify static-analysis scope
+        id: static-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          scope="$(scripts/ci-static-scope)"
+          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
       - name: go.mod replace guard
         run: make check-gomod-replace
       - name: Native dependency surface guard
@@ -206,16 +226,36 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
+          # Exact-key-only restore (no restore-keys fallback): a broad prefix
+          # let a partial/incompatible cache (missing testing.T.Fatal no-return
+          # facts) be inherited across differing keys and re-saved forward,
+          # repeatedly re-poisoning the cache with a SA5011 false-positive
+          # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
+          # forces a fully fresh, never-poisoned recompute.
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
-      - name: Lint
+      - name: Lint affected packages
+        if: steps.static-scope.outputs.scope == 'changed'
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
+          LINT_CHANGED_SCOPE: tracked
+          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
+        run: make lint-affected
+      - name: Lint full repository
+        if: steps.static-scope.outputs.scope != 'changed'
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
-      - name: Format
+      - name: Format changed files
+        if: steps.static-scope.outputs.scope == 'changed'
+        env:
+          LINT_CHANGED_SCOPE: tracked
+          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
+        run: make fmt-check-changed
+      - name: Format full repository
+        if: steps.static-scope.outputs.scope != 'changed'
         run: make fmt-check
       - name: Vet
+        if: steps.static-scope.outputs.scope != 'changed'
         run: make vet
       - name: Docs
         run: make check-docs
@@ -559,6 +599,67 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  cmd-gc-productmetrics-testhook:
+    name: cmd/gc product metrics testhook
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Ensure timing renderer is available
+        run: command -v jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq)
+      - name: Run product metrics testhook profile
+        env:
+          OBSERVABLE_TIMING_FILE: ${{ runner.temp }}/cmd-gc-productmetrics-testhook.json
+          OBSERVABLE_SHARD_ID: cmd-gc-productmetrics-testhook
+          OBSERVABLE_VARIANT: linux-productmetrics-testhook
+          OBSERVABLE_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+          EXTRA_TEST_ENV: >-
+            OBSERVABLE_TIMING_FILE="$${OBSERVABLE_TIMING_FILE}"
+            OBSERVABLE_SHARD_ID="$${OBSERVABLE_SHARD_ID}"
+            OBSERVABLE_VARIANT="$${OBSERVABLE_VARIANT}"
+            OBSERVABLE_RUNNER_LABEL="$${OBSERVABLE_RUNNER_LABEL}"
+            OBSERVABLE_COMMIT_SHA="$${GITHUB_SHA}"
+            OBSERVABLE_WORKFLOW="$${GITHUB_WORKFLOW}"
+            OBSERVABLE_RUN_ID="$${GITHUB_RUN_ID}"
+            OBSERVABLE_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}"
+            OBSERVABLE_JOB="$${GITHUB_JOB}"
+            OBSERVABLE_RUNNER_NAME="$${RUNNER_NAME}"
+            OBSERVABLE_RUNNER_OS="$${RUNNER_OS}"
+            OBSERVABLE_RUNNER_ARCH="$${RUNNER_ARCH}"
+        run: make test-productmetrics-testhook EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
+      - name: Upload product metrics testhook timing
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timing-cmd-gc-productmetrics-testhook-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cmd-gc-productmetrics-testhook.json
+          if-no-files-found: error
+          retention-days: 7
+
+  credential-provider-windows:
+    name: Credential provider / Windows process tree
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.credential_provider == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Test credential-provider unit contract
+        run: go test -count=1 ./internal/credentialprovider
+      - name: Test Windows Job Object descendant cleanup
+        run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
+
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
     needs:
@@ -885,9 +986,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -923,9 +1022,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -961,9 +1058,7 @@ jobs:
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore phase-2 conformance
         id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
+        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"
       - name: Ensure WorkerCore phase-2 reports
         if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
         run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
@@ -1165,12 +1260,70 @@ jobs:
       - name: Typecheck test files (tsc -p tsconfig.test.json)
         run: npm run --workspace gas-city-dashboard-frontend typecheck:test
         working-directory: internal/api/dashboardspa/web
+      - name: Typecheck e2e specs (tsc -p e2e/tsconfig.json)
+        run: npm run --workspace gas-city-dashboard-frontend typecheck:e2e
+        working-directory: internal/api/dashboardspa/web
       - name: Vitest
         run: npm run --workspace gas-city-dashboard-frontend test
         working-directory: internal/api/dashboardspa/web
       - name: Build
         run: npm run build --silent
         working-directory: internal/api/dashboardspa/web
+      # Sync the freshly built bundle into the embedded dist/ the fakesupervisor
+      # serves, so the Playwright render smoke (Layer B) runs against the SPA
+      # this job just built, not a stale committed embed.
+      - name: Sync embedded SPA bundle
+        run: rm -rf internal/api/dashboardspa/dist && cp -rf internal/api/dashboardspa/web/frontend/dist internal/api/dashboardspa/dist
+      - name: Build seeded fakesupervisor (Layer B server)
+        run: go build -tags integration -o fakesupervisor .
+        working-directory: test/dashport/cmd/fakesupervisor
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        working-directory: internal/api/dashboardspa/web
+      # Cache the downloaded browser binaries keyed on the resolved
+      # @playwright/test version (from the lockfile-pinned install above). A cache
+      # hit skips the ~150 MB Chromium download; --with-deps in the install step
+      # below still runs (system libs aren't cached), so a hit is safe.
+      # Restore/save are split (rather than the combined actions/cache) so the
+      # save step can run with if: always() — a completed download still gets
+      # cached even if a later step in this job fails.
+      - name: Restore Playwright browsers cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright Chromium
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2 3; do
+            if npm run test:e2e:install:ci; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+        working-directory: internal/api/dashboardspa/web/frontend
+      - name: Save Playwright browsers cache
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+      - name: Playwright render smoke (Layer B)
+        run: npm run test:e2e
+        working-directory: internal/api/dashboardspa/web/frontend
+        timeout-minutes: 10
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: internal/api/dashboardspa/web/frontend/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # openclaw-bridge Node test suite. The bridge ships its own npm tests
   # (inbound at-least-once redelivery + gc client wire shapes); without this
@@ -1356,6 +1509,8 @@ jobs:
       - ci-preflight
       - ci-integration
       - cmd-gc-process
+      - cmd-gc-productmetrics-testhook
+      - credential-provider-windows
       - worker-core-summary
       - worker-core-phase2-summary
       - pack-gate
@@ -1377,6 +1532,8 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           allow_skipped = {
               "cmd-gc-process",
+              "cmd-gc-productmetrics-testhook",
+              "credential-provider-windows",
               "pack-gate",
               "docker-session",
               "k8s-session",

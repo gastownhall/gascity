@@ -42,6 +42,7 @@ import type {
   GetHealthResponse,
   GetV0CityByCityNameHealthResponse,
   GetV0CityByCityNameMailData,
+  GetV0CityByCityNameSessionByIdTranscriptData,
   GetV0CityByCityNameStatusResponse,
   GetV0CityByCityNameWorkflowByWorkflowIdData,
   ListBodyBead,
@@ -68,6 +69,7 @@ import type {
   SlingResponse,
   SupervisorCitiesOutputBody,
   UsageBody,
+  StreamSessionData,
   WorkflowSnapshotResponse,
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { SupervisorApiError, unwrapSupervisorResult, type SupervisorResult } from './errors';
@@ -85,6 +87,11 @@ export const GC_MUTATION_HEADERS = {
 
 export { SupervisorApiError, SUPERVISOR_PROXY_BASE_URL };
 
+type SessionStreamFormat = NonNullable<NonNullable<StreamSessionData['query']>['format']>;
+type SessionTranscriptFormat = NonNullable<
+  NonNullable<GetV0CityByCityNameSessionByIdTranscriptData['query']>['format']
+>;
+
 export interface SupervisorApi {
   readonly baseUrl: string;
   health(): Promise<GetHealthResponse>;
@@ -98,6 +105,7 @@ export interface SupervisorApi {
   listBeads(
     cityName: string,
     query?: NonNullable<GetV0CityByCityNameBeadsData['query']>,
+    signal?: AbortSignal,
   ): Promise<ListBodyBead>;
   listEvents(
     cityName: string,
@@ -140,7 +148,12 @@ export interface SupervisorApi {
     query?: NonNullable<ReplyMailData['query']>,
   ): Promise<Message>;
   cityEventStreamUrl(cityName: string, afterSeq?: string): string;
-  sessionStreamUrl(cityName: string, sessionId: string, after?: string): string;
+  sessionStreamUrl(
+    cityName: string,
+    sessionId: string,
+    afterCursor?: string,
+    format?: SessionStreamFormat,
+  ): string;
   listSessions(cityName: string): Promise<ListBodySessionResponse>;
   sessionPending(cityName: string, sessionId: string): Promise<SessionPendingResponse>;
   respondSession(
@@ -148,7 +161,11 @@ export interface SupervisorApi {
     sessionId: string,
     body: SessionRespondInputBody,
   ): Promise<RespondSessionResponse>;
-  sessionTranscript(cityName: string, sessionId: string): Promise<SessionTranscriptGetResponse>;
+  sessionTranscript(
+    cityName: string,
+    sessionId: string,
+    format?: SessionTranscriptFormat,
+  ): Promise<SessionTranscriptGetResponse>;
   workflowRun(
     cityName: string,
     workflowId: string,
@@ -261,12 +278,13 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor rigs response was empty',
       );
     },
-    listBeads(cityName, query) {
+    listBeads(cityName, query, signal) {
       return unwrapSupervisorResult<ListBodyBead>(
         getV0CityByCityNameBeads({
           client,
           path: { cityName },
           ...(query === undefined ? {} : { query }),
+          ...(signal === undefined ? {} : { signal }),
         }) as Promise<SupervisorResult<ListBodyBead>>,
         'gc supervisor beads response was empty',
       );
@@ -425,21 +443,52 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         afterSeq === undefined ? undefined : { after_seq: afterSeq },
       );
     },
-    sessionStreamUrl(cityName, sessionId, after) {
+    sessionStreamUrl(cityName, sessionId, afterCursor, format) {
+      const query: Record<string, string> = {};
+      if (afterCursor !== undefined) query.after_cursor = afterCursor;
+      if (format !== undefined) query.format = format;
       return supervisorUrl(
         baseUrl,
         `/v0/city/${encodeURIComponent(cityName)}/session/${encodeURIComponent(sessionId)}/stream`,
-        after === undefined ? undefined : { after },
+        Object.keys(query).length > 0 ? query : undefined,
       );
     },
-    listSessions(cityName) {
-      return unwrapSupervisorResult<ListBodySessionResponse>(
-        getV0CityByCityNameSessions({
-          client,
-          path: { cityName },
-        }) as Promise<SupervisorResult<ListBodySessionResponse>>,
-        'gc supervisor sessions response was empty',
-      );
+    async listSessions(cityName) {
+      // The dashboard session views want every session. Walk the keyset pages
+      // until the server stops minting next_cursor and merge them, so a fleet
+      // larger than one server-cap page is fully listed instead of silently
+      // truncated at the first page. Each page requests the 1000-row server cap.
+      // partial/partial_errors are OR-merged across pages so a backend failure
+      // on any page still trips the partial-notice consumers (entityLinks).
+      const merged: NonNullable<ListBodySessionResponse['items']> = [];
+      const partialErrors: string[] = [];
+      let total = 0;
+      let partial = false;
+      let cursor: string | undefined;
+      for (;;) {
+        const page = await unwrapSupervisorResult<ListBodySessionResponse>(
+          getV0CityByCityNameSessions({
+            client,
+            path: { cityName },
+            query: cursor === undefined ? { limit: 1000 } : { limit: 1000, cursor },
+          }) as Promise<SupervisorResult<ListBodySessionResponse>>,
+          'gc supervisor sessions response was empty',
+        );
+        if (page.items) merged.push(...page.items);
+        if (page.partial) partial = true;
+        if (page.partial_errors) partialErrors.push(...page.partial_errors);
+        total = page.total;
+        const next = page.next_cursor;
+        // Stop at the last page. The equal-cursor guard is a safety net against
+        // a server that fails to advance the cursor, so the walk can never spin
+        // forever on a degenerate response.
+        if (next === undefined || next === '' || next === cursor) break;
+        cursor = next;
+      }
+      const result: ListBodySessionResponse = { items: merged, total };
+      if (partial) result.partial = true;
+      if (partialErrors.length > 0) result.partial_errors = partialErrors;
+      return result;
     },
     sessionPending(cityName, sessionId) {
       return unwrapSupervisorResult<SessionPendingResponse>(
@@ -461,12 +510,12 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor session respond response was empty',
       );
     },
-    sessionTranscript(cityName, sessionId) {
+    sessionTranscript(cityName, sessionId, format) {
       return unwrapSupervisorResult<SessionTranscriptGetResponse>(
         getV0CityByCityNameSessionByIdTranscript({
           client,
           path: { cityName, id: sessionId },
-          query: { format: 'conversation' },
+          query: { format: format ?? 'conversation' },
         }) as Promise<SupervisorResult<SessionTranscriptGetResponse>>,
         'gc supervisor transcript response was empty',
       );

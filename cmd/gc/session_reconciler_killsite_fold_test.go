@@ -70,7 +70,7 @@ func maxAgeReconcileSnapshot(e *reconcilerTestEnv, sessions []beads.Bead, tr max
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), "", snap.OpenForReconcile(), snap, e.desiredState, cfgNames, e.cfg, e.sp,
-		beads.SessionStore{Store: e.store}, nil, nil, nil, nil, e.dt, nil, poolDesired, nil, false, nil, "",
+		beads.SessionStore{Store: e.store}, nil, nil, nil, nil, e.dt, nil, poolDesired, nil, nil, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
 	)

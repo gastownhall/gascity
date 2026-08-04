@@ -126,7 +126,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 				}
 			}
 
-			if err := materializeSkillsIntoWorkdir(cfg, &agent, workdir, sharedCatalog, stdout, stderr); err != nil {
+			if err := materializeSkillsIntoWorkdir(cfg, &agent, cityPath, workdir, sharedCatalog, stdout, stderr); err != nil {
 				return errExit
 			}
 			return nil
@@ -160,7 +160,7 @@ func decodeSharedCatalogSnapshot(encoded string) (materialize.CityCatalog, error
 	return cat, nil
 }
 
-func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) error {
+func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPath, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) error {
 	if cfg == nil || agent == nil {
 		fmt.Fprintln(stderr, "gc internal materialize-skills: missing city config or agent") //nolint:errcheck // best-effort stderr
 		return errExit
@@ -210,10 +210,11 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 	}
 
 	res, err := materialize.Run(materialize.Request{
-		SinkDir:     filepath.Join(absWorkdir, vendorSink),
-		Desired:     desired,
-		OwnedRoots:  owned,
-		LegacyNames: materialize.LegacyStubNames(),
+		SinkDir:          filepath.Join(absWorkdir, vendorSink),
+		Desired:          desired,
+		OwnedRoots:       owned,
+		LegacyNames:      materialize.LegacyStubNames(),
+		LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr

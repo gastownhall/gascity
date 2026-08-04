@@ -234,10 +234,16 @@ func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScop
 		}
 	}
 
+	// A terminal root (phase "complete") has no active step even if a member bead
+	// still reads in_progress because its close event was lost: suppress the
+	// active-step scan so the lane's progress matches the terminal phase and the
+	// clamped DAG instead of reporting active_step under a completed run.
 	var primaryInProgress []runIssue
-	for _, i := range issues {
-		if isPrimaryStepIssue(i) && i.status == "in_progress" {
-			primaryInProgress = append(primaryInProgress, i)
+	if phase.phase != "complete" {
+		for _, i := range issues {
+			if isPrimaryStepIssue(i) && i.status == "in_progress" {
+				primaryInProgress = append(primaryInProgress, i)
+			}
 		}
 	}
 	activeStepID, hasActiveStep := latestStepID(primaryInProgress)
@@ -265,6 +271,21 @@ func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScop
 		phaseLabel = stages[foundStageIndex].Label
 	}
 
+	// A terminal root's lane must not expose live-work fields derived from members
+	// whose close events were lost: present every member as closed and drop the
+	// stale assignee so a historical LaneCard never reads "on <assignee> · N in
+	// progress" for a finished run. Gated identically to the active-step scan above.
+	counts := statusCounts(issues)
+	assignees := activeAssignees(issues)
+	if phase.phase == "complete" {
+		var terminal StatusCounts
+		for range issues {
+			terminal.inc("closed")
+		}
+		counts = terminal
+		assignees = []string{}
+	}
+
 	return RunLane{
 		ID:                   rootID,
 		Title:                displayTitle(rootID, issues),
@@ -273,8 +294,8 @@ func runLane(rootID string, issues []runIssue, feedScopes map[string]RunFeedScop
 		External:             externalReference(issues),
 		Phase:                phase.phase,
 		PhaseLabel:           phaseLabel,
-		StatusCounts:         statusCounts(issues),
-		ActiveAssignees:      activeAssignees(issues),
+		StatusCounts:         counts,
+		ActiveAssignees:      assignees,
 		UpdatedAt:            updatedAt,
 		Stages:               stages,
 		Progress:             progress,

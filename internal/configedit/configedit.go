@@ -1529,6 +1529,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
 	}
+	if src.CheckTimeout != nil {
+		dst.CheckTimeout = src.CheckTimeout
+	}
 	if src.Idempotent != nil {
 		dst.Idempotent = src.Idempotent
 	}

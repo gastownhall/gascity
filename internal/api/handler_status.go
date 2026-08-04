@@ -45,6 +45,15 @@ var statusResponseTTLFloor = 3 * time.Second
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
 
+type statusPartialReporter interface {
+	StatusPartial() bool
+}
+
+func statusProviderPartial(sp any) bool {
+	reporter, ok := sp.(statusPartialReporter)
+	return ok && reporter.StatusPartial()
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -137,9 +146,18 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
+	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
+	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
+	// async full prime and no reconciler, so its cache never reaches live and
+	// the cache-only Ready projection can never answer. It is deliberately not
+	// the same set as suspendedRigs, which grows below to include rigs merely
+	// inferred suspended because every one of their agents is — those keep a
+	// refreshing cache and must still be asked for ready work.
+	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
 	for _, r := range cfg.Rigs {
 		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
 			suspendedRigs[r.Name] = true
+			cacheColdRigs[r.Name] = true
 		}
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
@@ -208,6 +226,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	if statusProviderPartial(sp) {
+		partialErrors = append(partialErrors, "runtime status probe incomplete; non-running agent rows are unknown")
+	}
+
 	// Count rigs by state + collect per-rig detail rows.
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	rigDetails := make([]StatusRigDetail, 0, len(cfg.Rigs))
@@ -234,7 +256,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var wc workCounts
 	if !lite {
 		var workErrs []string
-		wc, workErrs = s.statusWorkCounts(ctx)
+		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
 	}
 
@@ -281,11 +303,15 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	versions := s.resolveComponentVersions()
 
-	// StoreHealth carries a full closed-history Dolt row scan (behind a 30s
+	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
 	if !lite {
-		storeHealth = s.cachedStoreHealth(ctx, time.Now())
+		var err error
+		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
+		if err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("store health: %v", err))
+		}
 	}
 
 	return StatusBody{
@@ -560,7 +586,14 @@ type statusWorkResult struct {
 // beads.Counter answer persisted counts without hydrating rows — the caching
 // layer counts matches in memory when its cache is clean (#1896). Stores are
 // queried concurrently; results aggregate in deterministic city/rig order.
-func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
+//
+// Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
+// Their store runs no background cache refresh, so the cache-only Ready
+// projection is guaranteed to decline with ErrCacheUnavailable — reporting that
+// as a partial error made every city with a suspended rig permanently partial,
+// which greys out unrelated status tiles in the dashboard. Skipping the read
+// changes no count: the failing read already contributed zero ready work.
+func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
 	// store's persisted statuses are counted exactly once.
@@ -585,7 +618,7 @@ func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName,
+			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
 		})
 	}
 

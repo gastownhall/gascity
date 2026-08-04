@@ -22,8 +22,10 @@ const (
 	nudgeMailSweepNudgeCloseReason = "nudge gc-swept: stale nudge bead past gc retention window"
 
 	// nudgeMailSweepMailCloseReason is the close_reason stamped on read mail
-	// beads before close.
-	nudgeMailSweepMailCloseReason = "mail gc-swept: read mail bead past gc retention window"
+	// beads before close. It is beadmail.RetentionSweepCloseReason so beadmail's
+	// direct-ID gate recognizes these beads as retention-swept (system-aged,
+	// still addressable until purge) rather than user-removed.
+	nudgeMailSweepMailCloseReason = beadmail.RetentionSweepCloseReason
 )
 
 // nudgeMailSweepResult holds per-category close counts from sweepStaleNudgeMail.

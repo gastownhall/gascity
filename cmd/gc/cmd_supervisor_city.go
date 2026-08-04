@@ -139,9 +139,6 @@ func normalizeRegisteredCityPath(cityPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
-	}
 	return normalizePathForCompare(abs), nil
 }
 
@@ -646,7 +643,16 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if opts.Force && supervisorAliveHook() != 0 {
-		tryStopControllerWithForce(cityPath, io.Discard, true)
+		stopResult := tryStopControllerWithForce(cityPath, io.Discard, true)
+		switch stopResult.outcome {
+		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
+		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		default:
+			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 	}
 	if err := reg.Unregister(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr

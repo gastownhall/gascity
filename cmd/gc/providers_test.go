@@ -187,6 +187,9 @@ provider = "exec:/tmp/custom-beads"
 	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "exec:/tmp/custom-beads" {
 		t.Fatalf("rawBeadsProviderForScope() = %q, want custom exec provider", got)
 	}
+	if got := authoritativeBeadsProviderForScope(rigDir, cityDir); got != "exec:/tmp/custom-beads" {
+		t.Fatalf("authoritativeBeadsProviderForScope() = %q, want custom exec provider", got)
+	}
 }
 
 func TestRawBeadsProviderForScopeKeepsSessionOverrideScoped(t *testing.T) {
@@ -211,6 +214,9 @@ provider = "file"
 
 	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "bd" {
 		t.Fatalf("rawBeadsProviderForScope(rig) = %q, want bd", got)
+	}
+	if got := authoritativeBeadsProviderForScope(rigDir, cityDir); got != "bd" {
+		t.Fatalf("authoritativeBeadsProviderForScope(rig) = %q, want scope-pinned bd override", got)
 	}
 	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
 		t.Fatalf("rawBeadsProviderForScope(city) = %q, want file outside scoped override", got)
@@ -269,6 +275,59 @@ provider = "file"
 
 	if got := rawBeadsProviderForScope(rigDir, cityDir); got != "bd" {
 		t.Fatalf("rawBeadsProviderForScope() = %q, want bd metadata to outrank stale file marker", got)
+	}
+}
+
+// TestRawBeadsProviderForScopeDetectsBdMetadataAtCityRoot reproduces dr-h6ze:
+// a city's own root can host a Dolt-backed HQ store even though [beads]
+// provider declares "file" as the default for rigs. Regression for the
+// samePath(scopeRoot, cityPath) shortcut that returned the configured/ambient
+// default for city-root scope without ever consulting the on-disk store
+// marker -- a bead whose prefix resolves to the city root (e.g. the HQ
+// prefix) was silently pointed at the wrong backend and could never be found.
+func TestAuthoritativeBeadsProviderForScopeDetectsBdMetadataAtCityRootDespiteAmbientFile(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "hq-demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setScopedBeadsProviderForTest(t, "", "file")
+
+	if got := authoritativeBeadsProviderForScope(cityDir, cityDir); got != "bd" {
+		t.Fatalf("authoritativeBeadsProviderForScope(cityRoot) = %q, want bd metadata to outrank unscoped ambient GC_BEADS=file", got)
+	}
+	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
+		t.Fatalf("rawBeadsProviderForScope(cityRoot) = %q, want caller-scope GC_BEADS=file semantics preserved", got)
+	}
+}
+
+// TestRawBeadsProviderForScopeCityRootWithoutMarkersKeepsConfiguredDefault is
+// the regression guard alongside the fix above: a city root that carries no
+// on-disk store marker at all (the common case -- no separate HQ Dolt store)
+// must keep resolving to the configured/ambient default exactly as before.
+func TestRawBeadsProviderForScopeCityRootWithoutMarkersKeepsConfiguredDefault(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "plain-demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
+		t.Fatalf("rawBeadsProviderForScope(cityRoot) = %q, want configured file default preserved when no store marker exists", got)
 	}
 }
 
@@ -1353,7 +1412,18 @@ func TestNewSessionProviderFromContext_PackRuntimeCollisionSurfaces(t *testing.T
 }
 
 func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// The "default" case calls newSessionProvider with no explicit city, so it
+	// falls through to ambient discovery. findCity walks up from the working
+	// directory, and a checkout nested under a real city root (every gc rig
+	// worktree) resolves that live city, wrapping the injected fake in an
+	// auto.Provider. Pin the discovery ceiling to the package directory so the
+	// walk stops before it can reach an ambient city.toml.
+	clearGCEnv(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CEILING_DIRECTORIES", wd)
 	t.Setenv("GC_SESSION", "fake")
 
 	base := runtime.NewFake()
@@ -1414,7 +1484,20 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 }
 
 func TestErrorReturningSessionProviderFactoriesReturnContextualErrors(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// Same ambient-discovery exposure as the sibling above: the "default" case
+	// calls newSessionProvider with no explicit city, so findCity walks up from
+	// the working directory and a checkout nested under a real city root
+	// resolves that live city — attempting a real connection to its production
+	// store from a unit test. This test passes today only because the injected
+	// stub returns an error before the auto.Provider wrap that breaks the
+	// sibling's identity assertion, so it is one behavior change away from
+	// failing the same way. Pin the ceiling here too rather than rely on that.
+	clearGCEnv(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CEILING_DIRECTORIES", wd)
 	t.Setenv("GC_SESSION", "broken")
 
 	wantErr := errors.New("injected provider failure")

@@ -70,6 +70,8 @@ type cityStatusSnapshot struct {
 	Agents            []cityStatusAgentRow
 	Rigs              []StatusRigJSON
 	NamedSessions     []cityStatusNamedSession
+	Partial           bool
+	PartialErrors     []string
 	Summary           StatusSummaryJSON
 }
 
@@ -273,6 +275,11 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	}
 	observations := observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
 
+	if statusProviderPartial(sp) {
+		snapshot.Partial = true
+		snapshot.PartialErrors = append(snapshot.PartialErrors, "runtime status probe incomplete; non-running agent rows are unknown")
+	}
+
 	// Phase 3: stitch observation results back into rows and tallies in the
 	// original order to keep output deterministic.
 	for i, p := range plans {
@@ -466,6 +473,8 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		Controller:        snapshot.Controller,
 		Running:           running,
 		Suspended:         snapshot.Suspended,
+		Partial:           snapshot.Partial,
+		PartialErrors:     append([]string(nil), snapshot.PartialErrors...),
 		Health:            HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
 		Beads:             snapshot.Beads,
 		ConditionalWrites: snapshot.ConditionalWrites,
@@ -505,7 +514,7 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if row.ScaleLabel != "" {
 				fmt.Fprintf(stdout, "  %-24s%s\n", row.GroupName, row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
-			status := agentStatusLine(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended)
+			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, snapshot.Partial)
 			if row.Expanded {
 				fmt.Fprintf(stdout, "    %-22s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
 			} else {

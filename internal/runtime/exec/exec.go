@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -78,10 +79,15 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	// WaitDelay ensures Go forcibly closes I/O pipes after the context
-	// expires, even if grandchild processes (e.g. sleep in a shell script)
-	// still hold them open.
-	cmd.WaitDelay = 2 * time.Second
+	// Run the adapter in its own process group with interrupt-then-kill
+	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
+	// foreground child (e.g. a readiness sleep in the adapter), not just the
+	// shell leader — without this the shell defers its rollback trap until
+	// the child returns, and the forced kill wins first, leaking any resource
+	// the adapter already created (e.g. a Docker container). The grace also
+	// ensures Go forcibly closes I/O pipes after the context expires, even if
+	// grandchild processes (e.g. sleep in a shell script) still hold them open.
+	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -92,25 +98,54 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	}
 
 	err := cmd.Run()
-	if err != nil {
-		// Check for exit code 2 → unknown operation → success.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if exitErr.ExitCode() == 2 {
-				return "", nil
-			}
-		}
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		if len(args) > 0 && args[0] == "start" && strings.Contains(strings.ToLower(errMsg), "already exists") {
-			return "", fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
-		}
-		return "", fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+	if err == nil {
+		return strings.TrimRight(stdout.String(), "\n"), nil
 	}
 
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	// An accepted cancellation action wins over the adapter's exit status. In
+	// particular, an INT trap may use protocol-reserved exit 2; treating that as
+	// an unsupported operation would turn cancellation into success. Signal can
+	// race with process completion: a delivered interrupt makes cancellation the
+	// observed winner, while os.ErrProcessDone leaves the flag false and
+	// preserves the ordinary exit result because completion was observed first.
+	// Neither result claims physical signal-delivery ordering.
+	if cancellationAccepted.Load() {
+		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
+	}
+	return "", p.runError(err, stderr.String(), args)
+}
+
+// cancellationError formats the error returned when a delivered cancellation
+// wins over the adapter's own exit status, preferring the context's cause and
+// attaching any adapter stderr for context.
+func (p *Provider) cancellationError(ctxErr error, stderr string, args []string) error {
+	cancelErr := ctxErr
+	if cancelErr == nil {
+		cancelErr = context.Canceled
+	}
+	if errMsg := strings.TrimSpace(stderr); errMsg != "" {
+		return fmt.Errorf("exec provider %s %s: %s: %w", p.script, strings.Join(args, " "), errMsg, cancelErr)
+	}
+	return fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
+}
+
+// runError maps an ordinary (non-cancellation) cmd.Run failure onto the
+// provider's contract: exit code 2 is an unknown operation treated as success
+// (forward compatible, nil error), a "start ... already exists" collision maps
+// to [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
+func (p *Provider) runError(runErr error, stderr string, args []string) error {
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
+		return nil
+	}
+	errMsg := strings.TrimSpace(stderr)
+	if errMsg == "" {
+		errMsg = runErr.Error()
+	}
+	if len(args) > 0 && args[0] == "start" && strings.Contains(strings.ToLower(errMsg), "already exists") {
+		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
+	}
+	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
 }
 
 // runWithTTY executes the script with the terminal inherited (for Attach).
@@ -223,10 +258,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
-	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
-		return nil
-	}
-	if cfg.AcceptStartupDialogs == nil && !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
 		return nil
 	}
 

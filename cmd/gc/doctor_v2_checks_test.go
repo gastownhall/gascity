@@ -106,7 +106,7 @@ schema = 2
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -148,7 +148,7 @@ dir = "formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -195,7 +195,7 @@ dir = "custom-formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, 0, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("gc doctor --fix unexpectedly passed with custom formulas dir; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
@@ -1149,7 +1149,7 @@ prompt_template = "prompts/helper.md"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, 0, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -1822,6 +1822,37 @@ scope = "city"
 		if !strings.Contains(out, line) {
 			t.Fatalf("post-fix doctor output missing %q:\n%s", line, out)
 		}
+	}
+}
+
+// doctorPathWithinCity must be fail-closed: a candidate path that is
+// lexically nested under cityPath but actually escapes it through a
+// symlink must be reported as outside the city, even when the leaf of
+// the candidate does not exist yet (e.g. a path doctor is about to
+// create). Resolving only fully-existing paths is not enough — the
+// escape has to be detected from the nearest existing ancestor, so a
+// missing leaf can never downgrade the check to a lexical-only pass.
+func TestDoctorPathWithinCityDetectsSymlinkEscapeWithMissingLeaf(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(cityPath, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	candidate := filepath.Join(escape, "not-yet-created", "leaf")
+
+	if doctorPathWithinCity(cityPath, candidate) {
+		t.Fatalf("doctorPathWithinCity(%q, %q) = true, want false: candidate escapes cityPath through the %q symlink even though its leaf does not exist yet", cityPath, candidate, escape)
 	}
 }
 

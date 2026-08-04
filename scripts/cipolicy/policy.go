@@ -20,7 +20,7 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "dcfc9770a69a0dfa30475b3fe53f52f65a1fa81c8e902967e5fdc24cf516e2dc"
+	expectedCIExecutionHash      = "b16d700bb89ac6cee0d6d486afcfc121d6de9b12e6b2cdab88ad1f3116f07502"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
@@ -61,6 +61,7 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		"internal/worker/**",
 		"internal/sessionlog/**",
+		"internal/modelwindow/**",
 		"internal/runtime/**",
 		"internal/config/**",
 		"cmd/gc/template_resolve*.go",
@@ -74,6 +75,7 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		"internal/worker/**",
 		"internal/sessionlog/**",
+		"internal/modelwindow/**",
 		"internal/runtime/**",
 		"internal/config/**",
 		"cmd/gc/**",
@@ -87,6 +89,13 @@ var requiredFilterPaths = map[string][]string{
 		"internal/**",
 		"examples/gastown/**",
 	},
+	"credential_provider": {
+		"go.mod",
+		"go.sum",
+		"internal/credentialprovider/**",
+		"internal/testenv/**",
+		"internal/testutil/**",
+	},
 	"integration": {
 		"go.mod",
 		"go.sum",
@@ -95,6 +104,7 @@ var requiredFilterPaths = map[string][]string{
 		"**/*.go",
 		"scripts/test-integration-shard",
 		"scripts/test-go-test-shard",
+		"scripts/runtime-tmux-tests.manifest",
 		"scripts/go-test-observable",
 		"examples/gastown/**",
 	},

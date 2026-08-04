@@ -1,8 +1,8 @@
 // Package storehealth computes the Dolt bead store health summary used
 // by gc status and the /v0/status API. The summary is: store path on
-// disk, raw size in bytes, the live row count of the city store, a
-// derived MB-per-row ratio, and a warning flag when the ratio exceeds
-// the configured threshold.
+// disk, raw size in bytes, the retained row count of the city store
+// (including open and closed beads), a derived MB-per-row ratio, and a
+// warning flag when the ratio exceeds the configured threshold.
 //
 // Design: ADR 0002 (docs/adr/0002-dolt-store-maintenance-runbook.md)
 // and bead ga-d5y design D9.
@@ -23,6 +23,16 @@ import (
 // is flagged overdue. 1 MB per row matches the bad case observed in
 // production (.beads/dolt at ~11 GB with ~64 rows).
 const DefaultThresholdMB = 1.0
+
+// MinWarnSizeBytes is the absolute floor below which the ratio-based
+// warning never fires, regardless of row count. A pure MB-per-row ratio
+// degenerates at small denominators: a healthy young city with only a
+// handful of live rows still carries Dolt's own baseline footprint
+// (oldgen archives, system tables) well into the hundreds of MB, which
+// would otherwise permanently trip the ratio threshold with nothing for
+// maintenance to reclaim -- gc dolt compact's own commit-count gate
+// correctly finds nothing to do, but the warning can never clear (#3374).
+const MinWarnSizeBytes = 1_000_000_000 // 1 GB
 
 // Health summarizes disk and maintenance health of the Dolt bead store.
 // A pointer *Health is included in status payloads so "no data" (e.g.
@@ -53,19 +63,19 @@ func StorePath(cityPath string) string {
 
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
-func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
+func Compute(cityPath string, sizeBytes int64, retainedRows int, lastGCAt time.Time, lastGCStatus string) Health {
 	h := Health{
 		Path:         StorePath(cityPath),
 		SizeBytes:    sizeBytes,
-		LiveRows:     liveRows,
+		LiveRows:     retainedRows,
 		ThresholdMB:  DefaultThresholdMB,
 		LastGCAt:     lastGCAt,
 		LastGCStatus: lastGCStatus,
 	}
-	if liveRows > 0 {
-		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(liveRows))
+	if retainedRows > 0 {
+		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(retainedRows))
+		h.Warning = sizeBytes > MinWarnSizeBytes && sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(retainedRows)
 	}
-	h.Warning = sizeBytes > int64(DefaultThresholdMB*bytesPerMB)*int64(liveRows)
 	return h
 }
 

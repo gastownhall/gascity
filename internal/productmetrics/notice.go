@@ -191,7 +191,7 @@ func (service *Service) activateNotice(ctx context.Context, invocation Invocatio
 	if !allowed {
 		return false, fmt.Errorf("productmetrics: notice activation is blocked by %s", projection.reason)
 	}
-	if len(service.deps.notice.text) == 0 || service.deps.notice.version == 0 || !service.deps.notice.testOnly {
+	if len(service.deps.notice.text) == 0 || service.deps.notice.version == 0 {
 		return false, errors.New("productmetrics: no approved notice is compiled")
 	}
 	written, writeErr := writer.Write(service.deps.notice.text)

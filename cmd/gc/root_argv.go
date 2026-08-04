@@ -13,11 +13,24 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !ok || command != "metrics"
+	discoverPackCommands := !ok || !rootCommandSkipsPackDiscovery(command)
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,
 		eagerPackCommandDiscovery: discoverPackCommands,
+	}
+}
+
+// rootCommandSkipsPackDiscovery identifies built-in commands that cannot
+// resolve to a pack binding. Pack discovery only adds city-config and pack
+// loading work; each command still performs its normal scope and config
+// resolution when it runs.
+func rootCommandSkipsPackDiscovery(command string) bool {
+	switch command {
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+		return true
+	default:
+		return false
 	}
 }
 

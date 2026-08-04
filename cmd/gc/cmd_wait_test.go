@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -258,12 +259,10 @@ func TestWaitListJSONFiltersState(t *testing.T) {
 	}
 }
 
-func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
+func TestWaitListJSONSessionFilterWiresFileStore(t *testing.T) {
 	_, store := setupWaitJSONTestCity(t)
 	targetWait := createTestWaitBeadForSession(t, store, "target-session", waitStatePending)
-	for i := 0; i < waitLookupLimit; i++ {
-		createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
-	}
+	otherWait := createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWaitList("", "target-session", true, &stdout, &stderr); code != 0 {
@@ -273,6 +272,9 @@ func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
 	payload := decodeWaitListJSON(t, stdout.Bytes())
 	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
 		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
+	}
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s: %s", otherWait.ID, stdout.String())
 	}
 }
 
@@ -596,11 +598,12 @@ var (
 	waitTestRealBDCached   string
 	waitTestRealBDErr      error
 
-	managedBdWaitTemplateOnce sync.Once
-	managedBdWaitTemplatePath string
-	managedBdWaitTemplateErr  error
+	managedBdWaitTemplateOnce sync.Once //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplatePath string    //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplateErr  error     //nolint:unused // exercised by native_dolt_rebind_integration_test.go
 )
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func waitTestEnv(overrides map[string]string) []string {
 	env := map[string]string{}
 	for _, entry := range sanitizedBaseEnv() {
@@ -629,23 +632,113 @@ func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
 	waitTestRealBDPathOnce.Do(func() {
-		candidate, err := findPreferredBinary("bd")
-		if err != nil {
-			waitTestRealBDErr = errors.New("bd with init not installed")
-			return
-		}
-		cmd := exec.Command(candidate, "init", "--help")
-		out, err := cmd.CombinedOutput()
-		if err == nil || !strings.Contains(string(out), `unknown subcommand "init"`) {
-			waitTestRealBDCached = candidate
-			return
-		}
-		waitTestRealBDErr = errors.New("bd with init not installed")
+		waitTestRealBDCached, waitTestRealBDErr = buildPinnedBDBinaryForTests()
 	})
 	if waitTestRealBDErr != nil {
-		t.Skip(waitTestRealBDErr.Error())
+		t.Fatalf("build pinned bd test binary: %v", waitTestRealBDErr)
 	}
 	return waitTestRealBDCached
+}
+
+// buildPinnedBDBinaryForTests builds the bd CLI from the exact
+// github.com/steveyegge/beads module version this repo's go.mod requires, so
+// the binary's compiled-in schema/migration knowledge always matches
+// gascity's own in-process beads code (internal/beads imports that same
+// module directly). A bd resolved by searching PATH/home-dir locations
+// instead (as findPreferredBinary does for callers that only need some bd
+// present) carries no such guarantee: it can drift to a different schema
+// version and fail deep inside a test with a cryptic mismatch error instead
+// of cleanly at the point the drift actually originates (ga-r9cvmi).
+//
+// go install's "@version" form deliberately ignores any enclosing module's
+// go.mod/go.sum and resolves the target module's own dependency closure in
+// isolation, which is required here: cmd/bd's full dependency graph (CLI
+// extras like AI-assisted duplicate detection, ADO rich-text rendering,
+// telemetry exporters) is broader than what gascity's own go.sum carries,
+// since gascity only imports internal/beads's storage packages.
+func buildPinnedBDBinaryForTests() (string, error) {
+	version, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		return "", fmt.Errorf("resolve pinned beads module version: %w", err)
+	}
+
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testBDBinaryDirPrefix)
+	buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testBDBinaryDirPrefix))
+	if err != nil {
+		return "", fmt.Errorf("mktemp bd binary dir: %w", err)
+	}
+
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go",
+		"github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+buildDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(buildDir, "bd"), nil
+}
+
+// pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
+// this test binary was actually built against, read from this process's own
+// embedded build info rather than a `go list -m` subprocess or a go.mod text
+// scan: debug.ReadBuildInfo reflects the exact resolved dependency graph
+// (including any replace/exclude directives) with zero process spawn, and it
+// can never itself drift from go.mod the way a second hardcoded version
+// string could, since the compiler stamps it in at build time.
+func pinnedBeadsModuleVersion() (string, error) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", fmt.Errorf("read build info: not available (binary not built with module support)")
+	}
+	for _, dep := range bi.Deps {
+		if dep.Path != "github.com/steveyegge/beads" {
+			continue
+		}
+		if dep.Replace != nil {
+			return dep.Replace.Version, nil
+		}
+		return dep.Version, nil
+	}
+	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
+}
+
+// TestBuildPinnedBDBinaryForTestsMatchesGoModVersion locks in the fix for
+// ga-r9cvmi: a bd binary resolved by searching PATH/home-dir locations (the
+// old waitTestRealBDPath behavior, still used elsewhere via
+// findPreferredBinary) carries no guarantee of matching the schema/migration
+// knowledge baked into gascity's own in-process beads code, which is compiled
+// from the exact github.com/steveyegge/beads version go.mod pins. Confirmed
+// live: the same ~/.local/bin/bd path reported two different version stamps
+// across two consecutive invocations in this same fleet sandbox, and
+// ga-r9cvmi's own notes captured a deterministic v49-vs-v53 schema mismatch
+// from that ambient drift. buildPinnedBDBinaryForTests must instead build bd
+// fresh from the pinned dependency, so its correctness never depends on
+// whatever happens to be installed on the host.
+func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
+	// Load-bearing for the census even though waitTestRealBDPath calls it
+	// again: this is the cmd/gc+untagged slow_process_gate call site the
+	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
+	// TESTING.md. Deleting it as redundant fails the ledger gate.
+	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
+
+	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
+	// with the other bd-consuming tests. Calling buildPinnedBDBinaryForTests
+	// directly builds a second ~91 MB binary, and leaks a second temp dir, in
+	// any shard that also holds a waitTestRealBDPath caller.
+	bdPath := waitTestRealBDPath(t)
+
+	pinned, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
+	}
+	wantVersion := strings.TrimPrefix(pinned, "v")
+
+	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+	}
+	if !strings.Contains(string(out), wantVersion) {
+		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	}
 }
 
 func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {
@@ -705,60 +798,34 @@ func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
 	}
 }
 
-func TestCmdWaitListSessionFilterUsesSessionScopedLookup(t *testing.T) {
-	cityDir := t.TempDir()
-	writePhase0InterfaceCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
-provider = "file"
-`)
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_DIR", t.TempDir())
-	t.Setenv("GC_BEADS", "file")
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	targetWait, err := store.Create(beads.Bead{
-		Title:  "target wait",
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:target-session"},
-		Metadata: map[string]string{
-			"session_id": "target-session",
-			"state":      waitStatePending,
-			"kind":       "manual",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(target wait): %v", err)
-	}
-	for i := 0; i < waitLookupLimit; i++ {
-		if _, err := store.Create(beads.Bead{
-			Title:  fmt.Sprintf("other wait %d", i),
-			Type:   waitBeadType,
-			Labels: []string{waitBeadLabel, "session:other-session"},
-			Metadata: map[string]string{
-				"session_id": "other-session",
-				"state":      waitStatePending,
-				"kind":       "manual",
-			},
-		}); err != nil {
-			t.Fatalf("Create(other wait %d): %v", i, err)
-		}
-	}
+func TestDoWaitListFromSessionStoreUsesSessionScopedLookup(t *testing.T) {
+	mem := beads.NewMemStore()
+	targetWait := createTestWaitBeadForSession(t, mem, "target-session", waitStatePending)
+	otherWait := createTestWaitBeadForSession(t, mem, "other-session", waitStatePending)
+	store := &waitListQueryCaptureStore{Store: mem}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
+	code := doWaitListFromSessionStore(sessionFrontDoor(store), "/test/city", "", "target-session", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
+		t.Fatalf("doWaitListFromSessionStore = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), targetWait.ID) {
 		t.Fatalf("wait list output missing target wait %s:\nstdout=%s\nstderr=%s", targetWait.ID, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "other-session") {
-		t.Fatalf("wait list output included non-target session:\n%s", stdout.String())
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s:\n%s", otherWait.ID, stdout.String())
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1; queries=%#v", len(store.queries), store.queries)
+	}
+	wantQuery := beads.ListQuery{
+		Status: "open",
+		Label:  "session:target-session",
+		Limit:  waitLookupLimit + 1,
+		Sort:   beads.SortCreatedDesc,
+	}
+	if !reflect.DeepEqual(store.queries[0], wantQuery) {
+		t.Fatalf("List query = %#v, want %#v", store.queries[0], wantQuery)
 	}
 }
 
@@ -806,6 +873,7 @@ prefix = "fe"
 	return rigPath, nil
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 	t.Helper()
 	managedBdWaitTemplateOnce.Do(func() {
@@ -2694,7 +2762,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	}
 }
 
-func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
+func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Helper()
 	configureIsolatedRuntimeEnv(t)
 
@@ -2715,8 +2783,9 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
+	reexecGC := reexecGCTestBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return reexecGC }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
@@ -2728,8 +2797,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	})
 
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
-	rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
-	if err != nil {
+	if _, err := writeManagedBdWaitTestCityScaffold(cityPath); err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
 	t.Setenv("GC_CITY", cityPath)
@@ -2744,15 +2812,13 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
 	}
-	if err := initAndHookDir(cityPath, rigPath, "fe"); err != nil {
-		t.Fatalf("initAndHookDir(rig): %v", err)
-	}
 	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
 		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
-	return cityPath, rigPath
+	return cityPath
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd/dolt lifecycle city; run make test-cmd-gc-process for full coverage")

@@ -108,8 +108,8 @@ func oldEffectiveOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>/dev/null; ` +
+		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }
@@ -133,7 +133,7 @@ func oldEffectiveOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
-		`xargs -rI{} bd update {} --status open 2>/dev/null`
+		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
 }
 
 // parityVariant binds an exported query kind's accessors to its frozen oracle.

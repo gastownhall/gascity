@@ -14,11 +14,13 @@ set -euo pipefail
 zero="0000000000000000000000000000000000000000"
 
 go_changed=0
+any_non_deletion=0
 while read -r _local_ref local_sha _remote_ref remote_sha; do
-  # Branch deletion — nothing to test.
+  # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
   fi
+  any_non_deletion=1
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
@@ -28,6 +30,21 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     go_changed=1
   fi
 done
+
+# Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
+# immediately before this push leaves the machine, once per invocation
+# (not per ref) regardless of whether Go sources changed. A mayor ruling
+# (reassign/close/hold/reroute) that landed after this push was queued
+# must not be allowed to clobber a branch another agent has since taken
+# over. Bypass: `git push --no-verify`.
+if [ "$any_non_deletion" -eq 1 ]; then
+  repo_root="$(git rev-parse --show-toplevel)"
+  # shellcheck source=../scripts/push-ownership-guard.sh disable=SC1091
+  . "$repo_root/scripts/push-ownership-guard.sh"
+  if ! assert_bead_still_claimed; then
+    exit 1
+  fi
+fi
 
 if [ "$go_changed" -eq 0 ]; then
   exit 0

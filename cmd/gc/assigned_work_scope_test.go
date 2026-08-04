@@ -197,6 +197,54 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandNormalizesInstanceSuffixedRouteTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	work := []beads.Bead{{
+		ID:       "instance-routed",
+		Status:   "in_progress",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker-1",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "instance-routed" {
+		t.Fatalf("filtered work = %#v, want instance-suffixed route target normalized to the base template and kept", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandLeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	work := []beads.Bead{{
+		ID:       "out-of-range-routed",
+		Status:   "in_progress",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker-99",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 0 {
+		t.Fatalf("filtered work = %#v, want out-of-range instance suffix left unmatched and dropped", got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

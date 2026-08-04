@@ -244,11 +244,19 @@ Gas City derived the rig name from the directory basename (`my-project`) and
 set up work tracking in it. The portable declaration lands in `city.toml`; the
 path binding stays machine-local in `.gc/site.toml`:
 
-```toml
-# city.toml — portable
+```shell
+~/my-city
+$ cat city.toml
+[workspace]
+provider = "claude"
+
+... # content elided
+
 [[rigs]]
 name = "my-project"
+```
 
+```toml
 # .gc/site.toml — machine-local
 [[rig]]
 name = "my-project"

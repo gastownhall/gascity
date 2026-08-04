@@ -142,10 +142,6 @@ func (c *PreStartScriptsCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
-func (c *PostgresAuthCheck) WarmupEligible() bool { return false }
-
-// WarmupEligible returns false; this check is not part of the
-// `gc start` warm-up scan.
 func (c *ProviderParityCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -87,15 +88,14 @@ type sessionCircuitResetReply struct {
 }
 
 // controllerSocketPath returns the Unix socket path for controller commands.
-// It preserves the legacy .gc/controller.sock location for short city paths,
-// but falls back to a deterministic short temp-path when the legacy pathname
-// is too close to the platform Unix-socket length limit.
+// It uses the canonical .gc/controller.sock location for short city paths,
+// but falls back to a deterministic short temp-path when that pathname is too
+// close to the platform Unix-socket length limit.
 func controllerSocketPath(cityPath string) string {
 	canonicalCityPath := normalizePathForCompare(cityPath)
-	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
 	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
 	if len(canonicalLegacy) <= controllerSocketPathLimit {
-		return legacy
+		return canonicalLegacy
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
@@ -618,6 +618,11 @@ func (r *configWatchRegistrar) addPath(root string, recursive bool, done <-chan 
 		return true
 	}
 	walkRoot := root
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. This resolves root so WalkDir can descend into a
+	// symlinked root directory at all; the actual identity comparison below
+	// (samePath(path, root)) already normalizes both sides independently of
+	// walkRoot's resolution state.
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		walkRoot = resolved
 	}
@@ -1339,6 +1344,21 @@ func runController(
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
+
+	// One-time startup hygiene: release stale runtime name claims held by
+	// closed configured named-session beads so on-demand respawn is not blocked
+	// by pre-fix legacy entries inherited across a restart (ga-n2d Gap C).
+	// Best-effort — a sweep failure must never block startup, and the lazy
+	// reclaim path still releases such claims when the configured identity
+	// reclaims its name.
+	if cs.cityBeadStore != nil {
+		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		} else if released > 0 {
+			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	cs.startBeadEventWatcher(ctx)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)

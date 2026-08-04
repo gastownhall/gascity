@@ -95,6 +95,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -123,7 +124,7 @@ Examples:
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
@@ -287,7 +288,7 @@ func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
@@ -636,7 +637,7 @@ conflicting live workflow from the same source is an error.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
@@ -655,11 +656,16 @@ conflicting live workflow from the same source is an error.`,
 				if isGraphFormula {
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
+					var syntheticInputConvoyID string
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
+						// PrepareInvocation may have minted a synthetic input convoy for a
+						// bare bead target; capture it so a post-prepare failure below can
+						// close it instead of stranding an open claim-attracting bead.
+						syntheticInputConvoyID = inv.InputConvoy
 						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
@@ -670,7 +676,7 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
@@ -723,6 +729,10 @@ conflicting live workflow from the same source is an error.`,
 						return ensureFormulaCookAttachDep(store, attach, result.RootID)
 					})
 					if err != nil {
+						// A post-prepare failure discards the invocation; close the
+						// synthetic input convoy it minted (the success path threads the
+						// convoy into the started workflow, so err == nil never reaches here).
+						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
@@ -798,6 +808,10 @@ conflicting live workflow from the same source is an error.`,
 				return nil
 			}
 
+			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
@@ -805,12 +819,46 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
-				Title: title,
-				Vars:  cookVars,
-			})
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			var result *molecule.Result
+			if isGraphFormula {
+				// Stamp the run root with its store/scope identity before
+				// instantiating, exactly as the --attach branch does via
+				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
+				// graph.v2 run root carries no gc.root_store_ref/gc.scope_kind, and
+				// the dashboard run-detail projection rejects the whole run with 422
+				// invalid_snapshot (sr-xz9f).
+				storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
+				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
+				}
+				if graphRootKey != "" {
+					unlock := graphv2.LockKey(graphRootKey)
+					defer unlock()
+				}
+				result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+					Title:          title,
+					Vars:           cookVars,
+					IdempotencyKey: graphRootKey,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+			} else {
+				result, err = molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
+					Title: title,
+					Vars:  cookVars,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
@@ -885,8 +933,18 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 	return rootKey
 }
 
-func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, cliGraphrouteDeps(cityPath))
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	// cook does not route the workflow root to an agent, but rig-scoped step
+	// targets still need the invocation's rig context to resolve — the same
+	// context sling derives from its entry agent's qualified name. A rig-scoped
+	// rootStoreRef already supplies that context through the store-scope
+	// fallback in DecorateGraphWorkflowRecipeWithDefaultBinding (#4175); thread
+	// the already-resolved formulaScope.rig in explicitly as well so the cook
+	// call site states the rig context directly instead of relying solely on the
+	// store-ref encoding (empty QualifiedName so the root stays unrouted;
+	// MetadataOnly mirrors the no-session default binding).
+	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
@@ -1036,12 +1094,18 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 type formulaScope struct {
 	storeRoot   string
 	searchPaths []string
+	// rig is the resolved rig name ("" for city scope). Rig-scoped formula
+	// steps need this context to resolve bare rig-scoped targets during cook.
+	rig string
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula
-// invocation should run. Priority: --rig flag > enclosing rig from cwd >
-// city.
-func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error) {
+// invocation should run. Priority: --rig flag > explicit --city flag >
+// GC_RIG env > enclosing rig from cwd > city. The GC_RIG tier mirrors
+// resolveBdScopeTarget (cmd_bd.go): the controller sets GC_RIG reliably,
+// while cwd detection fails for pool/polecat worktrees under
+// .gc/worktrees/, which are not inside the registered rig.Path.
+func resolveFormulaScope(cfg *config.City, cityPath string, stderr io.Writer) (formulaScope, error) {
 	if name := strings.TrimSpace(rigFlag); name != "" {
 		rig, ok := rigByName(cfg, name)
 		if !ok {
@@ -1053,6 +1117,35 @@ func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error
 		return rigFormulaScope(cfg, cityPath, rig), nil
 	}
 
+	// An explicit --city pins city scope, symmetric with explicit --rig: a
+	// deliberate city scope must never be silently downgraded to a rig store
+	// by GC_RIG env or cwd auto-detection below. GC_RIG is ambient on every
+	// controller-spawned agent, so without this pin `gc --city X formula
+	// cook` lands on a rig store. (gastownhall/gascity#3410 did the same for
+	// `gc bd`.)
+	if strings.TrimSpace(cityFlag) != "" {
+		return formulaScope{storeRoot: cityPath, searchPaths: cfg.FormulaLayers.City}, nil
+	}
+
+	gcRigDiscarded := ""
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return rigFormulaScope(cfg, cityPath, rig), nil
+		}
+		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
+		// (which errors on the identical value), we do not fail: falling
+		// through to cwd/city keeps formula commands working from agents
+		// whose GC_RIG names a rig this city does not bind. The discard must
+		// not be silent though — record it and warn below, naming the scope
+		// actually used.
+		gcRigDiscarded = gcRig
+	}
+
+	scope := formulaScope{
+		storeRoot:   cityPath,
+		searchPaths: cfg.FormulaLayers.City,
+	}
+	scopeDesc := "city"
 	if cwd, err := os.Getwd(); err == nil {
 		// resolveRigForDir already filters unbound rigs (see
 		// rig_scope_resolution.go), so a true return guarantees rig.Path is
@@ -1060,27 +1153,33 @@ func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error
 		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr != nil {
 			return formulaScope{}, rerr
 		} else if ok {
-			return rigFormulaScope(cfg, cityPath, rig), nil
+			scope = rigFormulaScope(cfg, cityPath, rig)
+			scopeDesc = fmt.Sprintf("%q rig", rig.Name)
 		}
 	}
 
-	return formulaScope{
-		storeRoot:   cityPath,
-		searchPaths: cfg.FormulaLayers.City,
-	}, nil
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc formula: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and using the %s scope instead (the same value via --rig would error)\n", gcRigDiscarded, scopeDesc) //nolint:errcheck // best-effort stderr
+	}
+
+	return scope, nil
 }
 
 func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaScope {
 	return formulaScope{
 		storeRoot:   resolveStoreScopeRoot(cityPath, rig.Path),
 		searchPaths: cfg.FormulaLayers.SearchPaths(rig.Name),
+		rig:         rig.Name,
 	}
 }
 
 // rigFormulaVarsForScope returns rig-scoped formula var defaults for the
-// active scope (honoring --rig and cwd). Returns an empty map when no rig
-// context is active so callers can treat the result as read-only
-// annotations without nil checks.
+// active scope (honoring --rig, explicit --city, GC_RIG env, and cwd — same
+// priority as resolveFormulaScope). Returns an empty map when no rig context
+// is active so callers can treat the result as read-only annotations without
+// nil checks. No stderr warning here for a discarded GC_RIG: this is always
+// called alongside resolveFormulaScope (see newFormulaShowCmd), which
+// already warns once for the same condition.
 func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string {
 	if cfg == nil {
 		return map[string]string{}
@@ -1090,6 +1189,16 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 			return cloneStringMap(rig.FormulaVars)
 		}
 		return map[string]string{}
+	}
+	// Symmetric with resolveFormulaScope: an explicit --city pins city scope,
+	// which has no rig-scoped formula vars.
+	if strings.TrimSpace(cityFlag) != "" {
+		return map[string]string{}
+	}
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return cloneStringMap(rig.FormulaVars)
+		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr == nil && ok {
@@ -1136,7 +1245,7 @@ since it was spawned.`,
 			if err != nil {
 				return err
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return err
 			}

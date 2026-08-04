@@ -72,6 +72,18 @@ func TestPackReleaseStampCreatesAndValidatesRegistryRelease(t *testing.T) {
 	if !strings.Contains(stdout.String(), "stamped demo 0.1.0") {
 		t.Fatalf("stamp stdout = %q", stdout.String())
 	}
+	emitted, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatalf("ReadFile(registry): %v", err)
+	}
+	for _, want := range []string{
+		`tier = "community"`,
+		`publisher = "Unknown publisher"`,
+	} {
+		if !strings.Contains(string(emitted), want) {
+			t.Errorf("stamped registry missing safe attribution %q:\n%s", want, emitted)
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -288,5 +300,26 @@ func TestRunPackReleaseNetworkGitInjectsCredentialHelper(t *testing.T) {
 	}
 	if !strings.Contains(string(argv), "credential.helper=") {
 		t.Fatalf("injected git argv missing credential.helper: %q", string(argv))
+	}
+}
+
+func TestResolveLocalPackReleaseSourceResolvesSymlinkedSource(t *testing.T) {
+	repo, _ := initPackReleaseRepo(t)
+
+	link := filepath.Join(t.TempDir(), "link-repo")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	repoDir, resolvedPackPath, err := resolveLocalPackReleaseSource(filepath.Join(link, "packs", "demo"), "")
+	if err != nil {
+		t.Fatalf("resolveLocalPackReleaseSource: %v", err)
+	}
+	wantRepoDir := normalizePathForCompare(repo)
+	if repoDir != wantRepoDir {
+		t.Fatalf("repoDir = %q, want %q (real repo root, not the %q symlink)", repoDir, wantRepoDir, link)
+	}
+	if resolvedPackPath != "packs/demo" {
+		t.Fatalf("resolvedPackPath = %q, want %q", resolvedPackPath, "packs/demo")
 	}
 }

@@ -257,6 +257,145 @@ describe('HealthPage', () => {
     expect(screen.getByRole('heading', { name: /diagnostics/i })).toBeTruthy();
   });
 
+  it('renders unavailable values instead of non-finite or synthetic zero telemetry', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        rss: { status: 'unavailable', reason: 'sample_failed' },
+      },
+      host: {
+        ...baseHealth().host,
+        memory: { status: 'unavailable', reason: 'invalid_sample' },
+        uptime: { status: 'unavailable', reason: 'sample_failed' },
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('Memory unavailable');
+    expect(synopsis).not.toMatch(/NaN|Infinity/);
+    expect(valueFor(container, 'Memory free')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Host uptime')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'RSS')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Load (1m, 5m, 15m)')?.textContent).toBe('0.42, 0.55, 0.61');
+    expect(screen.getByText('telemetry unavailable')).toBeTruthy();
+    expect(screen.queryByText(/dashboard host health unavailable/i)).toBeNull();
+    expect(container.textContent).not.toContain('0 B of 0 B');
+  });
+
+  it('renders an available zero-denominator memory sample as unavailable', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      host: {
+        ...baseHealth().host,
+        memory: {
+          status: 'available',
+          value: { total_mem_bytes: 0, free_mem_bytes: 0 },
+        },
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('Memory unavailable');
+    expect(valueFor(container, 'Memory free')?.textContent).toBe('n/a');
+    expect(container.textContent).not.toMatch(/NaN|Infinity/);
+    expect(container.textContent).not.toContain('0 B of 0 B');
+  });
+
+  it('contains malformed CPU, load, and admin metrics at the display boundary', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        pid: 0,
+        uptime_sec: -1,
+        heap_used_bytes: -1,
+      },
+      host: {
+        ...baseHealth().host,
+        cpu_count: 0,
+        load: {
+          status: 'available',
+          value: {
+            load_avg_1: -1,
+            load_avg_5: -1,
+            load_avg_15: -1,
+          },
+        },
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('CPU/load unavailable');
+    expect(valueFor(container, 'CPUs')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Load (1m, 5m, 15m)')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'PID')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Heap used')?.textContent).toBe('n/a');
+
+    const adminSection = sectionFor('Admin process');
+    expect(adminSection).not.toBeNull();
+    expect(valueFor(adminSection!, 'Uptime')?.textContent).toBe('n/a');
+    expect(screen.getAllByText('telemetry unavailable').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/NaN|Infinity/);
+  });
+
+  it('keeps the Host badge healthy when only the admin process telemetry is degraded', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        pid: 0,
+        uptime_sec: -1,
+        rss: { status: 'unavailable', reason: 'sample_failed' },
+        heap_used_bytes: -1,
+      },
+      // host telemetry is left fully valid: the Host badge must reflect the
+      // host, not the dashboard process.
+    };
+
+    renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const hostSection = sectionFor('Host');
+    expect(hostSection).not.toBeNull();
+    expect(hostSection!.textContent).not.toContain('telemetry unavailable');
+
+    // Admin problems still surface in the Admin section, unchanged.
+    const adminSection = sectionFor('Admin process');
+    expect(adminSection).not.toBeNull();
+    expect(valueFor(adminSection!, 'PID')?.textContent).toBe('n/a');
+    expect(valueFor(adminSection!, 'Uptime')?.textContent).toBe('n/a');
+  });
+
+  it('treats a just-started host with zero uptime as available, not telemetry-unavailable', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      host: {
+        ...baseHealth().host,
+        uptime: { status: 'available', value: 0 },
+      },
+    };
+
+    renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const hostSection = sectionFor('Host');
+    expect(hostSection).not.toBeNull();
+    expect(hostSection!.textContent).not.toContain('telemetry unavailable');
+  });
+
   it('restores diagnostics from local probes plus the cached supervisor status', async () => {
     renderPage();
 
@@ -388,7 +527,13 @@ describe('HealthPage', () => {
       ...baseHealth(),
       host: {
         ...baseHealth().host,
-        free_mem_bytes: 400_000_000,
+        memory: {
+          status: 'available',
+          value: {
+            total_mem_bytes: 16_000_000_000,
+            free_mem_bytes: 400_000_000,
+          },
+        },
       },
     };
     currentTrend = {
@@ -502,18 +647,21 @@ function baseHealth(): SystemHealth {
     admin: {
       pid: 4242,
       uptime_sec: 600,
-      rss_bytes: 50_000_000,
+      rss: { status: 'available', value: 50_000_000 },
       heap_used_bytes: 30_000_000,
       node_version: 'v20.10.0',
     },
     host: {
-      load_avg_1: 0.42,
-      load_avg_5: 0.55,
-      load_avg_15: 0.61,
-      total_mem_bytes: 16_000_000_000,
-      free_mem_bytes: 8_000_000_000,
+      load: {
+        status: 'available',
+        value: { load_avg_1: 0.42, load_avg_5: 0.55, load_avg_15: 0.61 },
+      },
+      memory: {
+        status: 'available',
+        value: { total_mem_bytes: 16_000_000_000, free_mem_bytes: 8_000_000_000 },
+      },
       cpu_count: 8,
-      uptime_sec: 86_400,
+      uptime: { status: 'available', value: 86_400 },
     },
   };
 }

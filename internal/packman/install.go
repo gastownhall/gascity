@@ -1,7 +1,9 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -108,11 +110,13 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 }
 
 // EnsureBundledPacksCurrent repairs any bundled pack synthetic caches that were
-// written by a different binary version. Each call to EnsureRepoInCache for a
-// bundled source validates the cache against the running binary's embedded
-// content and re-materializes it when the hashes differ. This prevents the
-// config loader's strict content-hash check from failing after a binary upgrade
-// where the running controller and the most-recently-installed binary differ.
+// written by a different binary version. A matching marker is enough on this
+// controller hot path: it binds the cache to the running binary's embedded
+// content hash and canonical commit without walking the materialized file set.
+// A missing or stale marker falls through to EnsureRepoInCache, which performs
+// full validation under the shared cache lock and re-materializes when needed.
+// This prevents binary-upgrade skew without serializing every config reload on
+// a full walk of the bundled repository.
 //
 // Callers that need to ensure all packs (including remote git clones) are
 // present should use InstallLocked instead.
@@ -134,6 +138,13 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 	for _, source := range sources {
 		pack := lock.Packs[source]
 		if pack.Commit == "" {
+			continue
+		}
+		cachePath, err := RepoCachePath(source, pack.Commit)
+		if err != nil {
+			return err
+		}
+		if builtinpacks.ValidateSyntheticRepoFast(cachePath, pack.Commit) == nil {
 			continue
 		}
 		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
@@ -183,7 +194,11 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 	if err != nil {
 		return nil, err
 	}
-	if len(reachable) == 0 {
+	// A direct import list with no remote entries (len(reachable) == 0) can
+	// still transitively reach remote sources through a local path-source
+	// pack's own imports — discoverReachableClosure walks those regardless
+	// of directness, so only an empty import list can skip the loop.
+	if len(imports) == 0 {
 		return &Lockfile{Schema: LockfileSchema, Packs: make(map[string]LockedPack)}, nil
 	}
 
@@ -317,16 +332,49 @@ func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty); err != nil {
+		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty, s.cityRoot); err != nil {
 			return nil, nil, false, fmt.Errorf("import %q: %w", name, err)
 		}
 	}
 	return constraints, reachable, dirty, nil
 }
 
-func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
+// walkImport walks one import into the reachable closure. declDir is the
+// directory a relative local-path source is resolved against: the city root
+// for top-level imports, and the declaring pack's own directory for nested
+// imports, so a local pack's relative local imports resolve against that
+// pack's location rather than the process working directory.
+func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	if !isRemoteSource(imp.Source) {
-		return nil
+		// A local path-source pack is never locked or fetched from cache,
+		// but its own declared imports still need to reach the closure —
+		// read its pack.toml straight off disk instead of from a resolved
+		// git commit cache. A relative source resolves against declDir, not
+		// the process working directory.
+		if !imp.ImportIsTransitive() {
+			return nil
+		}
+		srcDir := imp.Source
+		if !filepath.IsAbs(srcDir) {
+			srcDir = filepath.Join(declDir, srcDir)
+		}
+		if seen[srcDir] {
+			return nil
+		}
+		seen[srcDir] = true
+		nested, err := readPackImports(srcDir)
+		if err != nil {
+			// A local path source that isn't materialized on disk yet (a
+			// doctor-fix in-flight rewrite, a synthetic/placeholder import,
+			// or a not-yet-created pack directory) has no transitive
+			// imports to discover -- not a hard error. Only a pack.toml
+			// that exists but fails to parse is a genuine problem.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("local pack %q: %w", imp.Source, err)
+		}
+		return s.walkNestedImports(nested, constraints, reachable, seen, dirty, srcDir)
 	}
 
 	mergedConstraint, err := mergeConstraints(constraints[imp.Source], imp.Version)
@@ -344,7 +392,8 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		return nil
 	}
 
-	if _, err := s.cachedPackPath(imp.Source, chosen.Commit); err != nil {
+	cachePath, err := s.cachedPackPath(imp.Source, chosen.Commit)
+	if err != nil {
 		return err
 	}
 	if !imp.ImportIsTransitive() {
@@ -359,13 +408,19 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	if err != nil {
 		return err
 	}
+	// A remote pack's nested relative local import (if any) resolves under
+	// the cached checkout, not the city root.
+	return s.walkNestedImports(nested, constraints, reachable, seen, dirty, cachePath)
+}
+
+func (s *syncState) walkNestedImports(nested map[string]config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	names := make([]string, 0, len(nested))
 	for name := range nested {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty); err != nil {
+		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty, declDir); err != nil {
 			return fmt.Errorf("nested import %q: %w", name, err)
 		}
 	}

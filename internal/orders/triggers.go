@@ -36,6 +36,15 @@ type CursorFunc func(orderName string) uint64
 
 // TriggerOptions carries execution context for triggers that run subprocesses.
 type TriggerOptions struct {
+	// ConditionCtx is the parent context for the condition-check subprocess.
+	// When non-nil, canceling it — a controller shutdown, a config reload, or a
+	// canceled dispatch tick — interrupts a running check promptly instead of
+	// letting a raised check_timeout keep the process alive for the full
+	// deadline. Bare callers (the API GET /v0/orders/check evaluator and the
+	// storeless CLI check) may leave it nil; checkCondition then falls back to
+	// context.Background(), preserving the timeout-only behavior for those
+	// one-shot evaluators.
+	ConditionCtx     context.Context
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
@@ -47,6 +56,14 @@ var (
 	conditionCheckPostCancelWaitDelay = 2 * time.Second
 	conditionCheckSignalGrace         = 2 * time.Second
 )
+
+// ConditionCheckTimedOutMarker is the substring embedded in a condition
+// trigger's TriggerResult.Reason when the check command is killed by its
+// check_timeout deadline. The dispatcher matches on it to emit the
+// operator-facing starvation diagnostic, so both the producer here and the
+// consumer in the dispatcher reference this one constant instead of coupling
+// on a separately-typed literal across packages.
+const ConditionCheckTimedOutMarker = "timed out"
 
 // CheckTrigger evaluates an order's trigger condition and returns whether it's due.
 // ep is an events Provider used by event triggers to query events; may be nil for
@@ -210,30 +227,43 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	// may have elapsed since lastRun without an evaluation landing on it. Scan
 	// minute-by-minute from just after lastRun up to now; any match is a missed
 	// occurrence that is now due. Bounded lookback so a very old lastRun cannot
-	// spin (it is overdue regardless). Skipped when lastRun is zero (never run):
-	// such an order fires only on an exact match, never back-filling history.
-	if !last.IsZero() {
-		const maxCatchupLookback = 366 * 24 * time.Hour
-		start := last.Truncate(time.Minute).Add(time.Minute)
-		if floor := now.Add(-maxCatchupLookback).Truncate(time.Minute); start.Before(floor) {
-			start = floor
+	// spin (it is overdue regardless).
+	//
+	// A never-run order (lastRun zero) gets the same scan bounded to a much
+	// shorter lookback instead of being skipped entirely: without it, a
+	// narrow-window order (e.g. one specific minute/day) that never happens to
+	// be evaluated on its exact scheduled minute could never fire at all — no
+	// lastRun exists to catch up from, and no restart recovers it (#3947, a
+	// residual cold-start gap in the warm-order catch-up above). The short
+	// floor keeps a freshly-enabled order from firing for an occurrence that
+	// elapsed long before it existed, unlike the year-long lookback a warm
+	// order's lastRun-anchored catch-up gets.
+	const maxCatchupLookback = 366 * 24 * time.Hour
+	const neverRunCatchupLookback = 25 * time.Hour
+	lookback := maxCatchupLookback
+	start := last.Truncate(time.Minute).Add(time.Minute)
+	if last.IsZero() {
+		lookback = neverRunCatchupLookback
+		start = now.Add(-neverRunCatchupLookback).Truncate(time.Minute)
+	}
+	if floor := now.Add(-lookback).Truncate(time.Minute); start.Before(floor) {
+		start = floor
+	}
+	prev := start.Add(-time.Minute)
+	for t := start; !t.After(now); t = t.Add(time.Minute) {
+		// Spring-forward: one absolute minute stepped over a wall-clock
+		// gap (e.g. 01:59 → 03:00). Schedule minutes inside the gap can
+		// never match a real instant, so evaluate the skipped wall-clock
+		// readings and fire at this first real minute after the jump.
+		_, prevOff := prev.Zone()
+		_, tOff := t.Zone()
+		if tOff > prevOff && matchesInWallGap(matchesAt, prev, t) {
+			return TriggerResult{Due: true, Reason: "cron: caught up occurrence skipped by DST spring-forward", LastRun: last}
 		}
-		prev := start.Add(-time.Minute)
-		for t := start; !t.After(now); t = t.Add(time.Minute) {
-			// Spring-forward: one absolute minute stepped over a wall-clock
-			// gap (e.g. 01:59 → 03:00). Schedule minutes inside the gap can
-			// never match a real instant, so evaluate the skipped wall-clock
-			// readings and fire at this first real minute after the jump.
-			_, prevOff := prev.Zone()
-			_, tOff := t.Zone()
-			if tOff > prevOff && matchesInWallGap(matchesAt, prev, t) {
-				return TriggerResult{Due: true, Reason: "cron: caught up occurrence skipped by DST spring-forward", LastRun: last}
-			}
-			if matchesAt(t) && !sameWallMinute(last, t) {
-				return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
-			}
-			prev = t
+		if matchesAt(t) && !sameWallMinute(last, t) {
+			return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
 		}
+		prev = t
 	}
 
 	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
@@ -283,12 +313,26 @@ func cronFieldMatches(field string, value int) bool {
 // checkCondition runs the check command and returns due if exit code is 0.
 // Uses a timeout to prevent hanging check scripts from blocking trigger evaluation.
 func checkCondition(a Order, opts TriggerOptions) TriggerResult {
-	const triggerCheckTimeout = 10 * time.Second
 	timeout := opts.ConditionTimeout
 	if timeout <= 0 {
-		timeout = triggerCheckTimeout
+		// Derive the deadline from the order itself so every CheckTrigger
+		// caller honors check_timeout, not only the ones that populate
+		// TriggerOptions.ConditionTimeout (controller dispatch, store-aware
+		// CLI check). Bare callers — the API /v0/orders/check evaluator and
+		// the storeless CLI check — pass empty opts; CheckTimeoutOrDefault
+		// returns defaultConditionCheckTimeout for an unset/invalid value, so
+		// this preserves the prior 10s behavior when check_timeout is absent.
+		timeout = a.CheckTimeoutOrDefault()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Derive the check deadline from the caller's context when one is supplied so
+	// a canceled tick/shutdown/reload stops a running check before check_timeout
+	// elapses; nil opts (bare CLI/API evaluators) fall back to the background
+	// context, keeping the timeout as the sole bound.
+	parent := opts.ConditionCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
@@ -301,7 +345,7 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			reason := fmt.Sprintf("check command timed out after %s", timeout)
+			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)
 			if cleanupErr := cleanupCommand(); cleanupErr != nil {
 				reason = fmt.Sprintf("%s; cleanup failed: %v", reason, cleanupErr)
 			}

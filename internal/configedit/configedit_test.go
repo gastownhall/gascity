@@ -2824,6 +2824,37 @@ func TestMergeOrderOverrideMergesIdempotent(t *testing.T) {
 	}
 }
 
+func TestMergeOrderOverrideMergesCheckTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	sixty := "60s"
+	if err := ed.SetOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &sixty}); err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	// A partial merge that does not mention check_timeout must PRESERVE it.
+	trig := "cooldown"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Trigger: &trig}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "60s" {
+		t.Fatalf("check_timeout should be preserved through a partial merge, got %v", got)
+	}
+
+	// An explicit check_timeout must be APPLIED through the merge.
+	ninety := "90s"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &ninety}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "90s" {
+		t.Fatalf("check_timeout=90s should be applied through merge, got %v", got)
+	}
+}
+
 func TestMergeOrderOverrideNormalizesLegacyGateToTriggerOnWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity()+`

@@ -145,3 +145,17 @@ func TestValidateArtifactDir_FIFO(t *testing.T) {
 		t.Errorf("error should mention unsafe file type, got: %v", err)
 	}
 }
+
+// Regression-pins ValidateArtifactDir's existence-check behavior (refs
+// ga-iawy13.4): a missing artifact directory must still produce an error.
+// This root EvalSymlinks site is deliberate existence checking, not
+// comparison preparation, and must keep failing the same way after the
+// canonical-path-at-ingest migration.
+func TestValidateArtifactDir_MissingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	err := ValidateArtifactDir(dir)
+	if err == nil {
+		t.Fatal("expected error for missing artifact directory, got nil")
+	}
+}

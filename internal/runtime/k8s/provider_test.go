@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestProviderImplementsInterface(_ *testing.T) {
@@ -346,6 +347,89 @@ func TestSendKeys(t *testing.T) {
 	}
 	if !found {
 		t.Error("no tmux send-keys call with Down Enter")
+	}
+}
+
+// TestNudgePropagatesTransportError verifies that a transport failure (no
+// running pod for the session) surfaces as a non-nil error instead of being
+// swallowed — Nudge is not best-effort at the delivery layer, callers up
+// through worker.RuntimeHandle.Nudge and `gc session nudge` rely on this
+// error to report failed delivery (#4389). It also verifies the missing-pod
+// case is specifically [runtime.ErrSessionNotFound] — distinct from a live
+// pod's exec-stream failure — so callers like internal/session/chat.go and
+// internal/api/session_resolution.go can no-op on a gone session instead of
+// hard-failing (sjarmak's #4405 review).
+func TestNudgePropagatesTransportError(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	// No pod registered for this session name, so findRunningPod fails.
+	err := p.Nudge("gc-missing-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for missing pod, got nil")
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge missing-pod error = %v, want errors.Is(..., runtime.ErrSessionNotFound)", err)
+	}
+}
+
+// TestSendKeysMissingSessionIsNoOp verifies SendKeys honors the documented
+// best-effort contract (runtime.go SendKeys_MissingSession): a missing pod
+// (ErrSessionNotFound at the carrier) is a no-op returning nil, not an error.
+// This is the deliberate asymmetry with Nudge (#4389/#4405): SendKeys is
+// best-effort on a gone session, while a genuine transport failure to a live
+// pod still propagates (see TestSendKeysExecStreamFailureIsNotErrSessionNotFound).
+func TestSendKeysMissingSessionIsNoOp(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	err := p.SendKeys("gc-missing-agent", "Down", "Enter")
+	if err != nil {
+		t.Fatalf("SendKeys: expected nil for missing pod (best-effort contract), got %v", err)
+	}
+}
+
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound verifies the other half
+// of sjarmak's #4405 review: a running pod whose exec stream fails (a real
+// transport failure — #4389's actual bug) must NOT be mistaken for a gone
+// session. Only the pod-not-found case is ErrSessionNotFound; this failure
+// mode must propagate as a plain error so callers correctly treat it as a
+// hard failure rather than silently no-opping.
+func TestNudgeExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "-l", "hello world"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.Nudge("gc-test-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
+	}
+}
+
+// TestSendKeysExecStreamFailureIsNotErrSessionNotFound mirrors
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound for SendKeys.
+func TestSendKeysExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "Down", "Enter"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.SendKeys("gc-test-agent", "Down", "Enter")
+	if err == nil {
+		t.Fatal("SendKeys: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("SendKeys exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
 	}
 }
 
@@ -774,10 +858,16 @@ func TestPodManifestCompatibility(t *testing.T) {
 		}
 	}
 
-	// Verify working directory is pod-mapped.
-	if pod.Spec.Containers[0].WorkingDir != "/workspace/demo-rig" {
-		t.Errorf("workingDir = %q, want /workspace/demo-rig",
-			pod.Spec.Containers[0].WorkingDir)
+	// The manifest's workingDir is the workspace root, which always exists —
+	// the kubelet chdirs there before the entrypoint runs. The pod-mapped agent
+	// directory is entered by the entrypoint instead. gc-session-k8s builds its
+	// manifest the same way, so the two providers stay interchangeable.
+	if pod.Spec.Containers[0].WorkingDir != podWorkspaceRoot {
+		t.Errorf("workingDir = %q, want %q",
+			pod.Spec.Containers[0].WorkingDir, podWorkspaceRoot)
+	}
+	if args := strings.Join(pod.Spec.Containers[0].Args, " "); !strings.Contains(args, "cd "+shellquote.Quote("/workspace/demo-rig")) {
+		t.Errorf("entrypoint should enter the pod-mapped agent dir; got: %s", args)
 	}
 }
 
@@ -2197,5 +2287,22 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 	}
 	if !hasSkip {
 		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	}
+
+	// Pod-local init only scaffolds a session filesystem; it must not register
+	// or start a city, and must not run provider login/readiness probes (a
+	// gateway-backed provider cannot satisfy a first-party-login probe, and the
+	// controller owns readiness). Assert both flags are present.
+	for _, flag := range []string{"--no-start", "--skip-provider-readiness"} {
+		found := false
+		for _, arg := range gcInitCmd {
+			if arg == flag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
 	}
 }
