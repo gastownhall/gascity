@@ -1978,6 +1978,11 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 // handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
 // latency on the demand path (see readyDemandCache): this pays one live
 // backing-store read rather than over-counting blocked work as demand.
+//
+// Known gap: NativeDoltStore maps Status:"open" to
+// ExcludeStatus=[closed,in_progress] (see nativeIssueFilterFromListQuery), so it
+// still returns raw blocked/deferred rows regardless of Live — this gate is
+// inert on that backend, tracked separately.
 func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
@@ -4331,8 +4336,10 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // and store ref that own each bead. It is the input collection for
 // canonicalizeLegacyBoundUnassignedRoutedWork: empty-assignee open work is dropped
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
-// migration re-home needs its own scan. Active-only List queries are served from
-// the CachingStore in steady state, so this adds no backing-store round trip.
+// migration re-home needs its own scan. The scan now issues one live backing
+// read per store per tick so the raw-status filter runs, which costs a
+// backing-store round trip the cached read did not — the accepted tradeoff for
+// not counting blocked work as demand.
 func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
 		return nil, nil, nil, false
@@ -4366,9 +4373,13 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 		// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
 		open, err := listOpenForControllerDemandLive(source.store)
 		if err != nil {
-			// A failed live demand read must NOT read as zero demand: this set
-			// feeds ONLY openControlDispatcherDemand, so silently dropping a
-			// store's rows on an outage drains a live control dispatcher
+			// A failed live demand read must NOT read as zero demand: the only
+			// demand signal this set feeds is openControlDispatcherDemand (its
+			// other consumers — canonicalizeLegacyBoundUnassignedRoutedWork,
+			// repairControlDispatcherRoutesForStoreScope and
+			// selectReadyUnassignedRoutedWork — degrade to no-ops on an
+			// outage), so silently dropping a store's rows drains a live
+			// control dispatcher
 			// (gc-ft31x, the fail-open-to-zero sibling of the raw-status demand
 			// fix). Report it partial so the caller retains affected dispatchers
 			// this tick. A partial result still carries the rows it managed to
@@ -4404,9 +4415,11 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 }
 
 // markControlDispatcherTemplatesPartial marks every deterministic control-
-// dispatcher template partial. collectOpenUnassignedRoutedWork feeds only
-// openControlDispatcherDemand, so when its live read fails the lost signal is
-// exactly the control-dispatcher demand: without this the tick reads zero demand
+// dispatcher template partial. The only demand signal
+// collectOpenUnassignedRoutedWork feeds is openControlDispatcherDemand — its
+// other consumers degrade to no-ops on an outage — so when its live read fails
+// the lost signal is exactly the control-dispatcher demand: without this the
+// tick reads zero demand
 // and drains a live dispatcher on a transient List outage. Marking the templates
 // partial routes them through retainScaleCheckPartialPoolDesired, which preserves
 // the running dispatcher session for this tick (gc-ft31x).

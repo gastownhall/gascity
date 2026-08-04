@@ -320,4 +320,11 @@ func TestListActiveWorkflowProjectionBeadsExcludesBlocked(t *testing.T) {
 	if len(got) != 2 {
 		t.Errorf("projection size = %d, want 2 (gc-ready, gc-claimed); got %v", len(got), ids)
 	}
+	// Every read must be Live and status-scoped, and in_progress must be read
+	// before open: the two reads are not one snapshot, so this order confines
+	// the missable flip to open->in_progress (a bead just claimed, which must
+	// not be spawned against anyway).
+	if want := strings.Join([]string{"in_progress", "open"}, ","); strings.Join(store.liveStatuses, ",") != want {
+		t.Errorf("live status reads = %v, want [in_progress open] (status-scoped, in_progress first)", store.liveStatuses)
+	}
 }
