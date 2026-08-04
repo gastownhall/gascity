@@ -523,23 +523,34 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 // DiscoverSweepTranscript resolves the transcript path for a model-usage
 // sweep without reading it. It preserves the same bounded keyed and keyless
 // discovery rules as SweepSessionModelUsage so callers can safely memoize a
-// stable rollout path across repeated incremental sweeps. A keyless Codex scan
-// clouded by an I/O fault returns no path and is retried later rather than
-// trusting a potentially ambiguous result.
-func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) string {
+// stable rollout path across repeated incremental sweeps.
+//
+// settled classifies a miss with the same meaning SweepSessionModelUsage gives
+// it, so a caller that memoizes discovery can distinguish the two kinds: true
+// means there is definitively nothing to find (an unregistered provider family,
+// or a keyless codex session whose bounded workdir+window fallback came up empty
+// on a CLEAN scan) and re-running discovery is pure waste; false means the miss
+// is transient (a keyed rollout not flushed yet, or a keyless scan clouded by an
+// I/O fault, which leaves both an empty result and a lone hit non-definitive) and
+// a later attempt may resolve it. A found path is always settled.
+func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
-		return ""
+		return "", true
 	}
 	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
 	if _, ok := invocationUsageSpecs[family]; !ok {
-		return ""
+		return "", true
 	}
 	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
-	if family == "codex" && strings.TrimSpace(meta["session_key"]) == "" && !scanClean {
-		return ""
+	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	if keylessCodex && !scanClean {
+		return "", false
 	}
-	return path
+	if path == "" {
+		return "", keylessCodex
+	}
+	return path, true
 }
 
 // SweepSessionModelUsageAtPath performs the same cursor-guarded extraction,

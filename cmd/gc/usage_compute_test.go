@@ -346,11 +346,11 @@ func kindCount(facts []usage.Fact, kind usage.Kind) int {
 	return n
 }
 
-// rawSinkKindCount counts the facts of one kind APPENDED to the sink file,
+// rawSinkModelFactCount counts the model facts APPENDED to the sink file,
 // without usage.ReadFacts's IdempotencyKey dedup. Idempotency assertions must
 // use this: ReadFacts collapses a replayed fact at read time, so it would
 // silently pass even if a tick re-recorded work the cursor should have skipped.
-func rawSinkKindCount(t *testing.T, path string, kind usage.Kind) int {
+func rawSinkModelFactCount(t *testing.T, path string) int {
 	t.Helper()
 	body, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -368,11 +368,122 @@ func rawSinkKindCount(t *testing.T, path string, kind usage.Kind) int {
 		if err := json.Unmarshal([]byte(line), &f); err != nil {
 			t.Fatalf("malformed usage fact %q: %v", line, err)
 		}
-		if f.Kind == kind {
+		if f.Kind == usage.KindModel {
 			n++
 		}
 	}
 	return n
+}
+
+// liveSweepStart anchors a live fixture just behind the wall clock. A live
+// session has no slept_at, so its transcript-discovery window runs from
+// awake_started_at all the way to now: a hardcoded fixture date drifts out of
+// discovery's bounded day lookback as real time advances, and the fixture stops
+// being discoverable — the test would start failing for everyone on a fixed
+// future day. Deriving the anchor from time.Now keeps the window an hour wide
+// forever.
+func liveSweepStart() time.Time {
+	return time.Now().UTC().Add(-time.Hour)
+}
+
+// liveCodexSessionMeta is an AWAKE codex session's metadata: a non-terminal state
+// and NO slept_at, so it is a live-lane candidate whose discovery window runs to
+// the wall clock. An empty sessionKey is omitted entirely, selecting the keyless
+// (work_dir, wake-window) discovery path.
+func liveCodexSessionMeta(start time.Time, workDir, sessionKey string) map[string]string {
+	meta := map[string]string{
+		"state":            "active",
+		"session_name":     "codex-live-1",
+		"awake_started_at": start.Format(time.RFC3339),
+		"work_dir":         workDir,
+		"provider":         "codex",
+		"builtin_ancestor": "codex",
+		"molecule_id":      "run-L",
+	}
+	if sessionKey != "" {
+		meta["session_key"] = sessionKey
+	}
+	return meta
+}
+
+// liveSweepHarness is the shared wiring for the live model-usage sweep cases: a
+// session bead in a memory store, a real usage sink, and codexRoot as the only
+// transcript search path. The cases differ only in session metadata and in what
+// is on disk, so everything else is built once here.
+type liveSweepHarness struct {
+	cr       *CityRuntime
+	store    *beads.MemStore
+	meta     map[string]string
+	beadID   string
+	sinkPath string
+	info     session.Info
+}
+
+func newLiveSweepHarness(t *testing.T, codexRoot string, meta map[string]string) liveSweepHarness {
+	t.Helper()
+	cityPath := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	store := beads.NewMemStore()
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	h := liveSweepHarness{
+		cr:       &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard},
+		store:    store,
+		meta:     meta,
+		sinkPath: sinkPath,
+	}
+	h.info = h.addSession(t, meta)
+	h.beadID = h.info.ID
+	return h
+}
+
+// addSession creates another session bead in the harness store and returns the
+// snapshot row the reconcile tick would hand emitDueComputeFacts for it.
+func (h liveSweepHarness) addSession(t *testing.T, meta map[string]string) session.Info {
+	t.Helper()
+	b, err := h.store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Status:   "open",
+		Title:    meta["session_name"],
+		Labels:   []string{session.LabelSession},
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session.Info{ID: b.ID, MetadataState: meta["state"], AwakeStartedAt: meta["awake_started_at"]}
+}
+
+// tick runs one STEADY-STATE reconcile-tick usage pass over the harness session.
+// The boot pass is driven directly by the one case that covers it, which needs a
+// two-session snapshot anyway.
+func (h liveSweepHarness) tick() {
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+}
+
+// memo returns the live-sweep memo the tick holds for this session's current
+// awake epoch and conversation.
+func (h liveSweepHarness) memo() liveSweepMemo {
+	return h.cr.liveSweepMemoFor(h.beadID, h.meta["awake_started_at"], h.meta["session_key"])
+}
+
+// expireSweepThrottle clears the session's liveModelSweepMinInterval floor,
+// standing in for that interval elapsing between ticks. It preserves the rest of
+// the memo (resolved path, settled-miss sentinel) so a case advances only the
+// clock.
+func (h liveSweepHarness) expireSweepThrottle() {
+	memo := h.memo()
+	memo.nextSweepAt = time.Time{}
+	h.cr.storeLiveSweepMemo(h.beadID, memo)
+}
+
+func (h liveSweepHarness) cursor(t *testing.T) string {
+	t.Helper()
+	b, err := h.store.Get(h.beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Metadata[session.MetadataKeyInvocationUsageCursor]
 }
 
 // TestEmitDueComputeFactsSweepsLiveSessionModelUsage is the undercount
@@ -384,48 +495,19 @@ func rawSinkKindCount(t *testing.T, path string, kind usage.Kind) int {
 // interval — and the persisted invocation cursor must make a tick with no new
 // transcript activity a no-op.
 func TestEmitDueComputeFactsSweepsLiveSessionModelUsage(t *testing.T) {
-	cityPath := t.TempDir()
 	workDir := t.TempDir()
 	codexRoot := t.TempDir()
-	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
-	sessionKey := codexSweepSessionKey
-	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+	start := liveSweepStart()
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
 		{150, 100, 50},  // total=150, last input=100, output=50
 		{450, 200, 100}, // total=450, last input=200, output=100
 	})
-
-	store := beads.NewMemStore()
-	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	// No slept_at and a non-terminal state: this session is still running.
-	b, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Status: "open",
-		Title:  "live codex session",
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"state":            "active",
-			"session_name":     "codex-live-1",
-			"awake_started_at": start.Format(time.RFC3339),
-			"session_key":      sessionKey,
-			"work_dir":         workDir,
-			"provider":         "codex",
-			"builtin_ancestor": "codex",
-			"molecule_id":      "run-L",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
-	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
-	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
-	info := session.Info{ID: b.ID, MetadataState: "active", AwakeStartedAt: start.Format(time.RFC3339)}
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, codexSweepSessionKey))
 
 	// Tick 1: nothing terminal has happened, yet both invocations already on the
 	// transcript must bill now instead of waiting for retirement.
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
-	facts1, warnings, err := usage.ReadFacts(sinkPath)
+	h.tick()
+	facts1, warnings, err := usage.ReadFacts(h.sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (tick 1): %v", err)
 	}
@@ -449,7 +531,7 @@ func TestEmitDueComputeFactsSweepsLiveSessionModelUsage(t *testing.T) {
 
 	// The interval stays OPEN: stamping either accounting marker on a live sweep
 	// would suppress the real end-of-interval compute fact and terminal sweep.
-	afterTick1, err := store.Get(b.ID)
+	afterTick1, err := h.store.Get(h.beadID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,49 +547,239 @@ func TestEmitDueComputeFactsSweepsLiveSessionModelUsage(t *testing.T) {
 
 	// Discovery is memoized for this awake epoch so a per-tick sweep does not
 	// repeat the bounded rollout scan.
-	cacheKey := liveSweepTranscriptCacheKey{
-		sessionID:  b.ID,
-		awakeStart: start.Format(time.RFC3339),
-		sessionKey: sessionKey,
-	}
-	if path, cached := cr.cachedLiveTranscriptPath(cacheKey); !cached || path == "" {
-		t.Fatalf("tick 1 did not memoize the resolved transcript path: path=%q cached=%v", path, cached)
+	if memo := h.memo(); memo.path == "" {
+		t.Fatalf("tick 1 did not memoize the resolved transcript path: memo=%+v", memo)
 	}
 
-	// Tick 2: no transcript activity. A live session stays a candidate on every
+	// Tick 2: no transcript activity. The sweep-interval floor is cleared first so
+	// this asserts the CURSOR, not the throttle (TestEmitDueComputeFactsThrottles-
+	// LiveModelSweep owns the floor): a live session stays a candidate on every
 	// tick, so only the persisted cursor prevents a double-count.
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
-	if got := rawSinkKindCount(t, sinkPath, usage.KindModel); got != 2 {
+	h.expireSweepThrottle()
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 2 {
 		t.Fatalf("tick 2 appended model facts to a total of %d, want 2: the cursor must make a no-activity tick a no-op", got)
 	}
 
 	// Tick 3: one new invocation lands. Only that delta bills, and the session is
 	// still awake, so still no compute fact.
-	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
 		{150, 100, 50},
 		{450, 200, 100},
 		{750, 300, 150},
 	})
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
-	facts3, _, err := usage.ReadFacts(sinkPath)
+	h.expireSweepThrottle()
+	h.tick()
+	facts3, _, err := usage.ReadFacts(h.sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (tick 3): %v", err)
 	}
 	if got := kindCount(facts3, usage.KindModel); got != 3 {
 		t.Fatalf("tick 3 model facts = %d, want 3 (one appended invocation): %+v", got, facts3)
 	}
-	if got := rawSinkKindCount(t, sinkPath, usage.KindModel); got != 3 {
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 3 {
 		t.Fatalf("tick 3 appended model facts to a total of %d, want 3 (only the delta)", got)
 	}
 	if got := kindCount(facts3, usage.KindCompute); got != 0 {
 		t.Fatalf("tick 3 compute facts = %d, want 0 while the session is awake", got)
 	}
-	afterTick3, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := afterTick3.Metadata[session.MetadataKeyInvocationUsageCursor]; got != "total:750" {
+	if got := h.cursor(t); got != "total:750" {
 		t.Fatalf("invocation_usage_cursor = %q, want total:750", got)
+	}
+}
+
+// TestEmitDueComputeFactsThrottlesLiveModelSweep pins the live lane's cost
+// bound. Unlike the terminal lane — gated by a persisted per-interval marker, so
+// it touches a session once — a live session is a candidate on EVERY tick, so
+// without a floor the reconcile tick would run bounded transcript discovery and a
+// transcript read for every awake session at whatever cadence the tick spins
+// (pokes drive it sub-second). A session must be swept at most once per
+// liveModelSweepMinInterval no matter how often the tick fires.
+func TestEmitDueComputeFactsThrottlesLiveModelSweep(t *testing.T) {
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, codexSweepSessionKey))
+
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 2 {
+		t.Fatalf("tick 1 model facts = %d, want 2", got)
+	}
+	if memo := h.memo(); !memo.nextSweepAt.After(time.Now().UTC()) {
+		t.Fatalf("tick 1 left the sweep-interval floor unarmed: nextSweepAt=%v", memo.nextSweepAt)
+	}
+
+	// A third invocation lands and the tick fires again immediately. The session is
+	// inside its floor, so it must not be re-swept — no discovery, no transcript
+	// read, no fact — even though there is genuinely new usage waiting.
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+		{750, 300, 150},
+	})
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 2 {
+		t.Fatalf("tick 2 model facts = %d, want 2: a tick inside liveModelSweepMinInterval must not re-sweep the session", got)
+	}
+	if got := h.cursor(t); got != "total:450" {
+		t.Fatalf("invocation_usage_cursor = %q, want total:450 (unmoved by the throttled tick)", got)
+	}
+
+	// Once the floor elapses the same session is swept again and the delta bills:
+	// the throttle delays a sweep, it never drops one.
+	h.expireSweepThrottle()
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 3 {
+		t.Fatalf("tick 3 model facts = %d, want 3 (the delta bills once the floor elapses)", got)
+	}
+}
+
+// TestEmitDueComputeFactsSkipsLiveModelSweepOnBootPass pins the boot carve-out.
+// The boot reconcile covers the WHOLE fleet at once on the synchronous readiness
+// path, which is exactly where fleet-proportional per-session file discovery and
+// reads must not land. The live lane therefore waits for the first steady-state
+// tick — while the terminal lane, whose per-interval marker makes it self-limiting,
+// keeps running on boot as before.
+func TestEmitDueComputeFactsSkipsLiveModelSweepOnBootPass(t *testing.T) {
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, codexSweepSessionKey))
+
+	// A retired session in the same snapshot: its interval ended, so the terminal
+	// lane owes it a compute fact on the boot pass. Its own workdir has no rollout,
+	// so it contributes no model facts either way.
+	slept := start.Add(90 * time.Second)
+	terminal := h.addSession(t, map[string]string{
+		"state":            "asleep",
+		"session_name":     "codex-retired-1",
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"session_key":      "019e7777-cccc-7000-8000-00000000000b",
+		"work_dir":         t.TempDir(),
+		"provider":         "codex",
+		"builtin_ancestor": "codex",
+		"molecule_id":      "run-T",
+	})
+	snapshot := []session.Info{h.info, terminal}
+
+	h.cr.emitDueComputeFacts(context.Background(), snapshot, true)
+	bootFacts, _, err := usage.ReadFacts(h.sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (boot pass): %v", err)
+	}
+	if got := kindCount(bootFacts, usage.KindModel); got != 0 {
+		t.Fatalf("boot pass model facts = %d, want 0: the live lane must not run on the fleet-wide boot reconcile; facts: %+v", got, bootFacts)
+	}
+	if got := kindCount(bootFacts, usage.KindCompute); got != 1 {
+		t.Fatalf("boot pass compute facts = %d, want 1: the terminal lane's cost profile is unchanged and must keep running on boot", got)
+	}
+	if got := h.cursor(t); got != "" {
+		t.Fatalf("boot pass advanced the live session's invocation cursor to %q, want unset (it must not be swept at all)", got)
+	}
+	if memo := h.memo(); memo.path != "" || !memo.nextSweepAt.IsZero() {
+		t.Fatalf("boot pass touched the live session's sweep memo: %+v", memo)
+	}
+
+	// The very next steady-state tick picks the live session up: boot DEFERS the
+	// lane, it does not disable it.
+	h.cr.emitDueComputeFacts(context.Background(), snapshot, false)
+	steadyFacts, _, err := usage.ReadFacts(h.sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (steady tick): %v", err)
+	}
+	if got := kindCount(steadyFacts, usage.KindModel); got != 2 {
+		t.Fatalf("steady tick model facts = %d, want 2 (the deferred live sweep runs on the first non-boot tick): %+v", got, steadyFacts)
+	}
+}
+
+// TestEmitDueComputeFactsBacksOffUnresolvedLiveSweepDiscovery pins the miss
+// memoization. A live session is a candidate on every tick, so an awake session
+// whose transcript cannot be discovered yet would otherwise re-run the bounded
+// rollout scan forever, once per tick, for its entire life. A TRANSIENT miss must
+// be memoized as a backoff: re-attempted on the sweep floor rather than on every
+// tick, and never dropped.
+func TestEmitDueComputeFactsBacksOffUnresolvedLiveSweepDiscovery(t *testing.T) {
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, codexSweepSessionKey))
+
+	// Tick 1: the keyed rollout is not on disk yet. That miss is transient — the
+	// file may simply not be flushed — so it must not settle.
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 0 {
+		t.Fatalf("tick 1 model facts = %d, want 0 (no transcript on disk yet)", got)
+	}
+	memo := h.memo()
+	if memo.settledMiss {
+		t.Fatal("a keyed rollout that is merely not flushed yet must not be memoized as a settled miss")
+	}
+	if memo.nextSweepAt.IsZero() {
+		t.Fatal("an unresolved discovery must still arm the sweep floor, or discovery re-runs on every tick forever")
+	}
+
+	// The transcript lands immediately after. Tick 2 is inside the backoff, so
+	// discovery is NOT re-attempted.
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, codexSweepSessionKey, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 0 {
+		t.Fatalf("tick 2 model facts = %d, want 0: a memoized miss must not re-run discovery inside its backoff", got)
+	}
+
+	// Once the floor elapses discovery is retried and the pending usage is
+	// recovered.
+	h.expireSweepThrottle()
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 2 {
+		t.Fatalf("tick 3 model facts = %d, want 2 (discovery retried once the backoff elapsed)", got)
+	}
+}
+
+// TestEmitDueComputeFactsStopsRetryingSettledLiveSweepMiss pins the other half of
+// the miss memoization: a DEFINITIVE miss is not retried at all. A keyless codex
+// session whose bounded (work_dir, wake-window) scan comes up empty on a CLEAN
+// scan has nothing to find — the outcome is ambiguity, an out-of-window filename,
+// or a TZ shift, none of which a retry resolves — so the live lane records the
+// verdict once and stops scanning for that awake epoch.
+func TestEmitDueComputeFactsStopsRetryingSettledLiveSweepMiss(t *testing.T) {
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	// No session_key: discovery takes the keyless workdir+window fallback.
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, ""))
+
+	h.tick()
+	memo := h.memo()
+	if !memo.settledMiss {
+		t.Fatalf("a clean keyless scan that found nothing is definitive and must settle: memo=%+v", memo)
+	}
+
+	// Even with the floor cleared AND a matching rollout now on disk, the settled
+	// miss is never re-attempted. Nothing is lost: the interval's usage is still
+	// recovered by the terminal sweep when the session finally closes, and a re-wake
+	// starts a fresh epoch that discovers again.
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-00000000000c", [][3]int{
+		{150, 100, 50},
+	})
+	h.expireSweepThrottle()
+	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 0 {
+		t.Fatalf("model facts = %d, want 0: a settled discovery miss must never re-run discovery", got)
+	}
+	if got := h.cursor(t); got != "" {
+		t.Fatalf("invocation_usage_cursor = %q, want unset (nothing was swept)", got)
 	}
 }
 
@@ -566,7 +838,7 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
 
 	info := session.Info{ID: b.ID, MetadataState: "asleep", AwakeStartedAt: start.Format(time.RFC3339)}
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 
 	facts, warnings, err := usage.ReadFacts(sinkPath)
 	if err != nil {
@@ -619,7 +891,7 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 	// A second tick must add no new facts: the cursor blocks the model re-record
 	// and the emit marker blocks the compute re-emit; ReadFacts also dedups any
 	// replay by IdempotencyKey.
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 	facts2, _, err := usage.ReadFacts(sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (second tick): %v", err)
@@ -676,7 +948,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	// Tick 1: the rollout is not on disk yet → the sweep misses (transient). The
 	// compute fact still records, but neither the compute marker nor the sweep
 	// marker is stamped, so the interval stays open for retry.
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 	facts1, _, err := usage.ReadFacts(sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (tick 1): %v", err)
@@ -706,7 +978,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 
 	// Tick 2: the interval is still a candidate → the sweep retries, discovers the
 	// rollout, and recovers the model facts. No duplicate compute fact.
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 	facts2, _, err := usage.ReadFacts(sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (tick 2): %v", err)
@@ -731,7 +1003,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 
 	// Tick 3: both markers set → no re-Get work, no new facts.
 	info.UsageComputeEmittedAt = awake // reflects the committed interval on the snapshot
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 	facts3, _, err := usage.ReadFacts(sinkPath)
 	if err != nil {
 		t.Fatalf("ReadFacts (tick 3): %v", err)
@@ -741,14 +1013,17 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	}
 }
 
-// writeKeylessCodexRolloutForSweep fabricates a codex rollout at the local-date
-// path the codex CLI would use for `at` (session_meta cwd=workDir, a turn_context
+// writeCodexRolloutForSweepAt fabricates a codex rollout at the local-date path
+// the codex CLI would use for `at` (session_meta cwd=workDir, a turn_context
 // model, one token_count per {total, lastInput, lastOutput}). Unlike
-// writeCodexRolloutForSweep — which hardcodes 2026-06-15 and is reachable by the
-// TZ-tolerant keyed lookup — it derives the day dir and filename timestamp from
-// `at` in time.Local, so the keyless workdir+window fallback (which parses rollout
-// filenames in time.Local) resolves it on any host timezone.
-func writeKeylessCodexRolloutForSweep(t *testing.T, root string, at time.Time, workDir, sessionID string, tokenCounts [][3]int) {
+// writeCodexRolloutForSweep — which hardcodes 2026-06-15, fine only for a fixture
+// whose slept_at also pins the discovery window to that date — it derives BOTH the
+// day dir and the filename timestamp from `at` in time.Local, matching how codex
+// names rollouts and how discovery parses them. Any test whose discovery window
+// runs to the wall clock (a live session has no slept_at) must use this: a
+// hardcoded day falls out of the bounded lookback as real time advances, so the
+// fixture would silently stop being discoverable.
+func writeCodexRolloutForSweepAt(t *testing.T, root string, at time.Time, workDir, sessionID string, tokenCounts [][3]int) {
 	t.Helper()
 	local := at.In(time.Local)
 	dayDir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
@@ -794,7 +1069,7 @@ func TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir(t *testing.T) {
 	slept := start.Add(90 * time.Second)
 	// A keyless codex rollout in this wisp's unique worktree — no session_key keys
 	// it; only the cwd + interval window resolve it.
-	writeKeylessCodexRolloutForSweep(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-000000000009", [][3]int{
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-000000000009", [][3]int{
 		{150, 100, 50},
 		{450, 200, 100},
 	})
@@ -827,7 +1102,7 @@ func TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir(t *testing.T) {
 	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
 	info := session.Info{ID: b.ID, MetadataState: "asleep", AwakeStartedAt: start.Format(time.RFC3339)}
 
-	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
 
 	facts, warnings, err := usage.ReadFacts(sinkPath)
 	if err != nil {

@@ -28,6 +28,20 @@ const usageComputeEmittedAtKey = "usage_compute_emitted_at"
 // session-interval accounting markers, not domain metadata).
 const usageModelSweptAtKey = "usage_model_swept_at"
 
+// liveModelSweepMinInterval floors how often the reconcile tick re-sweeps one
+// awake session's transcript for model usage. The terminal lane is gated by a
+// persisted per-interval marker, so it touches each session once; a live session
+// has no such endpoint and is a candidate on EVERY tick, which makes the live
+// lane's cost fleet-proportional AND repeated at the tick cadence — a bounded
+// rollout discovery scan plus a transcript tail read per awake session, on the
+// SYNCHRONOUS reconcile tick. Without a floor, a poke-driven sub-second cadence
+// turns that into per-tick file I/O across the whole live fleet. Thirty seconds
+// is far below the interval-scale staleness this lane exists to fix (usage
+// previously appeared only at retirement, hours later) and far above the tick
+// cadence that produces the storm; nothing is lost by waiting, because the
+// cursor-guarded sweep bills the whole batch pending at the moment it next runs.
+const liveModelSweepMinInterval = 30 * time.Second
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -196,7 +210,15 @@ func liveModelSweepCandidate(info session.Info) bool {
 // raw-half read. A steady fleet of parked sessions whose intervals are already
 // accounted issues zero Gets. Best-effort: it never blocks or fails the reconcile
 // tick.
-func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info) {
+//
+// bootReconcile disables the live lane. The terminal lane's cost is unchanged by
+// boot — it is gated by a persisted per-interval marker, so it fires once per
+// interval whenever the pass runs — but the live lane's transcript discovery and
+// reads are proportional to the awake fleet, and the boot pass covers the whole
+// fleet at once on the synchronous readiness path. Deferring the live lane to the
+// first steady-state tick costs one tick of billing latency and keeps startup off
+// the critical path (the same trade beadReconcileTick makes for the pool sweep).
+func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info, bootReconcile bool) {
 	if cr.cs == nil {
 		return
 	}
@@ -248,13 +270,19 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		return sweepFactory
 	}
 	now := time.Now().UTC()
+	liveLane := !bootReconcile
 	processSessionBead := func(b beads.Bead) {
 		if b.Metadata == nil {
 			return
 		}
 		state := b.Metadata["state"]
 		if isLiveModelSweepState(state) {
-			cr.sweepLiveSessionModelUsage(ctx, b, now, logf, modelSweepFactory)
+			// Routed off the FRESH bead, so a session that woke since the snapshot
+			// lands here too — and on the boot pass it is skipped just like a
+			// snapshot-live one.
+			if liveLane {
+				cr.sweepLiveSessionModelUsage(ctx, b, now, logf, modelSweepFactory)
+			}
 			return
 		}
 		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
@@ -299,7 +327,14 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
 	}
 	for _, info := range sessions {
-		if !computeFactGetCandidate(info) && !liveModelSweepCandidate(info) {
+		// A canceled tick (controller shutdown, reconcile deadline) stops here
+		// rather than working through the rest of the fleet: every remaining
+		// session is picked up idempotently by the next tick.
+		if ctx.Err() != nil {
+			return
+		}
+		liveCandidate := liveLane && liveModelSweepCandidate(info)
+		if !computeFactGetCandidate(info) && !liveCandidate {
 			continue
 		}
 		b, err := store.Get(info.ID)
@@ -311,17 +346,35 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 }
 
-type liveSweepTranscriptCacheKey struct {
-	sessionID  string
+// liveSweepMemo is one awake session's live model-usage sweep state, held for
+// the process lifetime because the worker factory is rebuilt every tick.
+//
+// awakeStart and sessionKey stamp the epoch and conversation the memo describes:
+// a re-wake or a replacement conversation invalidates it, so it resolves its own
+// rollout rather than sweeping a stale path. Keying the map by session id (with
+// the epoch inside the value) means a long-lived session replaces its memo on
+// each wake instead of accumulating one entry per epoch forever.
+type liveSweepMemo struct {
 	awakeStart string
 	sessionKey string
+	// path is the resolved transcript, empty until discovery succeeds.
+	path string
+	// settledMiss records a DEFINITIVE discovery miss — there is nothing to find
+	// for this epoch, so discovery is never re-attempted for it.
+	settledMiss bool
+	// nextSweepAt floors the sweep cadence (liveModelSweepMinInterval). It also
+	// backs off an unsettled discovery miss, so a session whose transcript cannot
+	// be resolved yet re-attempts discovery on that same floor instead of on
+	// every tick forever.
+	nextSweepAt time.Time
 }
 
 // sweepLiveSessionModelUsage incrementally records model usage for an awake
 // session without closing its compute interval or stamping the terminal sweep
-// marker. Transcript discovery is memoized for the current awake epoch and
-// provider session key; a new epoch or replacement conversation therefore
-// resolves its own rollout instead of reusing a stale path.
+// marker. Transcript discovery and the transcript read are both memoized and
+// throttled per session (see liveSweepMemo and liveModelSweepMinInterval), so a
+// live fleet costs at most one bounded discovery plus one tail read per session
+// per liveModelSweepMinInterval no matter how fast the reconcile tick spins.
 func (cr *CityRuntime) sweepLiveSessionModelUsage(
 	ctx context.Context,
 	b beads.Bead,
@@ -329,44 +382,58 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 	logf func(string, ...any),
 	modelSweepFactory func() *worker.Factory,
 ) {
-	if b.Metadata == nil || !isLiveModelSweepState(b.Metadata["state"]) ||
-		strings.TrimSpace(b.Metadata["awake_started_at"]) == "" {
+	if b.Metadata == nil || !isLiveModelSweepState(b.Metadata["state"]) {
+		return
+	}
+	awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
+	if awakeStart == "" {
+		return
+	}
+	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(b.Metadata["session_key"]))
+	if memo.settledMiss || now.Before(memo.nextSweepAt) {
 		return
 	}
 	factory := modelSweepFactory()
 	if factory == nil {
 		return
 	}
-	cacheKey := liveSweepTranscriptCacheKey{
-		sessionID:  b.ID,
-		awakeStart: strings.TrimSpace(b.Metadata["awake_started_at"]),
-		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
+	if memo.path == "" {
+		// A settled miss is definitive for this epoch (unregistered provider family,
+		// or a keyless codex session whose CLEAN workdir+window scan found nothing —
+		// ambiguity, an out-of-window filename, or a TZ shift, none of which a retry
+		// resolves). Record it so the scan is never repeated; the session's usage is
+		// still recovered by the terminal sweep when its interval ends, and a re-wake
+		// starts a fresh epoch that discovers again.
+		path, settled := factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)
+		memo.path = path
+		memo.settledMiss = path == "" && settled
 	}
-	path, cached := cr.cachedLiveTranscriptPath(cacheKey)
-	if !cached {
-		path = factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)
-		if path != "" {
-			cr.rememberLiveTranscriptPath(cacheKey, path)
-		}
-	}
-	if path == "" {
+	// Persist the memo BEFORE the miss return: an unsettled miss must still take
+	// the interval floor, or discovery repeats on every tick for a session whose
+	// transcript never resolves.
+	memo.nextSweepAt = now.Add(liveModelSweepMinInterval)
+	cr.storeLiveSweepMemo(b.ID, memo)
+	if memo.path == "" {
 		return
 	}
-	if _, _, err := factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, path, now); err != nil {
+	if _, _, err := factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, memo.path, now); err != nil {
 		logf("usage: live model-usage sweep for session %s failed; will retry: %v", b.ID, err)
 	}
 }
 
-func (cr *CityRuntime) cachedLiveTranscriptPath(key liveSweepTranscriptCacheKey) (string, bool) {
-	if value, ok := cr.liveSweepTranscriptPaths.Load(key); ok {
-		path, _ := value.(string)
-		return path, true
+// liveSweepMemoFor returns the session's memo for the given awake epoch and
+// provider session key, or a fresh one stamped with that identity when none is
+// held or the held one describes a superseded epoch or conversation.
+func (cr *CityRuntime) liveSweepMemoFor(sessionID, awakeStart, sessionKey string) liveSweepMemo {
+	if value, ok := cr.liveSweepMemos.Load(sessionID); ok {
+		if memo, isMemo := value.(liveSweepMemo); isMemo &&
+			memo.awakeStart == awakeStart && memo.sessionKey == sessionKey {
+			return memo
+		}
 	}
-	return "", false
+	return liveSweepMemo{awakeStart: awakeStart, sessionKey: sessionKey}
 }
 
-func (cr *CityRuntime) rememberLiveTranscriptPath(key liveSweepTranscriptCacheKey, path string) {
-	if strings.TrimSpace(path) != "" {
-		cr.liveSweepTranscriptPaths.Store(key, path)
-	}
+func (cr *CityRuntime) storeLiveSweepMemo(sessionID string, memo liveSweepMemo) {
+	cr.liveSweepMemos.Store(sessionID, memo)
 }
