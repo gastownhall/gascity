@@ -24,6 +24,19 @@ const (
 	textFileBusyRetryDelay    = 25 * time.Millisecond
 )
 
+// conditionGCHome resolves the gc state directory for gate subprocesses. Gate
+// HOME is intentionally sandboxed to the city, so it cannot also be used for
+// gc's machine-level cache and registry state.
+func conditionGCHome() string {
+	if value := strings.TrimSpace(os.Getenv("GC_HOME")); value != "" {
+		return value
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".gc")
+	}
+	return filepath.Join(os.TempDir(), ".gc")
+}
+
 // conditionPATH resolves the tool directories gate scripts actually need.
 // This keeps the env narrow while ensuring gate scripts use the same bd/gc
 // binaries as the running city instead of whatever older copy happens to live
@@ -90,6 +103,7 @@ func (ce ConditionEnv) Environ() []string {
 	env := []string{
 		"PATH=" + conditionPATH(),
 		"HOME=" + home,
+		"GC_HOME=" + conditionGCHome(),
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,

@@ -13,6 +13,8 @@ import (
 )
 
 func TestConditionEnvEnviron(t *testing.T) {
+	t.Setenv("GC_HOME", "/operator/gc-home")
+
 	env := ConditionEnv{
 		BeadID:               "bead-123",
 		Iteration:            3,
@@ -41,6 +43,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 	// Required vars.
 	checks := map[string]string{
 		"PATH":                      conditionPATH(),
+		"GC_HOME":                   "/operator/gc-home",
 		"BEADS_DIR":                 "/home/test/city/.beads",
 		"GC_BEAD_ID":                "bead-123",
 		"GC_ITERATION":              "3",
