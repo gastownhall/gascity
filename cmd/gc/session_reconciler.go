@@ -5243,8 +5243,10 @@ func idleAssignedWorkOnly(eval wakeEvaluation) bool {
 // beginIdleRespawnDrainIfIdle drains an alive session that is awake only for
 // assigned work to asleep when a completed idle probe proves its agent idle, so
 // resume-on-ready can re-spawn it fresh. It returns true when a drain was begun.
-// It deliberately neither cancels the drain nor clears the idle probe for these
-// sessions — that cancel/clear is what previously pinned them awake-but-idle.
+// The gate consumes the completed idle probe (shouldBeginIdleDrainInfo clears it
+// after reading it), but once the drain is begun it is deliberately never
+// canceled on the wake path for these sessions — that cancel is what previously
+// pinned them awake-but-idle.
 func beginIdleRespawnDrainIfIdle(info sessionpkg.Info, eval wakeEvaluation, dt *drainTracker, sp runtime.Provider, clk clock.Clock) bool {
 	if !idleAssignedWorkOnly(eval) {
 		return false

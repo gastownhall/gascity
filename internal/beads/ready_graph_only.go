@@ -21,9 +21,11 @@ type GraphOnlyReadyProvider interface {
 }
 
 // GraphOnlyReadyFor returns the graph-only-ready capability for store when one is
-// available, walking wrapper delegation. It mirrors GraphApplyFor: a plain
-// implementation is used directly, while a wrapper delegates through its handle
-// without claiming the interface globally.
+// available, walking wrapper delegation. Unlike GraphApplyFor (which prefers a
+// direct GraphApplyStore implementation), the provider is checked FIRST here:
+// a wrapper's runtime-gated ok=false answer must win even when the wrapper also
+// satisfies GraphOnlyReadyStore, so capability presence tracks the wrapped
+// backend's state rather than the wrapper's static method set.
 func GraphOnlyReadyFor(store Store) (GraphOnlyReadyStore, bool) {
 	if store == nil {
 		return nil, false
