@@ -97,6 +97,15 @@ func TestGCBdRefusesMistypedMetadataPairsBehindGlobalFlags(t *testing.T) {
 // get past the guard and continue into normal resolution — the guard is not
 // allowed to become a reason a working invocation stops working.
 func TestGCBdAllowsCorrectMetadataForms(t *testing.T) {
+	// These forms deliberately run PAST the guard, so pin an explicit non-city
+	// temp dir rather than leaning on ambient state: doBd then fails
+	// deterministically at resolveBdCity, before any store is opened or bd is
+	// exec'd. TestMain's env scrub and the test-binary refusal of ambient
+	// upward discovery cover this today; pinning it here keeps the isolation
+	// local to the test instead of a property of that scrub list, and matches
+	// the idiom every sibling test in cmd_bd_test.go uses.
+	t.Setenv("GC_CITY_PATH", t.TempDir())
+
 	cases := []struct {
 		name string
 		args []string
