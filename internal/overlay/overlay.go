@@ -302,9 +302,14 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 // path stages provider overlays and then runs hooks.Install on the SAME
 // directory. Reconciler-owned mergeable files (overlay.IsMergeablePath —
 // .codex/hooks.json et al.) must be skipped here so hooks.Install is the sole
-// writer and the two writers cannot leave a permanent hybrid hook document. The
-// runtime task-worktree staging path passes a nil skip and keeps staging those
-// files, because there hooks.Install never runs and staging is the sole writer.
+// writer on that reconcile tick and the two writers cannot leave a permanent
+// hybrid hook document. The runtime task-worktree staging path passes a nil
+// skip and keeps staging those files, because there hooks.Install never runs
+// and staging is the sole writer.
+//
+// The skip does not make hooks.Install the only writer everywhere: for a
+// persistent agent, session-start staging writes the same paths via the
+// nil-skip path, so a hybrid can reappear until the next tick converges it.
 func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip SkipFunc, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {

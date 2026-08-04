@@ -4919,10 +4919,21 @@ func materializeProviderOverlaysBeforeFingerprint(
 	})
 	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
 	// runs immediately after this staging on the SAME workDir (see
-	// prepareTemplateResolution), so it must be the sole writer of those files.
-	// Staging them too leaves two writers with disagreeing hook-entry matchers
-	// and a permanent codex-hooks-drift hybrid. The runtime
-	// task-worktree staging path keeps staging them — it is their sole writer.
+	// prepareTemplateResolution), so it must be the sole writer of those files
+	// ON THE RECONCILE TICK. Staging them too leaves two writers with
+	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
+	// The runtime task-worktree staging path keeps staging them — it is their
+	// sole writer.
+	//
+	// "Sole writer" is scoped to the tick on purpose. For a persistent
+	// (non-task) agent the home dir is also the session workDir, and
+	// session-start staging writes these same files through the NON-skipping
+	// path — internal/runtime/tmux.stageStartFiles and
+	// runtime.StageSessionWorkDir (subprocess/acp) both call
+	// StageProviderOverlayDir with a nil skip. So a hybrid document can
+	// reappear at session start; the next tick converges it. That turns the
+	// permanent drift this fix targets into a transient one, which is the
+	// actual invariant — not that nothing else ever writes these paths.
 	for _, od := range packDirs {
 		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
