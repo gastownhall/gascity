@@ -2255,7 +2255,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
 				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, trace)),
 			sessionBeads,
-			result.PoolScaleCheckPartialTemplates,
+			effectivePoolPartialRetentionTemplates(result),
 		)
 		recordPhase(TraceSitePoolDemandCompute, "bead_reconcile.compute_pool_desired", phaseStart, map[string]any{
 			"pool_work_bead_count": len(poolWorkBeads),
@@ -3066,7 +3066,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts)),
 		filteredSnap,
-		wfcResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
@@ -3282,7 +3282,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
 				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, trace)),
 			sessionBeads,
-			result.PoolScaleCheckPartialTemplates,
+			effectivePoolPartialRetentionTemplates(result),
 		)
 		if result.PoolDesiredCounts == nil {
 			result.PoolDesiredCounts = make(map[string]int)

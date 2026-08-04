@@ -97,6 +97,21 @@ func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T)
 func TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage(t *testing.T) {
 	cityPath := t.TempDir()
 	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
+	dispatcherSession := beads.Bead{
+		ID:     "session-control-dispatcher",
+		Title:  "control dispatcher",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "template:control-dispatcher"},
+		Metadata: map[string]string{
+			"session_name":         "control-dispatcher-1",
+			"template":             config.ControlDispatcherAgentName,
+			"agent_name":           config.ControlDispatcherAgentName,
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -108,14 +123,79 @@ func TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage(t *testin
 	}
 	dispatcher := config.ControlDispatcherAgentName
 
-	got := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	snapshot := newSessionBeadSnapshot([]beads.Bead{dispatcherSession})
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, nil, snapshot, nil, io.Discard,
+	)
 
-	if !got.PoolScaleCheckPartialTemplates[dispatcher] {
-		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want control-dispatcher template %q marked partial on a routed-demand outage (gc-ft31x)", got.PoolScaleCheckPartialTemplates, dispatcher)
+	if got.PoolScaleCheckPartialTemplates[dispatcher] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want routed-demand outage to remain retention-only", got.PoolScaleCheckPartialTemplates)
+	}
+	if !got.PoolPartialRetentionTemplates[dispatcher] {
+		t.Fatalf("PoolPartialRetentionTemplates = %v, want control-dispatcher template %q retained on a routed-demand outage (gc-ft31x)", got.PoolPartialRetentionTemplates, dispatcher)
 	}
 	if !got.ScaleCheckPartialTemplates[dispatcher] {
 		t.Fatalf("ScaleCheckPartialTemplates = %v, want control-dispatcher template %q marked partial on a routed-demand outage (gc-ft31x)", got.ScaleCheckPartialTemplates, dispatcher)
 	}
+	if _, ok := got.State["control-dispatcher-1"]; !ok {
+		t.Fatalf("desired state = %v, want existing dispatcher retained during routed-demand outage", mapKeys(got.State))
+	}
+	retained := retainScaleCheckPartialPoolDesired(cfg, nil, snapshot, got.PoolPartialRetentionTemplates)
+	if retained[dispatcher] != 1 {
+		t.Fatalf("retained dispatcher count = %d, want 1", retained[dispatcher])
+	}
+}
+
+// TestBuildDesiredStateStartsColdControlDispatcherFromHealthyStoreDuringOtherStoreOutage
+// covers gc-ft31x.2: a failed live routed-demand read is retention-only. It
+// must preserve an existing dispatcher, but it must not veto a cold dispatcher
+// create justified by real control work visible in another store.
+func TestBuildDesiredStateStartsColdControlDispatcherFromHealthyStoreDuringOtherStoreOutage(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("city live open list outage")}
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "Finalize workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:     beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey: "core.control-dispatcher",
+		},
+	}); err != nil {
+		t.Fatalf("create rig control work: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), cityStore,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if got.ScaleCheckCounts["core.control-dispatcher"] != 1 {
+		t.Fatalf("ScaleCheckCounts = %v, want healthy-store control demand for core.control-dispatcher", got.ScaleCheckCounts)
+	}
+	if got.PoolScaleCheckPartialTemplates["core.control-dispatcher"] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want unrelated live-list outage not to suppress cold create", got.PoolScaleCheckPartialTemplates)
+	}
+	for _, desired := range got.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			return
+		}
+	}
+	t.Fatalf("desired state = %v, want cold core.control-dispatcher planned despite unrelated store outage", mapKeys(got.State))
 }
 
 // blockedDemandStore models the production controller-demand List reads for a

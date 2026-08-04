@@ -1025,7 +1025,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
 		sessionBeads,
-		dsResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(dsResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)

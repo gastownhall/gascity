@@ -63,10 +63,13 @@ type DesiredStateResult struct {
 	BaseState        map[string]TemplateParams
 	ScaleCheckCounts map[string]int // nil when store is nil or scale_check not run
 	// ScaleCheckPartialTemplates records all templates whose bead-backed demand
-	// probe failed. PoolScaleCheckPartialTemplates drives generic pool retention;
+	// probe failed. PoolScaleCheckPartialTemplates blocks fresh pool creates;
+	// PoolPartialRetentionTemplates preserves existing pool capacity and may also
+	// contain retention-only failures where another store proved positive demand.
 	// NamedScaleCheckPartialTemplates only protects configured named sessions.
 	ScaleCheckPartialTemplates      map[string]bool
 	PoolScaleCheckPartialTemplates  map[string]bool
+	PoolPartialRetentionTemplates   map[string]bool
 	NamedScaleCheckPartialTemplates map[string]bool
 	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet                         map[string]bool
@@ -682,6 +685,7 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	var poolScaleCheckPartialTemplates map[string]bool
+	var poolPartialRetentionTemplates map[string]bool
 	var namedScaleCheckPartialTemplates map[string]bool
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
@@ -792,6 +796,7 @@ func buildDesiredStateWithSessionBeads(
 				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 			}
 		}
+		poolPartialRetentionTemplates = mergeScaleCheckPartialTemplates(poolPartialRetentionTemplates, poolScaleCheckPartialTemplates)
 		if len(controlDispatcherOpenDemand) > 0 {
 			if scaleCheckCounts == nil {
 				scaleCheckCounts = make(map[string]int)
@@ -805,10 +810,11 @@ func buildDesiredStateWithSessionBeads(
 		if unassignedRoutedPartial {
 			// The unassigned-routed live read failed, so controlDispatcherOpenDemand
 			// above is a partial (possibly empty) view — not proof of zero demand.
-			// Mark every deterministic control-dispatcher template partial so
-			// retainScaleCheckPartialPoolDesired preserves the running dispatcher
-			// this tick instead of draining it on a transient outage (gc-ft31x).
-			poolScaleCheckPartialTemplates = markControlDispatcherTemplatesPartial(cfg, poolScaleCheckPartialTemplates)
+			// Mark every deterministic control-dispatcher template for retention so
+			// a running dispatcher survives this tick. This is intentionally not a
+			// create-suppression marker: another healthy store may have proved real
+			// control demand that justifies starting a cold dispatcher (gc-ft31x.2).
+			poolPartialRetentionTemplates = markControlDispatcherTemplatesPartial(cfg, poolPartialRetentionTemplates)
 		}
 		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = selectReadyUnassignedRoutedWork(
 			unassignedRoutedBeads,
@@ -828,7 +834,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 			namedScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(namedScaleCheckPartialTemplates, partialTemplates)
 		}
-		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolScaleCheckPartialTemplates)
+		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolPartialRetentionTemplates)
 		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
@@ -1014,7 +1020,7 @@ func buildDesiredStateWithSessionBeads(
 	// Phase 2: discover session beads created outside config iteration
 	// (e.g., by "gc session new"). Include them in desired state if they
 	// have a valid template and are not held/closed.
-	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolScaleCheckPartialTemplates, namedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolPartialRetentionTemplates, namedScaleCheckPartialTemplates, stderr)
 
 	var continuationClaimCandidates []ContinuationClaimCandidate
 	continuationClaimQueryPartial := storePartial
@@ -1034,6 +1040,7 @@ func buildDesiredStateWithSessionBeads(
 		ScaleCheckCounts:                   scaleCheckCounts,
 		ScaleCheckPartialTemplates:         scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
+		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
 		NamedScaleCheckPartialTemplates:    namedScaleCheckPartialTemplates,
 		AssignedWorkBeads:                  assignedWorkBeads,
 		AssignedWorkStores:                 assignedWorkStores,
@@ -1187,7 +1194,7 @@ func refreshDesiredStateWithSessionBeads(
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
-	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
 
@@ -1870,6 +1877,13 @@ func mergeScaleCheckPartialTemplates(dst, src map[string]bool) map[string]bool {
 		}
 	}
 	return dst
+}
+
+func effectivePoolPartialRetentionTemplates(result DesiredStateResult) map[string]bool {
+	return mergeScaleCheckPartialTemplates(
+		mergeScaleCheckPartialTemplates(nil, result.PoolScaleCheckPartialTemplates),
+		result.PoolPartialRetentionTemplates,
+	)
 }
 
 func sortedBoolMapKeys(values map[string]bool) []string {
