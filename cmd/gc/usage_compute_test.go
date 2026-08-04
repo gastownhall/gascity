@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +49,32 @@ func TestComputeFactGetCandidate(t *testing.T) {
 		if got := computeFactGetCandidate(tc.info); got != tc.want {
 			t.Errorf("%s: computeFactGetCandidate = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestLiveModelSweepCandidate(t *testing.T) {
+	const awakeStart = "2026-01-02T00:30:00Z"
+	for _, tc := range []struct {
+		name  string
+		state string
+		awake string
+		want  bool
+	}{
+		{name: "active", state: "active", awake: awakeStart, want: true},
+		{name: "awake alias", state: "awake", awake: awakeStart, want: true},
+		{name: "missing interval anchor", state: "active", want: false},
+		{name: "terminal", state: "asleep", awake: awakeStart, want: false},
+		{name: "transitional", state: "draining", awake: awakeStart, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := session.Info{MetadataState: tc.state, AwakeStartedAt: tc.awake}
+			if got := liveModelSweepCandidate(info); got != tc.want {
+				t.Fatalf("liveModelSweepCandidate() = %v, want %v", got, tc.want)
+			}
+			if isLiveModelSweepState(tc.state) && isComputeTerminalState(tc.state) {
+				t.Fatalf("state %q is both live and compute-terminal", tc.state)
+			}
+		})
 	}
 }
 
@@ -275,20 +303,23 @@ func TestEmitComputeFactForBeadHungSinkReturnsPromptly(t *testing.T) {
 	}
 }
 
+const codexSweepSessionKey = "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+
 // writeCodexRolloutForSweep fabricates a codex rollout transcript
 // (rollout-<localtime>-<sessionID>.jsonl) under root/YYYY/MM/DD reachable by the
 // window-free keyed discovery: a session_meta line whose cwd is workDir, a
 // turn_context supplying the model, and one event_msg token_count per element of
-// tokenCounts ({total, lastInput, lastOutput}). Returns the rollout path.
-func writeCodexRolloutForSweep(t *testing.T, root, workDir, sessionID string, tokenCounts [][3]int) {
+// tokenCounts ({total, lastInput, lastOutput}). The keyed sweep scenarios share
+// codexSweepSessionKey; callers vary only the transcript contents and location.
+func writeCodexRolloutForSweep(t *testing.T, root, workDir string, tokenCounts [][3]int) {
 	t.Helper()
 	dayDir := filepath.Join(root, "2026", "06", "15")
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dayDir, "rollout-2026-06-15T10-00-00-"+sessionID+".jsonl")
+	path := filepath.Join(dayDir, "rollout-2026-06-15T10-00-00-"+codexSweepSessionKey+".jsonl")
 	lines := []string{
-		fmt.Sprintf(`{"timestamp":"2026-06-15T10:00:00.000Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, sessionID, workDir),
+		fmt.Sprintf(`{"timestamp":"2026-06-15T10:00:00.000Z","type":"session_meta","payload":{"id":%q,"cwd":%q}}`, codexSweepSessionKey, workDir),
 		`{"timestamp":"2026-06-15T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}`,
 	}
 	for i, tc := range tokenCounts {
@@ -315,6 +346,171 @@ func kindCount(facts []usage.Fact, kind usage.Kind) int {
 	return n
 }
 
+// rawSinkKindCount counts the facts of one kind APPENDED to the sink file,
+// without usage.ReadFacts's IdempotencyKey dedup. Idempotency assertions must
+// use this: ReadFacts collapses a replayed fact at read time, so it would
+// silently pass even if a tick re-recorded work the cursor should have skipped.
+func rawSinkKindCount(t *testing.T, path string, kind usage.Kind) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("reading usage sink %s: %v", path, err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var f usage.Fact
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatalf("malformed usage fact %q: %v", line, err)
+		}
+		if f.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEmitDueComputeFactsSweepsLiveSessionModelUsage is the undercount
+// regression for "model calls today": model facts used to be minted only by the
+// terminal end-of-interval sweep, so a session that stayed awake for hours
+// contributed nothing to the day's totals until it finally closed. The reconcile
+// tick must sweep an AWAKE session's transcript incrementally — billing each
+// invocation as it lands, without minting a compute fact or closing the still-open
+// interval — and the persisted invocation cursor must make a tick with no new
+// transcript activity a no-op.
+func TestEmitDueComputeFactsSweepsLiveSessionModelUsage(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	sessionKey := codexSweepSessionKey
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},  // total=150, last input=100, output=50
+		{450, 200, 100}, // total=450, last input=200, output=100
+	})
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	// No slept_at and a non-terminal state: this session is still running.
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "live codex session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "active",
+			"session_name":     "codex-live-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-L",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+	info := session.Info{ID: b.ID, MetadataState: "active", AwakeStartedAt: start.Format(time.RFC3339)}
+
+	// Tick 1: nothing terminal has happened, yet both invocations already on the
+	// transcript must bill now instead of waiting for retirement.
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	facts1, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (tick 1): %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if got := kindCount(facts1, usage.KindModel); got != 2 {
+		t.Fatalf("tick 1 model facts = %d, want 2 (a live session's invocations must bill before it closes); facts: %+v", got, facts1)
+	}
+	if got := kindCount(facts1, usage.KindCompute); got != 0 {
+		t.Fatalf("tick 1 compute facts = %d, want 0: the awake interval has not ended", got)
+	}
+	for _, f := range facts1 {
+		if f.RunID != "run-L" {
+			t.Fatalf("fact RunID = %q, want run-L: %+v", f.RunID, f)
+		}
+		if f.Provider != "codex" {
+			t.Fatalf("model fact Provider = %q, want codex", f.Provider)
+		}
+	}
+
+	// The interval stays OPEN: stamping either accounting marker on a live sweep
+	// would suppress the real end-of-interval compute fact and terminal sweep.
+	afterTick1, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterTick1.Metadata[session.MetadataKeyInvocationUsageCursor]; got != "total:450" {
+		t.Fatalf("invocation_usage_cursor = %q, want total:450 (advanced past the swept batch)", got)
+	}
+	if got := afterTick1.Metadata[usageComputeEmittedAtKey]; got != "" {
+		t.Fatalf("live sweep closed the awake interval (usage_compute_emitted_at = %q), want unset", got)
+	}
+	if got := afterTick1.Metadata[usageModelSweptAtKey]; got != "" {
+		t.Fatalf("live sweep stamped the terminal sweep marker (%q), want unset while the interval accumulates", got)
+	}
+
+	// Discovery is memoized for this awake epoch so a per-tick sweep does not
+	// repeat the bounded rollout scan.
+	cacheKey := liveSweepTranscriptCacheKey{
+		sessionID:  b.ID,
+		awakeStart: start.Format(time.RFC3339),
+		sessionKey: sessionKey,
+	}
+	if path, cached := cr.cachedLiveTranscriptPath(cacheKey); !cached || path == "" {
+		t.Fatalf("tick 1 did not memoize the resolved transcript path: path=%q cached=%v", path, cached)
+	}
+
+	// Tick 2: no transcript activity. A live session stays a candidate on every
+	// tick, so only the persisted cursor prevents a double-count.
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	if got := rawSinkKindCount(t, sinkPath, usage.KindModel); got != 2 {
+		t.Fatalf("tick 2 appended model facts to a total of %d, want 2: the cursor must make a no-activity tick a no-op", got)
+	}
+
+	// Tick 3: one new invocation lands. Only that delta bills, and the session is
+	// still awake, so still no compute fact.
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+		{750, 300, 150},
+	})
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+	facts3, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (tick 3): %v", err)
+	}
+	if got := kindCount(facts3, usage.KindModel); got != 3 {
+		t.Fatalf("tick 3 model facts = %d, want 3 (one appended invocation): %+v", got, facts3)
+	}
+	if got := rawSinkKindCount(t, sinkPath, usage.KindModel); got != 3 {
+		t.Fatalf("tick 3 appended model facts to a total of %d, want 3 (only the delta)", got)
+	}
+	if got := kindCount(facts3, usage.KindCompute); got != 0 {
+		t.Fatalf("tick 3 compute facts = %d, want 0 while the session is awake", got)
+	}
+	afterTick3, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterTick3.Metadata[session.MetadataKeyInvocationUsageCursor]; got != "total:750" {
+		t.Fatalf("invocation_usage_cursor = %q, want total:750", got)
+	}
+}
+
 // TestEmitDueComputeFactsAlsoSweepsModelUsage is the CORE regression for the
 // token-starvation bug: the controller reconcile tick emits per-interval compute
 // facts but never any model facts for pool-routed, hook-self-driven codex agents,
@@ -330,8 +526,8 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 
 	// Codex names rollouts by the session_key uuid suffix; the keyed no-window
 	// discovery matches on exactly that.
-	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
-	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{
+	sessionKey := codexSweepSessionKey
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
 		{150, 100, 50},  // total=150, last input=100, output=50
 		{450, 200, 100}, // total=450, last input=200, output=100
 	})
@@ -446,7 +642,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	workDir := t.TempDir()
 	codexRoot := t.TempDir()
 	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
-	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+	sessionKey := codexSweepSessionKey
 
 	store := beads.NewMemStore()
 	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
@@ -503,7 +699,7 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	}
 
 	// The transcript is flushed to disk between ticks.
-	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
 		{150, 100, 50},
 		{450, 200, 100},
 	})

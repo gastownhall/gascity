@@ -108,6 +108,12 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// liveSweepTranscriptPaths memoizes the stable transcript path for each
+	// session awake epoch and provider session key. The worker factory is rebuilt
+	// per tick, so this process-lifetime cache avoids repeating bounded discovery
+	// without carrying a path across a replacement conversation.
+	liveSweepTranscriptPaths sync.Map // liveSweepTranscriptCacheKey -> transcript path
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 

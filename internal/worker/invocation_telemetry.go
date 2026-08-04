@@ -517,6 +517,60 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			slog.String("session_id", id), slog.String("provider", family))
 		return 0, false, nil
 	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// DiscoverSweepTranscript resolves the transcript path for a model-usage
+// sweep without reading it. It preserves the same bounded keyed and keyless
+// discovery rules as SweepSessionModelUsage so callers can safely memoize a
+// stable rollout path across repeated incremental sweeps. A keyless Codex scan
+// clouded by an I/O fault returns no path and is retried later rather than
+// trusting a potentially ambiguous result.
+func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) string {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return ""
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		return ""
+	}
+	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
+	if family == "codex" && strings.TrimSpace(meta["session_key"]) == "" && !scanClean {
+		return ""
+	}
+	return path
+}
+
+// SweepSessionModelUsageAtPath performs the same cursor-guarded extraction,
+// fact emission, metrics, and cursor persistence as SweepSessionModelUsage,
+// using an already-resolved transcript path instead of repeating discovery.
+// An empty path is a transient miss so callers can retry on a later tick.
+func (f *Factory) SweepSessionModelUsageAtPath(ctx context.Context, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return 0, true, nil
+	}
+	sink := f.usageSink
+	if sink == nil || sink == usage.Discard {
+		return 0, true, nil
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		slog.Debug("model-usage sweep (at path): unregistered provider family; skipping",
+			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
+		return 0, true, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return 0, false, nil
+	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// sweepResolvedTranscript owns the post-discovery model-usage sweep shared by
+// the discovery-driven and already-resolved entry points.
+func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	sink := f.usageSink
 	usages, extractErr := f.Adapter().InvocationUsage(family, path)
 	if extractErr != nil {
 		// Transient: a torn mid-write tail can fail the parse; retry on a later tick.
