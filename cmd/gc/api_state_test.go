@@ -477,7 +477,13 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		t.Fatalf("stale runtime update did not hide alpha/helper; agents = %+v", got.Agents)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// hangBudget, not a short fixed deadline: nothing in this test asserts how
+	// long WaitForAgentVisibility takes, only that it eventually returns nil
+	// once the fresh runtime update lands below. The 100ms window right after
+	// this IS a negative assertion ("must not resolve before the fresh update
+	// lands") and must not be migrated -- see cmd/gc/hangbudget_test.go's
+	// carve-out doc comment.
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	waitErr := make(chan error, 1)
 	go func() {

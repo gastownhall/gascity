@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
 )
 
@@ -178,7 +180,10 @@ func (s *Server) serializeConfigWrite(fn func() error) error {
 
 // packImportHTTPError maps importsvc sentinels to RFC 9457 problem responses.
 func packImportHTTPError(err error) error {
+	var authErr *gitcred.AuthError
 	switch {
+	case errors.As(err, &authErr):
+		return packCredentialRequiredProblem(authErr)
 	case errors.Is(err, importsvc.ErrInvalidSource), errors.Is(err, importsvc.ErrScopeLoad),
 		errors.Is(err, importsvc.ErrNameDerive), errors.Is(err, importsvc.ErrReservedPrefix):
 		// ErrNameDerive and ErrReservedPrefix are client input-validation failures
@@ -201,4 +206,31 @@ func packImportHTTPError(err error) error {
 	default:
 		return apierr.Internal.With("pack import failed", &huma.ErrorDetail{Message: err.Error()})
 	}
+}
+
+// packCredentialRequiredProblem projects only safe, URL-derived context from an
+// authentication failure. In particular, AuthError.Output, RuleOrigin, Err, and
+// Error() are intentionally excluded because git/backend error text may contain
+// credentials or internal secret-mount paths.
+func packCredentialRequiredProblem(authErr *gitcred.AuthError) error {
+	host := strings.TrimSpace(authErr.OrgPrefix)
+	if host == "" {
+		host = strings.TrimSpace(authErr.Host)
+	}
+	if host == "" {
+		return apierr.BadGateway.Msg("pack source authentication failed")
+	}
+
+	details := []*huma.ErrorDetail{
+		{Location: "body.host", Value: host},
+	}
+	if repo := strings.TrimSpace(authErr.Repo); repo != "" {
+		details = append(details, &huma.ErrorDetail{Location: "body.repo", Value: repo})
+	}
+	hint := "register a pack credential for this host"
+	if authErr.Matched {
+		hint = "rotate the pack credential for this host"
+	}
+	details = append(details, &huma.ErrorDetail{Location: "body.hint", Value: hint})
+	return apierr.PackCredentialRequired.With("pack source authentication requires a credential", details...)
 }

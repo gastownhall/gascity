@@ -321,7 +321,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), t.TempDir(), tc.enforce, &stderr)
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
@@ -368,11 +368,60 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 		"--status=closed",
 	}
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
 		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("valid atomic shipped close warned: %q", got)
+	}
+}
+
+// panicOnGetStore embeds a nil beads.Store and overrides Get to panic. It
+// proves a code path never falls back to the store for a given ID — used to
+// assert the close gate actually consumes preFetched beads instead of
+// re-reading them: gc bd close previously paid for the same store.Get twice,
+// once in the write-ID guard and once in this gate.
+type panicOnGetStore struct{ beads.Store }
+
+func (panicOnGetStore) Get(id string) (beads.Bead, error) {
+	panic("store.Get called for id " + id + ": preFetched bead should have been used")
+}
+
+func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
+	preFetched := map[string]beads.Bead{
+		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+	}
+	var stderr strings.Builder
+	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), true, &stderr)
+	if !block {
+		t.Fatalf("expected block=true for shipped-without-commit, got false; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {
+		t.Fatalf("expected enforced gate output, got %q", stderr.String())
+	}
+}
+
+// TestRunWorkRecordCloseGateReusesPreOpenedStore proves runWorkRecordCloseGate
+// never calls openStoreAtForCity when handed a preOpened store — it's the IO
+// wrapper's half of the dedup (evaluateWorkRecordCloseGate proves the
+// preFetched-bead half above). cityPath is deliberately bogus: opening a
+// real store at it would fail, causing the gate to fail open (block=false, no
+// stderr) — indistinguishable from a no-op success. Asserting a violation
+// fires instead proves preOpened/preFetched were actually used, not silently
+// bypassed by a failed fallback open.
+func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
+	preFetched := map[string]beads.Bead{
+		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+	}
+	var stderr strings.Builder
+	const bogusCityPath = "/nonexistent/does-not-exist"
+	t.Setenv(workRecordEnforceEnvVar, "1")
+	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, &stderr)
+	if !block {
+		t.Fatalf("expected block=true for shipped-without-commit, got false (fallback store open may have silently swallowed the preOpened store); stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {
+		t.Fatalf("expected enforced gate output, got %q", stderr.String())
 	}
 }
 

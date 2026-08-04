@@ -954,3 +954,92 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 		t.Fatalf("child unrelated metadata = %q, want keep", got)
 	}
 }
+
+// TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalScopeRef must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the full path and
+// falls back to the unresolved input on failure, with no walk-up.
+func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got := canonicalScopeRef(missing)
+
+	resolvedAlias, err := filepath.EvalSymlinks(aliasDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
+	}
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalScopeRef(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput pins
+// that canonicalScopeRef always yields an absolute path for reliable
+// cross-process lock-key comparison, even when EvalSymlinks cannot resolve
+// anything at all. Today a relative input that cannot be resolved is
+// returned unchanged (still relative).
+func TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput(t *testing.T) {
+	const relative = "does-not-exist-anywhere/leaf"
+	got := canonicalScopeRef(relative)
+	if !filepath.IsAbs(got) {
+		t.Errorf("canonicalScopeRef(%q) = %q, want an absolute path", relative, got)
+	}
+}
+
+// TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalCityPath must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the absolute path and
+// falls back to the unresolved abs path on failure, with no walk-up.
+func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got, err := canonicalCityPath(missing)
+	if err != nil {
+		t.Fatalf("canonicalCityPath(%q): %v", missing, err)
+	}
+
+	resolvedAlias, evalErr := filepath.EvalSymlinks(aliasDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(aliasDir): %v", evalErr)
+	}
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs pins that a
+// logical store sentinel is not absolutized. LockScopeForStoreRef returns the
+// literal "rig:<name>" when the rig cannot be resolved to a path; if that were
+// made cwd-relative, two gc processes started from different directories would
+// derive different lock keys and lock files for the same logical scope.
+func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T) {
+	for _, ref := range []string{"rig:alpha", "city:main"} {
+		a := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		b := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		if a != ref || b != ref {
+			t.Errorf("canonicalScopeRef(%q) = %q / %q, want %q verbatim from both dirs", ref, a, b, ref)
+		}
+	}
+}

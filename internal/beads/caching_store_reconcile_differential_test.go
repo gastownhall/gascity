@@ -75,18 +75,19 @@ func (in snapshotInputs) quiescent(st storeState) bool {
 // It captures every field the seam writes; the field-coverage census
 // (TestMergeOracleFieldCoverage) proves this list stays exhaustive.
 type mergeEndState struct {
-	beads        map[string]Bead
-	deps         map[string][]Dep
-	depsComplete bool
-	dirty        map[string]struct{}
-	beadSeq      map[string]uint64
-	localBeadAt  map[string]time.Time
-	deletedSeq   map[string]uint64
-	state        cacheState
-	lastFreshAt  time.Time
-	mutationSeq  uint64
-	primeErr     string
-	syncFailures int
+	beads          map[string]Bead
+	deps           map[string][]Dep
+	depsComplete   bool
+	dirty          map[string]struct{}
+	beadSeq        map[string]uint64
+	localBeadAt    map[string]time.Time
+	deletedSeq     map[string]uint64
+	state          cacheState
+	lastFreshAt    time.Time
+	mutationSeq    uint64
+	primeErr       string
+	syncFailures   int
+	circuitTripped bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -214,6 +215,11 @@ func (b *countingBacking) List(q ListQuery) ([]Bead, error) {
 // type assertion (no call), so a stray call would panic — a louder failure
 // than a count mismatch. The store starts cacheLive (promoteLiveLocked
 // overwrites it regardless).
+//
+// circuitTripped starts true — the one pre-merge value the seam must clear.
+// Seeding the zero value instead would make the end-state comparison of that
+// field vacuous (false on every implementation, every case), so a branch that
+// stopped re-arming the breaker would slip through the differential.
 func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 	var counter *countingBacking
 	var backing Store
@@ -235,6 +241,8 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		deletedSeq:   cloneU64Map(st.deletedSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
+
+		circuitTripped: true,
 	}
 	ensureMaps(c)
 	return c, counter
@@ -281,6 +289,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		mutationSeq:          c.mutationSeq,
 		primeErr:             primeErr,
 		syncFailures:         c.syncFailures,
+		circuitTripped:       c.circuitTripped,
 		statsAdds:            c.stats.Adds,
 		statsRemoves:         c.stats.Removes,
 		statsUpdates:         c.stats.Updates,

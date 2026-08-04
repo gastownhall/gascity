@@ -136,10 +136,20 @@ func execProviderNeedsScopedDoltStoreEnv(provider string) bool {
 }
 
 func resolveConfiguredExecStoreTarget(cityPath, storePath string) (execStoreTarget, error) {
+	return resolveConfiguredExecStoreTargetWithConfig(cityPath, storePath, nil)
+}
+
+// resolveConfiguredExecStoreTargetWithConfig is resolveConfiguredExecStoreTarget
+// for a caller that already holds this city's config. A nil config is loaded
+// here, matching resolveConfiguredExecStoreTarget.
+func resolveConfiguredExecStoreTargetWithConfig(cityPath, storePath string, cfg *config.City) (execStoreTarget, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		return execStoreTarget{}, err
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		cfg = loaded
 	}
 	if samePath(scopeRoot, cityPath) {
 		return execStoreTarget{

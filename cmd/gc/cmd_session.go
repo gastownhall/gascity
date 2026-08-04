@@ -252,6 +252,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// legacy bound identities).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
+
+	// Fix B: when the template is a configured named session and the user
+	// supplied no explicit alias, materialize it under the canonical configured
+	// identity so session_name, mail routing, and tmux display all agree.
+	if configuredOwner != "" && requestedAlias == "" {
+		alias = configuredOwner
+		explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, configuredOwner)
+	}
+
 	reservationIDs := []string{alias, explicitName}
 	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""
 	if reserveConcreteIdentity {
@@ -279,7 +288,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			// Controller is running — create bead only, let reconciler start it.
 			kindMeta := map[string]string{
 				"agent_name":     sessionQualifiedName,
-				"session_origin": "manual",
+				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+			}
+			if configuredOwner != "" && requestedAlias == "" {
+				kindMeta[session.NamedSessionMetadataKey] = "true"
+				kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 			}
 			if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 				kindMeta["provider_kind"] = family
@@ -331,7 +344,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 						return err
 					}
 				}
-				if err := session.EnsureSessionNameAvailableWithConfig(sessStore, cfg, explicitName, ""); err != nil {
+				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 					return err
 				}
 				var createErr error
@@ -393,7 +406,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// Fallback: controller not running — direct start via session manager.
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
-		"session_origin": "manual",
+		"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+	}
+	if configuredOwner != "" && requestedAlias == "" {
+		kindMeta[session.NamedSessionMetadataKey] = "true"
+		kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 	}
 	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 		kindMeta["provider_kind"] = family
@@ -445,7 +462,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(sessStore, cfg, explicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -650,6 +667,16 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 		}
 	}
 	return config.Agent{}, false
+}
+
+// sessionOriginForConfiguredNamed returns "named" when the session is being
+// created for a configured named-session identity without a user-supplied
+// alias, and "manual" otherwise.
+func sessionOriginForConfiguredNamed(configuredOwner, requestedAlias string) string {
+	if configuredOwner != "" && requestedAlias == "" {
+		return "named"
+	}
+	return "manual"
 }
 
 func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {

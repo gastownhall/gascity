@@ -201,8 +201,12 @@ func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []bea
 	return out
 }
 
-// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --sort oldest --limit=N`.
-func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int) []beads.Bead {
+// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --sort oldest --limit=N`.
+// This is a route-scoped, unassigned tier (Tier 3 pool-demand/control-dispatcher
+// routing), so held beads must be excluded (ga-5736js): filterReadyByAssignee
+// (Tier 1/2, assignee-scoped) stays hold-transparent by design and must not
+// gain this filter.
+func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.Bead {
 	var matched []beads.Bead
 	for _, b := range ready {
 		if b.Assignee != "" || b.Type == controlReadyExcludeType {
@@ -211,11 +215,21 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int
 		if b.Metadata[metadataKey] != route {
 			continue
 		}
+		held := false
+		for _, label := range beadmeta.DispatchHoldLabels {
+			if beadLabelsContain(b.Labels, label) {
+				held = true
+				break
+			}
+		}
+		if held {
+			continue
+		}
 		matched = append(matched, b)
 	}
 	beads.SortBeads(matched, beads.SortCreatedAsc)
-	if limit > 0 && len(matched) > limit {
-		matched = matched[:limit]
+	if len(matched) > workflowServeScanLimit {
+		matched = matched[:workflowServeScanLimit]
 	}
 	return matched
 }
@@ -256,8 +270,8 @@ func evaluateControlReady(ready []beads.Bead, parsed parsedControlReadyQuery, en
 		groups = append(groups, filterReadyByAssignee(ready, cand, workflowServeScanLimit))
 	}
 	for _, route := range controlReadyRoutes(parsed) {
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route, workflowServeScanLimit))
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route, workflowServeScanLimit))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route))
 	}
 	return mergeControlReadyGroups(groups...)
 }

@@ -1653,6 +1653,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -2078,14 +2079,16 @@ gc import why <name-or-source>
 
 ## gc init
 
-Create a new Gas City workspace in the given directory (or cwd).
+Create a new Gas City workspace in the given directory. With no path, the
+current directory is used only when stdin is an interactive terminal;
+otherwise pass an explicit path ("." for the current directory).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, and
 pins the builtin pack imports (resolved from the user-global pack cache).
-Use --template with --default-provider to create a city non-interactively,
-or --file to initialize from an existing TOML config file.
+Use --template with --default-provider and an explicit path to create a city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -2816,6 +2819,7 @@ gc pack registry
 | [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry requests](#gc-pack-registry-requests) | Show your Registry publish request status |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
 | [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
@@ -2922,6 +2926,22 @@ gc pack registry remove <registry-name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc pack registry requests
+
+Show recent publish requests you submitted to Registry, or one request with its feedback comments.
+
+This command is read-only. Use a personal Registry token; run "gc pack registry login" if you have not logged in yet.
+
+```
+gc pack registry requests [request-id] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSON response object |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | personal registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc pack registry search
 
