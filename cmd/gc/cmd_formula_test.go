@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -1250,6 +1251,13 @@ title = "Do work"
 	}
 	if got := root.Metadata[beadmeta.ScopeKindMetadataKey]; got != "formula-cook" {
 		t.Fatalf("root %s: gc.scope_kind = %q, want %q", res.RootID, got, "formula-cook")
+	}
+	recorded, err := events.ReadAll(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	if len(recorded) == 0 || recorded[0].Type != events.ExecutionStepDefined || recorded[0].RunID != res.RootID {
+		t.Fatalf("execution events = %#v, want initial step-definition snapshot for %s", recorded, res.RootID)
 	}
 }
 

@@ -52,6 +52,22 @@ type Projection struct {
 	Steps            []StepDefinition
 }
 
+// EmitCurrent projects and records the current execution snapshot for rootID.
+// A nil recorder disables emission without reading either store.
+func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID, actor string) error {
+	if recorder == nil {
+		return nil
+	}
+	projection, err := ProjectCurrent(graphStore, convoyStore, rootID)
+	if err != nil {
+		return err
+	}
+	for _, event := range projection.Events(actor) {
+		recorder.Record(event)
+	}
+	return nil
+}
+
 // Events converts the projection to repeatable snapshot facts. Work
 // associations precede step definitions, preserving each slice's deterministic
 // order. Topology is copied so later graph reads cannot mutate emitted facts.

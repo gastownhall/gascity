@@ -210,6 +210,31 @@ func TestProjectionEventsPreserveFactsAndRepeatSnapshots(t *testing.T) {
 	}
 }
 
+func TestEmitCurrentProjectsAndRecordsSnapshotFacts(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	step := mustCreateProjectionStep(t, graph, "gcg-step", root.ID, "build", "[]")
+	recorder := events.NewFake()
+
+	if err := EmitCurrent(recorder, beads.GraphStore{Store: graph}, beads.WorkStore{}, root.ID, "formula-cook"); err != nil {
+		t.Fatalf("EmitCurrent: %v", err)
+	}
+
+	if len(recorder.Events) != 1 {
+		t.Fatalf("recorded events = %#v, want one", recorder.Events)
+	}
+	got := recorder.Events[0]
+	if got.Type != events.ExecutionStepDefined || got.Actor != "formula-cook" || got.Subject != step.ID || got.RunID != root.ID || got.StepID != "build" {
+		t.Fatalf("recorded event = %#v, want projected step fact", got)
+	}
+}
+
+func TestEmitCurrentNilRecorderIsNoOp(t *testing.T) {
+	if err := EmitCurrent(nil, beads.GraphStore{}, beads.WorkStore{}, "missing", "formula-cook"); err != nil {
+		t.Fatalf("EmitCurrent with nil recorder: %v", err)
+	}
+}
+
 func mustCreateProjectionRoot(t *testing.T, store beads.Store, convoyID string) beads.Bead {
 	t.Helper()
 	metadata := map[string]string{
