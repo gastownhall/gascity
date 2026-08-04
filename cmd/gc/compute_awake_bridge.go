@@ -89,9 +89,11 @@ func buildAwakeInputFromReconciler(
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
 			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
-			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
+			awakeWB := AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready,
-			})
+			}
+			applyWakeBackoffMetadata(&awakeWB, wb.Metadata, wb.UpdatedAt)
+			input.WorkBeads = append(input.WorkBeads, awakeWB)
 		}
 	}
 

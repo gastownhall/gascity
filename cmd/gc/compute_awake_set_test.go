@@ -1516,7 +1516,7 @@ func TestSessionHasAssignedWorkMatchesNamedIdentity(t *testing.T) {
 		NamedIdentity: "hello-world/refinery",
 	}
 	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "in_progress"}}
-	if !sessionHasAssignedWork(work, nil, bead) {
+	if !sessionHasAssignedWork(work, nil, bead, now) {
 		t.Fatal("expected named-identity assignment to count as assigned work")
 	}
 }
@@ -1535,8 +1535,71 @@ func TestSessionHasAssignedWorkMatchesConfiguredNamedSessionFallback(t *testing.
 		ConfiguredNamedSession: true,
 	}
 	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}}
-	if !sessionHasAssignedWork(work, named, bead) {
+	if !sessionHasAssignedWork(work, named, bead, now) {
 		t.Fatal("expected configured named-session fallback assignment to count as assigned work")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WakeBackoffUntil — agent-judged backoff suppression (ga-7fldxz.2)
+// ---------------------------------------------------------------------------
+
+func TestAssignedWork_WakeBackoffSuppressesDemand(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "hw-1", Assignee: "mc-1", Status: "in_progress", WakeBackoffUntil: now.Add(10 * time.Minute)},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+	if result["polecat-mc-1"].HasAssignedWork {
+		t.Fatal("backed-off work bead must not count as assigned work")
+	}
+}
+
+func TestAssignedWork_WakeBackoffPastDoesNotSuppress(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "hw-1", Assignee: "mc-1", Status: "in_progress", WakeBackoffUntil: now.Add(-10 * time.Minute)},
+		},
+		Now: now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "assigned-work")
+}
+
+func TestAssignedWork_WakeBackoffOneOfTwoBeadsStillWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "hw-1", Assignee: "mc-1", Status: "in_progress", WakeBackoffUntil: now.Add(10 * time.Minute)},
+			{ID: "hw-2", Assignee: "mc-1", Status: "in_progress"},
+		},
+		Now: now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "assigned-work")
+	if got := result["polecat-mc-1"].AssignedWorkBeadID; got != "hw-2" {
+		t.Fatalf("expected anchor to skip backed-off bead and land on hw-2, got %q", got)
+	}
+}
+
+func TestSessionHasAssignedWorkExcludesBackedOffBead(t *testing.T) {
+	bead := AwakeSessionBead{ID: "mc-1", SessionName: "polecat-mc-1"}
+	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-1", Status: "in_progress", WakeBackoffUntil: now.Add(10 * time.Minute)}}
+	if sessionHasAssignedWork(work, nil, bead, now) {
+		t.Fatal("backed-off work bead must not count as assigned work")
 	}
 }
 
