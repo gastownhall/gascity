@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -49,6 +50,32 @@ type StepDefinition struct {
 type Projection struct {
 	WorkAssociations []WorkAssociation
 	Steps            []StepDefinition
+}
+
+// Events converts the projection to repeatable snapshot facts. Work
+// associations precede step definitions, preserving each slice's deterministic
+// order. Topology is copied so later graph reads cannot mutate emitted facts.
+func (p Projection) Events(actor string) []events.Event {
+	result := make([]events.Event, 0, len(p.WorkAssociations)+len(p.Steps))
+	for _, association := range p.WorkAssociations {
+		result = append(result, events.Event{
+			Type:    events.ExecutionWorkAssociated,
+			Actor:   actor,
+			Subject: association.WorkBeadID,
+			RunID:   association.ExecutionRunID,
+		})
+	}
+	for _, step := range p.Steps {
+		result = append(result, events.Event{
+			Type:             events.ExecutionStepDefined,
+			Actor:            actor,
+			Subject:          step.BeadID,
+			RunID:            step.ExecutionRunID,
+			StepID:           step.StepID,
+			DependsOnStepIDs: cloneTopology(step.DependsOnStepIDs),
+		})
+	}
+	return result
 }
 
 // ProjectCurrent projects current execution facts for rootID. The graph store
@@ -182,4 +209,13 @@ func canonicalTopology(raw, stepID string) *[]string {
 
 func validNativeStepID(id string) bool {
 	return strings.TrimSpace(id) != "" && len(id) <= 256 && utf8.ValidString(id)
+}
+
+func cloneTopology(dependencies *[]string) *[]string {
+	if dependencies == nil {
+		return nil
+	}
+	clone := make([]string, len(*dependencies))
+	copy(clone, *dependencies)
+	return &clone
 }

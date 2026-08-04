@@ -29,6 +29,8 @@ func TestAllowedTypesMatchEventConstants(t *testing.T) {
 		events.ConvoyClosed,
 		events.ControllerStarted,
 		events.EventsRotated,
+		events.ExecutionWorkAssociated,
+		events.ExecutionStepDefined,
 		events.SessionDrainAckedWithAssignedWork,
 		events.SessionResetStalled,
 		events.ProjectIdentityStamped,

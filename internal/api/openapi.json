@@ -11900,6 +11900,8 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.step_defined": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined",
+            "execution.work_associated": "#/components/schemas/TypedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgBound",
@@ -12020,6 +12022,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionWorkAssociated"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -13123,6 +13131,8 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.dead_assignee_reopened",
+                "execution.work_associated",
+                "execution.step_defined",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -13345,6 +13355,108 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionStepDefined": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_defined",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionWorkAssociated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.work_associated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.work_associated",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -16278,6 +16390,8 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.step_defined": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined",
+            "execution.work_associated": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionWorkAssociated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgBound",
@@ -16398,6 +16512,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionWorkAssociated"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -17572,6 +17692,8 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.dead_assignee_reopened",
+                "execution.work_associated",
+                "execution.step_defined",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -17807,6 +17929,116 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionStepDefined": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.step_defined",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.step_defined",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionWorkAssociated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.work_associated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.work_associated",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded": {

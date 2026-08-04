@@ -5504,6 +5504,36 @@ type TypedEventStreamEnvelopeEventsRotated struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExecutionStepDefined defines model for TypedEventStreamEnvelopeExecutionStepDefined.
+type TypedEventStreamEnvelopeExecutionStepDefined struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NoPayload                `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionWorkAssociated defines model for TypedEventStreamEnvelopeExecutionWorkAssociated.
+type TypedEventStreamEnvelopeExecutionWorkAssociated struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NoPayload                `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgAdapterAdded defines model for TypedEventStreamEnvelopeExtmsgAdapterAdded.
 type TypedEventStreamEnvelopeExtmsgAdapterAdded struct {
 	Actor     string                   `json:"actor"`
@@ -6690,6 +6720,38 @@ type TypedTaggedEventStreamEnvelopeEventsRotated struct {
 	City      string                   `json:"city"`
 	Message   *string                  `json:"message,omitempty"`
 	Payload   RotatedPayload           `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionStepDefined defines model for TypedTaggedEventStreamEnvelopeExecutionStepDefined.
+type TypedTaggedEventStreamEnvelopeExecutionStepDefined struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NoPayload                `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionWorkAssociated defines model for TypedTaggedEventStreamEnvelopeExecutionWorkAssociated.
+type TypedTaggedEventStreamEnvelopeExecutionWorkAssociated struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   NoPayload                `json:"payload"`
 	RunId     *string                  `json:"run_id,omitempty"`
 	Seq       int64                    `json:"seq"`
 	SessionId *string                  `json:"session_id,omitempty"`
@@ -12595,6 +12657,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExecutionStepDefined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionStepDefined
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionStepDefined() (TypedEventStreamEnvelopeExecutionStepDefined, error) {
+	var body TypedEventStreamEnvelopeExecutionStepDefined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionStepDefined overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionStepDefined(v TypedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionStepDefined performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionStepDefined(v TypedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionWorkAssociated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionWorkAssociated() (TypedEventStreamEnvelopeExecutionWorkAssociated, error) {
+	var body TypedEventStreamEnvelopeExecutionWorkAssociated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionWorkAssociated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionWorkAssociated(v TypedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionWorkAssociated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionWorkAssociated(v TypedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgAdapterAdded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgAdapterAdded
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgAdapterAdded() (TypedEventStreamEnvelopeExtmsgAdapterAdded, error) {
 	var body TypedEventStreamEnvelopeExtmsgAdapterAdded
@@ -14275,6 +14393,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedEventStreamEnvelopeEventsRotated()
+	case "execution.step_defined":
+		return t.AsTypedEventStreamEnvelopeExecutionStepDefined()
+	case "execution.work_associated":
+		return t.AsTypedEventStreamEnvelopeExecutionWorkAssociated()
 	case "extmsg.adapter_added":
 		return t.AsTypedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -14954,6 +15076,62 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeEvent
 // MergeTypedTaggedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeEventsRotated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
 	v.Type = "events.rotated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionStepDefined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionStepDefined() (TypedTaggedEventStreamEnvelopeExecutionStepDefined, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionStepDefined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionStepDefined overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionStepDefined(v TypedTaggedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionStepDefined performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionStepDefined(v TypedTaggedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated() (TypedTaggedEventStreamEnvelopeExecutionWorkAssociated, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionWorkAssociated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionWorkAssociated(v TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionWorkAssociated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionWorkAssociated(v TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16644,6 +16822,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
+	case "execution.step_defined":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionStepDefined()
+	case "execution.work_associated":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated()
 	case "extmsg.adapter_added":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":

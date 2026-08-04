@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestProjectCurrentUsesOnlyTracksFromConvoyStore(t *testing.T) {
@@ -175,6 +176,37 @@ func TestProjectCurrentRejectsNonGraphV2Root(t *testing.T) {
 	plain := mustCreateProjectionBead(t, graph, beads.Bead{ID: "gcg-plain"})
 	if _, err := ProjectCurrent(beads.GraphStore{Store: graph}, beads.WorkStore{}, plain.ID); err == nil {
 		t.Fatal("ProjectCurrent accepted a non-graph.v2 root")
+	}
+}
+
+func TestProjectionEventsPreserveFactsAndRepeatSnapshots(t *testing.T) {
+	rootTopology := []string{}
+	dependentTopology := []string{"root"}
+	projection := Projection{
+		WorkAssociations: []WorkAssociation{
+			{WorkBeadID: "mc-a", ExecutionRunID: "gcg-root"},
+			{WorkBeadID: "mc-b", ExecutionRunID: "gcg-root"},
+		},
+		Steps: []StepDefinition{
+			{BeadID: "gcg-step-a", ExecutionRunID: "gcg-root", StepID: "root", DependsOnStepIDs: &rootTopology},
+			{BeadID: "gcg-step-b", ExecutionRunID: "gcg-root", StepID: "build", DependsOnStepIDs: &dependentTopology},
+		},
+	}
+	want := []events.Event{
+		{Type: events.ExecutionWorkAssociated, Actor: "graph-projector", Subject: "mc-a", RunID: "gcg-root"},
+		{Type: events.ExecutionWorkAssociated, Actor: "graph-projector", Subject: "mc-b", RunID: "gcg-root"},
+		{Type: events.ExecutionStepDefined, Actor: "graph-projector", Subject: "gcg-step-a", RunID: "gcg-root", StepID: "root", DependsOnStepIDs: projectionStringsPtr([]string{})},
+		{Type: events.ExecutionStepDefined, Actor: "graph-projector", Subject: "gcg-step-b", RunID: "gcg-root", StepID: "build", DependsOnStepIDs: projectionStringsPtr([]string{"root"})},
+	}
+
+	first := projection.Events("graph-projector")
+	second := projection.Events("graph-projector")
+	if !reflect.DeepEqual(first, want) || !reflect.DeepEqual(second, want) {
+		t.Fatalf("repeated snapshot events = %#v / %#v, want %#v", first, second, want)
+	}
+	dependentTopology[0] = "mutated"
+	if first[3].DependsOnStepIDs == projection.Steps[1].DependsOnStepIDs || (*first[3].DependsOnStepIDs)[0] != "root" {
+		t.Fatalf("event retained mutable projector topology: %#v", first[3].DependsOnStepIDs)
 	}
 }
 

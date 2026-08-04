@@ -5151,6 +5151,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_defined';
+} & TypedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.work_associated';
+} & TypedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
 } & TypedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -5622,6 +5626,40 @@ export type TypedEventStreamEnvelopeEventsRotated = {
     subject?: string;
     ts: string;
     type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.step_defined
+ */
+export type TypedEventStreamEnvelopeExecutionStepDefined = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.work_associated
+ */
+export type TypedEventStreamEnvelopeExecutionWorkAssociated = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.work_associated';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6640,6 +6678,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.step_defined';
+} & TypedTaggedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.work_associated';
+} & TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) | ({
     type: 'extmsg.adapter_added';
 } & TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -7132,6 +7174,42 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
     subject?: string;
     ts: string;
     type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.step_defined
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.work_associated
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionWorkAssociated = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.work_associated';
     workflow?: WorkflowEventProjection;
 };
 
