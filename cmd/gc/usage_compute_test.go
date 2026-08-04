@@ -1139,14 +1139,17 @@ func TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir(t *testing.T) {
 
 func TestIsComputeTerminalState(t *testing.T) {
 	// Every non-running endpoint the open-bead scan can observe.
-	for _, s := range []string{"asleep", "drained", "archived", "suspended", "quarantined"} {
+	// Include draining: pool drain-ack-stop-pending keeps the bead open in
+	// state=draining until close stamps drained (which has already left the
+	// open set the scan reads).
+	for _, s := range []string{"asleep", "draining", "drained", "archived", "suspended", "quarantined"} {
 		if !isComputeTerminalState(s) {
 			t.Errorf("%q should be terminal", s)
 		}
 	}
-	// Running states, transient states, and closed (which leaves the open set the
-	// scan reads) are not emitted by the scan.
-	for _, s := range []string{"active", "awake", "creating", "draining", "closed", ""} {
+	// Running states and closed (which leaves the open set the scan reads) are
+	// not emitted by the scan.
+	for _, s := range []string{"active", "awake", "creating", "closed", ""} {
 		if isComputeTerminalState(s) {
 			t.Errorf("%q should not be terminal", s)
 		}

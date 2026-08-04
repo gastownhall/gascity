@@ -45,15 +45,16 @@ const liveModelSweepMinInterval = 30 * time.Second
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
-// idle-sleep (asleep), controller drain (drained), retirement (archived),
-// operator suspend (suspended), and crash-loop quarantine (quarantined). A
-// session closed directly from active without first passing through one of
-// these open states is the known v0 scan limitation (see
-// engdocs/design/usage-facts-v0.md).
+// idle-sleep (asleep), controller drain (draining — the open-set state while
+// drain-ack-stop is pending; drained is usually only stamped at close),
+// retirement (archived), operator suspend (suspended), and crash-loop
+// quarantine (quarantined). A session closed directly from active without
+// first passing through one of these open states is the known v0 scan
+// limitation (see engdocs/design/usage-facts-v0.md).
 func isComputeTerminalState(state string) bool {
 	switch session.State(strings.TrimSpace(state)) {
-	case session.StateAsleep, session.StateDrained, session.StateArchived,
-		session.StateSuspended, session.StateQuarantined:
+	case session.StateAsleep, session.StateDraining, session.StateDrained,
+		session.StateArchived, session.StateSuspended, session.StateQuarantined:
 		return true
 	}
 	return false
