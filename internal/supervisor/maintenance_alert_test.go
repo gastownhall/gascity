@@ -31,7 +31,7 @@ func TestAlert_SentOnFailureWithAlertTo(t *testing.T) {
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	finished := started.Add(2500 * time.Millisecond)
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:    started,
 		FinishedAt:   finished,
 		Stage:        "gc",
@@ -84,7 +84,7 @@ func TestAlert_NotSentOnSuccess(t *testing.T) {
 	})
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: started.Add(100 * time.Millisecond),
 		Stage:      "done",
@@ -113,7 +113,7 @@ func TestAlert_NotSentWithEmptyAlertTo(t *testing.T) {
 	})
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
 		Stage:      "gc",
@@ -146,7 +146,7 @@ func TestAlert_SendFailureDoesNotPropagate(t *testing.T) {
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	// Should not panic.
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
 		Stage:      "gc",
@@ -184,7 +184,7 @@ func TestAlert_RepeatFailureSuppressed(t *testing.T) {
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	fail := func(offset time.Duration, stage, errMsg string) {
-		loop.emitRunEvent(MaintenanceRun{
+		emitRunEventLocked(loop, MaintenanceRun{
 			StartedAt:  started.Add(offset),
 			FinishedAt: started.Add(offset + time.Second),
 			Stage:      stage,
@@ -230,19 +230,19 @@ func TestAlert_RecoveryNoticeAfterFailureStreak(t *testing.T) {
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	for i := range 3 {
-		loop.emitRunEvent(MaintenanceRun{
+		emitRunEventLocked(loop, MaintenanceRun{
 			StartedAt:  started.Add(time.Duration(i) * time.Hour),
 			FinishedAt: started.Add(time.Duration(i)*time.Hour + time.Second),
 			Stage:      "gc",
 			Err:        "out of disk",
 		})
 	}
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started.Add(4 * time.Hour),
 		FinishedAt: started.Add(4*time.Hour + time.Second),
 		Stage:      "done",
 	})
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started.Add(5 * time.Hour),
 		FinishedAt: started.Add(5*time.Hour + time.Second),
 		Stage:      "done",
@@ -284,13 +284,13 @@ func TestAlert_NoRecoveryNoticeWithoutAlert(t *testing.T) {
 	})
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
 		Stage:      "gc",
 		Err:        "boom",
 	})
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started.Add(time.Hour),
 		FinishedAt: started.Add(time.Hour + time.Second),
 		Stage:      "done",
@@ -318,10 +318,19 @@ func TestAlert_NilMailProviderSkips(t *testing.T) {
 
 	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	// Must not panic.
-	loop.emitRunEvent(MaintenanceRun{
+	emitRunEventLocked(loop, MaintenanceRun{
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
 		Stage:      "gc",
 		Err:        "boom",
 	})
+}
+
+// emitRunEventLocked calls emitRunEvent under loop.mu, matching the
+// production contract (callers hold the lease mutex; the alert-dedup
+// state emitRunEvent mutates is mu-guarded).
+func emitRunEventLocked(loop *StoreMaintenanceLoop, run MaintenanceRun) {
+	loop.mu.Lock()
+	defer loop.mu.Unlock()
+	loop.emitRunEvent(run)
 }
