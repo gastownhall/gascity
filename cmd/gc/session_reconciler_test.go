@@ -31,6 +31,21 @@ type fakeIdleTracker struct {
 	idle       map[string]bool
 	templates  map[string]bool
 	exemptions map[string]bool
+
+	// demandMismatchCalls records every recordIdleKillCycle invocation, in
+	// order, for call-site assertions.
+	demandMismatchCalls []demandMismatchCall
+	// demandMismatchPublish makes recordIdleKillCycle report shouldPublish
+	// on every call, so tests can exercise the publish path without driving
+	// a real tracker through its threshold.
+	demandMismatchPublish bool
+}
+
+// demandMismatchCall captures one recordIdleKillCycle call's arguments.
+type demandMismatchCall struct {
+	template    string
+	hasOpenWork bool
+	demand      int
 }
 
 func newFakeIdleTracker() *fakeIdleTracker {
@@ -65,6 +80,14 @@ func (f *fakeIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
 	if sessionName != "" {
 		f.exemptions[sessionName] = true
 	}
+}
+
+func (f *fakeIdleTracker) recordIdleKillCycle(template string, hasOpenWork bool, demand int, now time.Time) (shouldPublish bool, count int, firstSeen time.Time) {
+	f.demandMismatchCalls = append(f.demandMismatchCalls, demandMismatchCall{template: template, hasOpenWork: hasOpenWork, demand: demand})
+	if f.demandMismatchPublish {
+		return true, len(f.demandMismatchCalls), now
+	}
+	return false, len(f.demandMismatchCalls), now
 }
 
 type lineLimitedPeekProvider struct {
@@ -9163,6 +9186,170 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 	if b.Metadata["slept_at"] != env.clk.Now().UTC().Format(time.RFC3339) {
 		t.Errorf("slept_at = %q, want idle stop timestamp", b.Metadata["slept_at"])
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutFeedsDemandMismatchTracker guards the
+// ga-oedyvj call site: every idle-timeout kill must feed the idleTracker's
+// demand-mismatch detector with the killed template, whether the session
+// still held open assigned work, and the template's current pool demand.
+func TestReconcileSessionBeads_IdleTimeoutFeedsDemandMismatchTracker(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+		"sleep_intent":         "idle-stop-pending",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 2}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if len(it.demandMismatchCalls) != 1 {
+		t.Fatalf("demandMismatchCalls = %d, want 1: %+v", len(it.demandMismatchCalls), it.demandMismatchCalls)
+	}
+	got := it.demandMismatchCalls[0]
+	if got.template != "worker" {
+		t.Errorf("template = %q, want %q", got.template, "worker")
+	}
+	if got.hasOpenWork {
+		t.Error("hasOpenWork = true, want false: killed session held no assigned work")
+	}
+	if got.demand != 2 {
+		t.Errorf("demand = %d, want 2 (from poolDesired)", got.demand)
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork guards the
+// distinction the idle-timeout ladder needs but does not fully collapse:
+// DecideIdleTimeout defers when a session holds *awake* assigned work
+// (in-progress, or open and ready), but open work that is blocked on an
+// unmet dependency is not awake, so the ladder still reaches
+// TimerActionStop and the session is idle-killed while that blocked bead
+// is still assigned to it. The demand-mismatch tracker relies on
+// hasOpenWork -- backed by the status-only Open query, not the Awake one --
+// to tell that case apart from a genuine no-claim cycle.
+func TestReconcileSessionBeads_IdleTimeoutDemandMismatchSeesOpenWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+		"sleep_intent":         "idle-stop-pending",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	blocker, err := env.store.Create(beads.Bead{
+		Title:  "blocking dependency",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	work, err := env.store.Create(beads.Bead{
+		Title:    "implement phase work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(assigned bead): %v", err)
+	}
+	if err := env.store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if len(it.demandMismatchCalls) != 1 {
+		t.Fatalf("demandMismatchCalls = %d, want 1: %+v", len(it.demandMismatchCalls), it.demandMismatchCalls)
+	}
+	if !it.demandMismatchCalls[0].hasOpenWork {
+		t.Error("hasOpenWork = false, want true: killed session still held an open (but blocked, non-awake) assigned-work bead")
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutDemandMismatchPublishesEvent guards
+// the event-emission half of the ga-oedyvj call site: when the idleTracker
+// reports shouldPublish, the reconciler must record a SessionDemandMismatch
+// event carrying the template, cycle count, and demand as its payload.
+func TestReconcileSessionBeads_IdleTimeoutDemandMismatchPublishesEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pending_create_claim": "true",
+		"sleep_intent":         "idle-stop-pending",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	it.demandMismatchPublish = true
+
+	rec := events.NewFake()
+	env.rec = rec
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 3}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	var found *events.Event
+	for i, e := range rec.Events {
+		if e.Type == events.SessionDemandMismatch {
+			found = &rec.Events[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("SessionDemandMismatch event was not recorded")
+	}
+	if found.Subject != "worker" {
+		t.Errorf("Subject = %q, want %q", found.Subject, "worker")
+	}
+	var payload api.SessionDemandMismatchPayload
+	if err := json.Unmarshal(found.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Template != "worker" {
+		t.Errorf("payload.Template = %q, want %q", payload.Template, "worker")
+	}
+	if payload.Demand != 3 {
+		t.Errorf("payload.Demand = %d, want 3", payload.Demand)
+	}
+	if payload.CycleCount != 1 {
+		t.Errorf("payload.CycleCount = %d, want 1", payload.CycleCount)
 	}
 }
 

@@ -103,10 +103,20 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionDemandMismatch fires when a pool template has been repeatedly
+	// idle-timeout-killed with no claim while pool demand for the template
+	// stayed positive and did not move between cycles — the stranded-demand
+	// treadmill (wake, claim nothing, idle-kill, repeat) described by bead
+	// ga-oedyvj. Published once a consecutive-cycle threshold is crossed,
+	// then again only at doubling multiples of that threshold, so a
+	// long-lived episode does not flood the event bus. Detection-only: this
+	// event carries no recovery action, pack-level subscribers decide what
+	// (if anything) to do.
+	SessionDemandMismatch = "session.demand_mismatch"
+	ConvoyCreated         = "convoy.created"
+	ConvoyClosed          = "convoy.closed"
+	ControllerStarted     = "controller.started"
+	ControllerStopped     = "controller.stopped"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -254,6 +264,7 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
+	SessionDemandMismatch,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,

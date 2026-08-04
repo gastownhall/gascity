@@ -3512,6 +3512,21 @@ type SessionCreateSucceededPayload struct {
 	Session   SessionResponse `json:"session"`
 }
 
+// SessionDemandMismatchPayload defines model for SessionDemandMismatchPayload.
+type SessionDemandMismatchPayload struct {
+	// CycleCount Consecutive no-claim idle-kill cycles observed for this template as of this emission.
+	CycleCount int64 `json:"cycle_count"`
+
+	// Demand The template's pool demand at the most recent cycle.
+	Demand int64 `json:"demand"`
+
+	// FirstSeen RFC3339 timestamp the current episode started.
+	FirstSeen *string `json:"first_seen,omitempty"`
+
+	// Template Pool template experiencing the stranded-demand treadmill (also the envelope Subject).
+	Template string `json:"template"`
+}
+
 // SessionDrainAckedWithAssignedWorkPayload defines model for SessionDrainAckedWithAssignedWorkPayload.
 type SessionDrainAckedWithAssignedWorkPayload struct {
 	// BeadId ID of the work bead still holding this session as its assignee.
@@ -6042,6 +6057,21 @@ type TypedEventStreamEnvelopeSessionCrashed struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionDemandMismatch defines model for TypedEventStreamEnvelopeSessionDemandMismatch.
+type TypedEventStreamEnvelopeSessionDemandMismatch struct {
+	Actor     string                       `json:"actor"`
+	Message   *string                      `json:"message,omitempty"`
+	Payload   SessionDemandMismatchPayload `json:"payload"`
+	RunId     *string                      `json:"run_id,omitempty"`
+	Seq       int64                        `json:"seq"`
+	SessionId *string                      `json:"session_id,omitempty"`
+	StepId    *string                      `json:"step_id,omitempty"`
+	Subject   *string                      `json:"subject,omitempty"`
+	Ts        time.Time                    `json:"ts"`
+	Type      string                       `json:"type"`
+	Workflow  *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork defines model for TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.
 type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
 	Actor     string                                   `json:"actor"`
@@ -7272,6 +7302,22 @@ type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDemandMismatch defines model for TypedTaggedEventStreamEnvelopeSessionDemandMismatch.
+type TypedTaggedEventStreamEnvelopeSessionDemandMismatch struct {
+	Actor     string                       `json:"actor"`
+	City      string                       `json:"city"`
+	Message   *string                      `json:"message,omitempty"`
+	Payload   SessionDemandMismatchPayload `json:"payload"`
+	RunId     *string                      `json:"run_id,omitempty"`
+	Seq       int64                        `json:"seq"`
+	SessionId *string                      `json:"session_id,omitempty"`
+	StepId    *string                      `json:"step_id,omitempty"`
+	Subject   *string                      `json:"subject,omitempty"`
+	Ts        time.Time                    `json:"ts"`
+	Type      string                       `json:"type"`
+	Workflow  *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork defines model for TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.
@@ -9854,6 +9900,32 @@ func (t *EventPayload) FromSessionCreateSucceededPayload(v SessionCreateSucceede
 
 // MergeSessionCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreateSucceededPayload
 func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionDemandMismatchPayload returns the union data inside the EventPayload as a SessionDemandMismatchPayload
+func (t EventPayload) AsSessionDemandMismatchPayload() (SessionDemandMismatchPayload, error) {
+	var body SessionDemandMismatchPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionDemandMismatchPayload overwrites any union data inside the EventPayload as the provided SessionDemandMismatchPayload
+func (t *EventPayload) FromSessionDemandMismatchPayload(v SessionDemandMismatchPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionDemandMismatchPayload performs a merge with any union data inside the EventPayload, using the provided SessionDemandMismatchPayload
+func (t *EventPayload) MergeSessionDemandMismatchPayload(v SessionDemandMismatchPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13601,6 +13673,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCrashed(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionDemandMismatch returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDemandMismatch
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDemandMismatch() (TypedEventStreamEnvelopeSessionDemandMismatch, error) {
+	var body TypedEventStreamEnvelopeSessionDemandMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDemandMismatch overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDemandMismatch
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDemandMismatch(v TypedEventStreamEnvelopeSessionDemandMismatch) error {
+	v.Type = "session.demand_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDemandMismatch performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDemandMismatch
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDemandMismatch(v TypedEventStreamEnvelopeSessionDemandMismatch) error {
+	v.Type = "session.demand_mismatch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -14345,6 +14445,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
+	case "session.demand_mismatch":
+		return t.AsTypedEventStreamEnvelopeSessionDemandMismatch()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":
@@ -15970,6 +16072,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionDemandMismatch returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDemandMismatch
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDemandMismatch() (TypedTaggedEventStreamEnvelopeSessionDemandMismatch, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDemandMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDemandMismatch overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDemandMismatch
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDemandMismatch(v TypedTaggedEventStreamEnvelopeSessionDemandMismatch) error {
+	v.Type = "session.demand_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDemandMismatch performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDemandMismatch
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDemandMismatch(v TypedTaggedEventStreamEnvelopeSessionDemandMismatch) error {
+	v.Type = "session.demand_mismatch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -16714,6 +16844,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
+	case "session.demand_mismatch":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDemandMismatch()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
 	case "session.draining":

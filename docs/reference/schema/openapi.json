@@ -2422,6 +2422,9 @@
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionDemandMismatchPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
           },
           {
@@ -7202,6 +7205,35 @@
         ],
         "type": "object"
       },
+      "SessionDemandMismatchPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_count": {
+            "description": "Consecutive no-claim idle-kill cycles observed for this template as of this emission.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "demand": {
+            "description": "The template's pool demand at the most recent cycle.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "first_seen": {
+            "description": "RFC3339 timestamp the current episode started.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Pool template experiencing the stranded-demand treadmill (also the envelope Subject).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "cycle_count",
+          "demand"
+        ],
+        "type": "object"
+      },
       "SessionDrainAckedWithAssignedWorkPayload": {
         "additionalProperties": false,
         "properties": {
@@ -11924,6 +11956,7 @@
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
+            "session.demand_mismatch": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandMismatch",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
@@ -12116,6 +12149,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -13103,6 +13139,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
+                "session.demand_mismatch",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -15171,6 +15208,57 @@
         "title": "TypedEventStreamEnvelope session.crashed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDemandMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandMismatchPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.demand_mismatch",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
         "additionalProperties": false,
         "properties": {
@@ -16302,6 +16390,7 @@
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
+            "session.demand_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandMismatch",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
@@ -16494,6 +16583,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
@@ -17552,6 +17644,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
+                "session.demand_mismatch",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -19775,6 +19868,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDemandMismatch": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDemandMismatchPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.demand_mismatch",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.demand_mismatch",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {

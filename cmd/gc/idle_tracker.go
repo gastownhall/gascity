@@ -46,6 +46,16 @@ type idleTracker interface {
 	// inheriting the template timeout. Used for mode="always" named sessions
 	// that share a template with pool siblings.
 	exemptTemplateFallbackForSession(sessionName string)
+
+	// recordIdleKillCycle records one idle-timeout-kill observation for a
+	// template, detecting the stranded-demand treadmill: repeated
+	// wake/idle-kill cycles where the session claims nothing and pool
+	// demand does not move. hasOpenWork reports whether the killed session
+	// still held open assigned work; demand is the template's current pool
+	// demand. Returns whether the caller should publish a demand-mismatch
+	// event now, the current consecutive-cycle count, and when the episode
+	// started. See demandMismatchTracker for the full semantics.
+	recordIdleKillCycle(template string, hasOpenWork bool, demand int, now time.Time) (shouldPublish bool, count int, firstSeen time.Time)
 }
 
 // memoryIdleTracker is the production implementation of idleTracker.
@@ -54,6 +64,7 @@ type memoryIdleTracker struct {
 	timeouts                   map[string]time.Duration // session name → idle timeout
 	templateTimeouts           map[string]time.Duration // agent template → idle timeout
 	templateFallbackExemptions map[string]bool          // session name → skip template fallback
+	demandMismatch             *demandMismatchTracker
 }
 
 // newIdleTracker creates an idle tracker. Returns nil if disabled.
@@ -63,6 +74,7 @@ func newIdleTracker() *memoryIdleTracker {
 		timeouts:                   make(map[string]time.Duration),
 		templateTimeouts:           make(map[string]time.Duration),
 		templateFallbackExemptions: make(map[string]bool),
+		demandMismatch:             newDemandMismatchTracker(0),
 	}
 }
 
@@ -114,4 +126,8 @@ func (m *memoryIdleTracker) checkIdle(sessionName, template string, sp runtime.P
 		return false
 	}
 	return now.Sub(lastActivity) > timeout
+}
+
+func (m *memoryIdleTracker) recordIdleKillCycle(template string, hasOpenWork bool, demand int, now time.Time) (shouldPublish bool, count int, firstSeen time.Time) {
+	return m.demandMismatch.recordIdleKillCycle(template, hasOpenWork, demand, now)
 }

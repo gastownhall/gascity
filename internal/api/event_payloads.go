@@ -536,6 +536,37 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// SessionDemandMismatchPayload carries the machine-readable context for a
+// session.demand_mismatch event: a pool template repeatedly idle-timeout-
+// killed with no claim while pool demand stayed positive and did not move
+// between cycles. The envelope Message renders the same facts as operator
+// text; this payload is the machine contract so pack-level subscribers can
+// act on the stranded-demand treadmill without parsing message text.
+type SessionDemandMismatchPayload struct {
+	Template   string `json:"template" doc:"Pool template experiencing the stranded-demand treadmill (also the envelope Subject)."`
+	CycleCount int    `json:"cycle_count" doc:"Consecutive no-claim idle-kill cycles observed for this template as of this emission."`
+	Demand     int    `json:"demand" doc:"The template's pool demand at the most recent cycle."`
+	FirstSeen  string `json:"first_seen,omitempty" doc:"RFC3339 timestamp the current episode started."`
+}
+
+// IsEventPayload marks SessionDemandMismatchPayload as an events.Payload variant.
+func (SessionDemandMismatchPayload) IsEventPayload() {}
+
+// SessionDemandMismatchPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. FirstSeen is emitted only when set.
+func SessionDemandMismatchPayloadJSON(template string, cycleCount, demand int, firstSeen time.Time) json.RawMessage {
+	p := SessionDemandMismatchPayload{
+		Template:   template,
+		CycleCount: cycleCount,
+		Demand:     demand,
+	}
+	if !firstSeen.IsZero() {
+		p.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -638,6 +669,7 @@ func init() {
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionDemandMismatch, SessionDemandMismatchPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

@@ -3296,6 +3296,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						Subject: tp.DisplayName(),
 					})
 					telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
+					// Stranded-demand detection (ga-oedyvj): this kill claimed
+					// nothing if the session held no open assigned work. Feed
+					// that plus the template's current pool demand to the
+					// tracker so a repeating wake/idle-kill treadmill with no
+					// progress gets surfaced instead of silently repeating.
+					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+					if assignedErr != nil {
+						// Fail closed: treat error as "has work" so a transient
+						// store blip doesn't count as a no-progress cycle and
+						// raise a false alarm. Mirrors the max-age branch above.
+						fmt.Fprintf(stderr, "session reconciler: checking assigned work for demand-mismatch %s: %v\n", name, assignedErr) //nolint:errcheck // best-effort stderr
+						hasWork = true
+					}
+					demand := poolDesired[tp.TemplateName]
+					if shouldPublish, count, firstSeen := it.recordIdleKillCycle(tp.TemplateName, hasWork, demand, clk.Now()); shouldPublish {
+						rec.Record(events.Event{
+							Type:    events.SessionDemandMismatch,
+							Actor:   "gc",
+							Subject: tp.DisplayName(),
+							Payload: api.SessionDemandMismatchPayloadJSON(tp.TemplateName, count, demand, firstSeen),
+						})
+					}
 					// Mark for immediate re-wake on this same tick by clearing
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
