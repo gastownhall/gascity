@@ -1242,3 +1242,68 @@ func schemaHasChoice(schema []ProviderOption, key, value string) bool {
 	}
 	return false
 }
+
+// TestResolveClaudeCanonicalModelIDsThroughResolvers drives the real builtin
+// claude schema through both resolver entry points with the canonical provider
+// model IDs operators actually pin in agent.toml.
+//
+// This is the path that failed in ra-jbbv0, and the enum tests in
+// internal/worker/builtin do not reach it: they inspect the Choices table
+// directly, while the incident's two failure surfaces are both here.
+// ResolveExplicitOptions rejects an out-of-enum value outright ("invalid value
+// for model: claude-opus-5"), which left four named sessions unwakeable;
+// ResolveOptions instead finds no choice, skips the FlagArgs append behind its
+// choice != nil guard, and silently emits no --model at all, which left a whole
+// city running the provider default while `gc config show` still reported the
+// pin. Both are asserted here so a future edit to the enum cannot regress
+// either one unnoticed.
+func TestResolveClaudeCanonicalModelIDsThroughResolvers(t *testing.T) {
+	schema := BuiltinProviders()["claude"].OptionsSchema
+	if len(schema) == 0 {
+		t.Fatal("builtin claude provider has no OptionsSchema")
+	}
+
+	for _, model := range []string{
+		"claude-opus-5",
+		"claude-opus-5[1m]",
+		"claude-sonnet-5",
+		"claude-fable-5",
+	} {
+		t.Run(model, func(t *testing.T) {
+			want := []string{"--model", model}
+
+			args, _, err := ResolveOptions(schema, map[string]string{"model": model}, nil)
+			if err != nil {
+				t.Fatalf("ResolveOptions(model=%q) error = %v, want nil", model, err)
+			}
+			if !containsArgPair(args, want) {
+				t.Errorf("ResolveOptions(model=%q) args = %v, want to contain %v", model, args, want)
+			}
+
+			explicit, err := ResolveExplicitOptions(schema, map[string]string{"model": model})
+			if err != nil {
+				t.Fatalf("ResolveExplicitOptions(model=%q) error = %v, want nil", model, err)
+			}
+			if !containsArgPair(explicit, want) {
+				t.Errorf("ResolveExplicitOptions(model=%q) args = %v, want to contain %v", model, explicit, want)
+			}
+		})
+	}
+}
+
+// containsArgPair reports whether args contains pair as an adjacent subsequence.
+func containsArgPair(args []string, pair []string) bool {
+	for i := 0; i+len(pair) <= len(args); i++ {
+		match := true
+		for j, want := range pair {
+			if args[i+j] != want {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
