@@ -163,12 +163,9 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 // configured" is DoltBackupCheck's concern, and failing closed there would
 // block bulk deletion on every unbacked city.
 func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now time.Time) (bool, string) {
-	scopeRoots := managedDoltScopeRootsForConfig(cityPath, cfg, nil)
-	for _, scopeRoot := range scopeRoots {
-		scopeRoot = filepath.Clean(scopeRoot)
-		label := bdBackupScopeLabel(cityPath, scopeRoot)
-		beadsDir := filepath.Join(scopeRoot, ".beads")
-		if finding, ok := scanBackupFreshness(label, beadsDir, now, maxAge); ok {
+	check := NewBdBackupFreshnessCheckForConfig(cityPath, cfg, nil)
+	for _, target := range check.freshnessScanTargets() {
+		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, maxAge); ok {
 			return false, finding
 		}
 	}
