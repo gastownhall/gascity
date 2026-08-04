@@ -615,13 +615,26 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			// claimant asserts the exact owner identity the holder was
 			// minted for, (2) the holder is asleep rather than genuinely
 			// running, and (3) the holder is recognizably a
-			// configured-named-session bead. This mirrors the self-owner
-			// exception the agent_name branch below already has, and does
-			// not resurrect or steal an alias from an unrelated, live, or
-			// ambiguous session.
+			// configured-named-session bead FOR THAT SAME IDENTITY. This
+			// mirrors the self-owner exception the agent_name branch below
+			// already has, and does not resurrect or steal an alias from an
+			// unrelated, live, or ambiguous session.
+			//
+			// Condition (3) is two-part on purpose.
+			// wasConfiguredNamedSession(b) establishes the holder is a
+			// configured-named-session bead at all, but it is owner-AGNOSTIC
+			// — a bead minted for a DIFFERENT configured identity that merely
+			// persisted this identity's runtime session_name would satisfy it
+			// and hand the alias over on the claimant's assertion alone.
+			// configuredNamedIdentitySignalsMatch is the owner-scoped
+			// recognizer introduced for the identical trap in
+			// name_claim_sweep.go (review #3373); it matches the recorded
+			// identity, alias, agent_name, or template/role signal against
+			// THIS identity.
 			if selfOwner != "" && selfOwner == alias &&
 				strings.TrimSpace(b.Metadata["state"]) == string(StateAsleep) &&
-				wasConfiguredNamedSession(b) {
+				wasConfiguredNamedSession(b) &&
+				configuredNamedIdentitySignalsMatch(b, selfOwner) {
 				continue
 			}
 			return fmt.Errorf("%w: %q conflicts with session name on %s", ErrSessionAliasExists, alias, b.ID)

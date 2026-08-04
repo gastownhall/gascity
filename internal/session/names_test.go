@@ -1200,3 +1200,91 @@ func TestEnsureSessionAliasAvailable_DrainedNamedPredecessorBlocksLiveSelfOwnerC
 		t.Fatalf("ensureSessionAliasAvailable(different owner vs drained predecessor) = %v, want ErrSessionAliasExists", err)
 	}
 }
+
+// The #2885 self-owner exception above is a three-part guard, and each part is
+// load-bearing. These negatives pin all three in the refusing direction so a
+// later loosening of the condition fails here rather than silently handing a
+// canonical alias to a claimant that only asserted ownership.
+//
+// The mismatched-identity case is the one wasConfiguredNamedSession alone
+// cannot catch: it is owner-AGNOSTIC, so the owner-scoped
+// configuredNamedIdentitySignalsMatch (the recognizer name_claim_sweep.go
+// adopted for the identical trap in review #3373) is what refuses it.
+func TestEnsureSessionAliasAvailable_SelfOwnerExceptionRefusesUnqualifiedHolders(t *testing.T) {
+	cases := []struct {
+		name   string
+		holder map[string]string
+	}{
+		{
+			// Guard condition 3, owner-scoped half: a configured-named-session
+			// bead minted for a DIFFERENT identity that merely persisted
+			// "perrin" as its runtime session_name. No alias, agent_name, or
+			// template resolves to "perrin", so it is not perrin's predecessor
+			// and must keep blocking perrin's claim.
+			name: "mismatched configured identity",
+			holder: map[string]string{
+				"session_name":              "perrin",
+				"session_origin":            "named",
+				"configured_named_session":  "true",
+				"configured_named_identity": "egwene",
+				"state":                     "asleep",
+				"sleep_reason":              "drained",
+			},
+		},
+		{
+			// Guard condition 2: same identity, but the holder is awake — a
+			// genuinely running session, not a superseded predecessor.
+			name: "same identity but awake",
+			holder: map[string]string{
+				"session_name":              "perrin",
+				"session_origin":            "named",
+				"configured_named_session":  "true",
+				"configured_named_identity": "perrin",
+				"state":                     "awake",
+			},
+		},
+		{
+			// Guard condition 3, recognition half: an asleep holder with no
+			// configured-named signals at all is an ordinary session squatting
+			// the name, not a configured-named predecessor.
+			name: "asleep but not a configured named session",
+			holder: map[string]string{
+				"session_name": "perrin",
+				"state":        "asleep",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			if _, err := store.Create(beads.Bead{
+				Type:     BeadType,
+				Labels:   []string{LabelSession},
+				Metadata: tc.holder,
+			}); err != nil {
+				t.Fatalf("Create(holder): %v", err)
+			}
+
+			live, err := store.Create(beads.Bead{
+				Type:   BeadType,
+				Labels: []string{LabelSession},
+				Metadata: map[string]string{
+					"session_name": "perrin-gc-live1",
+					"agent_name":   "perrin",
+					"template":     "perrin",
+					"pool_managed": "true",
+					"state":        "awake",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(live typed session): %v", err)
+			}
+
+			if err := ensureSessionAliasAvailable(store, nil, "perrin", live.ID, "perrin"); !errors.Is(err, ErrSessionAliasExists) {
+				t.Fatalf("ensureSessionAliasAvailable(self-owner vs %s) = %v, want ErrSessionAliasExists", tc.name, err)
+			}
+		})
+	}
+}
