@@ -2297,11 +2297,15 @@ title = "Do work"
 		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "fixture/quinn", FormulaLayer: formulaDir},
 	}
 	store := beads.NewMemStore()
+	eventLog := events.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, beads.OrdersStore{Store: store}, nil, &stdout, &stderr)
+	code := doOrderRun(aa, "acceptance-patrol", "", cityDir, beads.OrdersStore{Store: store}, eventLog, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(eventLog.Events) == 0 || eventLog.Events[0].Type != events.ExecutionStepDefined {
+		t.Fatalf("execution events = %#v, want initial step-definition snapshot", eventLog.Events)
 	}
 	all, err := store.ListOpen()
 	if err != nil {

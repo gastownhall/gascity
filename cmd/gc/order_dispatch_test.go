@@ -1130,6 +1130,9 @@ metadata = { "gc.run_target" = "worker" }
 	if !rec.hasType(events.OrderCompleted) || rec.hasType(events.OrderFailed) {
 		t.Fatalf("events = %+v, want completed without failure", rec.events)
 	}
+	if !rec.hasType(events.ExecutionStepDefined) {
+		t.Fatalf("events = %+v, want initial execution step-definition snapshot", rec.events)
+	}
 }
 
 func TestOrderDispatchRigOwnedGraphKeepsOwnerStoreWhenPoolRunsOnAnotherRig(t *testing.T) {

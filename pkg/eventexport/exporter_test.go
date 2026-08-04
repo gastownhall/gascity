@@ -242,9 +242,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // TestExporter_EmitCorrelation proves the end-to-end exported batch carries
-// run_id/session_id only when Config.EmitCorrelation is true (the version-neutral
-// opt-in; SchemaVersion is unchanged since the envelope already defines the fields
-// and they stay omitted by default).
+// run/session/step correlation only when Config.EmitCorrelation is true.
 func TestExporter_EmitCorrelation(t *testing.T) {
 	run := func(emit bool) Batch {
 		cp := &capture{}
@@ -281,10 +279,10 @@ func TestExporter_EmitCorrelation(t *testing.T) {
 	if on.Events[0].RunID != "wf-root-abc" || on.Events[0].SessionID != "sess-9f2a" || on.Events[0].StepID != "mc-step-7" {
 		t.Fatalf("EmitCorrelation=true must carry run/session/step, got %+v", on.Events[0])
 	}
-	// Headline invariant: a v1-pinned receiver accepts the populated batch with no
-	// schema mismatch — emitting run/session is v1-compatible (no flag day).
+	// A receiver pinned to this build's schema accepts populated optional
+	// correlation fields without a schema mismatch.
 	if err := ValidateBatch(on); err != nil {
-		t.Fatalf("v1 receiver must accept a populated batch: %v", err)
+		t.Fatalf("receiver must accept a populated batch: %v", err)
 	}
 
 	off := run(false)

@@ -205,7 +205,9 @@
               "login",
               "logout",
               "whoami",
-              "runtime-heartbeat"
+              "runtime-heartbeat",
+              "pack-registry-requests",
+              "events-reemit-execution"
             ]
           },
           "event_id": {

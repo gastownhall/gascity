@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -763,6 +764,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 	rootID := cookResult.RootID
+	if cookResult.GraphWorkflow {
+		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: genericStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
+			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
+		}
+	}
 
 	// Track the spawned root in the same store that created it so manual runs
 	// stay provider-aware and do not fall back to ambient bd CLI state.

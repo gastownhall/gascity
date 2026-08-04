@@ -1983,12 +1983,17 @@ func (p *Provider) IsRunning(name string) bool {
 }
 
 // ListRunning enumerates live GC-managed session names from the T3 snapshot.
+//
+// A soft-unavailable snapshot is a total observation failure, not proof that
+// no sessions are running. Report ErrRuntimeUnavailable so absence-consuming
+// callers defer instead of treating a transient bridge outage (or an
+// initializing session) as an authoritative empty list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
 			fmt.Fprintf(os.Stderr, "t3bridge: ListRunning(%s) — soft-unavailable: %v\n", prefix, err)
-			return nil, nil
+			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return nil, err
 	}

@@ -16,6 +16,13 @@ func TestNormalizeVersion(t *testing.T) {
 		{in: "v0.0.0-20260317225312-41a12e4914cb", want: "dev"},
 		{in: "(devel)", want: "dev"},
 		{in: "", want: "dev"},
+		// SemVer build metadata must be preserved.
+		{in: "1.3.5+ra.1", want: "1.3.5+ra.1"},
+		{in: "1.3.5", want: "1.3.5"},
+		// Pseudo-version with a newer timestamp still collapses.
+		{in: "v0.0.0-20260719191849-4c2927134266", want: "dev"},
+		// +incompatible is the one Go-specific suffix we strip.
+		{in: "1.2.3+incompatible", want: "1.2.3"},
 	}
 	for _, tt := range tests {
 		if got := normalizeVersion(tt.in); got != tt.want {

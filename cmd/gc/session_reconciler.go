@@ -82,6 +82,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonPending
 	case string(TraceReasonAssignedWork):
 		reason = TraceReasonAssignedWork
+	case string(TraceReasonAssignedWorkExhausted):
+		reason = TraceReasonAssignedWorkExhausted
 	default:
 		reason = TraceReasonCode(dec.TraceReason)
 	}
@@ -98,6 +100,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredPending
 	case string(TraceOutcomeDeferredBusy):
 		outcome = TraceOutcomeDeferredBusy
+	case string(TraceOutcomeStopDeferExhausted):
+		outcome = TraceOutcomeStopDeferExhausted
 	default:
 		outcome = TraceOutcomeCode(dec.TraceOutcome)
 	}
@@ -1358,6 +1362,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
+	assignedWorkDeferTr := reconcileOpts.assignedWorkDeferTr
 	asyncStopTracker := reconcileOpts.asyncStopTracker
 	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
@@ -3193,8 +3198,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Pass the agent template so the tracker can fall back to a per-template
 		// timeout for pool sessions whose bead-derived runtime names are not
 		// registered directly. sessionpkg.DecideIdleTimeout owns the decision
-		// ladder; this block gathers the facts it asks for and executes the
-		// outcome.
+		// ladder (blocker, then pending interaction, then assigned work, then
+		// stop); this block gathers the facts it asks for and executes the
+		// outcome. The assigned-work gather uses the Awake (not Open) variant
+		// so this ladder's notion of assigned work matches ComputeAwakeSet's
+		// assigned-work wake exemption exactly — using Open here would defer
+		// idle-kills ComputeAwakeSet does not itself hold the session awake
+		// for, trading the kill/wake treadmill (ga-3ox7rk) for the opposite
+		// mismatch.
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
 				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
@@ -3203,12 +3214,48 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
-			for dec.Action == sessionpkg.TimerActionGatherPending {
-				facts.Pending = sessionpkg.PendingNo
-				if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
-					facts.Pending = sessionpkg.PendingYes
+			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
+				if dec.Action == sessionpkg.TimerActionGatherPending {
+					facts.Pending = sessionpkg.PendingNo
+					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+						facts.Pending = sessionpkg.PendingYes
+					}
+				} else {
+					hasWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+					if assignedErr != nil {
+						// Fail closed: treat error as "has work" so a transient
+						// store blip doesn't idle-kill a session that may still
+						// hold in-flight work. Mirrors the max-age gather above.
+						fmt.Fprintf(stderr, "session reconciler: checking assigned work for idle-timeout %s: %v\n", name, assignedErr) //nolint:errcheck // best-effort stderr
+						hasWork = true
+					}
+					facts.AssignedWork = sessionpkg.AssignedWorkNone
+					if hasWork {
+						facts.AssignedWork = sessionpkg.AssignedWorkHas
+					}
 				}
 				dec = sessionpkg.DecideIdleTimeout(facts)
+			}
+			// Consecutive same-bead assigned-work defer backstop (ga-nllza6):
+			// DecideIdleTimeout stays a pure decider, so the reconciler tracks
+			// the streak itself, keyed by session name + the session's current
+			// anchor bead. A streak longer than the configured limit overrides
+			// the ordinary AssignedWorkHas defer with a forced stop under its
+			// own distinct trace/sleep reason (assigned_work_exhausted), so a
+			// session wedged re-deferring on the same bead every tick
+			// eventually gets killed instead of running forever. Any other
+			// outcome (blocker/pending defer, ordinary idle stop, or no
+			// trigger) resets the streak so it never bleeds into an unrelated
+			// later defer run.
+			if assignedWorkDeferTr != nil {
+				if dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonAssignedWork) {
+					anchorBeadID := strings.TrimSpace(infoByID[id].CurrentlyProcessingBeadID)
+					if assignedWorkDeferTr.recordDefer(name, tp.TemplateName, anchorBeadID) {
+						dec = sessionpkg.DecideAssignedWorkExhausted()
+					}
+				} else {
+					assignedWorkDeferTr.reset(name)
+				}
 			}
 			switch dec.Action {
 			case sessionpkg.TimerActionDefer:

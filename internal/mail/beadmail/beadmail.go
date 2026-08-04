@@ -342,7 +342,10 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive deletes a message bead without reading it.
+// Archive closes a message bead, retaining its body for later retrieval via
+// gc mail peek or bd show. A closed message no longer appears in inbox views
+// (all listing paths filter Status != "open"). Archiving an already-closed
+// message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
@@ -355,15 +358,9 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
-		if err := p.store.Delete(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return mail.ErrAlreadyArchived
-			}
-			return fmt.Errorf("beadmail archive: %w", err)
-		}
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Delete(id); err != nil {
+	if err := p.store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
@@ -412,8 +409,9 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching deletes open messages selected by filter without per-message
-// lookups after the candidate list has already verified them.
+// ArchiveMatching archives open messages selected by filter without per-message
+// lookups after the candidate list has already verified them. Matched beads are
+// closed rather than deleted, so their bodies stay readable.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
 	if err != nil {
@@ -429,7 +427,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -510,7 +508,7 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
-// ArchiveMany archives a batch of messages by deleting each bead eagerly,
+// ArchiveMany archives a batch of messages by closing each bead eagerly,
 // preserving per-id error reporting that matches [Provider.Archive].
 func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(ids) == 0 {

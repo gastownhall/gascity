@@ -16,6 +16,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -1982,6 +1983,8 @@ func TestSlingLaunchFormula(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	recorder := events.NewFake()
+	deps.Events = recorder
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2000,6 +2003,9 @@ func TestSlingLaunchFormula(t *testing.T) {
 	}
 	if result.BeadID == "" {
 		t.Error("expected non-empty BeadID")
+	}
+	if len(recorder.Events) != 0 {
+		t.Fatalf("non-graph formula emitted execution facts: %#v", recorder.Events)
 	}
 }
 
@@ -2505,6 +2511,55 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 	if len(members) != 1 || members[0].ID != source.ID {
 		t.Fatalf("members = %+v, want source %s", members, source.ID)
+	}
+}
+
+func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	recorder := events.NewFake()
+	deps.Events = recorder
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, FormulaOpts{}); err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+
+	if len(recorder.Events) != 3 {
+		t.Fatalf("execution events = %#v, want work association and two step definitions", recorder.Events)
+	}
+	if recorder.Events[0].Type != events.ExecutionWorkAssociated || recorder.Events[1].Type != events.ExecutionStepDefined || recorder.Events[2].Type != events.ExecutionStepDefined {
+		t.Fatalf("execution event types = %s, %s, %s, want association then definitions", recorder.Events[0].Type, recorder.Events[1].Type, recorder.Events[2].Type)
+	}
+}
+
+func TestInstantiateGraphFormulaPreservesMaterializationWhenProjectionFails(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	store := deps.Store
+	deps.Events = events.NewFake()
+	convoy, err := store.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, molecule.Options{Vars: map[string]string{"convoy_id": convoy.ID}}, "", "", "", config.Agent{Name: "worker"}, deps)
+	if err != nil {
+		t.Fatalf("InstantiateSlingFormula: %v", err)
+	}
+	var traces []string
+	deps.Tracer = func(format string, args ...any) { traces = append(traces, fmt.Sprintf(format, args...)) }
+	emitCurrentExecutionFacts(deps, &getErrStore{Store: store, err: fmt.Errorf("projection store unavailable")}, result.RootID, "worker", "graph-work")
+	if !slices.ContainsFunc(traces, func(trace string) bool { return strings.Contains(trace, "execution snapshot projection failed") }) {
+		t.Fatalf("traces = %#v, want projection failure", traces)
 	}
 }
 

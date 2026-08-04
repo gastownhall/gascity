@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -631,23 +632,113 @@ func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
 	waitTestRealBDPathOnce.Do(func() {
-		candidate, err := findPreferredBinary("bd")
-		if err != nil {
-			waitTestRealBDErr = errors.New("bd with init not installed")
-			return
-		}
-		cmd := exec.Command(candidate, "init", "--help")
-		out, err := cmd.CombinedOutput()
-		if err == nil || !strings.Contains(string(out), `unknown subcommand "init"`) {
-			waitTestRealBDCached = candidate
-			return
-		}
-		waitTestRealBDErr = errors.New("bd with init not installed")
+		waitTestRealBDCached, waitTestRealBDErr = buildPinnedBDBinaryForTests()
 	})
 	if waitTestRealBDErr != nil {
-		t.Skip(waitTestRealBDErr.Error())
+		t.Fatalf("build pinned bd test binary: %v", waitTestRealBDErr)
 	}
 	return waitTestRealBDCached
+}
+
+// buildPinnedBDBinaryForTests builds the bd CLI from the exact
+// github.com/steveyegge/beads module version this repo's go.mod requires, so
+// the binary's compiled-in schema/migration knowledge always matches
+// gascity's own in-process beads code (internal/beads imports that same
+// module directly). A bd resolved by searching PATH/home-dir locations
+// instead (as findPreferredBinary does for callers that only need some bd
+// present) carries no such guarantee: it can drift to a different schema
+// version and fail deep inside a test with a cryptic mismatch error instead
+// of cleanly at the point the drift actually originates (ga-r9cvmi).
+//
+// go install's "@version" form deliberately ignores any enclosing module's
+// go.mod/go.sum and resolves the target module's own dependency closure in
+// isolation, which is required here: cmd/bd's full dependency graph (CLI
+// extras like AI-assisted duplicate detection, ADO rich-text rendering,
+// telemetry exporters) is broader than what gascity's own go.sum carries,
+// since gascity only imports internal/beads's storage packages.
+func buildPinnedBDBinaryForTests() (string, error) {
+	version, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		return "", fmt.Errorf("resolve pinned beads module version: %w", err)
+	}
+
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testBDBinaryDirPrefix)
+	buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testBDBinaryDirPrefix))
+	if err != nil {
+		return "", fmt.Errorf("mktemp bd binary dir: %w", err)
+	}
+
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go",
+		"github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+buildDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(buildDir, "bd"), nil
+}
+
+// pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
+// this test binary was actually built against, read from this process's own
+// embedded build info rather than a `go list -m` subprocess or a go.mod text
+// scan: debug.ReadBuildInfo reflects the exact resolved dependency graph
+// (including any replace/exclude directives) with zero process spawn, and it
+// can never itself drift from go.mod the way a second hardcoded version
+// string could, since the compiler stamps it in at build time.
+func pinnedBeadsModuleVersion() (string, error) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", fmt.Errorf("read build info: not available (binary not built with module support)")
+	}
+	for _, dep := range bi.Deps {
+		if dep.Path != "github.com/steveyegge/beads" {
+			continue
+		}
+		if dep.Replace != nil {
+			return dep.Replace.Version, nil
+		}
+		return dep.Version, nil
+	}
+	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
+}
+
+// TestBuildPinnedBDBinaryForTestsMatchesGoModVersion locks in the fix for
+// ga-r9cvmi: a bd binary resolved by searching PATH/home-dir locations (the
+// old waitTestRealBDPath behavior, still used elsewhere via
+// findPreferredBinary) carries no guarantee of matching the schema/migration
+// knowledge baked into gascity's own in-process beads code, which is compiled
+// from the exact github.com/steveyegge/beads version go.mod pins. Confirmed
+// live: the same ~/.local/bin/bd path reported two different version stamps
+// across two consecutive invocations in this same fleet sandbox, and
+// ga-r9cvmi's own notes captured a deterministic v49-vs-v53 schema mismatch
+// from that ambient drift. buildPinnedBDBinaryForTests must instead build bd
+// fresh from the pinned dependency, so its correctness never depends on
+// whatever happens to be installed on the host.
+func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
+	// Load-bearing for the census even though waitTestRealBDPath calls it
+	// again: this is the cmd/gc+untagged slow_process_gate call site the
+	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
+	// TESTING.md. Deleting it as redundant fails the ledger gate.
+	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
+
+	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
+	// with the other bd-consuming tests. Calling buildPinnedBDBinaryForTests
+	// directly builds a second ~91 MB binary, and leaks a second temp dir, in
+	// any shard that also holds a waitTestRealBDPath caller.
+	bdPath := waitTestRealBDPath(t)
+
+	pinned, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
+	}
+	wantVersion := strings.TrimPrefix(pinned, "v")
+
+	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+	}
+	if !strings.Contains(string(out), wantVersion) {
+		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	}
 }
 
 func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {

@@ -427,11 +427,27 @@ func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
 	return pathutil.PathWithin(absWorktree, absPath), nil
 }
 
+// requiredArtifactTargetInWorktree reports whether path's symlink-resolved
+// target is contained within worktree's symlink-resolved root, tolerating a
+// missing path (treated as contained; the caller's earlier os.Stat is what
+// classifies missing artifacts as failures).
 func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. worktree is always an absolute git-worktree path stamped
+	// by the controller (never a bare "." or other unresolved relative
+	// value); a worktree that no longer resolves must fail this check,
+	// which pathutil.NormalizePathForCompare's never-errors contract would
+	// silently paper over.
 	resolvedWorktree, err := filepath.EvalSymlinks(filepath.Clean(worktree))
 	if err != nil {
 		return false, fmt.Errorf("resolving required artifact worktree symlinks %q: %w", worktree, err)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. A missing artifact target is deliberately treated as
+	// contained (true) here — validateRequiredArtifacts' earlier os.Stat
+	// call is what classifies missing/unreadable artifacts as failures;
+	// this function only needs to gate symlink escapes for targets that
+	// exist.
 	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		if os.IsNotExist(err) {

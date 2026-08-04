@@ -27,22 +27,26 @@ runs the fast CI-equivalent gates for local changes: `make lint`,
 `make vet`, and `make test` for Go changes, and `make check-docs` for
 Markdown/docs/spec changes.
 
-**Dashboard SPA.** The dashboard at `cmd/gc/dashboard/web/` is a
+**Dashboard SPA.** The dashboard at `internal/api/dashboardspa/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
-endpoints. When `internal/api/openapi.json` or files under
-`cmd/gc/dashboard/web/src/` change, the hook regenerates
-`cmd/gc/dashboard/web/src/generated/schema.d.ts` (TS types from the
-spec) and rebuilds `cmd/gc/dashboard/web/dist/` (the compiled bundle
-that the Go static server embeds via `go:embed`). The hook needs
-Node / npm on your PATH; if npm is missing, the hook warns and
-skips the rebuild (CI enforces it). The hook runs dashboard typecheck,
-Vitest, and production build for dashboard/API-schema changes. Run
-`make dashboard-dev` to
-iterate with Vite HMR, `make dashboard-build` to produce a fresh
+endpoints. When `internal/api/openapi.json` changes, the hook regenerates
+`internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client/`
+(the typed API client) and, when that or the SPA source changes, rebuilds
+`internal/api/dashboardspa/dist/` (the compiled bundle that the Go static
+server embeds via `go:embed`). The hook needs Node / npm on your PATH; if
+npm is missing and a spec change is staged, the hook now fails closed with
+the recovery command, since a stale client would otherwise ship silently
+until CI catches it — for unrelated (docs/Go-only) changes it still just
+warns and skips the rebuild. The hook runs dashboard typecheck, Vitest, and
+production build for dashboard/API-schema changes. Run `make dashboard-dev`
+to iterate with Vite HMR, `make dashboard-build` to produce a fresh
 bundle, `make dashboard-check` for typecheck + build + test. For
-dashboard or API-schema changes, also smoke the built app with
+API-schema changes, run `make dashboard-ci` instead — it also regenerates
+the typed client from the spec and fails if that or `dist/` is stale,
+which `dashboard-check` alone does not catch. For dashboard or API-schema
+changes, also smoke the built app with
 `npm run preview -- --host 127.0.0.1 --port <port>` from
-`cmd/gc/dashboard/web/` and load the served page before pushing.
+`internal/api/dashboardspa/web/` and load the served page before pushing.
 
 ## Development Workflow
 
@@ -157,9 +161,10 @@ Run `make help` for the full list. The most useful targets are:
 | `make test` | Unit and repo-level Go tests |
 | `make test-integration` | Integration tests |
 | `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
-| `make dashboard-build` | Regenerate SPA types + compile the dashboard bundle |
+| `make dashboard-build` | Compile the dashboard bundle and sync it into the embedded `dist/` |
 | `make dashboard-dev` | Vite dev server for SPA iteration |
 | `make dashboard-check` | Typecheck + build + test the dashboard |
+| `make dashboard-ci` | `dashboard-check` plus fail-on-drift for the generated API client and `dist/` — the gate for openapi.json/dashboard changes |
 | `make cover` | Coverage run |
 
 > **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and

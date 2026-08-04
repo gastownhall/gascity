@@ -1185,6 +1185,38 @@ func TestCreateSessionBeadOnly(t *testing.T) {
 	}
 }
 
+// TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock pins
+// that pending_create_started_at is read from the Manager's injected clock,
+// not the real wall clock. The never-started pending-create lease
+// (cmd/gc/session_reconciler.go pendingCreateNeverStartedLeaseExpiredInfo)
+// anchors on this timestamp and compares it against clock.Fake in reconciler
+// tests; if the stamp comes from real time instead, the anchor and the
+// comparison live on different timelines and the lease can never expire in
+// those tests, silently disabling the rollback safety net.
+func TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+	fakeNow := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: fakeNow}
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{BeadOnly: true, Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Resume: ProviderResume{}})
+	if err != nil {
+		t.Fatalf("CreateSessionBeadOnly: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	got, err := time.Parse(time.RFC3339, b.Metadata["pending_create_started_at"])
+	if err != nil {
+		t.Fatalf("pending_create_started_at = %q, not RFC3339: %v", b.Metadata["pending_create_started_at"], err)
+	}
+	if !got.Equal(fakeNow) {
+		t.Errorf("pending_create_started_at = %v, want %v (manager clock, not real wall clock)", got, fakeNow)
+	}
+}
+
 func TestGetSurfacesAgentNameMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
