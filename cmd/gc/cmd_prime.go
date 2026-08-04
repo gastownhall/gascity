@@ -333,21 +333,21 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
 			if hookSPErr != nil {
 				// Fail open: a momentarily-broken provider config must not fail
-				// the hook, so skip the event-capable nudge-poller wiring this
-				// pass — today's spawn still runs with the nil provider.
+				// the hook. The nil provider below skips only the event-capable
+				// suppression, so the poller spawn keeps today's legacy behavior.
 				fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", hookSPErr) //nolint:errcheck
-			} else {
-				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
-					cityPath:          cityPath,
-					cityName:          cityName,
-					cfg:               cfg,
-					agent:             a,
-					resolved:          resolved,
-					sessionID:         os.Getenv("GC_SESSION_ID"),
-					continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
-					sessionName:       sessionName,
-				}), hookSP)
+				hookSP = nil
 			}
+			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
+				cityPath:          cityPath,
+				cityName:          cityName,
+				cfg:               cfg,
+				agent:             a,
+				resolved:          resolved,
+				sessionID:         os.Getenv("GC_SESSION_ID"),
+				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+				sessionName:       sessionName,
+			}), hookSP)
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
