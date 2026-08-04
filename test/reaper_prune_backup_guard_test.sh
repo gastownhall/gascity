@@ -2,9 +2,13 @@
 # Test: reaper Step 6 bd-prune backup-age guard
 #
 # Acceptance criteria:
-#   1. No backup_state.json present  → bd NOT called, anomaly recorded
-#   2. Fresh backup_state.json       → bd IS called, no anomaly
-#   3. Stale backup_state.json       → bd NOT called, anomaly recorded
+#   1. No backup state present       → bd NOT called, anomaly recorded
+#   2. Fresh backup state            → bd IS called, no anomaly
+#   3. Stale backup state            → bd NOT called, anomaly recorded
+#   4. RFC3339Nano fresh timestamp   → bd IS called, no anomaly
+#   5. Dolt registered + fresh sync  → bd IS called even when the legacy file is stale
+#   6. Dolt registered, never synced → bd NOT called even when the legacy file is fresh
+#   7. Malformed backup state        → bd NOT called, anomaly recorded
 
 set -euo pipefail
 
@@ -33,11 +37,38 @@ STEP6=$(awk '
   }
 ' "$REAPER")
 
-# run_prune_scenario <backup_age_seconds|"absent"> <max_age_seconds>
-# Returns: <bd_called>|<anomaly_called>|<anomaly_msg>
+# ts_ago <seconds_in_past> [fractional_suffix]
+# Prints an RFC3339 UTC timestamp <seconds_in_past> seconds ago. The optional
+# second argument is inserted as fractional seconds (e.g. ".765205448") to
+# produce the RFC3339Nano form that actually appears on disk.
+ts_ago() {
+    local age="$1" frac="${2:-}" base
+    if command -v python3 >/dev/null 2>&1; then
+        base=$(python3 -c "import datetime; print((datetime.datetime.utcnow() - datetime.timedelta(seconds=$age)).strftime('%Y-%m-%dT%H:%M:%S'))")
+    else
+        base=$(date -u -v-"${age}"S '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
+            || date -u -d "@$(($(date +%s) - age))" '+%Y-%m-%dT%H:%M:%S')
+    fi
+    printf '%s%sZ\n' "$base" "$frac"
+}
+
+# run_prune_scenario <backup_age_seconds|"absent"|"malformed"> [max_age_seconds] [pipeline] [legacy_age] [frac]
+#
+#   pipeline    "legacy" (default) writes .beads/backup/backup_state.json;
+#               "dolt" registers .beads/dolt-backup.json and writes
+#               .beads/dolt-backup-state.json with a last_sync field.
+#   legacy_age  only meaningful for pipeline=dolt: age of an ADDITIONAL legacy
+#               backup_state.json, used to prove the guard consults the active
+#               pipeline and does not fall back. "absent" (default) writes none.
+#   frac        optional fractional-seconds suffix for the active state file.
+#
+# Returns: <bd_called>|<anomaly_called>|<exit_status>|<anomaly_msg>
 run_prune_scenario() {
     local backup_age="$1"
     local max_age="${2:-86400}"
+    local pipeline="${3:-legacy}"
+    local legacy_age="${4:-absent}"
+    local frac="${5:-}"
     local tmpdir bd_flag anomaly_flag anomaly_msg_file step6_file run_script
     tmpdir=$(mktemp -d)
     bd_flag="$tmpdir/bd_called"
@@ -48,19 +79,35 @@ run_prune_scenario() {
 
     mkdir -p "$tmpdir/.beads"
 
-    if [ "$backup_age" != "absent" ]; then
-        # Write a backup_state.json whose timestamp is <backup_age> seconds in the past.
-        mkdir -p "$tmpdir/.beads/backup"
-        # Use Python or date to compute the timestamp.
-        if command -v python3 >/dev/null 2>&1; then
-            TS=$(python3 -c "import datetime; print((datetime.datetime.utcnow() - datetime.timedelta(seconds=$backup_age)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-        else
-            TS=$(date -u -v-"${backup_age}"S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-                || date -u -d "@$(($(date +%s) - backup_age))" '+%Y-%m-%dT%H:%M:%SZ')
+    local state_file state_field
+    if [ "$pipeline" = "dolt" ]; then
+        # A registered destination is what flips the guard to the Dolt pipeline.
+        printf '{"destination":"test-remote"}\n' > "$tmpdir/.beads/dolt-backup.json"
+        state_file="$tmpdir/.beads/dolt-backup-state.json"
+        state_field="last_sync"
+        if [ "$legacy_age" != "absent" ]; then
+            mkdir -p "$tmpdir/.beads/backup"
+            printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$(ts_ago "$legacy_age")" \
+                > "$tmpdir/.beads/backup/backup_state.json"
         fi
-        printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$TS" \
-            > "$tmpdir/.beads/backup/backup_state.json"
+    else
+        mkdir -p "$tmpdir/.beads/backup"
+        state_file="$tmpdir/.beads/backup/backup_state.json"
+        state_field="timestamp"
     fi
+
+    case "$backup_age" in
+        absent)
+            ;;
+        malformed)
+            # Truncated JSON: the key is present but the value never is.
+            printf '{"%s":\n' "$state_field" > "$state_file"
+            ;;
+        *)
+            printf '{"last_dolt_commit":"test","%s":"%s"}\n' \
+                "$state_field" "$(ts_ago "$backup_age" "$frac")" > "$state_file"
+            ;;
+    esac
 
     printf '%s\n' "$STEP6" > "$step6_file"
 
@@ -82,46 +129,108 @@ GC_BACKUP_MAX_AGE_FOR_BULK_DELETE='$max_age'
 . '$step6_file'
 RUNEOF
 
-    bash "$run_script" 2>/dev/null || true
+    # The stubbed Step 6 environment can legitimately exit nonzero, so this is
+    # surfaced in the tuple for diagnosis rather than asserted on.
+    local rc=0
+    bash "$run_script" 2>/dev/null || rc=$?
 
     local bd_result anomaly_result anomaly_msg_val
     bd_result=$([ -f "$bd_flag" ] && echo yes || echo no)
     anomaly_result=$([ -f "$anomaly_flag" ] && echo yes || echo no)
     anomaly_msg_val=$(cat "$anomaly_msg_file" 2>/dev/null || echo "")
     rm -rf "$tmpdir"
-    printf '%s|%s|%s\n' "$bd_result" "$anomaly_result" "$anomaly_msg_val"
+    printf '%s|%s|%s|%s\n' "$bd_result" "$anomaly_result" "$rc" "$anomaly_msg_val"
 }
 
 # ── T1: no backup_state.json → bd NOT called, anomaly recorded ────────────────
 result=$(run_prune_scenario "absent")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
     pass "T1: absent backup_state.json → bd skipped, anomaly recorded"
 else
-    fail "T1: absent backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called"
+    fail "T1: absent backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc"
 fi
 
 # ── T2: fresh backup (60s old, well within 86400s) → bd IS called ────────────
 result=$(run_prune_scenario "60")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
 if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
     pass "T2: fresh backup (60s) → bd called, no anomaly"
 else
-    fail "T2: fresh backup (60s) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called"
+    fail "T2: fresh backup (60s) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc"
 fi
 
 # ── T3: stale backup (90000s old, > 86400s threshold) → bd NOT called ─────────
 result=$(run_prune_scenario "90000")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f3-)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
         && printf '%s' "$anomaly_msg" | grep -qi "stale\|backup\|prune"; then
     pass "T3: stale backup (90000s) → bd skipped, anomaly recorded with stale/backup/prune keyword"
 else
-    fail "T3: stale backup (90000s) → expected bd=no anomaly=yes+keyword; got bd=$bd_called anomaly=$anomaly_called msg=$anomaly_msg"
+    fail "T3: stale backup (90000s) → expected bd=no anomaly=yes+keyword; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T4: fresh backup with RFC3339Nano timestamp → bd IS called ───────────────
+# Real on-disk timestamps carry nanoseconds; the strptime fallback rejects them
+# outright, so the guard must truncate before parsing.
+result=$(run_prune_scenario "60" "86400" "legacy" "absent" ".765205448")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T4: fresh RFC3339Nano backup (60s) → bd called, no anomaly"
+else
+    fail "T4: fresh RFC3339Nano backup (60s) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T5: Dolt registered + fresh last_sync + STALE legacy file → bd IS called ──
+# The fleet-breaking case: `bd backup sync` only ever advances
+# dolt-backup-state.json, so a migrated scope's legacy file is frozen at
+# whatever the retired writer last recorded. Reading it would latch the guard
+# closed forever.
+result=$(run_prune_scenario "60" "86400" "dolt" "9000000")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T5: dolt registered, fresh last_sync, stale legacy file → bd called, no anomaly"
+else
+    fail "T5: dolt registered, fresh last_sync, stale legacy file → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T6: Dolt registered but never synced → bd NOT called ─────────────────────
+# A fresh legacy file is present precisely so that falling back to it would
+# wrongly permit the prune. The registered-but-never-synced scope stays closed.
+result=$(run_prune_scenario "absent" "86400" "dolt" "60")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
+    pass "T6: dolt registered, never synced (fresh legacy present) → bd skipped, anomaly recorded"
+else
+    fail "T6: dolt registered, never synced (fresh legacy present) → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T7: malformed backup_state.json → bd NOT called, anomaly recorded ────────
+result=$(run_prune_scenario "malformed")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
+    pass "T7: malformed backup_state.json → bd skipped, anomaly recorded"
+else
+    fail "T7: malformed backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1
