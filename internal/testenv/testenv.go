@@ -64,6 +64,7 @@
 package testenv
 
 import (
+	"encoding/json"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -101,7 +102,9 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 // actually unsets. TestDoltPortVarsAreLeakVectors enforces that pairing.
 // Test-gate vars (GC_FAST_UNIT, GC_REAL_PROCESS_SIGNAL_TESTS,
 // GC_DOLT_REAL_BINARY, ...) do NOT belong here; they're how tests opt into
-// expensive paths.
+// expensive paths. Rollout-gate env overrides (internal/rollout registry
+// EnvOverride names) DO belong here: a developer's shell value must not leak in
+// and non-deterministically flip a gate's resolved mode during a test.
 var LeakVectorVars = []string{
 	"BEADS_DIR",
 	"BEADS_DOLT_PASSWORD",
@@ -109,10 +112,13 @@ var LeakVectorVars = []string{
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
+	"BEADS_HOLDER_TOKEN",
 	"DOLT_ROOT_PATH",
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
+	"GC_BEADS_CONDITIONAL_WRITES",
+	"GC_BEADS_GUARDED_RELEASE",
 	"GC_BEADS_SCOPE_ROOT",
 	"GC_BIN",
 	"GC_CITY",
@@ -178,27 +184,113 @@ func isLocalDoltHost(host string) bool {
 	return addr.IsLoopback() || addr.IsUnspecified()
 }
 
+// cityConfigFileName is the city-root marker file name. Kept as a stdlib-only
+// literal (mirroring citylayout.CityConfigFile) rather than an import of
+// internal/citylayout, for the same dependency-isolation reason as
+// isLocalDoltHost: this package is blank-imported by every test binary and
+// must not link domain packages.
+const cityConfigFileName = "city.toml"
+
+// doltRuntimeStateRelPath is a city root's managed-Dolt runtime state file,
+// relative to the city root. Mirrors the path
+// internal/beads/contract/connection.go's readManagedRuntimeState reads,
+// duplicated here for the same dependency-isolation reason as
+// cityConfigFileName.
+var doltRuntimeStateRelPath = filepath.Join(".gc", "runtime", "packs", "dolt", "dolt-state.json")
+
+// ambientCityDoltPort walks dir upward looking for a city.toml marker file
+// and, if one is found, returns the port recorded in that city's own
+// managed-Dolt runtime state. ok is false when no city.toml is discoverable
+// above dir, or the discovered city names no usable port — a process running
+// outside any city, or whose ambient city never started a managed Dolt
+// server, simply gives this arm nothing to compare against.
+//
+// This is a minimal, stdlib-only mirror of cmd/gc's findCity walk (package
+// main, so it cannot be imported here). It intentionally does not replicate
+// findCity's ceiling/legacy-runtime handling (home dir, temp dir,
+// GC_CEILING_DIRECTORIES, the supervisor's global runtime root): those
+// ceilings exist so production city *resolution* picks the intended city
+// over an unrelated ancestor. Here, any city.toml found above dir names
+// self-relative production data worth guarding against regardless of whose
+// city it is — walking all the way to the filesystem root is deliberately
+// more conservative, not less.
+func ambientCityDoltPort(dir string) (string, bool) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
+	}
+	for {
+		if fi, statErr := os.Stat(filepath.Join(abs, cityConfigFileName)); statErr == nil && !fi.IsDir() {
+			return doltStatePort(abs)
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", false
+		}
+		abs = parent
+	}
+}
+
+// doltStatePort reads cityRoot's managed-Dolt runtime state and returns its
+// recorded port. ok is false if the state file is missing, unparsable, or
+// names no positive port — a best-effort signal, not a requirement that
+// every city have a running managed Dolt server.
+func doltStatePort(cityRoot string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(cityRoot, doltRuntimeStateRelPath))
+	if err != nil {
+		return "", false
+	}
+	var state struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil || state.Port <= 0 {
+		return "", false
+	}
+	return strconv.Itoa(state.Port), true
+}
+
 // refuseProdDoltPort panics when a Dolt port var that will outlive init()
-// points at the local production Dolt server. survives reports whether the
-// named var survives the scrub: always in testscript subcommand mode,
-// passthrough-listed only in go-test mode. Port values are parsed with
-// strconv.Atoi the way consumers do, so numeric equivalents of ProdDoltPort
-// like "03307" and "+3307" fire too; unparsable values never reach a server
-// and are skipped. A paired host var that survives with a non-local value
-// disarms the guard for that pair — 3307 is Dolt's default port, so
-// external-server fixtures use it legitimately. A port var with no paired
-// host var is implicitly local and is never disarmed. ProdDoltPortOptOutVar
-// set to "1" disables the guard entirely.
+// points at a production Dolt server. survives reports whether the named var
+// survives the scrub: always in testscript subcommand mode,
+// passthrough-listed only in go-test mode. ProdDoltPortOptOutVar set to "1"
+// disables the guard entirely, for both detection arms below.
+//
+// Two independent arms feed refuseDoltPortValue: the hardcoded ProdDoltPort
+// constant (the well-known maintainer-host port), and — additively — the
+// port recorded in whatever city is ambiently discoverable from this
+// process's own working directory. The hardcoded constant alone cannot catch
+// a fleet whose managed Dolt port isn't 3307 (ga-cnyuq1); the ambient arm is
+// self-relative, so it protects each city's actual port without a second
+// hardcoded magic number. Known limitation: this guard runs only inside
+// internal/testenv's own init(), which never runs inside a forked,
+// separately-exec'd production `gc` binary subprocess — see ga-bixdpi.
 func refuseProdDoltPort(survives func(name string) bool) {
 	if os.Getenv(ProdDoltPortOptOutVar) == "1" {
 		return
 	}
+	refuseDoltPortValue(survives, ProdDoltPort)
+	if wd, err := os.Getwd(); err == nil {
+		if ambientPort, ok := ambientCityDoltPort(wd); ok {
+			refuseDoltPortValue(survives, ambientPort)
+		}
+	}
+}
+
+// refuseDoltPortValue panics when a Dolt port var that will outlive init()
+// carries targetPort with a local (or unproven) paired host. Port values are
+// parsed with strconv.Atoi the way consumers do, so numeric equivalents of
+// targetPort like "03307" and "+3307" fire too; unparsable values never
+// reach a server and are skipped. A paired host var that survives with a
+// non-local value disarms the guard for that pair — 3307 is Dolt's default
+// port, so external-server fixtures use it legitimately. A port var with no
+// paired host var is implicitly local and is never disarmed.
+func refuseDoltPortValue(survives func(name string) bool, targetPort string) {
 	for portVar, hostVar := range doltPortVars {
 		if !survives(portVar) {
 			continue
 		}
 		port, err := strconv.Atoi(strings.TrimSpace(os.Getenv(portVar)))
-		if err != nil || strconv.Itoa(port) != ProdDoltPort {
+		if err != nil || strconv.Itoa(port) != targetPort {
 			continue
 		}
 		host := ""
@@ -208,7 +300,7 @@ func refuseProdDoltPort(survives func(name string) bool) {
 		if !isLocalDoltHost(host) {
 			continue
 		}
-		panic("testenv: " + portVar + "=" + ProdDoltPort + " with a local Dolt host points at the production Dolt server; refusing to run tests against it (set " + ProdDoltPortOptOutVar + "=1 to deliberately allow it)")
+		panic("testenv: " + portVar + "=" + targetPort + " with a local Dolt host points at a production Dolt server; refusing to run tests against it (set " + ProdDoltPortOptOutVar + "=1 to deliberately allow it)")
 	}
 }
 

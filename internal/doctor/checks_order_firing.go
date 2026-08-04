@@ -18,6 +18,7 @@ import (
 const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
+	orderFiringHistoryTimeout = 15 * time.Second
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
@@ -36,18 +37,20 @@ func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFi
 
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
-	cfg      *config.City
-	cityPath string
-	clock    func() time.Time
-	lastRun  OrderFiringCurrentLastRunFunc
+	cfg            *config.City
+	cityPath       string
+	clock          func() time.Time
+	lastRun        OrderFiringCurrentLastRunFunc
+	historyTimeout time.Duration
 }
 
 // NewOrderFiringCurrentCheck creates a check for cron and cooldown order freshness.
 func NewOrderFiringCurrentCheck(cfg *config.City, cityPath string, opts ...OrderFiringCurrentOption) *OrderFiringCurrentCheck {
 	check := &OrderFiringCurrentCheck{
-		cfg:      cfg,
-		cityPath: cityPath,
-		clock:    time.Now,
+		cfg:            cfg,
+		cityPath:       cityPath,
+		clock:          time.Now,
+		historyTimeout: orderFiringHistoryTimeout,
 	}
 	for _, opt := range opts {
 		opt(check)
@@ -66,6 +69,33 @@ func (c *OrderFiringCurrentCheck) Fix(_ *CheckContext) error { return nil }
 
 // Run compares each cron or cooldown order with its order.fired history.
 func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
+	timeout := c.historyTimeout
+	if timeout <= 0 {
+		timeout = orderFiringHistoryTimeout
+	}
+
+	// The order-history resolver opens the beads/Dolt store and does not accept
+	// a context. Keep that potentially blocking I/O from wedging the complete
+	// doctor run; the gc process exits after printing this failed check.
+	results := make(chan *CheckResult, 1)
+	go func() {
+		results <- c.run(ctx)
+	}()
+
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(timeout):
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: fmt.Sprintf("order history lookup timed out after %s", timeout),
+			FixHint: "check beads/Dolt connectivity, then rerun gc doctor",
+		}
+	}
+}
+
+func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	result := &CheckResult{Name: c.Name()}
 	if c.cfg == nil {
 		result.Status = StatusOK

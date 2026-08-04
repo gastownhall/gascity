@@ -24,7 +24,9 @@ selected onto herdr fail to start; install it before flipping the selector.
 ## Enabling herdr
 
 `herdr` is selected with the same runtime selector used for every other
-backend, at one of three scopes.
+backend. That selector is city-wide (`[session] provider`) or, for a one-off
+run, process-wide (`GC_SESSION`); herdr cannot be selected for individual
+agents.
 
 ### City default
 
@@ -35,29 +37,37 @@ Set the session provider in `city.toml`:
 provider = "herdr"
 ```
 
-Every agent the city starts then runs under herdr, except agents pinned to
-another backend by a patch (see below).
+Every agent the city starts runs under herdr, except agents on the ACP transport
+(whether pinned `session = "acp"` or because their provider defaults to ACP),
+which route to the separate ACP backend instead (see below).
 
 ### Per-agent / per-rig
 
-Override the backend for a single agent — or every agent in a rig — with an
-agent patch. The override field is `session`:
+herdr cannot be selected for individual agents. The runtime backend is chosen
+city-wide by `[session] provider` (above) or process-wide by `GC_SESSION`
+(below); no patch puts an agent onto herdr when the city default is something
+else.
 
-```toml
-# one agent by name
-[[patches.agent]]
-name = "dog-1"
-session = "herdr"
+The per-agent patch field is `session`, but it selects a **transport**, not a
+backend. It accepts only `acp`, `tmux`, or omission (`IsValidSessionTransport`
+in `internal/config/provider.go`), so `session = "herdr"` never selects the
+herdr runtime. Config validation flags it as a warning:
 
-# every agent in a rig (match by the rig's working dir)
-[[patches.agent]]
-dir = "webapp"
-session = "herdr"
+```text
+agent "dog-1": session "herdr" is not a valid session transport (use "acp", "tmux", or omit)
 ```
 
-A per-agent `session` override wins over the `[session]` city default, so you
-can run the whole city on herdr while pinning specific agents to tmux (or the
-reverse — keep tmux as the default and pilot herdr on one agent).
+Under a herdr city, the transport router (`internal/runtime/auto`) sends only
+ACP-registered sessions to the separate ACP backend and routes everything else
+to the city's base provider, which is herdr. Two consequences follow:
+
+- `session = "acp"` (or a provider that defaults to ACP) moves that agent off
+  herdr, onto the ACP backend. It is the one per-agent lever that changes which
+  backend an agent runs on.
+- `session = "tmux"` does not keep an agent on tmux. The herdr provider does not
+  implement the transport-capability check, so the pin is neither honored nor
+  rejected; the agent falls back to the base provider and runs on herdr. To put
+  an agent on tmux, the whole city (or process) must default to tmux.
 
 ### Environment (one-off)
 
@@ -73,27 +83,35 @@ way it selects `exec:<script>` or any other backend.
 
 ## Piloting safely
 
-herdr is opt-in precisely so you can roll it out gradually. Recommended path:
+herdr is opt-in, and the backend is a whole-city choice, so you pilot it by
+scoping which city runs on herdr, not by pinning individual agents. Recommended
+path:
 
-1. **Keep the mayor on tmux first.** Don't run the orchestrator on an
-   experimental backend. If you flip the city default to herdr, pin the mayor
-   back to tmux with a patch:
+1. **Try it per-process on a scratch city.** Select herdr with the environment
+   variable on a throwaway city, so nothing is committed and your real city is
+   untouched:
+
+   ```bash
+   GC_SESSION=herdr gc start <scratch-city>
+   ```
+
+   Every agent in that process runs under herdr, except agents on the ACP
+   transport (whether pinned `session = "acp"` or because their provider
+   defaults to ACP), which still route to the separate ACP backend. Watch it
+   through a normal work cycle.
+
+2. **Promote to the scratch city's default.** Once the per-process trial looks
+   good, set the default in that city's `city.toml` and run it end to end:
 
    ```toml
    [session]
    provider = "herdr"
-
-   [[patches.agent]]
-   name = "mayor"
-   session = "tmux"
    ```
 
-2. **Start with one low-stakes agent** — a dog, or a single rig's witness —
-   by giving just that agent a `session = "herdr"` patch while the city default
-   stays tmux. Watch it through a normal work cycle before widening.
-
-3. **Widen** to a rig (`dir = "<rig>"`), then to the city default, once the
-   pilot agents are stable.
+3. **Widen** to your real city by flipping its `[session] provider` to
+   `"herdr"`, once the scratch city has been stable across several work cycles.
+   The switch is city-wide with no way to move agents over one at a time, so
+   keep any city you are not ready to migrate on the tmux default.
 
 ## Applying and verifying
 

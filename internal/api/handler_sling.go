@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -34,6 +33,24 @@ type slingBody struct {
 	ScopeKind      string            `json:"scope_kind"`
 	ScopeRef       string            `json:"scope_ref"`
 	Force          bool              `json:"force"`
+	Reassign       bool              `json:"reassign"`
+	Merge          string            `json:"merge"`
+	NoConvoy       bool              `json:"no_convoy"`
+	Owned          bool              `json:"owned"`
+	NoFormula      bool              `json:"no_formula"`
+}
+
+// routeOptsFromBody builds the domain RouteOpts from the wire body for a plain
+// bead route (direct or default-formula), carrying every server-expressible flag.
+func routeOptsFromBody(body slingBody) sling.RouteOpts {
+	return sling.RouteOpts{
+		Force:     body.Force,
+		Reassign:  body.Reassign,
+		Merge:     body.Merge,
+		NoConvoy:  body.NoConvoy,
+		Owned:     body.Owned,
+		NoFormula: body.NoFormula,
+	}
 }
 
 type slingResponse struct {
@@ -51,17 +68,6 @@ type slingResponse struct {
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }
-
-// controlDispatcherRuntimeMissing reports whether the named control-dispatcher
-// agent's session is asleep with reason runtime-missing. It powers the rig→city
-// control-dispatcher fallback (#3454) on the API sling graph-routing path.
-//
-// Session beads are city-scoped, so it reads the server's already-open city
-// bead store directly — never openCityStoreAt — which keeps it off the
-// managed-Dolt spawn path and therefore leak-guard-safe on the sling hot path.
-func (s *Server) controlDispatcherRuntimeMissing(qualifiedName string) bool {
-	return session.RuntimeMissingInStore(s.state.CityBeadStore(), qualifiedName)
-}
 
 // execSling calls the intent-based Sling API directly. The Huma handler
 // humaHandleSling performs all validation before calling this.
@@ -96,22 +102,48 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		message := fmt.Sprintf("bead prefix store %s is not registered; cannot verify bead %q", storeRef, storeBeadID)
 		return nil, http.StatusBadRequest, "missing_bead", message, nil
 	}
+	// Mirror the CLI's tolerant source-workflow scan: a non-source rig store
+	// whose live-root scan fails degrades to an operator-visible warning
+	// instead of aborting the sling. Without this sink the domain keeps every
+	// non-source scan failure fatal (internal/sling/sling_core.go), so a single
+	// schema-skewed rig store would abort every workflow-launching sling that
+	// routes through a running city. Dedup per store ref so one degraded rig
+	// warns once per request, and collect the ordered messages so they surface
+	// to the caller in the response `warnings` field, not only the server log: a
+	// running-city sling routes through this handler, so the invoking human or
+	// agent sees only the JSON response and would otherwise be blind to the
+	// degraded cross-store conflict coverage.
+	sourceWorkflowScanWarnings := make(map[string]struct{})
+	var sourceWorkflowScanMessages []string
 	deps := sling.SlingDeps{
-		CityName: s.state.CityName(),
-		CityPath: s.state.CityPath(),
-		Cfg:      s.state.Config(),
-		SP:       s.state.SessionProvider(),
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:   s.state.CityName(),
+		CityPath:   s.state.CityPath(),
+		Cfg:        s.state.Config(),
+		SP:         s.state.SessionProvider(),
+		Store:      store,
+		GraphStore: s.state.GraphBeadStore().Store,
+		Events:     s.state.EventProvider(),
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},
-		Runner:                          s.slingRunner(),
-		Router:                          apiBeadRouter{server: s, store: store},
-		Resolver:                        apiAgentResolver{},
-		Branches:                        apiBranchResolver{cityPath: s.state.CityPath()},
-		Notify:                          &apiNotifier{state: s.state},
-		ControlDispatcherRuntimeMissing: s.controlDispatcherRuntimeMissing,
+		SourceWorkflowStoreScanWarning: func(scanStoreRef string, scanErr error) {
+			key := strings.TrimSpace(scanStoreRef)
+			if _, warned := sourceWorkflowScanWarnings[key]; warned {
+				return
+			}
+			sourceWorkflowScanWarnings[key] = struct{}{}
+			message := fmt.Sprintf(
+				"source-workflow singleton scan skipped unavailable store %s (%v); cross-store roots in that store are invisible",
+				scanStoreRef, scanErr)
+			sourceWorkflowScanMessages = append(sourceWorkflowScanMessages, message)
+			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
+		},
+		Runner:   s.slingRunner(),
+		Router:   apiBeadRouter{server: s, store: store},
+		Resolver: apiAgentResolver{},
+		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
+		Notify:   &apiNotifier{state: s.state},
 		Tracer: func(format string, args ...any) {
 			fmt.Fprintf(apiSlingStderr(), format+"\n", args...) //nolint:errcheck
 		},
@@ -140,6 +172,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 		Force:     body.Force,
+		Reassign:  body.Reassign,
+		Merge:     body.Merge,
+		NoConvoy:  body.NoConvoy,
+		Owned:     body.Owned,
 	}
 
 	// Dispatch to the right intent-based method.
@@ -159,6 +195,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		result, err = sl.LaunchFormula(ctx, formulaName, agentCfg, formulaOpts)
 
 	case strings.TrimSpace(body.Bead) != "" &&
+		!body.NoFormula &&
 		agentCfg.EffectiveDefaultSlingFormula() != "" &&
 		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != ""):
 		mode = "attached"
@@ -166,10 +203,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		attachedBeadID = strings.TrimSpace(body.Bead)
 		formulaName = agentCfg.EffectiveDefaultSlingFormula()
 		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, routeOptsFromBody(body))
 
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, sling.RouteOpts{Force: body.Force})
+		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, routeOptsFromBody(body))
 	}
 
 	if err != nil {
@@ -197,12 +234,20 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		return nil, http.StatusBadRequest, "invalid", err.Error(), nil
 	}
 
+	// Surface both the domain's non-fatal metadata errors and the tolerated
+	// source-workflow scan warnings to the caller. The scan messages reach only
+	// the server log otherwise, leaving a remote caller blind to degraded
+	// cross-store conflict coverage.
+	warnings := result.MetadataErrors
+	if len(sourceWorkflowScanMessages) > 0 {
+		warnings = append(append([]string(nil), result.MetadataErrors...), sourceWorkflowScanMessages...)
+	}
 	resp := &slingResponse{
 		Status:   "slung",
 		Target:   body.Target,
 		Bead:     body.Bead,
 		Mode:     mode,
-		Warnings: result.MetadataErrors,
+		Warnings: warnings,
 	}
 	if !workflowLaunch {
 		return resp, http.StatusOK, "", "", nil

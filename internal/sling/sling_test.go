@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -408,6 +410,40 @@ func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsIdempotent(t *testing.
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true when routed bead has a live tracking convoy, got %+v", result)
+	}
+}
+
+// TestCheckBeadStatePoolInstanceRoutedToCollapsedIdentityIsIdempotent guards
+// the ga-79uuwq PoolName-bypass regression: a pool-instance agent's bead is
+// stamped with the pool's collapsed identity (agentutil.RoutedToIdentity),
+// not the instance's own raw QualifiedName. The idempotency check must
+// resolve that same collapsed identity to recognize the bead as already
+// routed, or every pool-instance sling would spuriously re-route work that
+// was already correctly dispatched to the pool.
+func TestCheckBeadStatePoolInstanceRoutedToCollapsedIdentityIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "myrig/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	poolInstance := config.Agent{Name: "polecat-2", Dir: "myrig", PoolName: "myrig/polecat"}
+	result := CheckBeadState(store, bead.ID, poolInstance, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when pool-instance bead is routed to the collapsed pool identity, got %+v", result)
 	}
 }
 
@@ -1947,6 +1983,8 @@ func TestSlingLaunchFormula(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	recorder := events.NewFake()
+	deps.Events = recorder
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -1965,6 +2003,9 @@ func TestSlingLaunchFormula(t *testing.T) {
 	}
 	if result.BeadID == "" {
 		t.Error("expected non-empty BeadID")
+	}
+	if len(recorder.Events) != 0 {
+		t.Fatalf("non-graph formula emitted execution facts: %#v", recorder.Events)
 	}
 }
 
@@ -2289,6 +2330,90 @@ func TestSlingAttachFormula(t *testing.T) {
 	}
 }
 
+// TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped is the regression
+// for #3681: --on/AttachFormula never carries the target bead's own
+// description into the formula's rendered context — the wisp root's
+// description is always the formula's own boilerplate, and no formula var
+// exposes the bead's text either. A caller relying on the bead's
+// description as the actual build instructions silently gets a brainstorm
+// that never saw them. Warn instead of changing routing/materialization.
+func TestSlingAttachFormulaWarnsWhenBeadDescriptionDropped(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	found := false
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("BeadWarnings = %#v, want a hint that the bead's description is dropped", result.BeadWarnings)
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenContextPathProvided guards the
+// #3681 hint's scope: a caller who already passes context_path (or
+// requirements_path) has explicitly carried the instructions in some
+// form, so the generic hint would be noise.
+func TestSlingAttachFormulaNoWarningWhenContextPathProvided(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Description: "follow ~/rigs/ultimate-brain-mcp patterns"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{Vars: []string{"context_path=/tmp/spec"}})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			t.Errorf("BeadWarnings = %#v, want no drop hint once context_path is explicit", result.BeadWarnings)
+		}
+	}
+}
+
+// TestSlingAttachFormulaNoWarningWhenBeadHasNoDescription guards against
+// noise on the common case: a bare bead with no description text has
+// nothing to lose, so no hint should fire.
+func TestSlingAttachFormulaNoWarningWhenBeadHasNoDescription(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "not carried into the formula's rendered context") {
+			t.Errorf("BeadWarnings = %#v, want no drop hint for a description-less bead", result.BeadWarnings)
+		}
+	}
+}
+
 func TestSlingAttachFormulaRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
@@ -2386,6 +2511,55 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 	if len(members) != 1 || members[0].ID != source.ID {
 		t.Fatalf("members = %+v, want source %s", members, source.ID)
+	}
+}
+
+func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	recorder := events.NewFake()
+	deps.Events = recorder
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, FormulaOpts{}); err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+
+	if len(recorder.Events) != 3 {
+		t.Fatalf("execution events = %#v, want work association and two step definitions", recorder.Events)
+	}
+	if recorder.Events[0].Type != events.ExecutionWorkAssociated || recorder.Events[1].Type != events.ExecutionStepDefined || recorder.Events[2].Type != events.ExecutionStepDefined {
+		t.Fatalf("execution event types = %s, %s, %s, want association then definitions", recorder.Events[0].Type, recorder.Events[1].Type, recorder.Events[2].Type)
+	}
+}
+
+func TestInstantiateGraphFormulaPreservesMaterializationWhenProjectionFails(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	store := deps.Store
+	deps.Events = events.NewFake()
+	convoy, err := store.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, molecule.Options{Vars: map[string]string{"convoy_id": convoy.ID}}, "", "", "", config.Agent{Name: "worker"}, deps)
+	if err != nil {
+		t.Fatalf("InstantiateSlingFormula: %v", err)
+	}
+	var traces []string
+	deps.Tracer = func(format string, args ...any) { traces = append(traces, fmt.Sprintf(format, args...)) }
+	emitCurrentExecutionFacts(deps, &getErrStore{Store: store, err: fmt.Errorf("projection store unavailable")}, result.RootID, "worker", "graph-work")
+	if !slices.ContainsFunc(traces, func(trace string) bool { return strings.Contains(trace, "execution snapshot projection failed") }) {
+		t.Fatalf("traces = %#v, want projection failure", traces)
 	}
 }
 
@@ -2819,6 +2993,181 @@ func TestSourceWorkflowLockScopeUsesStorePath(t *testing.T) {
 	}
 }
 
+type sourceWorkflowListFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s sourceWorkflowListFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(t *testing.T) {
+	sourceStore := beads.NewMemStore()
+	healthyStore := beads.NewMemStore()
+	root, err := healthyStore.Create(beads.Bead{
+		ID:     "wf-existing",
+		Title:  "existing workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	var warnings []string
+	deps := SlingDeps{
+		Store:    sourceStore,
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceStore, StoreRef: "city:test"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: errors.New("schema v54 has no revision")}, StoreRef: "rig:stale"},
+				{Store: healthyStore, StoreRef: "rig:healthy"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(storeRef string, err error) {
+			warnings = append(warnings, storeRef+": "+err.Error())
+		},
+	}
+
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("conflicting workflow IDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "rig:stale") || !strings.Contains(warnings[0], "revision") {
+		t.Fatalf("scan warnings = %q, want one warning for rig:stale revision failure", warnings)
+	}
+}
+
+func TestListSourceWorkflowRootsKeepsSourceStoreListFailureStrict(t *testing.T) {
+	readErr := errors.New("source store read failed")
+	var warned bool
+	deps := SlingDeps{
+		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr},
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr}, StoreRef: "city:test"},
+				{Store: beads.NewMemStore(), StoreRef: "rig:healthy"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) { warned = true },
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want source store error %v", err, readErr)
+	}
+	if warned {
+		t.Fatal("source store failure was downgraded to a warning")
+	}
+}
+
+func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *testing.T) {
+	sourceStore := beads.NewMemStore()
+	root, err := sourceStore.Create(beads.Bead{
+		ID:     "wf-selected",
+		Title:  "selected-store workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	deps := SlingDeps{
+		Store:    sourceStore,
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: beads.NewMemStore(), StoreRef: "rig:healthy"}}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) {},
+	}
+
+	err = checkLegacySourceWorkflowConflict(deps, "mc-source")
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError from already-open source store", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("conflicting workflow IDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+}
+
+func TestListSourceWorkflowRootsKeepsNonSourceFailureStrictWithoutWarningSink(t *testing.T) {
+	readErr := errors.New("unreported stale store")
+	deps := SlingDeps{
+		Store:    beads.NewMemStore(),
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: beads.NewMemStore(), StoreRef: "city:test"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr}, StoreRef: "rig:stale"},
+			}, nil
+		},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want unreported scan failure %v", err, readErr)
+	}
+}
+
+func TestListSourceWorkflowRootsFailsWhenSelectedAndNonSourceScansFail(t *testing.T) {
+	selectedErr := errors.New("selected store failed")
+	var warnings []string
+	deps := SlingDeps{
+		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr},
+		StoreRef: "city:test",
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: errors.New("stale store failed")}, StoreRef: "rig:stale"},
+				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr}, StoreRef: "city:test"},
+			}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(storeRef string, _ error) {
+			warnings = append(warnings, storeRef)
+		},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want selected scan error %v", err, selectedErr)
+	}
+	if !slices.Equal(warnings, []string{"rig:stale"}) {
+		t.Fatalf("scan warnings = %v, want only the skipped non-source store", warnings)
+	}
+}
+
+func TestListSourceWorkflowRootsFailsWhenListerHasNoUsableStores(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(),
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{StoreRef: "rig:nil"}}, nil
+		},
+		SourceWorkflowStoreScanWarning: func(string, error) {},
+	}
+
+	_, err := listSourceWorkflowRoots(deps, "mc-source")
+	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
+		t.Fatalf("listSourceWorkflowRoots error = %v, want no-usable-store failure", err)
+	}
+}
+
 func TestSlingExpandConvoy(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
@@ -2849,6 +3198,42 @@ func TestSlingExpandConvoy(t *testing.T) {
 	}
 	if len(result.Children) != 2 {
 		t.Fatalf("Children = %d, want 2", len(result.Children))
+	}
+}
+
+// TestExpandConvoyReassignClearsAssignee is a regression test for the
+// local/remote inversion a Fable red-team caught (2026-07-08): the local
+// plain-bead-no-formula sling path routes through ExpandConvoy, which dropped
+// RouteOpts.Reassign, so `gc sling <bead> --reassign` silently kept a human
+// assignee locally while the remote path (RouteBead->DoSling) honored it. A
+// plain (non-container) bead in ExpandConvoy delegates to DoSling
+// (sling_core.go:1163-1168), which clears the assignee only if Reassign
+// threaded through. (Convoy-container children route via DoSlingBatch's own
+// per-child loop, which does not clear assignees — a separate, unrelated path.)
+func TestExpandConvoyReassignClearsAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+	bead, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open", Assignee: "human-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	if _, err := s.ExpandConvoy(context.Background(), bead.ID, a, RouteOpts{Reassign: true}, store); err != nil {
+		t.Fatalf("ExpandConvoy: %v", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want cleared — Reassign must thread through ExpandConvoy->DoSling", got.Assignee)
 	}
 }
 
@@ -3178,7 +3563,11 @@ func TestHasMoleculeChildren(t *testing.T) {
 		{ID: "BL-1", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
 	}, nil)
-	if !HasMoleculeChildren(store, "BL-1", store) {
+	has, err := HasMoleculeChildren(store, "BL-1", store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: unexpected error %v", err)
+	}
+	if !has {
 		t.Error("expected true")
 	}
 }

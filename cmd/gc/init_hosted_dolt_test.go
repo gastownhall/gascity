@@ -205,7 +205,7 @@ func TestInitWizardConfigFromFlagsCapturesHostedDolt(t *testing.T) {
 		t.Fatalf("set template: %v", err)
 	}
 	hosted := hostedDoltInitOptions{Host: "gateway.example.com", Port: "4406", Database: "bd_prj_x", ProjectID: "prj_x"}
-	wiz, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "custom", "", hosted)
+	wiz, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "custom", "", hosted, false)
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestInitWizardConfigFromFlagsRejectsInvalidHostedDolt(t *testing.T) {
 		t.Fatalf("set template: %v", err)
 	}
 	hosted := hostedDoltInitOptions{Host: "gateway.example.com"} // missing port/database/project-id
-	_, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "custom", "", hosted)
+	_, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "custom", "", hosted, false)
 	if err == nil || !strings.Contains(err.Error(), "--dolt-port") {
 		t.Fatalf("initWizardConfigFromFlags = %v, want --dolt-port error", err)
 	}
@@ -236,7 +236,7 @@ func TestInitWizardConfigFromFlagsRejectsInvalidHostedDolt(t *testing.T) {
 func TestInitWizardConfigFromFlagsHostedDoltDefaultTemplateRequiresProvider(t *testing.T) {
 	cmd := newInitCmd(io.Discard, io.Discard)
 	hosted := hostedDoltInitOptions{Host: "gateway.example.com", Port: "4406", Database: "bd_prj_x", ProjectID: "prj_x"}
-	_, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "", "", hosted)
+	_, _, err := initWizardConfigFromFlags(cmd, "", "", nil, "", "", hosted, false)
 	if err == nil || !strings.Contains(err.Error(), "default-provider") {
 		t.Fatalf("initWizardConfigFromFlags = %v, want default-provider requirement", err)
 	}

@@ -222,6 +222,10 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
 	ensureProjectedPostgresEnvExplicit(env)
+	// Carry the controller's GitHub CLI auth token into the exec order so its
+	// `gh` calls authenticate. Projected before the [order.env] loop below so an
+	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
+	projectGitHubTokenExecEnv(env)
 	// Order-supplied [order.env] entries take effect last so they can tune
 	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
 	// noisy city) without editing the order's shell scripts or the parent
@@ -267,8 +271,9 @@ func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target exec
 		return orders.TriggerOptions{}, err
 	}
 	return orders.TriggerOptions{
-		ConditionDir: target.ScopeRoot,
-		ConditionEnv: env,
+		ConditionDir:     target.ScopeRoot,
+		ConditionEnv:     env,
+		ConditionTimeout: a.CheckTimeoutOrDefault(),
 	}, nil
 }
 

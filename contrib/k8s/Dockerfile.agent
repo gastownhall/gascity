@@ -12,19 +12,53 @@
 #   make docker-base docker-agent
 #
 # The gc binary should be built first and placed in the build context root:
-#   go build -o gc ./cmd/gc
+#   CGO_ENABLED=0 go build -o gc ./cmd/gc
 
 # Local build-layer image produced by Dockerfile.base, not a registry pull.
 ARG BASE_IMAGE=gc-agent-base:latest
+
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS bd-builder
+
+ARG BD_VERSION=v1.1.0
+ARG BD_SOURCE_REF=8e4e59d39f3459a43cf21a3236a13eca4dd874f7
+ARG BD_SOURCE_SHA256=63597b6b368d7d26ba3fc570ae3b2fa4cd8a5155d4716cae13d178a560808d5a
+ARG BD_BUILD=8e4e59d39
+ARG BD_BRANCH=HEAD
+ARG GRPC_VERSION=1.82.1
+
+# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0. Rebuild the
+# exact released source with its production CGO/pure-Go-regex configuration and
+# release identity, changing only the patched dependency version.
+RUN mkdir -p /src/bd /out \
+    && curl -fsSL --retry 3 \
+       "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
+       -o /tmp/bd-source.tar.gz \
+    && echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/bd-source.tar.gz --strip-components=1 -C /src/bd \
+    && rm -f /tmp/bd-source.tar.gz
+
+WORKDIR /src/bd
+RUN bd_version="${BD_VERSION#v}" \
+    && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
+    && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && CGO_ENABLED=1 go build \
+       -tags="gms_pure_go" \
+       -trimpath \
+       -ldflags="-s -w -X main.Version=${bd_version} -X main.Build=${BD_BUILD} -X main.Commit=${BD_SOURCE_REF} -X main.Branch=${BD_BRANCH}" \
+       -o /out/bd \
+       ./cmd/bd \
+    && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+
 FROM ${BASE_IMAGE}
 
 # Build-time copies and ownership fixes require root; the final image drops
 # back to gcagent below.
 USER root
 
-# bd (beads) CLI — copied from build context.
-# Build with: cp $(which bd) . && docker build ...
-COPY bd /usr/local/bin/bd
+# bd (beads) CLI, rebuilt above from checksum-pinned release source.
+COPY --from=bd-builder /out/bd /usr/local/bin/bd
+RUN BD_DISABLE_METRICS=1 BD_DISABLE_EVENT_FLUSH=1 bd --version
 
 # br (beads_rust) CLI — copied from build context.
 # Build with: cp $(which br) . && docker build ...
@@ -32,6 +66,7 @@ COPY br /usr/local/bin/br
 
 # gc binary — copied from build context.
 COPY gc /usr/local/bin/gc
+RUN gc version
 
 # gc-beads-br script for the exec:beads protocol.
 COPY contrib/beads-scripts/gc-beads-br /usr/local/bin/gc-beads-br

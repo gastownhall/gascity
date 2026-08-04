@@ -40,6 +40,16 @@ var (
 // supervisor-managed city (alive socket, no standalone [api] port) to the
 // supervisor client rather than reporting controller-down. (gascity ga-tp7)
 func apiClient(cityPath string) *api.Client {
+	// Remote routing is NOT handled here. A remote target is refused upstream by
+	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
+	// served by a resolution-aware remote transport keyed on
+	// resolvedContext.Remote (Phase 2) — never by sniffing global flags/env in
+	// this local loopback ladder. Sniffing here is wrong: a local --city command
+	// that merely has a stray GC_CITY_URL in its environment resolves LOCAL (flag
+	// beats env), and must still route through its live local controller.
+	// GC_NO_API + a resolved remote target is already a loud error at resolution
+	// (guardNoAPI), so no remote op can reach the GC_NO_API nil-return below.
+	//
 	// Operator escape hatch: GC_NO_API=1|true|yes → always fall back.
 	// Unknown values warn to stderr and fail open (fall through to normal path).
 	if disabled, warn := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {

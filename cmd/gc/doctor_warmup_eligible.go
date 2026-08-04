@@ -75,3 +75,7 @@ func (v2ScriptsLayoutCheck) WarmupEligible() bool { return false }
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
 func (v2WorkspaceNameCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *censusOwnerLivenessCheck) WarmupEligible() bool { return false }

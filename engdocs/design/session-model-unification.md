@@ -632,6 +632,14 @@ The synthesized default remains, but becomes origin-aware at runtime:
 - all sessions check assigned ready work
 - only `origin=ephemeral` checks unassigned `gc.routed_to=$GC_TEMPLATE`
 
+The assigned `in_progress` check (Tier 1) is an ownership read and must key
+off `${GC_ALIAS:-$GC_TEMPLATE}`, not the bare template — see "Claim Identity
+Convention" in `engdocs/architecture/prompt-templates.md` and the
+`ga-i1d0tr` decision for why a bare-template Tier 1 query lets one session
+cross-adopt another live session's in-progress claim on templates with more
+than one concurrent identity (a `[[named_session]]` paired with a
+multi-slot pool).
+
 Named and manual sessions stop at explicit ownership.
 
 Custom `work_query` and `scale_check` remain escape hatches.

@@ -106,19 +106,20 @@ type cachedCityServer struct {
 // dashboard is attached — the embedded SPA at "/" and the host-side dashboard
 // plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver       CityResolver
-	initializer    cityInitializer
-	readOnly       bool
-	version        string
-	buildID        string
-	startedAt      time.Time
-	allowedOrigins []string
-	allowedHosts   []string
-	allowAnyHost   bool
-	writeAuth      *citywriteauth.Verifier
-	readAuth       *citywriteauth.Verifier
-	dashboardBase  func() string
-	server         *http.Server
+	resolver        CityResolver
+	initializer     cityInitializer
+	readOnly        bool
+	version         string
+	buildID         string
+	startedAt       time.Time
+	allowedOrigins  []string
+	allowedHosts    []string
+	allowAnyHost    bool
+	writeAuth       *citywriteauth.Verifier
+	readAuth        *citywriteauth.Verifier
+	dashboardBase   func() string
+	runCensusSource RunCensusSource
+	server          *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -134,6 +135,11 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+
+	// idem caches responses for Idempotency-Key replay on supervisor-scope
+	// create endpoints (POST /v0/city). Per-city creates use the per-city
+	// Server's own cache instead.
+	idem *idempotencyCache
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
@@ -156,6 +162,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
+		idem:        newIdempotencyCache(30 * time.Minute),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
@@ -292,6 +299,16 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	}
 	sm.humaMux.Handle("/api/", h)
 	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithRunCensusSource supplies the incremental projection used by typed run
+// reads. The required contract serves the row-free census; a source that also
+// implements RunProjectionSource and RunProjectionGraceSource supplies the
+// warm list/detail/steps snapshots and point-read warming grace. It must be
+// called before Serve.
+func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *SupervisorMux {
+	sm.runCensusSource = source
 	return sm
 }
 
@@ -460,11 +477,17 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	// Serve, and per-city servers are built lazily per request, so every
 	// cached server observes the final provider.
 	srv.dashboardBase = sm.dashboardBase
+	srv.runCensusSource = sm.runCensusSource
 
 	sm.cacheMu.Lock()
+	defer sm.cacheMu.Unlock()
+	// A concurrent miss may have installed a Server for this State while this
+	// candidate was being built. Return the published instance so per-city
+	// caches and refresh coalescing remain process-unique.
+	if cached, ok := sm.cache[name]; ok && cached.state == state {
+		return cached.srv
+	}
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}
-	sm.cacheMu.Unlock()
-
 	return srv
 }
 

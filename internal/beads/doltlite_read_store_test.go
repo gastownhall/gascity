@@ -9,10 +9,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/rollout/gate"
+	sqlite "modernc.org/sqlite"
 )
 
 func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
@@ -1829,4 +1834,264 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}
 	return writer
+}
+
+// TestDoltliteReadStoreConditionalWriterLoudlyDegrades pins the F2 fix
+// (ga-zj78gu): once BdStore implements ConditionalWriter, the methods promote
+// through DoltliteReadStore's embedded *BdStore and ConditionalWriterFor asserts
+// true — but DoltliteReadStore.Get reads via direct SQL and cannot supply a real
+// revision until bd #4682. So the four CAS methods are shadowed to return the
+// typed unsupported veto rather than false-promote a store whose read path and
+// fenced-write path disagree on the revision source. The interface stays
+// SATISFIED (no hiding wrapper); every verb just degrades loudly.
+func TestDoltliteReadStoreConditionalWriterLoudlyDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	w, ok := ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("DoltliteReadStore must still SATISFY ConditionalWriter (degrade is behavioral, not interface-stripping)")
+	}
+
+	if err := w.UpdateIfMatch("ga-1", 1, UpdateOpts{}); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("UpdateIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.CloseIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CloseIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.DeleteIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("DeleteIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	ok2, err := w.CompareAndSetMetadataKey("ga-1", "k", "", "v")
+	if ok2 || !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CompareAndSetMetadataKey: got (%v, %v), want (false, ErrConditionalWriteUnsupported)", ok2, err)
+	}
+
+	// Completeness guard: iterate EVERY method on the ConditionalWriter interface
+	// via reflection and assert each degrades to unsupported. A CAS verb added to
+	// the interface later that is not shadowed here would instead promote from the
+	// embedded *BdStore, run the capability probe against the fatal-on-call
+	// backing runner, and fail loudly — closing the F2 false-promote class for
+	// future verbs, not just today's four.
+	cwType := reflect.TypeOf((*ConditionalWriter)(nil)).Elem()
+	wv := reflect.ValueOf(w)
+	for i := 0; i < cwType.NumMethod(); i++ {
+		name := cwType.Method(i).Name
+		method := wv.MethodByName(name)
+		in := make([]reflect.Value, method.Type().NumIn())
+		for j := range in {
+			in[j] = reflect.Zero(method.Type().In(j))
+		}
+		out := method.Call(in)
+		last, _ := out[len(out)-1].Interface().(error)
+		if !IsConditionalWriteUnsupported(last) {
+			t.Fatalf("ConditionalWriter.%s degraded to %v, want ErrConditionalWriteUnsupported (unshadowed promoted verb?)", name, last)
+		}
+	}
+}
+
+// TestDoltliteReadStoreResolveConditionalWriterDegrades pins the seam half of
+// F2: even when the embedded BdStore's capability probe would report capable,
+// DoltliteReadStore's prober shadow keeps ResolveConditionalWriter on the
+// degrade/refuse path — its SQL read path carries no bead revision, so a
+// promoted "capable" verdict would false-promote a store whose reads and
+// fenced writes disagree on the revision source. The fatal-on-call backing
+// runner doubles as the teeth: if the shadow ever disappears, the promoted
+// probe runs four subprocesses through it and the test dies loudly.
+func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	store.stampConditionalWritesMode(gate.Auto, false)
+	w, diag, err := ResolveConditionalWriter(store)
+	if w != nil || err != nil {
+		t.Fatalf("auto over doltlite = (%v, _, %v), want (nil, diag, nil)", w, err)
+	}
+	if diag == nil || diag.PreflightGate != "conditional_writes" {
+		t.Fatalf("diag = %+v, want the conditional_writes degrade diagnostic", diag)
+	}
+	if !strings.Contains(diag.PreflightReason, "revision") {
+		t.Fatalf("PreflightReason = %q, want the no-revision F2 reason", diag.PreflightReason)
+	}
+
+	store.stampConditionalWritesMode(gate.Require, false)
+	w, diag, err = ResolveConditionalWriter(store)
+	if w != nil || diag == nil || !IsConditionalWritesRequired(err) {
+		t.Fatalf("require over doltlite = (%v, %v, %v), want (nil, diag, typed refusal)", w, diag, err)
+	}
+}
+
+// TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
+// mechanism must execute a real SQLite REINDEX against the physical
+// .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
+// satisfy, since it speaks Dolt/MySQL). After the rebuild the store stays a
+// valid SQLite database whose secondary index returns correct results.
+func TestDoltliteReindexStore(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE INDEX idx_issues_status ON issues(status)`,
+		`INSERT INTO issues (id, status) VALUES ('a','open'),('b','open'),('c','closed')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	check, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer check.Close() //nolint:errcheck // test cleanup
+
+	var integrity string
+	if err := check.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q, want ok", integrity)
+	}
+
+	var openCount int
+	if err := check.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'open'").Scan(&openCount); err != nil {
+		t.Fatalf("indexed count: %v", err)
+	}
+	if openCount != 2 {
+		t.Fatalf("open issues via index = %d, want 2", openCount)
+	}
+}
+
+// reindexStaleCollSeq gives each stale-index fixture a unique collation name.
+// modernc.org/sqlite registers collations globally for the whole process, so a
+// reused name would let a prior run's closure (and its flipped ordering) leak
+// into the next, making the fixture non-deterministic under -count>1.
+var reindexStaleCollSeq atomic.Int64
+
+// TestDoltliteReindexStoreHealsStaleIndex is the regression proof ga-7hei
+// actually needs: it fails unless ReindexDoltliteStore executes a real SQLite
+// REINDEX. It builds a genuinely stale secondary index — the exact condition
+// REINDEX exists to repair, per SQLite's docs: an index built under one
+// collation definition goes stale when that definition changes. We register a
+// collation whose ordering flips after the index is populated, so the persisted
+// index is ordered per the old definition while SQLite now compares per the new
+// one. `PRAGMA integrity_check` then reports the index as corrupt, and only a
+// real REINDEX rebuilds it. Had ReindexDoltliteStore opened the database and
+// skipped db.Exec("REINDEX"), the corruption would survive and the final
+// assertion would fail — the gap the previous healthy-fixture test could not
+// catch.
+func TestDoltliteReindexStoreHealsStaleIndex(t *testing.T) {
+	collName := fmt.Sprintf("gasstalecoll%d", reindexStaleCollSeq.Add(1))
+	var reversed atomic.Bool
+	if err := sqlite.RegisterCollationUtf8(collName, func(a, b string) int {
+		c := strings.Compare(a, b)
+		if reversed.Load() {
+			return -c
+		}
+		return c
+	}); err != nil {
+		t.Fatalf("register collation: %v", err)
+	}
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+
+	// Build the index while the collation sorts ascending.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT COLLATE ` + collName + `)`,
+		`CREATE INDEX idx_issues_status ON issues(status COLLATE ` + collName + `)`,
+		`INSERT INTO issues (id, status) VALUES ('a','alpha'),('b','bravo'),('c','charlie'),('d','delta'),('e','echo')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	// Change the collation's definition. The persisted index is now ordered per
+	// the old ascending definition, but SQLite compares per the new one.
+	reversed.Store(true)
+
+	integrityCheck := func(tag string) string {
+		c, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+		if err != nil {
+			t.Fatalf("%s open: %v", tag, err)
+		}
+		defer c.Close() //nolint:errcheck // test cleanup
+		var result string
+		if err := c.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+			t.Fatalf("%s integrity_check: %v", tag, err)
+		}
+		return result
+	}
+
+	// Precondition: the fixture is genuinely stale. Without this guard, a future
+	// change that stops producing staleness would let the post-reindex "ok"
+	// assertion pass trivially, silently regressing this back to the toothless
+	// healthy-store check it strengthens.
+	if before := integrityCheck("before"); before == "ok" {
+		t.Fatalf("precondition failed: expected a stale index before reindex, got integrity_check=ok")
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	if after := integrityCheck("after"); after != "ok" {
+		t.Fatalf("integrity_check after reindex = %q, want ok (REINDEX must rebuild the stale index)", after)
+	}
+}
+
+// TestDoltliteReindexStoreRejectsNonDoltlite proves the reindex path refuses a
+// store that metadata.json does not identify as DoltLite, rather than silently
+// operating on the wrong backend.
+func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	meta := []byte(`{"backend":"dolt","database":"ga"}`)
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := ReindexDoltliteStore(dir); err == nil {
+		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
 }

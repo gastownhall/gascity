@@ -132,8 +132,11 @@ func TestBeadListAllTrueBoundsCounterStore(t *testing.T) {
 	if !store.countCalled {
 		t.Errorf("Count was not called; bounding did not engage")
 	}
-	if store.maxListLim != limit {
-		t.Errorf("max List limit = %d, want %d (page bound pushed into store)", store.maxListLim, limit)
+	// limit+1: the keyset bounded path overfetches one row as the has-more
+	// signal (Counts are un-seeked totals and cannot tell). Still O(limit),
+	// not O(history) — the property this test guards.
+	if store.maxListLim != limit+1 {
+		t.Errorf("max List limit = %d, want %d (page bound pushed into store)", store.maxListLim, limit+1)
 	}
 }
 
@@ -248,18 +251,35 @@ func TestBeadListAllTrueBoundedTotalExcludesFailedRigList(t *testing.T) {
 		t.Errorf("NextCursor empty, want a cursor (reachable Total %d > limit %d)", good, limit)
 	}
 
-	// Reachability: paging to the last window must return the final rows and
-	// stop. A Total inflated by the failed rig would emit a cursor past the 30
-	// reachable rows, so this asserts next_cursor never overshoots the data.
-	last := fetchBoundedBeads(t, fs, fmt.Sprintf("?type=molecule&all=true&limit=%d&cursor=%s", limit, encodeCursor(good-limit)))
-	if last.Total != good {
-		t.Errorf("last-page Total = %d, want %d", last.Total, good)
+	// Reachability: walking the keyset cursor chain must visit exactly the 30
+	// reachable rows and stop. A Total inflated by the failed rig used to make
+	// the offset cursor overshoot; with keyset cursors the equivalent defect
+	// would be a dangling next_cursor after the last reachable row.
+	seen := map[string]bool{}
+	cursor := body.NextCursor
+	for _, item := range body.Items {
+		seen[item.ID] = true
 	}
-	if len(last.Items) != limit {
-		t.Errorf("last-page len(Items) = %d, want %d", len(last.Items), limit)
+	pages := 1
+	for cursor != "" {
+		next := fetchBoundedBeads(t, fs, fmt.Sprintf("?type=molecule&all=true&limit=%d&cursor=%s", limit, cursor))
+		if next.Total != good {
+			t.Errorf("page %d Total = %d, want %d", pages, next.Total, good)
+		}
+		for _, item := range next.Items {
+			if seen[item.ID] {
+				t.Errorf("bead %s duplicated across pages", item.ID)
+			}
+			seen[item.ID] = true
+		}
+		cursor = next.NextCursor
+		pages++
+		if pages > 10 {
+			t.Fatal("cursor chain did not terminate (dangling next_cursor past reachable data)")
+		}
 	}
-	if last.NextCursor != "" {
-		t.Errorf("last-page NextCursor = %q, want empty (all reachable rows consumed)", last.NextCursor)
+	if len(seen) != good {
+		t.Errorf("walk reached %d distinct rows, want %d", len(seen), good)
 	}
 }
 
@@ -307,7 +327,15 @@ func TestBeadListAllTrueBoundedPartialResultRigKeepsCount(t *testing.T) {
 	if len(body.Items) != good+partial {
 		t.Errorf("len(Items) = %d, want %d (all rows incl. partial-rig survivors reachable)", len(body.Items), good+partial)
 	}
-	if body.NextCursor != "" {
-		t.Errorf("NextCursor = %q, want empty (everything fit in one page)", body.NextCursor)
+	// A degraded (partial) page always carries a resume cursor: the server
+	// cannot know whether the degraded rig withheld rows, so it hands the
+	// client a boundary instead of silently ending the walk. Following it
+	// here must terminate cleanly on an empty page.
+	if body.NextCursor == "" {
+		t.Fatalf("NextCursor empty, want a resume cursor on a partial page")
+	}
+	next := fetchBoundedBeads(t, fs, fmt.Sprintf("?type=molecule&all=true&limit=%d&cursor=%s", good+partial+10, body.NextCursor))
+	if len(next.Items) != 0 || next.NextCursor != "" {
+		t.Errorf("resume page = %d items, cursor %q; want empty page with no cursor (clean termination)", len(next.Items), next.NextCursor)
 	}
 }

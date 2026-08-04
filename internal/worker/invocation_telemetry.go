@@ -118,30 +118,48 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	transcriptProvider := strings.TrimSpace(info.ProviderKind)
-	if transcriptProvider == "" {
-		transcriptProvider = strings.TrimSpace(info.Provider)
-	}
-	// Provider-family (not role-name) gate: see the doc comment above. The
-	// normalized family keys the gate, the telemetry label, and the pricing
-	// lookup below, so the recorded provider can never drift from the family
-	// that gated the record.
-	providerFamily := invocationUsageFamily(transcriptProvider)
+	// Provider-family (not role-name) gate: see the doc comment above. Resolve
+	// through the canonical builtin_ancestor → provider_kind → provider ladder
+	// (session.ProviderFamilyFromInfo) rather than the local provider_kind →
+	// provider two-step, so a wrapped/manifold provider whose raw name does not
+	// itself contain "codex"/"claude" (e.g. "mc-codex-wrap" with builtin_ancestor
+	// "codex") still resolves to its builtin family instead of silently missing
+	// the gate. The normalized family keys the gate, the telemetry label, and the
+	// pricing lookup below, so the recorded provider can never drift from the
+	// family that gated the record — and the prompt-op seam and the
+	// controller-tick sweep resolve family identically.
+	providerFamily := invocationUsageFamilyFromInfo(info)
 	spec, ok := invocationUsageSpecs[providerFamily]
 	if !ok {
+		slog.Debug("invocation telemetry: unregistered provider family; skipping",
+			slog.String("session_id", id),
+			slog.String("provider", strings.TrimSpace(info.Provider)),
+			slog.String("provider_kind", strings.TrimSpace(info.ProviderKind)),
+			slog.String("builtin_ancestor", strings.TrimSpace(info.BuiltinAncestor)))
 		return
 	}
 	path := spec.discover(h, id, info.CreatedAt, pr.Metadata)
 	if path == "" {
+		slog.Debug("invocation telemetry: no transcript discovered; skipping",
+			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
 	usages, err := spec.extract(h.adapter, path)
-	if err != nil || len(usages) == 0 {
+	if err != nil {
+		slog.Debug("invocation telemetry: usage extraction failed; skipping",
+			slog.String("session_id", id), slog.String("provider", providerFamily), slog.Any("error", err))
+		return
+	}
+	if len(usages) == 0 {
+		slog.Debug("invocation telemetry: transcript carried no usage entries; skipping",
+			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
 	cursor := strings.TrimSpace(pr.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor])
 	pending := usagesAfterCursor(usages, cursor)
 	if len(pending) == 0 {
+		slog.Debug("invocation telemetry: no new invocations since cursor; skipping",
+			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
 
@@ -195,9 +213,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // run's model and compute facts carry the same RunID and group together in
 // gc costs. The session bead id is carried verbatim as SessionID (the join key to
 // the manifold spend plane's EIA session_id and to recall transcripts), distinct
-// from the resolved RunID and from Worker (the session name). StepID carries the
-// session's gc.active_work_bead when present, and is empty only for ad-hoc,
-// manual, or idle sessions. The dedup identity is the invocation's provider message id (or the
+// from the resolved RunID and from Worker (the session name). StepID is left
+// unset: model usage is attributed at run level, not per formula step (see the
+// StepID note in the body). The dedup identity is the invocation's provider message id (or the
 // transcript entry uuid when none), so the best-effort cursor races noted on
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
@@ -210,19 +228,19 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	// handle's currentSessionID == the session bead id); the params stay distinct
 	// so the run-chain precedence contract is preserved verbatim.
 	runID := beadmeta.ResolveRunID(meta, beadID, sessionID)
-	// The run STEP: the session's current work bead's gc.step_id, stamped at the claim
-	// hook (gc.active_work_bead). Read from the SAME session-bead snapshot as runID so
-	// StepID always names a step under this RunID. Empty when the session isn't on a
-	// formula work bead (ad-hoc/manual/idle) — run-level attribution, matching events.
-	stepID := strings.TrimSpace(meta[beadmeta.ActiveWorkBeadMetadataKey])
+	// Model usage is attributed at run level: StepID stays unset. Per-step
+	// attribution was retired along with the gc.active_work_bead session pointer —
+	// the claim hook no longer stamps it (that was an unsafe fuzzy session-bead
+	// write), so no production source names the current step. Compute facts are
+	// already run-level, so both usage Kinds now roll up per run, matching events.
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
 	}
 	return usage.Fact{
-		RunID:               runID,
-		SessionID:           strings.TrimSpace(sessionID),
-		StepID:              stepID,
+		RunID:     runID,
+		SessionID: strings.TrimSpace(sessionID),
+		// StepID intentionally unset — run-level attribution (see body note).
 		Worker:              strings.TrimSpace(worker),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),
@@ -285,6 +303,17 @@ func invocationUsageFamily(provider string) string {
 		return "codex"
 	}
 	return ""
+}
+
+// invocationUsageFamilyFromInfo resolves a session's invocation-usage family
+// through the canonical provider-family ladder (builtin_ancestor → provider_kind
+// → provider, via session.ProviderFamilyFromInfo) and then normalizes the result
+// to a registered family bucket via invocationUsageFamily. Routing through the
+// canonical ladder is what lets a wrapped/manifold provider whose raw name does
+// not itself contain "codex"/"claude" still resolve to its builtin family, so
+// the prompt-op seam and the controller-tick sweep agree on family.
+func invocationUsageFamilyFromInfo(info sessionpkg.Info) string {
+	return invocationUsageFamily(sessionpkg.ProviderFamilyFromInfo(info, ""))
 }
 
 // InvocationUsageFamily resolves the provider's invocation-usage family and
@@ -372,4 +401,281 @@ func usagesAfterCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 		}
 	}
 	return usages[len(usages)-1:]
+}
+
+// usagesSinceCursor is the end-of-interval sweep's fold: it returns every window
+// entry strictly after the cursor identity. Unlike usagesAfterCursor (the
+// prompt-op seam's conservative newest-only fallback), when the cursor is empty
+// it returns ALL window entries — the sweep's whole job is to recover the
+// interval's trailing invocations that the prompt-op seam never recorded,
+// bounded only by the extractor's tail window. When the cursor is present but
+// has scrolled out of the window it also returns all window entries: read-time
+// IdempotencyKey dedup (usage.ReadFacts) collapses any overlap with
+// already-recorded facts, so recovering the whole bounded tail cannot
+// double-count.
+func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlog.TailUsage {
+	if len(usages) == 0 {
+		return nil
+	}
+	if cursor != "" {
+		for i := len(usages) - 1; i >= 0; i-- {
+			if usageIdentity(usages[i]) == cursor {
+				return usages[i+1:]
+			}
+		}
+	}
+	return usages
+}
+
+// SweepSessionModelUsage is the controller-tick counterpart to the prompt-op
+// recordInvocationTelemetry seam: it recovers a terminal session's trailing
+// model-token usage that no prompt operation ever recorded. A pool-routed,
+// hook-self-driven agent gets one claim nudge and then self-drives, so every
+// invocation after its last prompt op — the common case for the whole awake
+// interval — would otherwise go unrecorded (documented at
+// recordInvocationTelemetry). Called beside the compute-fact emitter for each
+// session whose awake interval just ended, it discovers the session's
+// transcript, extracts per-invocation usage after the persisted invocation-usage
+// cursor, emits one model usage.Fact per new entry to the factory's usage sink
+// (and mirrors the prompt-op seam's gc.agent.tokens.* / cost OTel metrics per
+// invocation), and advances the cursor.
+//
+// It is best-effort. The returned settled reports whether the interval is fully
+// accounted for and needs no retry: true when the transcript was read (even if
+// nothing new was pending) OR the miss is permanent (unregistered family, or a
+// keyless codex session whose bounded workdir+window fallback found no unambiguous
+// rollout in a CLEAN scan — a closed session's rollout is already on disk, so that
+// miss is ambiguity/out-of-window/TZ, which no retry resolves); false when the
+// miss is transient (a keyed codex rollout not discovered yet, a keyless codex
+// scan clouded by a transient IO fault, an extraction error, or a sink Record
+// failure) so the caller should retry on a later tick. err is reserved for
+// a sink Record failure; the cursor is then advanced only through the last
+// successfully recorded entry so the retry resumes at the gap rather than
+// skipping it. Every gate is slog.Debug'd so a fleet-wide zero is attributable in
+// the field instead of silently swallowed.
+//
+// Coverage ceiling (known, intentional — do NOT widen): discovery and extraction
+// read only the extractor's bounded transcript tail (a 64KB window per family),
+// so a very long autonomous interval recovers only its final few invocations —
+// earlier model/cost facts of that interval are lost. Widening the tail re-opens
+// the unbounded-scan and misattribution risks that bound exists to prevent;
+// fuller recovery is a separate, deliberate change.
+//
+// Overlap with the prompt-op seam is safe: both stamp usage.ModelIdempotencyKey,
+// which usage.ReadFacts collapses, so an invocation recorded by both beats folds
+// to one fact. meta is the fresh session-bead metadata (RunID resolution,
+// the session_key, work dir, and cursor all read from it), and now stamps the
+// emitted facts.
+func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return 0, true, nil
+	}
+	sink := f.usageSink
+	if sink == nil || sink == usage.Discard {
+		return 0, true, nil
+	}
+	// Canonical builtin_ancestor → provider_kind → provider ladder, normalized to
+	// a registered family bucket — the metadata twin of invocationUsageFamilyFromInfo,
+	// so the sweep and the prompt-op seam never disagree on family.
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		// Permanent: an unregistered family will never gain an extractor by retrying.
+		slog.Debug("model-usage sweep: unregistered provider family; skipping",
+			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
+		return 0, true, nil
+	}
+	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
+	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	if keylessCodex && !scanClean {
+		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
+		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
+		// scan whether or not a path was found: an empty result may have hidden the
+		// only rollout, and a lone hit may have hidden a second same-cwd, in-window
+		// rollout that would make it ambiguous. Either way the result is
+		// non-definitive, so record nothing and leave the interval unsettled for a
+		// later, unclouded tick; the recently-closed sweep window bounds the retries.
+		slog.Debug("model-usage sweep: keyless codex workdir scan hit a transient IO fault; will retry",
+			slog.String("session_id", id))
+		return 0, false, nil
+	}
+	if path == "" {
+		if keylessCodex {
+			// Clean miss: a terminal session's rollout is written at codex start and is
+			// already on disk, so a clean zero/ambiguous match is ambiguity, an
+			// out-of-window filename timestamp, or a TZ-shifted filename — none of which
+			// a retry resolves. Settle so the whole recently-closed window is not
+			// re-swept every tick. (A keyed miss below stays transient: its keyed
+			// rollout may simply not be flushed yet.)
+			slog.Debug("model-usage sweep: keyless codex workdir fallback found no rollout; settling",
+				slog.String("session_id", id))
+			return 0, true, nil
+		}
+		// Transient: the rollout may not be flushed yet at interval end, so leave the
+		// interval unsettled for a retry on a later tick.
+		slog.Debug("model-usage sweep: no transcript discovered; will retry",
+			slog.String("session_id", id), slog.String("provider", family))
+		return 0, false, nil
+	}
+	usages, extractErr := f.Adapter().InvocationUsage(family, path)
+	if extractErr != nil {
+		// Transient: a torn mid-write tail can fail the parse; retry on a later tick.
+		slog.Debug("model-usage sweep: usage extraction failed; will retry",
+			slog.String("session_id", id), slog.String("provider", family), slog.Any("error", extractErr))
+		return 0, false, nil
+	}
+	cursor := strings.TrimSpace(meta[sessionpkg.MetadataKeyInvocationUsageCursor])
+	pending := usagesSinceCursor(usages, cursor)
+	if len(pending) == 0 {
+		// Swept: the transcript was read and the cursor is already current.
+		return 0, true, nil
+	}
+	registry := f.pricing
+	if registry == nil {
+		registry = defaultPricingRegistry()
+	}
+	workerName := strings.TrimSpace(meta["session_name"])
+	agentName := sweepAgentName(meta)
+	lastRecorded := ""
+	for _, u := range pending {
+		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{
+			PromptTokens:        u.InputTokens,
+			CompletionTokens:    u.OutputTokens,
+			CacheReadTokens:     u.CacheReadTokens,
+			CacheCreationTokens: u.CacheCreationTokens,
+		})
+		// Mirror the prompt-op seam's OTel metrics so the agents this sweep recovers
+		// facts for also get live gc.agent.tokens.* / cost series — the family keys
+		// the label identically to the emitted fact's Provider so metrics and facts
+		// agree. Metrics fire before the sink write: they must be recorded even if the
+		// sink Record below fails.
+		labels := telemetry.InvocationLabels{
+			AgentName: agentName,
+			Model:     u.Model,
+			Provider:  family,
+		}
+		telemetry.RecordInvocationTokens(ctx, labels,
+			int64(u.InputTokens), int64(u.OutputTokens),
+			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
+		if priced {
+			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		}
+		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now)
+		if recErr := sink.Record(ctx, fact); recErr != nil {
+			// Stop at the first failure and advance the cursor only through the last
+			// success, so the next sweep resumes here instead of skipping the gap.
+			err = recErr
+			break
+		}
+		emitted++
+		lastRecorded = usageIdentity(u)
+	}
+	if lastRecorded != "" {
+		if cursorErr := f.manager.PersistInvocationUsageCursor(id, lastRecorded); cursorErr != nil {
+			slog.Debug("model-usage sweep: persisting invocation usage cursor failed; next sweep may re-record",
+				slog.String("session_id", id), slog.Any("error", cursorErr))
+		}
+	}
+	// Settled only when the whole pending batch reached the sink: a sink Record
+	// failure (err != nil) leaves the interval unsettled so the caller retries the
+	// remainder — the cursor advanced only through the last success, and the
+	// IdempotencyKey collapses any already-recorded fact on the retry.
+	return emitted, err == nil, err
+}
+
+// discoverSweepTranscript resolves the transcript for the end-of-interval model
+// sweep: claude through the manager's keyed lookup, codex through the captured
+// session_key matched against the rollout filename suffix. The codex lookup is
+// bounded to the awake interval's day window via
+// sessionlog.FindCodexSessionFileByID(notBefore=awake_started_at,
+// notAfter=slept_at||now) — NOT the unbounded date-tree walk — because this runs
+// on the SYNCHRONOUS controller reconcile tick, where a full codex-history scan
+// per terminal session per tick could stall the tick. FindCodexSessionFileByID
+// still resolves resumed sessions whose rollout predates this interval: the
+// keyed lookup also scans the session UUID's own creation day (UUIDv7 hint ±2
+// days), which is where a resumed rollout was first written.
+//
+// A codex session with NO captured session_key — the graph.v2 wisp case, where
+// no capture path ever ran — falls back to sessionlog.FindCodexSessionFileNear,
+// the SAME bounded (cwd, wake-window) lookup the prompt-op seam runs for
+// fresh-wake keyless codex (discoverCodexInvocationTranscript). It is anchored at
+// the interval START (awake_started_at) with the same fixed
+// codexInvocationDiscoveryWindow, NOT the interval span: a rollout's filename
+// timestamp is the codex START (≈ the interval start), not its end, so a small
+// forward window catches a fresh wisp's rollout while keeping the scan to ~one day
+// directory — the interval span could be days for a long-awake session or a stale
+// slept_at, re-opening the unbounded-scan risk this bound exists to prevent. Wisps
+// run in per-wisp worktrees, so the session_meta cwd disambiguates on its own;
+// FindCodexSessionFileNear still REFUSES ambiguity (more than one in-window rollout
+// under the same cwd yields "") so a reused workdir records nothing rather than
+// misattributing.
+//
+// The returned scanClean is meaningful only for the keyless-codex fallback: it is
+// false when the (cwd, wake-window) scan hit a transient IO fault (a non-ENOENT
+// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds BOTH an empty
+// path (a miss that may have hidden the only rollout) AND a lone hit (a fault may
+// have hidden a second same-cwd rollout, making the singleton non-definitive), so
+// the caller retries rather than recording or settling either. The keyed codex
+// lookup and the claude manager lookup return scanClean true, which the caller
+// does not consult.
+func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool) {
+	switch family {
+	case "codex":
+		workDir := contract.WorkerDirFromMetadata(meta)
+		notBefore, notAfter := sweepIntervalWindow(meta, now)
+		if key := strings.TrimSpace(meta["session_key"]); key != "" {
+			return sessionlog.FindCodexSessionFileByID(
+				f.searchPaths, workDir, key, notBefore, notAfter), true
+		}
+		// Keyless fallback (Design B): resolve by cwd + wake window. Requires a
+		// workdir to key on and a non-zero interval start to anchor the window;
+		// without either, FindCodexSessionFileNear cannot bound its scan and the
+		// sweep records nothing — a clean, permanent miss.
+		if workDir == "" || notBefore.IsZero() {
+			slog.Debug("model-usage sweep: keyless codex has no workdir/anchor for fallback; skipping",
+				slog.String("session_id", id))
+			return "", true
+		}
+		return sessionlog.FindCodexSessionFileNearScan(
+			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
+	default:
+		path, terr := f.manager.TranscriptPath(id, f.searchPaths)
+		if terr != nil {
+			return "", true
+		}
+		return strings.TrimSpace(path), true
+	}
+}
+
+// sweepAgentName resolves the metric AgentName label for a swept session from
+// its metadata, mirroring the prompt-op seam's agent_name → alias → session_name
+// fallback so the gc.agent.tokens.* series carry the same identity from either
+// emission beat.
+func sweepAgentName(meta map[string]string) string {
+	for _, k := range []string{"agent_name", "alias", "session_name"} {
+		if v := strings.TrimSpace(meta[k]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// sweepIntervalWindow derives the codex discovery date window from a terminal
+// session's awake interval: [awake_started_at, slept_at]. When slept_at is
+// missing or not after the start (stale for non-sleep terminal states), it falls
+// back to now as the interval end, so notAfter is always set and never reversed —
+// FindCodexSessionFileByID requires a non-zero notAfter and refuses a reversed
+// range. The finder pads both ends by a local day, so an off-by-seconds bound
+// cannot drop the rollout's day directory.
+func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notAfter time.Time) {
+	notAfter = now
+	if started, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["awake_started_at"])); err == nil {
+		notBefore = started
+	}
+	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
+		if slept, err := time.Parse(time.RFC3339, sleptRaw); err == nil && slept.After(notBefore) {
+			notAfter = slept
+		}
+	}
+	return notBefore, notAfter
 }

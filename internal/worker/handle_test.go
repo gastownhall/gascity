@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1847,6 +1848,183 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 	}
 	if got := len(repeat.Entries); got != 4 {
 		t.Fatalf("len(History(repeat).Entries) = %d, want stable stitched length 4", got)
+	}
+}
+
+func TestSessionHandleHistoryRetainsStitchedHistoryAcrossPostRotationRewrite(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixture(t, firstTranscript, "before-session", []string{
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"remember alpha"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"remembered alpha"}`,
+	})
+	firstTime := time.Now().Add(-3 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileGeminiTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "gemini",
+		WorkDir:  workDir,
+		Provider: "gemini",
+	})
+	handle.adapter.SearchPaths = []string{searchRoot}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if _, err := handle.History(context.Background(), HistoryRequest{}); err != nil {
+		t.Fatalf("History(before rotation): %v", err)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixture(t, secondTranscript, "after-session", []string{
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"recall the earlier phrase"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"alpha"}`,
+	})
+	secondTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	stitched, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after rotation): %v", err)
+	}
+	if got := len(stitched.Entries); got != 4 {
+		t.Fatalf("len(History(after rotation).Entries) = %d, want stitched length 4", got)
+	}
+
+	// A post-rotation turn appends to the SECOND transcript, advancing its
+	// generation (new size + mtime). The retained snapshot reports the second
+	// stream ID but still carries the stitched pre-rotation entries from the
+	// first file, so it must not take the same-stream in-place replacement path
+	// — that path is only for a genuine single-file rewrite. Dropping u1,a1 here
+	// is the post-rotation history-loss regression.
+	writeGeminiHistoryFixture(t, secondTranscript, "after-session", []string{
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"recall the earlier phrase"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"alpha"}`,
+		`{"id":"a3","timestamp":"2026-04-17T03:16:00Z","type":"gemini","content":"still alpha"}`,
+	})
+	thirdTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, thirdTime, thirdTime); err != nil {
+		t.Fatalf("chtimes(second transcript rewrite): %v", err)
+	}
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(post-rotation generation): %v", err)
+	}
+	if after.TranscriptStreamID != secondTranscript {
+		t.Fatalf("History(post-rotation).TranscriptStreamID = %q, want %q", after.TranscriptStreamID, secondTranscript)
+	}
+	if got := len(after.Entries); got != 5 {
+		t.Fatalf("len(History(post-rotation).Entries) = %d, want 5 with pre-rotation history preserved", got)
+	}
+	if after.Entries[0].Text != "remember alpha" || after.Entries[1].Text != "remembered alpha" {
+		t.Fatalf("History(post-rotation).Entries[:2] = %+v, want preserved pre-rotation history", after.Entries[:2])
+	}
+	if after.Entries[2].Text != "recall the earlier phrase" || after.Entries[3].Text != "alpha" {
+		t.Fatalf("History(post-rotation).Entries[2:4] = %+v, want resumed transcript tail", after.Entries[2:4])
+	}
+	if after.Entries[4].Text != "still alpha" {
+		t.Fatalf("History(post-rotation).Entries[4].Text = %q, want appended post-rotation turn", after.Entries[4].Text)
+	}
+}
+
+func TestSessionHandleHistoryTreatsSameGeminiTranscriptRewriteAsReplacement(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatalf("mkdir chatsDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	transcriptPath := filepath.Join(chatsDir, "session-2026-04-17T03-12.json")
+	writeGeminiHistoryFixture(t, transcriptPath, "provider-conversation", []string{
+		`{"id":"a","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"cached a"}`,
+		`{"id":"b","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"cached b"}`,
+	})
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(transcriptPath, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(initial transcript): %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileGeminiTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "gemini",
+		WorkDir:  workDir,
+		Provider: "gemini",
+	})
+	handle.adapter.SearchPaths = []string{searchRoot}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	before, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(before rewrite): %v", err)
+	}
+	if got := historyEntryIDs(before); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("History(before rewrite) IDs = %v, want [a b]", got)
+	}
+
+	writeGeminiHistoryFixture(t, transcriptPath, "provider-conversation", []string{
+		`{"id":"x","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"replacement x"}`,
+		`{"id":"y","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"replacement y"}`,
+	})
+	secondTime := firstTime.Add(time.Minute)
+	if err := os.Chtimes(transcriptPath, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(rewritten transcript): %v", err)
+	}
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after rewrite): %v", err)
+	}
+	if after.TranscriptStreamID != before.TranscriptStreamID {
+		t.Fatalf("TranscriptStreamID changed across same-path rewrite: before %q after %q", before.TranscriptStreamID, after.TranscriptStreamID)
+	}
+	if after.LogicalConversationID != before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID changed across rewrite: before %q after %q", before.LogicalConversationID, after.LogicalConversationID)
+	}
+	if after.Generation.ID == before.Generation.ID {
+		t.Fatalf("Generation.ID = %q before and after rewrite, want changed generation", after.Generation.ID)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"x", "y"}) {
+		t.Fatalf("History(after rewrite) IDs = %v, want authoritative replacement [x y]", got)
 	}
 }
 

@@ -96,3 +96,52 @@ func TestDoSling_Reassign_PreservesNonInProgressStatus(t *testing.T) {
 		t.Errorf("Status = %q, want blocked (reopen must only apply to in_progress beads)", got.Status)
 	}
 }
+
+// TestDoSling_ReassignFormula_DoesNotReopenCollidingBead is the regression
+// guard for the standalone formula + --reassign hazard. LaunchFormula forwards
+// Reassign and sets BeadOrFormula to the formula NAME (not a bead ID), and
+// pre-flight runs the reassign reopen before the IsFormula dispatch. Without
+// the shouldReopenForReassign guard, reopenForReassign was called on that name,
+// so a bead whose ID happened to equal the formula name was silently
+// cleared/reopened — disrupting work another actor had already claimed. A
+// standalone formula launch must never touch a same-named bead.
+func TestDoSling_ReassignFormula_DoesNotReopenCollidingBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	// Seed a bead whose ID collides with the "code-review" formula name and put
+	// it in the order-claimed state (status=in_progress, assignee set) that
+	// reopenForReassign would otherwise clear.
+	deps.Store = seededStore("code-review")
+	inProgress, orderActor := "in_progress", "order:mol-dog-jsonl"
+	if err := deps.Store.Update("code-review", beads.UpdateOpts{Status: &inProgress, Assignee: &orderActor}); err != nil {
+		t.Fatalf("Update colliding bead to order-claimed state: %v", err)
+	}
+
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+		Reassign:      true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling formula launch with --reassign: %v", err)
+	}
+	if result.Method != "formula" {
+		t.Errorf("Method = %q, want formula (standalone formula launch)", result.Method)
+	}
+
+	got, err := deps.Store.Get("code-review")
+	if err != nil {
+		t.Fatalf("store.Get(code-review): %v", err)
+	}
+	if got.Assignee != orderActor {
+		t.Errorf("Assignee = %q, want %q — a standalone formula launch must not reopen a bead sharing the formula name", got.Assignee, orderActor)
+	}
+	if got.Status != "in_progress" {
+		t.Errorf("Status = %q, want in_progress — a standalone formula launch must not reopen a bead sharing the formula name", got.Status)
+	}
+}

@@ -1,8 +1,94 @@
 # herdr as a gascity runtime provider — feasibility & interface mapping
 
-**Status:** IMPLEMENTED & conformance-passing (branch `feat/herdr-runtime-provider`).
+**Status:** IMPLEMENTED & conformance-passing. **Rewritten 2026-07-26 for herdr ≥0.7.5
+— read the section below first; everything under "Implemented (2026-06-29)" describes
+the 0.7.1–0.7.3 CLI, which no longer exists.**
 
-## Implemented (2026-06-29)
+## Rewrite for herdr ≥0.7.5 (2026-07-26) — REQUIRED READING
+
+herdr 0.7.4/0.7.5 (brew auto-update) broke the original adapter FOUR ways and produced
+the unbounded pane/shell spawn storm of 2026-07-23/25 (496 stray shells, proc-table
+exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten on
+`feat/mysql-first-class-backend`; this section is the authoritative design.
+
+### What herdr changed
+
+1. **0.7.4 clears agent names on occupant change.** "Names are cleared when the occupant
+   exits, is released, or is replaced." claude's shell→TUI boot handoff replaces the
+   occupant, so every name-keyed lookup (`agent get/list`) went dark on a LIVE agent:
+   `IsRunning` false → reconciler re-Starts every tick → each wrongful Start leaked
+   placement panes. This was the 0.7.4 storm mechanism.
+2. **0.7.5 redesigned `agent start` entirely.** It now launches a supported agent
+   *kind*'s canonical executable into an EXISTING shell pane and blocks until the TUI is
+   detected (`agent start <name> --kind <K> --pane <ID> [--timeout ms] [-- args…]`).
+   `--no-focus/--tab/--cwd/--env` and arbitrary-argv exec are GONE — every old-style
+   Start failed AFTER placement had created a tab + shell pane, which then leaked per
+   tick (the 0.7.5 storm mechanism). cwd/env are now pane properties, set at
+   `workspace/tab create --cwd --env`.
+3. **0.7.5 enforces agent-name rules**: `^[a-z][a-z0-9_-]{0,31}$`. gc session names
+   carry rig names verbatim (`Indigo--anthony`) and can exceed 32 chars → every such
+   start rejected with `invalid_agent_name` on every tick.
+4. **Assorted surface changes:** `agent read`/`pane read` print raw text (no JSON
+   envelope); error codes are now `agent_not_found`/`pane_not_found`/`agent_pane_busy`
+   (`agent_name_taken` survives); `agent wait` takes `--until` (was `--status`); new
+   `agent prompt <target> <text>` types+submits through herdr's own prompt machinery;
+   agent verbs accept a pane id as target; herdr **persists the session layout on disk**
+   and restores every tab/pane on server start.
+
+### The design
+
+- **Pane binding is the stable handle** (`panebinding.go`). Start persists pane/tab/
+  workspace ids, launch mode, exact session name, and a timestamp in the meta sidecar
+  (`GC_HERDR_*` keys). All name→pane resolution funnels through `resolveBinding`:
+  registry name first (mapped via `herdrAgentName`), then the sidecar binding verified
+  by a live `pane process-info` probe. Confirmed-gone panes clear the binding (pane ids
+  recycle); transport errors clear nothing.
+- **Launch modes** (`launchspec.go`): a clean invocation of a supported kind (claude,
+  codex, …; no shell metachars) goes through `agent start --kind` after waiting for the
+  pane's shell prompt (rc-init spawns foreground children; `agent_pane_busy` retries
+  back off 1s/2s/4s because herdr's own prompt detection lags the process table).
+  Everything else is typed into the pane as `exec /bin/sh -c <cmd>` so the pane dies
+  with the command (tmux parity), waiting until the wrapper (or an exec'd root) is
+  observed running. Empty command = the pane's shell IS the session.
+- **Mode-aware liveness**: a busy pane (foreground child, or root that is no longer a
+  shell) always reads running. A `bindModeAgent` pane at a bare prompt past a 3-minute
+  launch grace means the agent EXITED — it is **reaped** (pane closed, binding cleared):
+  nothing else ever removes an ephemeral wisp's pane (unique tab label ⇒ no future
+  Start recycles it; not-running ⇒ no Stop is issued), which leaked one zsh per
+  completed wisp. A `bindModeShell` pane runs while it exists.
+- **Start ordering matters**: the sidecar is seeded from cfg.Env AND provisionally
+  bound BEFORE the (now seconds-long) launch — reconcile ticks that fire mid-boot read
+  both stores, and an unseeded sidecar makes the ownership check roll the fresh runtime
+  back ("live runtime belongs to another session"). The binding is re-persisted after
+  launch (adoption may land on the holder's pane).
+- **Placement** (`ensurePlacement`): find-or-create workspace; close EVERY stale tab
+  carrying the session's label; create the tab with cwd+env baked into its root shell
+  pane — that root pane is the agent's pane (there is no stray pane to close anymore).
+- **Names** (`agentname.go`): `herdrAgentName` maps gc names deterministically
+  (lowercase, charmap to `-`, 24-char head + fnv32 hash beyond 32). The sidecar's
+  exact-name record is the reverse map; `ListRunning` enumerates bound sessions first
+  and appends unmapped (foreign) registry agents.
+- **Delivery**: `deliverNudge` targets the pane id via native `agent prompt`
+  (registered agents), falling back to paste+Enter for unregistered panes.
+  `WaitForIdle` uses `agent wait --until idle`. `Peek` reads via `pane read`.
+
+### Operational gotchas (learned in production, 2026-07-26)
+
+- herdr **restores the saved layout** (`~/.config/herdr/sessions/<name>/session.json`)
+  on server start — after a storm or provider era, archive/delete it or you boot into
+  dozens of stale panes (the reaper cleans bound ones; foreign ones need `pane close`).
+- The herdr server dies with the supervisor's process group on
+  `launchctl kickstart -k` — expect a server restart + layout restore + re-adoption
+  wave after supervisor restarts.
+- `gc rig suspend` holds pack agents but NOT city.toml `[[named_session]]`s pointing at
+  the rig; those respawn (mode=always) until their mode changes or the rig's sessions
+  are closed.
+- Verification history: unit suite runs against a fake-0.7.5 shell-script herdr
+  (`panebinding_provider_test.go`); live tests cover occupant swap, raw sessions, a
+  real claude kind-path boot, and the full provider conformance suite. Production
+  soak results live on bead az-405.
+
+## Implemented (2026-06-29) — PRE-0.7.5, historical
 `internal/runtime/herdr/`: `client.go` (herdr CLI client), `provider.go` (the full
 `runtime.Provider` + `ServerLifecycleProvider`), `capabilities.go` (`IdleWaitProvider` →
 native `agent wait`, `ImmediateNudgeProvider`), `provider_live_test.go` +

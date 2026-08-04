@@ -16,6 +16,7 @@ const STATUS_LABEL: Record<RunNodeStatus, string> = {
   failed: 'failed',
   blocked: 'blocked',
   skipped: 'skipped',
+  canceled: 'canceled',
 };
 
 export function FormulaRunNode({ node, selected, onToggle }: FormulaRunNodeProps) {
@@ -142,6 +143,7 @@ function statusClassFor(status: RunNodeStatus): string {
       return 'text-fg-muted';
     case 'pending':
     case 'skipped':
+    case 'canceled':
       return 'text-fg-faint';
   }
 }
@@ -159,6 +161,8 @@ function statusGlyph(status: RunNodeStatus): string {
       return '!';
     case 'skipped':
       return '∅';
+    case 'canceled':
+      return '⊘';
     case 'pending':
     case 'ready':
       return '·';

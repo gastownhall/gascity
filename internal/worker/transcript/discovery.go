@@ -40,8 +40,22 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return ""
 	}
 	switch sessionlog.ProviderFamily(provider) {
+	case "auggie":
+		return sessionlog.FindAuggieSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "amp":
+		return sessionlog.FindAmpSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "copilot":
+		return sessionlog.FindCopilotSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "codex":
 		return sessionlog.FindCodexSessionFileByIDNoWindow(searchPaths, workDir, gcSessionID)
+	case "cursor":
+		return sessionlog.FindCursorSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "grok":
+		return sessionlog.FindGrokSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "kiro":
+		return sessionlog.FindKiroSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "gemini":
+		return sessionlog.FindGeminiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "kimi":
 		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "pi":
@@ -69,7 +83,22 @@ func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID s
 	if sessionID != "" && family == "pi" {
 		return ""
 	}
+	if sessionID != "" && family == "codex" {
+		return ""
+	}
 	if sessionID != "" && family == "antigravity" && !isProvisionalGCSessionID(sessionID) {
+		return ""
+	}
+	if sessionID != "" && family == "amp" {
+		return ""
+	}
+	if sessionID != "" && family == "auggie" {
+		return ""
+	}
+	if sessionID != "" && family == "grok" {
+		return ""
+	}
+	if sessionID != "" && family == "cursor" {
 		return ""
 	}
 	if sessionID != "" && SupportsIDLookup(provider) {
@@ -101,17 +130,18 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // a resume would reattach to is present on disk, and whether this provider
 // exposes a keyed transcript that can be probed on disk at all.
 //
-// probeable is true only for provider families that store a transcript keyed by
-// the gc session id, so that its absence on disk is a reliable stale-resume
-// signal: claude (and claude-eco), kimi, and pi. It is false for providers that
-// discover transcripts by cwd/date (codex/gemini/opencode/mimocode), for unknown or
-// custom providers whose layout we cannot assume, and when no session key or
-// work dir is supplied — callers should leave such sessions' resume metadata
-// untouched rather than guess. When probeable is true, exists reports whether
-// the keyed transcript file was found. The per-provider readers reached through
-// DiscoverKeyedPath merge their own default roots on top of searchPaths, so
-// claude/kimi/pi each probe their real on-disk location even when given only
-// the claude default search root.
+// probeable is true only for provider families where a missing keyed transcript
+// is a reliable stale-resume signal. Some providers, including Codex, support
+// keyed transcript discovery for display but are intentionally excluded here
+// because absence on disk is not yet used as a resume-key invalidation signal
+// for that provider. Unknown or custom providers whose layout we cannot assume,
+// and calls missing a session key or work dir, are also not probeable; callers
+// should leave such sessions' resume metadata untouched rather than guess. When
+// probeable is true, exists reports whether the keyed transcript file was
+// found. The per-provider readers reached through DiscoverKeyedPath merge their
+// own default roots on top of searchPaths, so known probeable providers each
+// probe their real on-disk location even when given only a partial configured
+// search root.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
 	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
 		return false, false
@@ -119,15 +149,16 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
 }
 
-// providerHasKeyedTranscript reports whether the provider family persists a
-// per-session transcript keyed by the gc session id. This is stricter than
-// SupportsIDLookup (which treats any non-codex/gemini/opencode/mimocode
-// provider as id-capable for discovery-strategy purposes): here we only claim a provider
-// when we actually know its on-disk keyed layout, so the stale-resume guard
-// never clears a resume key for a provider whose transcript we cannot verify.
+// providerHasKeyedTranscript reports whether the provider family can use keyed
+// transcript absence as a stale-resume signal. This is stricter than
+// SupportsIDLookup, which only answers whether transcript display lookup can
+// use a provider session id. Here we only claim a provider when its keyed
+// transcript absence is meaningful for resume-key invalidation, so the
+// stale-resume guard never clears a resume key for a provider whose restart
+// semantics we have not verified.
 func providerHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "kimi", "pi", "antigravity":
+	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true
 	}
 	// claude and claude-eco fall through ProviderFamily unchanged; match them

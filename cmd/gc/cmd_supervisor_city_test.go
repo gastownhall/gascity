@@ -22,6 +22,98 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
+// withControllerAlive overrides the standalone-controller probe so the
+// registration-rejection tests exercise the reject path deterministically,
+// without depending on a real socket-accept handshake winning a race against
+// controllerAlive's read deadline under parallel/high-load runs (#3847). The
+// real probe mechanics stay covered by controller_test.go.
+func withControllerAlive(t *testing.T, pid int) {
+	t.Helper()
+	withControllerHosting(t, pid, controllerHostingStandalone)
+}
+
+func withControllerHosting(t *testing.T, pid int, hostingMode controllerHostingMode) {
+	t.Helper()
+	prev := controllerIdentityHook
+	controllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: pid, HostingMode: hostingMode}
+	}
+	t.Cleanup(func() { controllerIdentityHook = prev })
+}
+
+func TestEnsureNoStandaloneControllerAcceptsSupervisorHostedController(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingSupervisor)
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerRecognizesLegacySupervisorPID(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+	oldSupervisorAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() { supervisorAliveHook = oldSupervisorAlive })
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) {
+	cityPath := t.TempDir()
+	gcDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	defer lock.Close() //nolint:errcheck // test cleanup
+	withControllerHosting(t, 0, controllerHostingUnknown)
+
+	pid, err := ensureNoStandaloneController(cityPath)
+	if !errors.Is(err, errControllerHostingUnknown) {
+		t.Fatalf("ensureNoStandaloneController error = %v, want unknown hosting", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0 without a responding controller", pid)
+	}
+}
+
+func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+
+	var stdout, stderr bytes.Buffer
+	if code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true); code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
+		t.Fatalf("stderr = %q, want unknown-hosting diagnostic without standalone label", got)
+	}
+	if !strings.Contains(got, "gc stop ") {
+		t.Fatalf("stderr = %q, want an actionable 'gc stop' remedy", got)
+	}
+	if want := supervisorRetryCommand("gc start", cityPath); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want retry command %q", got, want)
+	}
+}
+
 //nolint:unparam // tests override hook behavior but keep fixed timeout/poll values for determinism
 func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer) int, reload func(stdout, stderr io.Writer) int, alive func() int, running func(string) (bool, string, bool), timeout, poll time.Duration) {
 	t.Helper()
@@ -42,7 +134,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorAliveHook = alive
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
-	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
 	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
@@ -240,7 +332,7 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenReloadFails(t *testing.T
 			reloads++
 			return 1
 		},
-		func() int { return 4242 },
+		func() int { return 0 },
 		func(string) (bool, string, bool) { return false, "", true },
 		20*time.Millisecond,
 		time.Millisecond,
@@ -705,25 +797,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	var stdout, stderr bytes.Buffer
 	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true)
@@ -867,25 +942,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerForStoppedManagedC
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,
@@ -985,25 +1043,8 @@ func TestRegisterCityWithSupervisorRejectsStandaloneControllerDuringSupervisorSt
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // test cleanup
-
-	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close() //nolint:errcheck // test cleanup
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "ping") {
-			conn.Write([]byte("4242\n")) //nolint:errcheck // best-effort reply
-		}
-	}()
+	// Inject the standalone-controller probe (PID 4242) — no live socket (#3847).
+	withControllerAlive(t, 4242)
 
 	withSupervisorTestHooks(
 		t,
@@ -1186,8 +1227,7 @@ name = "bright-lights"
 }
 
 func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+	useTempSupervisorCityHome(t)
 
 	cityPath := filepath.Join(t.TempDir(), "force-city")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -1266,6 +1306,59 @@ func TestUnregisterCityFromSupervisorWithForceSendsForceStop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for force controller command")
 	}
+}
+
+func TestUnregisterCityFromSupervisorWithForceKeepsRegistrationAfterAmbiguousStop(t *testing.T) {
+	useTempSupervisorCityHome(t)
+
+	cityPath := filepath.Join(t.TempDir(), "force-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"force-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "force-city"); err != nil {
+		t.Fatal(err)
+	}
+	commands := startStandaloneControllerWithReply(t, cityPath, nil)
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisorWithForce(cityPath, &stdout, &stderr, "gc stop", true)
+	if !handled || code != 1 {
+		t.Fatalf("unregisterCityFromSupervisorWithForce = (%t, %d), want (true, 1); stderr=%q", handled, code, stderr.String())
+	}
+	select {
+	case command := <-commands:
+		if command != "stop-force" {
+			t.Fatalf("controller command = %q, want stop-force", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for force controller command")
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registered {
+		t.Fatal("city was unregistered after ambiguous controller stop")
+	}
+}
+
+func useTempSupervisorCityHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
 }
 
 func TestUnregisterCityFromSupervisorSkipsProbesWhenCityDirMissing(t *testing.T) {
@@ -1867,6 +1960,10 @@ shutdown_timeout = "100ms"
 
 	if pid := controllerAlive(canonicalTestPath(cityPath)); pid == 0 {
 		t.Fatal("controller socket exists but does not respond to ping")
+	}
+	identity := probeControllerIdentity(canonicalTestPath(cityPath))
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("controller identity = %+v, want PID %d hosted by supervisor", identity, os.Getpid())
 	}
 
 	// Verify convergence commands are routed through the event loop.
@@ -2791,5 +2888,26 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 	}
 	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
 		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
+	}
+}
+
+func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	realCity := filepath.Join(root, "real-city")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-city")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got, err := normalizeRegisteredCityPath(link)
+	if err != nil {
+		t.Fatalf("normalizeRegisteredCityPath(%q): %v", link, err)
+	}
+	want := normalizePathForCompare(realCity)
+	if got != want {
+		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
 	}
 }

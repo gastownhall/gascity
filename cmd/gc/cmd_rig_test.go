@@ -1093,9 +1093,9 @@ func TestDoRigListJSONBuildsSessionProviderOnce(t *testing.T) {
 
 	var calls int
 	orig := rigListSessionProvider
-	rigListSessionProvider = func() runtime.Provider {
+	rigListSessionProvider = func() (runtime.Provider, error) {
 		calls++
-		return &fakeAdoptionProvider{}
+		return &fakeAdoptionProvider{}, nil
 	}
 	t.Cleanup(func() { rigListSessionProvider = orig })
 
@@ -3182,6 +3182,12 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 
 func TestRouteRigList_APIJSONPreservesFallbackContract(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
+	// This test exercises the render/fallback contract, not liveness. HQ running
+	// now derives from controllerStatusForCity (false with no live controller),
+	// so pin the seam true to keep asserting the API-render shape.
+	prevHQRunning := rigListHQRunning
+	rigListHQRunning = func(string) bool { return true }
+	defer func() { rigListHQRunning = prevHQRunning }()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

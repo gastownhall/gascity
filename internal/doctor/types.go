@@ -101,4 +101,9 @@ type CheckResult struct {
 	FixAttempted bool
 	// Fixed is true when --fix successfully remediated the issue.
 	Fixed bool
+	// TimedOut is true when the check exceeded the doctor's per-check
+	// timeout and was abandoned. The check's real outcome is unknown:
+	// the runner reports StatusError/SeverityAdvisory so the run keeps
+	// going without gating automation on an unfinished check.
+	TimedOut bool
 }

@@ -176,10 +176,14 @@ Notes per trigger:
   day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
   Unlike cooldown it hits the same wall-clock times every day. Fires at most
   once per minute.
-- **`condition`** — the orchestrator runs `sh -c "<check>"` with a 10-second
-  timeout each tick. Use it for external state: check a file, ping an endpoint,
-  query a database. The check runs synchronously, so a slow one delays the rest
-  of the tick — keep it fast.
+- **`condition`** — the orchestrator runs `sh -c "<check>"` each tick, bounded by
+  the order's `check_timeout` (a positive Go duration, default `10s`). This is
+  separate from `timeout`, which bounds the dispatched formula/exec rather than
+  the check. Use it for external state: check a file, ping an endpoint, query a
+  database. The check runs synchronously, so a slow one delays the rest of the
+  tick — keep it fast, or raise `check_timeout` when a check must query a slow
+  store (a check killed by its deadline never proves its condition, so the order
+  would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
   processed twice.

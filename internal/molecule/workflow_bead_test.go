@@ -48,6 +48,14 @@ func TestWorkflowStatus(t *testing.T) {
 			},
 			want: "skipped",
 		},
+		{
+			name: "closed canceled is canceled",
+			bead: beads.Bead{
+				Status:   "closed",
+				Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled},
+			},
+			want: "canceled",
+		},
 		// Full coverage of the remaining switch arms.
 		{
 			name: "in_progress assigned is active",

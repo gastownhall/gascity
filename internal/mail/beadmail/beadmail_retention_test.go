@@ -364,6 +364,100 @@ func TestIsMessageBead(t *testing.T) {
 	}
 }
 
+// TestRetentionSweptReadMailStaysAddressableUntilPurge pins the boundary between
+// system-aged mail and user-removed mail through the Provider surface. The
+// always-on nudge-mail watchdog closes read mail past its TTL (stamping
+// RetentionSweepCloseReason) and PurgeReadMessageWisps deletes it later; during
+// that closed-but-not-purged window the message must stay addressable by direct
+// ID, matching pre-sweep behavior, so a caller holding the message ID still
+// resolves it. Only a message bead closed for a non-retention reason (a legacy
+// close-on-archive user removal) is not-found. This ties SweepReadMessagesBefore
+// to Provider.Get/Read/Reply so a future edit to isRemovedMessageBead cannot
+// silently diverge the retention path from the read path.
+func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "aged", "read long ago")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// Mark it read so the retention sweep treats it as a candidate.
+	if _, err := p.Read(sent.ID); err != nil {
+		t.Fatalf("Read before sweep: %v", err)
+	}
+
+	// The retention sweep closes the aged read mail with the canonical reason,
+	// exactly as the production nudge-mail watchdog does.
+	closed, closeErrs, listErr := SweepReadMessagesBefore(
+		beads.MailStore{Store: store}, time.Now().Add(time.Hour), 0, RetentionSweepCloseReason)
+	if listErr != nil {
+		t.Fatalf("sweep list error: %v", listErr)
+	}
+	if len(closeErrs) != 0 {
+		t.Fatalf("sweep per-bead errors: %v", closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("swept %d beads, want 1", closed)
+	}
+
+	// Precondition: the bead is closed and carries the retention marker.
+	raw, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get after sweep: %v", err)
+	}
+	if raw.Status != "closed" || raw.Metadata["close_reason"] != RetentionSweepCloseReason {
+		t.Fatalf("swept bead status=%q close_reason=%q, want closed / %q",
+			raw.Status, raw.Metadata["close_reason"], RetentionSweepCloseReason)
+	}
+
+	// Retention-swept mail stays addressable by direct ID until purge.
+	if _, err := p.Get(sent.ID); err != nil {
+		t.Errorf("Get(retention-swept) = %v, want addressable", err)
+	}
+	if _, err := p.Read(sent.ID); err != nil {
+		t.Errorf("Read(retention-swept) = %v, want addressable", err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "RE: aged", "still replying after retention")
+	if err != nil {
+		t.Fatalf("Reply(retention-swept) = %v, want addressable", err)
+	}
+	if reply.ID == "" {
+		t.Error("Reply(retention-swept) returned an empty message")
+	}
+
+	// But it is retired from the active list views, which already gate on open
+	// status — the same asymmetry as before this PR.
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox after sweep: %v", err)
+	}
+	for _, m := range inbox {
+		if m.ID == sent.ID {
+			t.Errorf("Inbox surfaced retention-swept message %q", sent.ID)
+		}
+	}
+
+	// Contrast: a message bead closed for a non-retention reason is a user
+	// removal and must be not-found through the same direct-ID operations.
+	removed, err := p.Send("alice", "bob", "removed", "closed by a non-retention path")
+	if err != nil {
+		t.Fatalf("Send removed: %v", err)
+	}
+	if err := store.SetMetadata(removed.ID, "close_reason", "manual removal: legacy close-on-archive path"); err != nil {
+		t.Fatalf("SetMetadata removed: %v", err)
+	}
+	if err := store.Close(removed.ID); err != nil {
+		t.Fatalf("Close removed: %v", err)
+	}
+	if _, err := p.Get(removed.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get(non-retention closed) = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Reply(removed.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(non-retention closed) = %v, want ErrNotFound", err)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

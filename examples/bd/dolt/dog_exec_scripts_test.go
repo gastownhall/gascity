@@ -109,13 +109,27 @@ type compactScriptFixture struct {
 	binDir        string
 	doltLog       string
 	gcLog         string
+	mailFailFile  string
 	stateFile     string
 	hashStateFile string
 	port          int
 }
 
+const compactScriptTestParallelism = 8
+
+// compactScriptTestSlots bounds real shell fan-out on high-core test hosts.
+var compactScriptTestSlots = make(chan struct{}, compactScriptTestParallelism)
+
+// newCompactScriptFixture runs its hermetic shell scenario in parallel while
+// holding one bounded process slot for the lifetime of the test.
 func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	t.Helper()
+	t.Parallel()
+	compactScriptTestSlots <- struct{}{}
+	t.Cleanup(func() {
+		<-compactScriptTestSlots
+	})
+
 	root := repoRoot(t)
 	port, cleanup := startReachableTCPListener(t)
 	t.Cleanup(cleanup)
@@ -131,7 +145,7 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
 
 	binDir := t.TempDir()
-	gcLog := writeCompactFakeGC(t, binDir)
+	gcLog, mailFailFile := writeCompactFakeGC(t, binDir)
 	doltLog := writeCompactFakeDolt(t, binDir)
 	stateFile := filepath.Join(binDir, "head-state")
 	if err := os.WriteFile(stateFile, []byte("headcommit\n"), 0o644); err != nil {
@@ -148,6 +162,7 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 		binDir:        binDir,
 		doltLog:       doltLog,
 		gcLog:         gcLog,
+		mailFailFile:  mailFailFile,
 		stateFile:     stateFile,
 		hashStateFile: hashStateFile,
 		port:          port,
@@ -212,6 +227,13 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 
 func replaceCompactMarkerCreatedAt(t *testing.T, markerPath, createdAt string) {
 	t.Helper()
+	replaceCompactMarkerField(t, markerPath, "created_at", createdAt)
+}
+
+// replaceCompactMarkerField rewrites the first KEY=VALUE line of a compact
+// marker in place, leaving every other line byte-for-byte intact.
+func replaceCompactMarkerField(t *testing.T, markerPath, key, value string) {
+	t.Helper()
 	data, err := os.ReadFile(markerPath)
 	if err != nil {
 		t.Fatalf("read compact marker: %v", err)
@@ -219,14 +241,14 @@ func replaceCompactMarkerCreatedAt(t *testing.T, markerPath, createdAt string) {
 	lines := strings.Split(string(data), "\n")
 	replaced := false
 	for i, line := range lines {
-		if strings.HasPrefix(line, "created_at=") {
-			lines[i] = "created_at=" + createdAt
+		if strings.HasPrefix(line, key+"=") {
+			lines[i] = key + "=" + value
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		t.Fatalf("compact marker missing created_at:\n%s", data)
+		t.Fatalf("compact marker missing %s:\n%s", key, data)
 	}
 	if err := os.WriteFile(markerPath, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
 		t.Fatalf("rewrite compact marker: %v", err)
@@ -247,6 +269,20 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	}
 	t.Fatalf("compact marker missing %s:\n%s", key, data)
 	return ""
+}
+
+func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...string) {
+	t.Helper()
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read compact marker: %v", err)
+	}
+	text := string(data)
+	for _, fragment := range want {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("compact marker missing evidence %q:\n%s", fragment, text)
+		}
+	}
 }
 
 func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
@@ -291,18 +327,28 @@ func runCompactScriptCommand(t *testing.T, mode string) (string, string, error) 
 	return out, fixture.doltLog, err
 }
 
-func writeCompactFakeGC(t *testing.T, binDir string) string {
+// writeCompactFakeGC installs the fake `gc` used by the compact-script
+// fixtures. It logs every invocation and, when the returned mail-failure
+// sentinel file exists, fails `gc mail send` so tests can exercise the
+// script's mail-delivery failure path. The sentinel does not exist by
+// default, so mail succeeds unless a test opts in.
+func writeCompactFakeGC(t *testing.T, binDir string) (logPath, mailFailPath string) {
 	t.Helper()
-	logPath := filepath.Join(binDir, "gc.log")
+	logPath = filepath.Join(binDir, "gc.log")
+	mailFailPath = filepath.Join(binDir, "gc-mail-fail")
 	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
 printf 'gc %%s\n' "$*" >> %s
 if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
   printf '{"rigs":[]}\n'
   exit 0
 fi
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ] && [ -f %s ]; then
+  printf 'fake gc: mail send failed\n' >&2
+  exit 1
+fi
 exit 0
-`, shellQuote(logPath)))
-	return logPath
+`, shellQuote(logPath), shellQuote(mailFailPath)))
+	return logPath, mailFailPath
 }
 
 func readCompactGCLog(t *testing.T, fixture compactScriptFixture) string {
@@ -609,6 +655,19 @@ case "$query" in
     exit 0
     ;;
   *"SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"*)
+    if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
+      calls_file="$state_file.$db-head-calls"
+      calls=0
+      if [ -f "$calls_file" ]; then
+        calls="$(cat "$calls_file")"
+      fi
+      calls=$((calls + 1))
+      printf '%%s\n' "$calls" > "$calls_file"
+      if [ "$calls" -eq 4 ]; then
+        print_cell ""
+        exit 0
+      fi
+    fi
     if [ "$mode" = "writer_race_db_hash_empty_pre_probe" ] && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.compact-head-calls"
       calls=0
@@ -2836,6 +2895,16 @@ func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("same-row-count value-hash drift should write quarantine marker: %v", err)
 	}
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten table value hash changed without row-count increase",
+		"integrity_table_drift=table=beads,before_rows=10,after_rows=10,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=same_row_count_hash_drift",
+		"flatten_preflight_head=headcommit",
+		"flatten_pre_reset_head=headcommit",
+		"flatten_head=compactcommit",
+		"preflight_db_value_hash=hash-before",
+		"decision=preserve_marker_manual_review_required",
+		"clear_decision=clear_only_after_clean_worktree_reachable_server_healthy_bead_queries_and_diff_hash_evidence_proves_no_loss",
+	)
 }
 
 func TestCompactScriptFailsOnEmptyPreflightValueHash(t *testing.T) {
@@ -2903,6 +2972,30 @@ func TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC(t *testing
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("empty postflight hash should write quarantine marker: %v", err)
+	}
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten value hash probe returned empty value",
+		"flatten_preflight_head=headcommit",
+		"flatten_head=compactcommit",
+		"preflight_db_value_hash=hash-before",
+		"postflight_db_value_hash=",
+		"decision=preserve_marker_manual_review_required",
+	)
+}
+
+func TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir second dolt db: %v", err)
+	}
+
+	out, err := fixture.run(t, "second_db_post_flatten_head_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite second database HEAD probe failure:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "zed")
+	if got := compactMarkerValue(t, marker, "postflight_db_value_hash"); got != "" {
+		t.Fatalf("second database marker inherited postflight hash %q from the first database", got)
 	}
 }
 
@@ -3243,12 +3336,156 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 		!strings.Contains(secondOut, "reason=post-flatten row count decreased") {
 		t.Fatalf("second compact missing quarantine marker details:\n%s", secondOut)
 	}
+	if !strings.Contains(secondOut, "quarantine recovery: keep marker unless git status is clean") ||
+		!strings.Contains(secondOut, "gc dolt compact --gc-only --only-db beads") {
+		t.Fatalf("second compact missing safe recovery guidance:\n%s", secondOut)
+	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	if strings.Contains(string(logData), "DOLT_GC") {
 		t.Fatalf("quarantined database must not run full GC:\n%s", logData)
+	}
+}
+
+func TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("second compact missing quarantine explanation:\n%s", secondOut)
+	}
+	thirdOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("third compact succeeded despite quarantine:\n%s", thirdOut)
+	}
+
+	// Two consecutive compact runs over an unchanged quarantine condition
+	// must send exactly one operator mail — a stable, correct quarantine
+	// should not page forever. The event stays unconditional (one per
+	// cycle) so downstream automation can still observe every check.
+	log := readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 1 {
+		t.Fatalf("three compact runs over an unchanged quarantine condition should send exactly one operator mail, got %d\nlog:\n%s", len(mailLines), log)
+	}
+	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
+	if len(eventLines) != 3 {
+		t.Fatalf("each compact cycle should still emit a dolt.compact.quarantine event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
+	}
+}
+
+func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
+		t.Fatalf("arm mail-failure sentinel: %v", err)
+	}
+
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// The mail that would have paged the operator failed to send. Dedup
+	// bookkeeping must not record it as delivered, or the quarantine goes
+	// unreported forever.
+	if err := os.Remove(fixture.mailFailFile); err != nil {
+		t.Fatalf("disarm mail-failure sentinel: %v", err)
+	}
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 2 {
+		t.Fatalf("a failed quarantine mail must be retried on the next cycle, want 2 attempts, got %d\nlog:\n%s", len(mailLines), log)
+	}
+
+	// Once a send finally succeeds, dedup takes over again.
+	thirdOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("third compact succeeded despite quarantine:\n%s", thirdOut)
+	}
+	log = readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 2 {
+		t.Fatalf("a successful retry should re-establish dedup, want 2 attempts, got %d\nlog:\n%s", len(mailLines), log)
+	}
+}
+
+func TestCompactScriptQuarantineReasonChangeReMails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 1 {
+		t.Fatalf("dedup should be established after two cycles, want 1 mail, got %d\nlog:\n%s", len(mailLines), log)
+	}
+
+	// Dedup is keyed on the quarantine reason, not on the marker's mere
+	// existence: a quarantine that changes cause is a new operator-visible
+	// state and must page again.
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	const newReason = "manual repair pending"
+	replaceCompactMarkerField(t, marker, "reason", newReason)
+
+	thirdOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("third compact succeeded despite quarantine:\n%s", thirdOut)
+	}
+	log = readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 2 {
+		t.Fatalf("a changed quarantine reason must send a fresh mail, want 2, got %d\nlog:\n%s", len(mailLines), log)
+	}
+	if !strings.Contains(mailLines[1], "reason="+newReason) {
+		t.Fatalf("re-sent mail should carry the new reason\nline:\n%s\nlog:\n%s", mailLines[1], log)
+	}
+}
+
+func TestCompactScriptUnreadableQuarantineMarkerIsNotClobbered(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file mode")
+	}
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	// The marker is the operator's only record of why the database was
+	// quarantined. Notify bookkeeping must not rewrite a marker it cannot
+	// read — doing so would erase exactly the evidence the recovery
+	// instructions tell the operator to preserve.
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatalf("chmod quarantine marker unreadable: %v", err)
+	}
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
+	}
+	if err := os.Chmod(marker, 0o600); err != nil {
+		t.Fatalf("restore quarantine marker mode: %v", err)
+	}
+
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten row count decreased" {
+		t.Fatalf("unreadable quarantine marker lost its reason: %q", reason)
+	}
+	if createdAt := compactMarkerValue(t, marker, "created_at"); createdAt == "" {
+		t.Fatal("unreadable quarantine marker lost its created_at")
 	}
 }
 
@@ -4383,6 +4620,23 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 	}
 }
 
+// doctorBackupStaleEnv sets the doctor's backup-staleness horizon for these
+// fixtures.
+//
+// It used to be 1 second, which raced the harness: the fixtures set a backup's
+// mtime to time.Now() and then exec the doctor script, so any delay above one
+// second between those two steps aged a deliberately-FRESH backup past the
+// horizon and the test failed. Under the parallel runner that delay is routine
+// (measured ~400ms latency and 2s test durations), which is why these tests
+// passed in isolation and failed nondeterministically in a full run — and why
+// a different one of the five failed on each run (ga-w97tq).
+//
+// 300s is chosen to sit far above any plausible process-startup delay while
+// staying far below the only STALE fixture in this file (-2h, in
+// TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase), so freshness
+// discrimination is still exercised exactly as before.
+const doctorBackupStaleEnv = "GC_DOCTOR_BACKUP_STALE_S=300"
+
 func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -4434,7 +4688,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4484,7 +4738,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4543,7 +4797,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4588,7 +4842,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "orphans: 2") {
 		t.Fatalf("doctor should report doctest/doctortest orphan databases, output:\n%s", out)
 	}
@@ -4646,7 +4900,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}

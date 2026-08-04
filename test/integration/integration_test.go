@@ -84,6 +84,10 @@ const (
 	doltIdentityModeSkip       = "skip"
 )
 
+// tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
+// tmux socket parent dir for the binary's lifetime; see TestMain.
+var tmuxSocketAliveSentinel *os.File
+
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
@@ -104,16 +108,34 @@ func TestMain(m *testing.M) {
 	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
 	// tmux sockets inside it pushes socket paths past macOS's 104-byte limit.
 	// /tmp is world-writable on macOS, Linux, and CI runners.
-	tmuxSocketParent, tmuxParentErr := os.MkdirTemp("/tmp", "gct-")
+	//
+	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
+	// run before creating this run's own dir. tmuxSocketAliveSentinel must
+	// stay referenced for the process lifetime: the runtime finalizes
+	// unreachable os.Files, which would close the descriptor and release
+	// the lock, letting a concurrent sibling's sweep reclaim this still-
+	// active directory (ga-djbcqt). Normal and skip exits call os.Exit, which
+	// skips defers, so those paths remove the parent explicitly below; the
+	// deferred removal here additionally covers a setup panic (which unwinds
+	// through defers) so it cannot leak the parent until a later aged sweep.
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
+	tmuxSocketAliveSentinel = tmuxSentinel
+	defer func() {
+		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
+		// below is honored and this never double-removes on a normal exit.
+		if tmuxSocketParent != "" {
+			_ = os.RemoveAll(tmuxSocketParent)
+		}
+	}()
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
 	if tmuxParentErr == nil {
 		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
 		if err := os.MkdirAll(tmuxSocketRoot, 0o700); err != nil {
+			_ = tmuxSocketAliveSentinel.Close()
+			tmuxSocketAliveSentinel = nil
 			os.RemoveAll(tmuxSocketParent)
 			tmuxSocketParent = ""
 			tmuxSocketRoot = filepath.Join(tmpDir, "tmux")
-		} else {
-			defer os.RemoveAll(tmuxSocketParent)
 		}
 	}
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {

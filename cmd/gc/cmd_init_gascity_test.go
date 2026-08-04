@@ -29,7 +29,7 @@ func TestNormalizeInitTemplateDefaultUsesGascity(t *testing.T) {
 }
 
 func TestInitWizardConfigProviderFlagDefaultsToGascity(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "")
+	wiz, err := initWizardConfig("codex", "", false)
 	if err != nil {
 		t.Fatalf("initWizardConfig: %v", err)
 	}
@@ -73,8 +73,8 @@ func TestDoInitDefaultTemplateImportsGascityPack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing pack.toml: %v", err)
 	}
-	if _, ok := packCfg.Imports["gascity"]; !ok {
-		t.Fatalf("default pack.toml imports = %v, want gascity entry:\n%s", packCfg.Imports, packData)
+	if _, ok := packCfg.Imports["gc"]; !ok {
+		t.Fatalf("default pack.toml imports = %v, want gc entry:\n%s", packCfg.Imports, packData)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestDoInitExplicitMinimalTemplateDoesNotImportGascityPack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing pack.toml: %v", err)
 	}
-	if _, ok := packCfg.Imports["gascity"]; ok {
-		t.Fatalf("explicit minimal pack.toml imports gascity unexpectedly:\n%s", packData)
+	if _, ok := packCfg.Imports["gc"]; ok {
+		t.Fatalf("explicit minimal pack.toml imports gc unexpectedly:\n%s", packData)
 	}
 }
 
@@ -119,15 +119,15 @@ func TestDoInitWithGascityTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing pack.toml: %v", err)
 	}
-	imp, ok := packCfg.Imports["gascity"]
+	imp, ok := packCfg.Imports["gc"]
 	if !ok {
-		t.Fatalf("pack.toml imports = %v, want gascity entry:\n%s", packCfg.Imports, packData)
+		t.Fatalf("pack.toml imports = %v, want gc entry:\n%s", packCfg.Imports, packData)
 	}
 	if imp.Source != config.PublicGascityPackSource {
-		t.Errorf("gascity import source = %q, want %q", imp.Source, config.PublicGascityPackSource)
+		t.Errorf("gc import source = %q, want %q", imp.Source, config.PublicGascityPackSource)
 	}
 	if imp.Version != config.PublicGascityPackVersion {
-		t.Errorf("gascity import version = %q, want %q", imp.Version, config.PublicGascityPackVersion)
+		t.Errorf("gc import version = %q, want %q", imp.Version, config.PublicGascityPackVersion)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestDoInitGascityTemplateSeedsRolesDefaultRigImport(t *testing.T) {
 // accepted it but both strings omitted it, making it undiscoverable from the
 // command contract.
 func TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates(t *testing.T) {
-	accepted := []string{"minimal", "gastown", "gascity", "custom"}
+	accepted := []string{"minimal", "gastown", "gascity", "custom", "empty"}
 
 	// Every advertised template round-trips through the normalizer.
 	for _, tmpl := range accepted {

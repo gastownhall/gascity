@@ -356,6 +356,7 @@ func defaultSlingCaller(ctx context.Context, args []string) error {
 	cmd := exec.CommandContext(ctx, bin, append([]string{"sling"}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	disableProductMetricsForChild(cmd)
 	if out, err := cmd.Output(); err != nil {
 		stderrText := strings.TrimSpace(stderr.String())
 		if stderrText != "" {

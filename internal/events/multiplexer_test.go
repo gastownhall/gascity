@@ -564,6 +564,14 @@ func TestParseCursorFormatCursor(t *testing.T) {
 			t.Errorf("round-trip: %q = %d, want %d", k, m2[k], v)
 		}
 	}
+
+	malformed := ParseCursor("alpha:nope,beta:7")
+	if _, ok := malformed["alpha"]; ok {
+		t.Fatalf("ParseCursor retained malformed alpha sequence: %v", malformed)
+	}
+	if malformed["beta"] != 7 {
+		t.Fatalf("ParseCursor beta = %d, want 7", malformed["beta"])
+	}
 }
 
 func TestWrapForSSE(t *testing.T) {

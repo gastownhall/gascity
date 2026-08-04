@@ -3,6 +3,7 @@ package docgen
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -406,6 +407,86 @@ func TestAddGoCommentsFilteredSkipsHiddenDirs(t *testing.T) {
 	r := &jsonschema.Reflector{FieldNameTag: "toml"}
 	if err := addGoCommentsFiltered(r, "example.com/test", "."); err != nil {
 		t.Errorf("addGoCommentsFiltered failed with unreadable hidden dir: %v", err)
+	}
+}
+
+// gitOK skips the test if git is not available in PATH.
+func gitOK(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// TestAddGoCommentsFilteredSkipsUntrackedTopLevelDirs verifies that
+// addGoCommentsFiltered only walks top-level directories known to git, so
+// stray untracked directories (leaked worktree-stage dirs, abandoned
+// PR-checkout dirs, etc. — see ga-vfurlv) are never walked. Without this,
+// AddGoComments's recursive filepath.Walk + go/parser.ParseDir cost is
+// multiplied by however many stray directories have accumulated at the
+// module root, which is what caused schema-gen tests to time out under
+// parallel load.
+func TestAddGoCommentsFilteredSkipsUntrackedTopLevelDirs(t *testing.T) {
+	gitOK(t)
+	tmp := t.TempDir()
+
+	runGit(t, tmp, "init", "-q", "-b", "main")
+	runGit(t, tmp, "config", "user.email", "test@example.com")
+	runGit(t, tmp, "config", "user.name", "test")
+	runGit(t, tmp, "config", "commit.gpgsign", "false")
+
+	// Tracked top-level dir — must be walked.
+	if err := os.MkdirAll(filepath.Join(tmp, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	trackedSrc := "package pkg\n\n// TrackedWidget is committed to git.\ntype TrackedWidget struct{}\n"
+	if err := os.WriteFile(filepath.Join(tmp, "pkg", "widget.go"), []byte(trackedSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tmp, "add", "pkg")
+	runGit(t, tmp, "commit", "-q", "-m", "add pkg")
+
+	// Untracked stray top-level dir, mimicking a leaked worktree-stage or
+	// abandoned PR-checkout directory. Must NOT be walked.
+	strayDir := filepath.Join(tmp, "ga-leaked-worktree")
+	if err := os.MkdirAll(strayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	straySrc := "package stray\n\n// UntrackedGhost must never be walked.\ntype UntrackedGhost struct{}\n"
+	if err := os.WriteFile(filepath.Join(strayDir, "ghost.go"), []byte(straySrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(orig) }()
+
+	r := &jsonschema.Reflector{FieldNameTag: "toml"}
+	if err := addGoCommentsFiltered(r, "example.com/test", "."); err != nil {
+		t.Fatalf("addGoCommentsFiltered: %v", err)
+	}
+
+	if _, ok := r.CommentMap["example.com/test/pkg.TrackedWidget"]; !ok {
+		t.Errorf("expected comment for tracked pkg.TrackedWidget, got map: %v", r.CommentMap)
+	}
+	for k := range r.CommentMap {
+		if strings.Contains(k, "ga-leaked-worktree") {
+			t.Errorf("addGoCommentsFiltered walked untracked top-level dir, found key %q", k)
+		}
 	}
 }
 

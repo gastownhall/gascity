@@ -371,7 +371,7 @@ check "process-alive (nonexistent)" "false" "$alive"
 echo "--- process-alive (tmux pane command) ---"
 # The entrypoint execs sleep, so pane_current_command should be "sleep".
 pane_cmd=$(docker exec -e "TMUX_TMPDIR=/run/gc-tmux" "$SESSION" tmux -u \
-    display-message -t "agent:0.0" -p '#{pane_current_command}' 2>/dev/null || echo "")
+    display-message -t "main:0.0" -p '#{pane_current_command}' 2>/dev/null || echo "")
 echo "  (pane_current_command='$pane_cmd')"
 alive=$(echo "$pane_cmd" | "$SCRIPT" process-alive "$SESSION")
 check "process-alive via pane command" "true" "$alive"
@@ -538,7 +538,7 @@ rm -f "$setup_marker" 2>/dev/null || true
 echo "--- session setup (tmux target rewriting) ---"
 # The session_setup command targets the expanded session name
 # (gc-docker-test-tmuxsetup). The Docker provider rewrites it to
-# target the in-container tmux session ("agent").
+# target the in-container tmux session ("main").
 config=$(cat <<EOF
 {
     "command": "sleep 300",
@@ -553,7 +553,7 @@ EOF
 )
 "$SCRIPT" stop "${SESSION}-tmuxsetup" 2>/dev/null || true
 echo "$config" | "$SCRIPT" start "${SESSION}-tmuxsetup"
-# Verify the option was applied to the in-container "agent" session.
+# Verify the option was applied to the in-container "main" session.
 got=$(docker exec -e "TMUX_TMPDIR=/run/gc-tmux" "${SESSION}-tmuxsetup" \
     tmux -u show-options -t main -v status-right 2>/dev/null || echo "")
 check_contains "tmux target rewritten to in-container session" "DOCKER_SETUP_OK" "$got"

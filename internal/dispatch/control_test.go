@@ -1603,7 +1603,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		MemStore: base,
 		err:      errors.New("adding dep: invalid connection: i/o timeout"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("first processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1612,7 +1612,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		t.Fatal("expected graph attach to leave nested spec bead open after outer dep failure")
 	}
 
-	_, err = processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err = processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1640,6 +1640,9 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: true},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: true},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: true},
+		{name: "dolt breaker open", err: errors.New("Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"), want: true},
+		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
+		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}

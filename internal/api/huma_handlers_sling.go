@@ -31,6 +31,11 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		ScopeKind:      input.Body.ScopeKind,
 		ScopeRef:       input.Body.ScopeRef,
 		Force:          input.Body.Force,
+		Reassign:       input.Body.Reassign,
+		Merge:          input.Body.Merge,
+		NoConvoy:       input.Body.NoConvoy,
+		Owned:          input.Body.Owned,
+		NoFormula:      input.Body.NoFormula,
 	}
 
 	if body.Target == "" {
@@ -65,6 +70,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	defaultFormulaLaunch := body.Formula == "" &&
 		body.AttachedBeadID == "" &&
 		body.Bead != "" &&
+		!body.NoFormula &&
 		agentCfg.EffectiveDefaultSlingFormula() != "" &&
 		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != "")
 	if body.Formula == "" && body.AttachedBeadID != "" {
@@ -78,6 +84,15 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	}
 	if body.ScopeKind != "" && body.ScopeKind != "city" && body.ScopeKind != "rig" {
 		return nil, apierr.InvalidRequest.Msg("scope_kind must be 'city' or 'rig'")
+	}
+	if body.Owned && body.NoConvoy {
+		return nil, huma.Error400BadRequest("owned requires a convoy (cannot use with no_convoy)")
+	}
+	if body.Merge != "" && body.Merge != "direct" && body.Merge != "mr" && body.Merge != "local" {
+		return nil, huma.Error400BadRequest("merge must be 'direct', 'mr', or 'local'")
+	}
+	if body.NoFormula && (body.Formula != "" || body.AttachedBeadID != "") {
+		return nil, huma.Error400BadRequest("no_formula conflicts with formula/attached_bead_id")
 	}
 	if body.ScopeKind == "rig" && body.ScopeRef != "" {
 		if agentCfg.Dir != body.ScopeRef {

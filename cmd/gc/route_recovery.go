@@ -60,6 +60,21 @@ func carriedPoolRoute(b beads.Bead) string {
 // which pool ad-hoc work belongs to is the owner's judgment, not the
 // controller's. Idempotent: an already-routed bead yields no route and is
 // skipped.
+//
+// TOCTOU-narrowing (not eliminating): the open-bead List is a snapshot, so
+// before writing, each bead is re-read through the store's authoritative,
+// cache-bypassing live handle and skipped unless it is still open, unassigned,
+// and carries the same recoverable route. This shrinks — but does not close —
+// the window in which the re-stamp could clobber a route a polecat consumed by
+// claiming the bead after the snapshot (ga-bgu): a claim landing between the
+// live re-read and SetMetadata is still possible. The re-stamp stays monotonic
+// (never worse than the prior blind write), so the residual window degrades to
+// the pre-guard behavior rather than a new failure.
+//
+// That re-read guards claims but cannot guard blocks: a claim flips the bead to
+// in_progress, which mapBdStatus preserves, while a block flips it to a status
+// that collapses to "open" (gc-4zb). Blocked work is therefore excluded at the
+// snapshot, by the Live query below, and not here.
 func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	if store == nil {
 		return 0, nil
@@ -70,7 +85,19 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	// carriers of a legacy route — plain work beads and workflow roots — which a
 	// gc.kind=workflow query would miss. Mirrors sweepDetachedHandoffOrphans'
 	// open-bead scan (AllowScan acknowledges the intentional population read).
-	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true})
+	//
+	// Live is what makes Status:"open" mean open (gc-4zb). mapBdStatus folds
+	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
+	// blocked bead decodes with Status "open" and is indistinguishable from
+	// ready work in every beads.Bead this function can read. A cached List
+	// filters with ListQuery.Matches against that collapsed status and so hands
+	// back blocked beads; only the backing store filters on the raw status, by
+	// passing --status=open to bd. Live bypasses the CachingStore to get there.
+	// Without it a blocked root that carries gc.run_target is re-stamped on
+	// every patrol tick — the blocked-routed-reaper's recurring offenders. The
+	// workflow-root spawn path selects on gc.routed_to without re-checking
+	// status, so each re-stamp respawns a worker that drains no-op.
+	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing open work: %w", err)
 	}
@@ -78,6 +105,12 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 		restored int
 		errs     []error
 	)
+	// Resolve the authoritative, cache-bypassing read handle once. Production
+	// stores are CachingStore-wrapped (see wrapWithCachingStore), so a plain
+	// store.Get can return a cached bead that predates a cross-process claim;
+	// handles.Live reads the backing store directly. For a plain store this
+	// degrades to store.Get.
+	handles := beads.HandlesFor(store)
 	for _, b := range items {
 		route := carriedPoolRoute(b)
 		if route == "" {
@@ -88,6 +121,28 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 		// holds regardless of store-level filtering semantics.)
 		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
 			continue
+		}
+		// Re-read the live bead immediately before writing, through the
+		// authoritative cache-bypassing handle. The open-bead List is a snapshot;
+		// a polecat — often in another process — may have claimed this bead in the
+		// window since, which atomically flips it open->in_progress, records
+		// gc.run_target, and consumes gc.routed_to in one update (ga-sa0). A plain
+		// store.Get would go through the wrapping CachingStore and could return a
+		// stale cached copy that predates a cross-process claim not yet absorbed
+		// into this process's cache; handles.Live reads the backing store and sees
+		// the claim. A blind SetMetadata keyed on the stale snapshot would re-stamp
+		// gc.routed_to onto the now-claimed bead, undoing that consumption and
+		// handing the dispatcher a phantom pool-demand bead that flaps
+		// open<->in_progress and thrashes owners (ga-bgu). Recomputing
+		// carriedPoolRoute on the live bead also yields "" once another restore has
+		// already re-stamped it, so concurrent passes stay idempotent.
+		live, getErr := handles.Live.Get(b.ID)
+		if getErr != nil {
+			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", b.ID, getErr))
+			continue
+		}
+		if live.Status != "open" || strings.TrimSpace(live.Assignee) != "" || carriedPoolRoute(live) != route {
+			continue // claimed, closed, or already routed since the snapshot — don't clobber
 		}
 		if setErr := store.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", b.ID, route, setErr))

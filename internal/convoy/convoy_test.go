@@ -1,6 +1,7 @@
 package convoy
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -217,6 +218,30 @@ func TestConvoyMembersKeepsDanglingTracksUnknownOps(t *testing.T) {
 	}
 }
 
+func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
+	backing := beads.NewMemStore()
+	convoy, _ := backing.Create(beads.Bead{Title: "test", Type: "convoy"})
+	item, _ := backing.Create(beads.Bead{Title: "task"})
+	if err := backing.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	store := metadataParseErrorStore{Store: backing, corruptID: item.ID}
+
+	members, err := Members(store, convoy.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("members = %d, want 1", len(members))
+	}
+	if members[0].ID != item.ID {
+		t.Errorf("member ID = %q, want %s", members[0].ID, item.ID)
+	}
+	if members[0].Status != "unknown" {
+		t.Errorf("member status = %q, want unknown", members[0].Status)
+	}
+}
+
 func TestConvoyAddItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps(store)
@@ -305,4 +330,16 @@ func requireTracksDep(t *testing.T, store beads.Store, convoyID, itemID string) 
 		}
 	}
 	t.Fatalf("missing tracks dep %s -> %s; deps=%v", convoyID, itemID, deps)
+}
+
+type metadataParseErrorStore struct {
+	beads.Store
+	corruptID string
+}
+
+func (s metadataParseErrorStore) Get(id string) (beads.Bead, error) {
+	if id == s.corruptID {
+		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
+	}
+	return s.Store.Get(id)
 }

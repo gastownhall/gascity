@@ -260,8 +260,8 @@ func writeScopeConfig(t *testing.T, scopePath, body string) {
 	}
 }
 
-// A rig whose Dolt lives on an external endpoint self-manages its backups on
-// that server; the local .dolt-backup / repo_state.json signals never apply, so
+// A rig pointing at an external (non-managed) Dolt endpoint owns its own
+// backups; the local .dolt-backup / repo_state.json signals never apply, so
 // the check must not warn or emit a localhost fix hint. Regression for #3868.
 func TestDoltBackupCheck_ExternalEndpoint_NoWarn(t *testing.T) {
 	cityPath := t.TempDir()

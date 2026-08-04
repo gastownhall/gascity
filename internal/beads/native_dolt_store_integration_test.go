@@ -4,10 +4,18 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -222,5 +230,115 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Get("gc-missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
+	}
+}
+
+// startTestDoltServer launches a throwaway dolt sql-server in a temp data dir
+// and returns a *sql.DB connected to a fresh database on it. Skips the test
+// when the dolt binary is unavailable.
+func startTestDoltServer(t *testing.T) *sql.DB {
+	t.Helper()
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt binary not in PATH")
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick free port: %v", err)
+	}
+	port := lis.Addr().(*net.TCPAddr).Port
+	_ = lis.Close()
+
+	dataDir := t.TempDir()
+	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
+	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open dolt connection: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := db.Ping(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dolt sql-server did not become ready on port %d", port)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err := db.Exec("CREATE DATABASE repairtest"); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	_ = db.Close()
+
+	db, err = sql.Open("mysql", dsn+"repairtest")
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestRepairIDDefaultAgainstDoltServer exercises the SHOW COLUMNS-based probe
+// end-to-end against a real dolt sql-server (the same wire protocol the live
+// fleet uses): a stripped DEFAULT is detected and repaired, an intact DEFAULT
+// is left alone, and an absent table is not an error. This covers the probe
+// rewrite that replaced the per-open INFORMATION_SCHEMA.COLUMNS catalog scan.
+func TestRepairIDDefaultAgainstDoltServer(t *testing.T) {
+	db := startTestDoltServer(t)
+
+	showIDDefault := func(table string) any {
+		var field, colType, null, key, extra string
+		var def any
+		row := db.QueryRow(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+		if err := row.Scan(&field, &colType, &null, &key, &def, &extra); err != nil {
+			t.Fatalf("SHOW COLUMNS FROM %s: %v", table, err)
+		}
+		return def
+	}
+
+	// Stripped default: probe detects it and the ALTER restores it.
+	if _, err := db.Exec("CREATE TABLE events (id char(36) NOT NULL, note text)"); err != nil {
+		t.Fatalf("create events: %v", err)
+	}
+	if err := repairIDDefault(db, "events"); err != nil {
+		t.Fatalf("repairIDDefault(events): %v", err)
+	}
+	if def := showIDDefault("events"); def == nil {
+		t.Fatal("events.id Default still NULL after repair, want (uuid())")
+	}
+
+	// Intact default: repair is a no-op and must not error.
+	if _, err := db.Exec("CREATE TABLE dependencies (id char(36) NOT NULL DEFAULT (uuid()), note text)"); err != nil {
+		t.Fatalf("create dependencies: %v", err)
+	}
+	if err := repairIDDefault(db, "dependencies"); err != nil {
+		t.Fatalf("repairIDDefault(dependencies) with intact default: %v", err)
+	}
+	if def := showIDDefault("dependencies"); def == nil {
+		t.Fatal("dependencies.id Default = NULL after no-op repair, want (uuid())")
+	}
+
+	// Absent table (e.g. wisp_events on an older schema): tolerated, not an error.
+	if err := repairIDDefault(db, "wisp_events"); err != nil {
+		t.Fatalf("repairIDDefault(wisp_events) on absent table: %v", err)
+	}
+
+	// Table without an id column: nothing to repair, no error.
+	if _, err := db.Exec("CREATE TABLE noid (pk int PRIMARY KEY)"); err != nil {
+		t.Fatalf("create noid: %v", err)
+	}
+	if err := repairIDDefault(db, "noid"); err != nil {
+		t.Fatalf("repairIDDefault(noid) without id column: %v", err)
 	}
 }

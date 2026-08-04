@@ -557,11 +557,12 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store             beads.Store
-	sp                runtime.Provider
-	cityPath          string
-	transportResolver func(template, provider string) transportResolution
-	clk               clock.Clock
+	store                   beads.Store
+	sp                      runtime.Provider
+	cityPath                string
+	transportResolver       func(template, provider string) transportResolution
+	clk                     clock.Clock
+	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -781,11 +782,33 @@ func WithTransportPolicyResolver(resolver func(template, provider string) (strin
 	}
 }
 
+// WithStaleKeyDetectionWaiter supplies the lifecycle signal used before a
+// keyed start is probed for stale resume-key failure. A nil waiter retains the
+// immutable production timer.
+func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
+	return func(m *Manager) {
+		if waiter != nil {
+			m.staleKeyDetectionWaiter = waiter
+		}
+	}
+}
+
+// WithClock supplies the time source the Manager stamps lifecycle timestamps
+// from (e.g. pending_create_started_at). A nil clock retains the immutable
+// production wall clock.
+func WithClock(clk clock.Clock) ManagerOption {
+	return func(m *Manager) {
+		if clk != nil {
+			m.clk = clk
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
 func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
-	m := &Manager{store: store, sp: sp}
+	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -1116,7 +1139,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
-		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
+		meta["pending_create_started_at"] = pendingCreateStartedAt(m.now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"

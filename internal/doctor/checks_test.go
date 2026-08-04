@@ -1002,8 +1002,9 @@ func TestBeadsStoreCheck_OK(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := NewBeadsStoreCheck(dir, func(cityPath string) (beads.Store, error) {
-		return beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, "beads.json"))
+	c := NewBeadsStoreCheck(dir, func(cityPath string) (beads.StoreOpenResult, error) {
+		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, "beads.json"))
+		return beads.StoreOpenResult{Store: store}, err
 	})
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
@@ -1012,8 +1013,8 @@ func TestBeadsStoreCheck_OK(t *testing.T) {
 }
 
 func TestBeadsStoreCheck_OpenError(t *testing.T) {
-	c := NewBeadsStoreCheck("/nonexistent", func(_ string) (beads.Store, error) {
-		return nil, fmt.Errorf("open failed")
+	c := NewBeadsStoreCheck("/nonexistent", func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, fmt.Errorf("open failed")
 	})
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
@@ -1030,8 +1031,8 @@ func TestBeadsStoreCheck_UsesPing(t *testing.T) {
 			return nil
 		},
 	}
-	c := NewBeadsStoreCheck(t.TempDir(), func(_ string) (beads.Store, error) {
-		return spy, nil
+	c := NewBeadsStoreCheck(t.TempDir(), func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: spy}, nil
 	})
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
@@ -1051,8 +1052,8 @@ func TestBeadsStoreCheck_FileProviderSkipsDoltPreflight(t *testing.T) {
 			return nil
 		},
 	}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) {
-		return spy, nil
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: spy}, nil
 	})
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
@@ -1060,6 +1061,61 @@ func TestBeadsStoreCheck_FileProviderSkipsDoltPreflight(t *testing.T) {
 	}
 	if !pinged {
 		t.Fatal("Ping should run for file provider stores")
+	}
+}
+
+// TestBeadsStoreCheck_WarnsOnBdStoreFallback covers gastownhall/gascity#4245:
+// a silent native-store-eligibility fallback to the fork-per-op BdStore
+// looked identical to a healthy native store ("store accessible", StatusOK)
+// because the check only ever saw the opened Store, never the selection
+// diagnostic that already named the preflight gate and reason.
+func TestBeadsStoreCheck_WarnsOnBdStoreFallback(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	spy := &spyPingStore{pingFunc: func() error { return nil }}
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: spy,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               beads.BeadsStoreNameBdStore,
+				NativeStoreEligible: false,
+				PreflightGate:       "bd_context_agreement",
+				PreflightReason:     "bd context is unreachable; cannot cross-verify backend agreement",
+			},
+		}, nil
+	})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "bd_context_agreement") {
+		t.Errorf("message = %q, want it to name the preflight gate", r.Message)
+	}
+	if !strings.Contains(r.Message, "cannot cross-verify backend agreement") {
+		t.Errorf("message = %q, want it to name the preflight reason", r.Message)
+	}
+	if r.FixHint == "" {
+		t.Error("FixHint is empty, want repair guidance")
+	}
+}
+
+// TestBeadsStoreCheck_NativeStoreDiagnosticStaysOK is the inverse of
+// TestBeadsStoreCheck_WarnsOnBdStoreFallback: a store that opened as the
+// native store (the healthy, non-fallback selection) must not warn.
+func TestBeadsStoreCheck_NativeStoreDiagnosticStaysOK(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	spy := &spyPingStore{pingFunc: func() error { return nil }}
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: spy,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               beads.BeadsStoreNameNativeDoltStore,
+				NativeStoreEligible: true,
+			},
+		}, nil
+	})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -1853,7 +1909,7 @@ func TestBeadsStoreCheck_ManagedCityMissingRuntimeStateFailsBeforePing(t *testin
 		pinged = true
 		return nil
 	}}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) { return spy, nil })
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) { return beads.StoreOpenResult{Store: spy}, nil })
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
@@ -1886,7 +1942,7 @@ func TestBeadsStoreCheck_ExternalCityUnavailableFailsBeforePing(t *testing.T) {
 		pinged = true
 		return nil
 	}}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) { return spy, nil })
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) { return beads.StoreOpenResult{Store: spy}, nil })
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
@@ -1923,7 +1979,7 @@ provider = "exec:/tmp/gc-beads-bd"
 		pinged = true
 		return nil
 	}}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) { return spy, nil })
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) { return beads.StoreOpenResult{Store: spy}, nil })
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
@@ -1962,7 +2018,7 @@ provider = "file"
 		pinged = true
 		return nil
 	}}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) { return spy, nil })
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) { return beads.StoreOpenResult{Store: spy}, nil })
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
@@ -1999,7 +2055,7 @@ name = "test"
 		pinged = true
 		return nil
 	}}
-	c := NewBeadsStoreCheck(dir, func(_ string) (beads.Store, error) { return spy, nil })
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) { return beads.StoreOpenResult{Store: spy}, nil })
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)

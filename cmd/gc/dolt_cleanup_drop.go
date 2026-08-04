@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltauth"
 )
 
 // CleanupDoltClient is the SQL surface the cleanup engine needs. The
@@ -177,8 +180,22 @@ type sqlCleanupDoltClient struct {
 
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
 // Caller must Close() when done.
-func newSQLCleanupDoltClient(host, port string) (CleanupDoltClient, error) {
-	db, err := managedDoltOpenDB(host, port, "root")
+func newSQLCleanupDoltClient(cityPath, host, port string) (CleanupDoltClient, error) {
+	return openSQLCleanupDoltClient(cityPath, host, port, doltauth.Resolve, managedDoltOpenDB)
+}
+
+type (
+	cleanupDoltAuthResolver func(scopeRoot, fallbackUser, host string, port int) doltauth.Resolved
+	cleanupDoltDBOpener     func(host, port, user string) (*sql.DB, error)
+)
+
+func openSQLCleanupDoltClient(cityPath, host, port string, resolve cleanupDoltAuthResolver, open cleanupDoltDBOpener) (CleanupDoltClient, error) {
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return nil, fmt.Errorf("invalid dolt port %q: %w", port, err)
+	}
+	user := resolve(cityPath, "root", host, portNum).User
+	db, err := open(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("open dolt connection: %w", err)
 	}
@@ -211,7 +228,11 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 	}
 	// Escape backticks in identifiers to prevent injection (` → ``).
 	safe := strings.ReplaceAll(name, "`", "``")
-	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE `%s`", safe)) //nolint:gosec // G201: identifier-escaped
+	// IF EXISTS keeps the drop idempotent: teardown/rollback is documented as
+	// "best-effort and idempotent (a re-crash mid-sweep re-runs cleanly)", so a
+	// drop that already succeeded before a marker write failed must not error the
+	// next sweep and wedge the record — a database-not-found is success here.
+	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", safe)) //nolint:gosec // G201: identifier-escaped
 	return err
 }
 

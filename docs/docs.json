@@ -212,7 +212,8 @@
           {
             "group": "Operate",
             "pages": [
-              "runbooks/managed-city-endpoints"
+              "runbooks/managed-city-endpoints",
+              "runbooks/remote-hardened-city"
             ]
           }
         ]

@@ -204,6 +204,8 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 type HistoryRequest struct {
 	TailCompactions int    `json:"tail_compactions,omitempty"`
 	LogicalID       string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID   string `json:"before_entry_id,omitempty"`
+	AfterEntryID    string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.

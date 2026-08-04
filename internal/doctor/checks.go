@@ -654,22 +654,29 @@ func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 
 // --- Data checks ---
 
-// BeadsStoreCheck verifies the bead store opens and Ping succeeds.
+// BeadsStoreCheck verifies the bead store opens and Ping succeeds, and warns
+// when the store selection silently fell back to the fork-per-op BdStore
+// (gastownhall/gascity#4245) instead of the native store.
 type BeadsStoreCheck struct {
 	cityPath string
-	newStore func(cityPath string) (beads.Store, error)
+	newStore func(cityPath string) (beads.StoreOpenResult, error)
 }
 
 // NewBeadsStoreCheck creates a check for the bead store.
-// newStore is a factory that opens a store from the city path.
-func NewBeadsStoreCheck(cityPath string, newStore func(string) (beads.Store, error)) *BeadsStoreCheck {
+// newStore is a factory that opens a store from the city path and reports
+// the native/fallback selection diagnostic alongside it.
+func NewBeadsStoreCheck(cityPath string, newStore func(string) (beads.StoreOpenResult, error)) *BeadsStoreCheck {
 	return &BeadsStoreCheck{cityPath: cityPath, newStore: newStore}
 }
 
 // Name returns the check identifier.
 func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 
-// Run opens the store and pings it to verify accessibility.
+// Run opens the store and pings it to verify accessibility. A successful
+// open that silently fell back to BdStore (fork-per-op, dramatically more
+// expensive than the native store) surfaces as a warning naming the
+// preflight gate and reason, instead of looking identically healthy to a
+// native-store city.
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
@@ -692,15 +699,23 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		}
 		conn.Close() //nolint:errcheck // best-effort close
 	}
-	store, err := c.newStore(c.cityPath)
+	result, err := c.newStore(c.cityPath)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	if err := store.Ping(); err != nil {
+	if err := result.Store.Ping(); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store ping failed: %v", err)
+		return r
+	}
+	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf(
+			"beads store running on BdStore fallback (fork-per-op; gate=%s): %s",
+			result.Diagnostic.PreflightGate, result.Diagnostic.PreflightReason)
+		r.FixHint = "native store unavailable; repair the named preflight gate, then restart the process to pick up native store eligibility"
 		return r
 	}
 	r.Status = StatusOK

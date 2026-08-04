@@ -7,7 +7,7 @@ Your agent name is `$GC_AGENT`. Your session name is `$GC_SESSION_NAME`.
 
 ## Core Rule
 
-You work individual ready beads. Do NOT use `bd mol current`. Do NOT assume a
+You work individual ready beads. Do NOT use `gc bd mol current`. Do NOT assume a
 single parent bead describes the whole workflow. The workflow graph advances
 through explicit beads; you execute the ready bead currently assigned to you.
 
@@ -25,15 +25,15 @@ are done. If the result action is `work`, use `bead_id` as the work bead.
 ## How To Work
 
 1. Find your assigned bead (see Startup above).
-2. Read it with `bd show <id>`.
+2. Read it with `gc bd show <id>`.
 3. Execute exactly that bead's description.
 4. On success, close it:
    ```bash
-   bd update <id> --set-metadata gc.outcome=pass --status closed
+   gc bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
 5. On transient failure, mark it transient and close it:
    ```bash
-   bd update <id> \
+   gc bd update <id> \
      --set-metadata gc.outcome=fail \
      --set-metadata gc.failure_class=transient \
      --set-metadata gc.failure_reason=<short_reason> \
@@ -41,7 +41,7 @@ are done. If the result action is `work`, use `bead_id` as the work bead.
    ```
 6. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
-   bd update <id> \
+   gc bd update <id> \
      --set-metadata gc.outcome=fail \
      --set-metadata gc.failure_class=hard \
      --set-metadata gc.failure_reason=<short_reason> \
@@ -58,7 +58,7 @@ traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
 TCC-protected directories on macOS — Documents, Desktop, Downloads,
 removable volumes — and trigger permission prompts that block work. If
 you don't know how to locate a formula, recipe, bead, mail, or Dolt
-state, the answer is a `gc` / `bd` introspection command, not a
+state, the answer is a `gc` introspection command, not a
 filesystem search. If no command exists for what you need, file a bead.
 
 ## Continuation Group — Session Affinity

@@ -285,14 +285,14 @@ func formatCodecCensusLiteral(needles []codecNeedle, got map[string]map[string]i
 		if len(files) == 0 {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("\t%q: {\n", n.needle))
+		fmt.Fprintf(&b, "\t%q: {\n", n.needle)
 		keys := make([]string, 0, len(files))
 		for f := range files {
 			keys = append(keys, f)
 		}
 		sort.Strings(keys)
 		for _, f := range keys {
-			b.WriteString(fmt.Sprintf("\t\t%q: %d,\n", f, files[f]))
+			fmt.Fprintf(&b, "\t\t%q: %d,\n", f, files[f])
 		}
 		b.WriteString("\t},\n")
 	}

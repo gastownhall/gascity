@@ -154,7 +154,9 @@ func sessionWithinDesiredConfigInfo(info sessionpkg.Info, cfg *config.City, pool
 	if agent == nil {
 		return nil, false
 	}
-	if isDrainedSessionInfo(info) {
+	// ComputeAwakeSet deliberately reuses drained always-mode named beads.
+	// Keep the display classifier aligned with that decision.
+	if isDrainedSessionInfo(info) && (!isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always") {
 		return agent, false
 	}
 	if info.DependencyOnlyMetadata == "true" {
@@ -175,7 +177,7 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	if agent == nil {
 		return nil, false
 	}
-	if isDrainedSessionBead(session) {
+	if isDrainedSessionBead(session) && (!isNamedSessionBead(session) || namedSessionMode(session) != "always") {
 		return agent, false
 	}
 	if session.Metadata["dependency_only"] == "true" {
@@ -308,7 +310,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		if isAgentEffectivelySuspendedWith(cfg, a, suspState) {
+		if isAgentEffectivelySuspendedWith(cfg, cityDir, a, suspState) {
 			continue
 		}
 		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
@@ -954,33 +956,29 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 	return emptyNil(batch)
 }
 
-// healStateWithRollbackInfo is the session.Info sibling of healStateWithRollback:
-// it reads its heal decision off the coherent infoByID snapshot entry instead of
-// the raw *session bead, persists the batch through sessFront.ApplyPatch, and
-// returns the batch for the reconciler to fold onto infoByID via ApplyPatchInfo.
-// Unlike the raw form it does NOT mirror onto a raw bead — the snapshot fold is
-// the single source of truth for the same-tick downstream readers (which now
-// also read Info), so the two transitional W6 lockstep mirrors are gone.
-func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+// healStateWithRollbackInfo computes and persists an advisory-state heal.
+// Callers may fold the returned patch only when err is nil; an error leaves
+// their current projection authoritative for the rest of the pass.
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
 	// Info.Closed is the projected mirror).
 	if info.Closed {
-		return nil
+		return nil, nil
 	}
 	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
-		return nil
+		return nil, nil
 	}
 	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
-		fmt.Fprintf(os.Stderr, "healState: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
+		return nil, err
 	}
 	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
 	// applied (no-op unless the shadow harness is enabled). Colocated with the
 	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
 	// inspection never records a write that never happened.
 	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
-	return batch
+	return batch, nil
 }
 
 // clearPendingCreateLeaseInfo is the Info-form counterpart of

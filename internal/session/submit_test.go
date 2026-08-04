@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -505,9 +504,6 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
@@ -527,9 +523,6 @@ func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
@@ -551,9 +544,6 @@ func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) 
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
 	sessionName := "s-test"
@@ -576,9 +566,6 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("poller ownership check uses /proc on linux")
-	}
 	cityPath := t.TempDir()
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
@@ -1592,7 +1579,7 @@ func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.
 func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {

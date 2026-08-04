@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,11 +38,10 @@ func TestBdStoreBackingUnwrapsCachingStore(t *testing.T) {
 	}
 }
 
-// TestBdStoreBackingUnwrapsCachingAndPolicyLayers mirrors the real
-// production nesting order: openRigStore/openStoreResultAtForCity wrap the
-// raw store with wrapStoreWithBeadPolicies, then buildStores/newControllerState
-// wrap that again with CachingStore. bdStoreBacking must see through both
-// layers to reach the *beads.BdStore whose subprocess ga-cdmx6x is about.
+// TestBdStoreBackingUnwrapsCachingAndPolicyLayers proves unwrapping is
+// order-independent. Production re-applies policy outside the cache, while
+// this inverse stack can still arise in tests and adapters; both must expose
+// the *beads.BdStore whose subprocess ga-cdmx6x is about.
 func TestBdStoreBackingUnwrapsCachingAndPolicyLayers(t *testing.T) {
 	inner := beads.NewBdStore("/city", noopBdRunner())
 	policyWrapped := wrapStoreWithBeadPolicies(inner, &config.City{})
@@ -124,6 +124,45 @@ func TestScopedStoreLikeSelectsRigScopeWhenDirIsARig(t *testing.T) {
 	}
 	if got := bs.Dir(); got != rigDir {
 		t.Fatalf("scoped store Dir() = %q, want rig dir %q", got, rigDir)
+	}
+}
+
+// TestScopedStoreLikePreservesBeadPolicyWrapper pins behavioral equivalence,
+// not just the backing directory. Production stores are policy-wrapped outside
+// the cache; dropping that wrapper from a scoped clone changes zero-value List
+// and Ready reads from TierBoth to TierIssues.
+func TestScopedStoreLikePreservesBeadPolicyWrapper(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cfg := &config.City{}
+	backing := beads.NewBdStore(cityDir, noopBdRunner())
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	existing := wrapStoreWithBeadPolicies(cached, cfg)
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, cfg, existing)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	inner, policy, ok := unwrapBeadPolicyStore(scoped)
+	if !ok {
+		t.Fatalf("scopedStoreLike() = %T, want a policy-wrapped clone", scoped)
+	}
+	if policy.cfg != cfg {
+		t.Fatalf("scoped policy config = %p, want original %p", policy.cfg, cfg)
+	}
+	if _, ok := inner.(*beads.BdStore); !ok {
+		t.Fatalf("scoped policy backing = %T, want *beads.BdStore", inner)
+	}
+}
+
+func TestScopedStoreLikeHonorsCanceledResolutionContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	existing := beads.NewBdStore(t.TempDir(), noopBdRunner())
+
+	_, err := scopedStoreLike(ctx, t.TempDir(), &config.City{}, existing)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scopedStoreLike error = %v, want context.Canceled", err)
 	}
 }
 

@@ -7,12 +7,14 @@ var terminalStatuses = map[string]bool{
 	"done":      true,
 	"failed":    true,
 	"skipped":   true,
+	"canceled":  true,
 }
 
-// applyDisplayNodeStates promotes pending nodes to ready or blocked based on
-// their upstream edges. Port of TS applyDisplayNodeStates. The returned slice is
-// a fresh copy with the pending → ready/blocked transitions applied, mirroring
-// the TS immutable update (the field order of each node is preserved).
+// applyDisplayNodeStates promotes pending nodes to ready based on their
+// upstream edges (dep-waiting nodes stay pending). Port of TS
+// applyDisplayNodeStates minus its pending→blocked promotion. The returned
+// slice is a fresh copy, mirroring the TS immutable update (the field order of
+// each node is preserved).
 func applyDisplayNodeStates(nodes []RunDisplayNode, edges []RunDisplayEdge) []RunDisplayNode {
 	byID := make(map[string]RunDisplayNode, len(nodes))
 	for _, node := range nodes {
@@ -60,7 +62,11 @@ func displayStatusFor(node RunDisplayNode, blockers []string, byID map[string]Ru
 	for _, blockerID := range blockers {
 		blocker, ok := byID[blockerID]
 		if !ok || !terminalStatuses[blocker.Status] {
-			return "blocked"
+			// Waiting on an unfinished upstream is the normal life of a
+			// pending node, not an alarm: it stays "pending". "blocked" is
+			// reserved for nodes the store itself marks blocked (operator
+			// attention), which return through the early exit above.
+			return "pending"
 		}
 	}
 	return "ready"

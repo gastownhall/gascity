@@ -133,7 +133,7 @@ func (s *Server) humaHandleProviderGet(_ context.Context, input *ProviderGetInpu
 func (s *Server) humaHandleProviderCreate(_ context.Context, input *ProviderCreateInput) (*ProviderCreatedOutput, error) {
 	// Idempotency: create at most once per Idempotency-Key. The cached value is
 	// the provider name; the response body is rebuilt from it on replay.
-	name, err := withIdempotency(s, "/v0/providers", input.IdempotencyKey, input.Body,
+	name, err := withIdempotency(s.idem, "/v0/providers", input.IdempotencyKey, input.Body,
 		func() (string, error) {
 			sm, ok := s.state.(StateMutator)
 			if !ok {

@@ -115,8 +115,8 @@ func extMsgClient(verb string, stderr io.Writer) (*api.Client, string, bool) {
 	return c, cityPath, true
 }
 
-func extMsgReportBindError(verb string, err error, stderr io.Writer) int {
-	if api.ShouldFallback(err) {
+func extMsgReportBindError(verb string, c *api.Client, err error, stderr io.Writer) int {
+	if api.ShouldFallback(c, err) {
 		fmt.Fprintf(stderr, "gc extmsg %s: city API unreachable (no local fallback for conversation bindings): %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -231,7 +231,7 @@ func cmdExtMsgBind(conv extMsgConversationFlags, agentName, sessionID string, re
 		Replace:      replace,
 	})
 	if err != nil {
-		return extMsgReportBindError(verb, err, stderr)
+		return extMsgReportBindError(verb, c, err, stderr)
 	}
 	return printExtMsgBinding(stdout, jsonOutput, record, action)
 }
@@ -279,7 +279,7 @@ func cmdExtMsgUnbind(conv extMsgConversationFlags, agentName, sessionID string, 
 	}
 	unbound, err := c.UnbindExtMsgConversation(ref, sessionID, agentName)
 	if err != nil {
-		return extMsgReportBindError("unbind", err, stderr)
+		return extMsgReportBindError("unbind", c, err, stderr)
 	}
 	if jsonOutput {
 		enc := json.NewEncoder(stdout)

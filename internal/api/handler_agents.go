@@ -373,7 +373,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if resolved.Command != "" {
-			return resolved.Command
+			return config.BinaryName(resolved.Command)
 		}
 	}
 	if spec, ok := cfg.Providers[providerName]; ok {
@@ -381,7 +381,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 			return spec.PathCheck
 		}
 		if spec.Command != "" {
-			return spec.Command
+			return config.BinaryName(spec.Command)
 		}
 	}
 	builtins := config.BuiltinProviders()
@@ -389,7 +389,7 @@ func providerPathCheck(providerName string, cfg *config.City) string {
 		if spec.PathCheck != "" {
 			return spec.PathCheck
 		}
-		return spec.Command
+		return config.BinaryName(spec.Command)
 	}
 	return providerName
 }

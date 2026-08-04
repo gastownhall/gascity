@@ -1467,9 +1467,9 @@ name = "mayor"
 	}
 	elapsed := time.Since(start)
 
-	// 5ms grace + the fixed 250ms post-SIGKILL settle. A fixed-100ms poll
-	// could overshoot the 5ms deadline; the clamp keeps the SIGTERM wait at
-	// ~5ms. Allow generous slack for scheduler jitter under CI load.
+	// A fixed-100ms poll could overshoot the 5ms deadline; the clamp keeps the
+	// SIGTERM wait at ~5ms, and the post-SIGKILL wait returns when the process
+	// exits. Allow generous slack for scheduler jitter under CI load.
 	if elapsed > 2*time.Second {
 		t.Errorf("terminateManagedDoltPID took %v with a 5ms grace; sub-poll clamp not honored", elapsed)
 	}

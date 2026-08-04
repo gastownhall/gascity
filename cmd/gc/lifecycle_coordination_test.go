@@ -203,9 +203,8 @@ func TestLifecycleCoordination_InitRigAddStart(t *testing.T) {
 	assertHooksAbsent(t, rigPath, "after start")
 }
 
-// TestLifecycleCoordination_StartOrder verifies that start precedes any
-// init call when using startBeadsLifecycle. This catches bugs where init
-// runs before the backing service is ready.
+// TestLifecycleCoordination_StartOrder verifies that start runs exactly once
+// before city initialization and each configured rig initialization.
 func TestLifecycleCoordination_StartOrder(t *testing.T) {
 	cityPath := t.TempDir()
 	cityName := "ordertest"
@@ -230,19 +229,17 @@ func TestLifecycleCoordination_StartOrder(t *testing.T) {
 	}
 
 	ops := readOpLog(t, logFile)
-	if len(ops) < 2 {
-		t.Fatalf("expected at least 2 ops, got %d: %v", len(ops), ops)
+	want := []string{
+		"start",
+		"init " + cityPath + " or hq",
+		"init " + rigPath + " mr mr",
 	}
-
-	// First op must be start.
-	if !strings.HasPrefix(ops[0], "start") {
-		t.Fatalf("first op should be start, got: %s", ops[0])
+	if len(ops) != len(want) {
+		t.Fatalf("expected exactly %d lifecycle ops, got %d: %v", len(want), len(ops), ops)
 	}
-
-	// All subsequent ops must be init.
-	for i := 1; i < len(ops); i++ {
-		if !strings.HasPrefix(ops[i], "init ") {
-			t.Fatalf("op[%d] should be init, got: %s", i, ops[i])
+	for i := range want {
+		if ops[i] != want[i] {
+			t.Fatalf("op[%d] = %q, want %q; all ops: %v", i, ops[i], want[i], ops)
 		}
 	}
 }

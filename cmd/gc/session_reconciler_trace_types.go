@@ -191,9 +191,10 @@ const (
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
 	TraceReasonStart                         TraceReasonCode = "start"
 
-	TraceReasonMaxSessionAge TraceReasonCode = "max_session_age"
-	TraceReasonUserHold      TraceReasonCode = "user_hold"
-	TraceReasonQuarantine    TraceReasonCode = "quarantine"
+	TraceReasonMaxSessionAge         TraceReasonCode = "max_session_age"
+	TraceReasonUserHold              TraceReasonCode = "user_hold"
+	TraceReasonQuarantine            TraceReasonCode = "quarantine"
+	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 )
 
 type TraceOutcomeCode string
@@ -270,6 +271,7 @@ const (
 	TraceOutcomeDeferredUserHold    TraceOutcomeCode = "deferred_user_hold"
 	TraceOutcomeDeferredQuarantine  TraceOutcomeCode = "deferred_quarantine"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
+	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
 
 	// TraceOutcomeSkippedLivenessError marks a destructive reconciler action
 	// (pending-create rollback, failed-create close, drain-ack finalize, or

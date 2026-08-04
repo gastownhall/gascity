@@ -11,6 +11,70 @@ import (
 
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
 
+// retiredKey records a config key that was removed in a known version. It is no
+// longer decoded into any struct, but its presence in config is a migration
+// WARNING, never a fatal unknown-field error — a city that has not yet dropped
+// the key still loads. This is the read-side counterpart of deleting a config
+// field: register the key here in the same change that removes the field.
+type retiredKey struct {
+	// RemovedIn is the version anchor at which the key was retired (a released
+	// version tag or an in-repo removal anchor). Surfaced in the warning so an
+	// operator knows when it stopped taking effect.
+	RemovedIn string
+	// Note is optional migration guidance (what replaced it, or what to do).
+	Note string
+}
+
+// retiredKeys registers retired config keys by dotted TOML path. A key here is
+// downgraded from a fatal unknown-field error to a warning by the undecoded
+// classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
+// surfaced on the two downstream deciders that re-classify config warnings —
+// strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
+// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
+// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+//
+// S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
+//   - Whole-table retirement needs BOTH the parent-table key and each leaf key
+//     registered, because toml.MetaData.Undecoded() reports both.
+//   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
+//     site_binding.go) and `gc migrate` still refuse a file carrying a retired
+//     key (the rewrite would drop it). S5-T7 must decide whether to exempt
+//     retired keys there or reword the "upgrade gc" guidance.
+var retiredKeys = map[string]retiredKey{}
+
+// retiredKeyWarning renders the migration warning for a retired key.
+func retiredKeyWarning(source, key string, rk retiredKey) string {
+	w := fmt.Sprintf("%s: %q was retired in %s and is ignored", source, key, rk.RemovedIn)
+	if rk.Note != "" {
+		w += "; " + rk.Note
+	}
+	return w
+}
+
+// IsRetiredKeyWarning reports whether w is a retired-config-key migration warning
+// (the retiredKeyWarning rendering). Downstream warning re-classifiers — strict
+// mode and the agent warning-emit path — consult this so a retired key stays a
+// surfaced, non-fatal warning rather than being re-promoted to a fatal error or
+// silently dropped, keeping the retirement contract true beyond the classifier.
+// Anchored to the stable rendering, so an entry's Note text does not affect it.
+func IsRetiredKeyWarning(w string) bool {
+	return strings.Contains(w, `" was retired in `) && strings.Contains(w, " and is ignored")
+}
+
+// classifyUndecoded maps a single undecoded TOML key to its human warning and
+// whether it is FATAL. Retired keys and specialized (release-wave) keys warn but
+// never fail; every other unknown key is a fatal unknown-field error. Taking the
+// retired map as a parameter keeps it testable without mutating package state.
+func classifyUndecoded(source, key string, known []string, retired map[string]retiredKey) (warning string, fatal bool) {
+	if rk, ok := retired[key]; ok {
+		return retiredKeyWarning(source, key, rk), false
+	}
+	if special, ok := specializedUndecodedWarning(source, key); ok {
+		return special, false
+	}
+	return unknownFieldWarning(source, key, known), true
+}
+
 var agentDefaultsCompatibilityOverlapKeys = []string{
 	"provider",
 	"model",
@@ -36,12 +100,8 @@ func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 
 	known := knownTOMLKeys()
 	for _, key := range undecoded {
-		keyStr := key.String()
-		if special, ok := specializedUndecodedWarning(source, keyStr); ok {
-			warnings = append(warnings, special)
-			continue
-		}
-		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
+		w, _ := classifyUndecoded(source, key.String(), known, retiredKeys)
+		warnings = append(warnings, w)
 	}
 	return warnings
 }
@@ -55,11 +115,9 @@ func fatalUndecodedWarnings(md toml.MetaData, source string) []string {
 	known := knownTOMLKeys()
 	var warnings []string
 	for _, key := range undecoded {
-		keyStr := key.String()
-		if _, ok := specializedUndecodedWarning(source, keyStr); ok {
-			continue
+		if w, fatal := classifyUndecoded(source, key.String(), known, retiredKeys); fatal {
+			warnings = append(warnings, w)
 		}
-		warnings = append(warnings, unknownFieldWarning(source, keyStr, known))
 	}
 	return warnings
 }

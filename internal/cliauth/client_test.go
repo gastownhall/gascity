@@ -3,6 +3,8 @@ package cliauth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -95,6 +97,90 @@ func TestBrowserLoginRoundTrip(t *testing.T) {
 	}
 	if token != "tok-abc" {
 		t.Fatalf("token = %q; want tok-abc", token)
+	}
+}
+
+func TestBrowserCallbackPageScrubsFragmentBeforeTokenHandoff(t *testing.T) {
+	resultCh := make(chan browserLoginResult, 1)
+	recorder := httptest.NewRecorder()
+	browserLoginHandler("expected-state", resultCh).ServeHTTP(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "http://127.0.0.1/callback", nil),
+	)
+
+	response := recorder.Result()
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read callback page: %v", err)
+	}
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q; want no-store", got)
+	}
+	if got := response.Header.Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q; want no-cache", got)
+	}
+	if got := response.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Referrer-Policy = %q; want no-referrer", got)
+	}
+	if got := response.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q; want nosniff", got)
+	}
+	if got := response.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q; want DENY", got)
+	}
+
+	page := string(body)
+	const scriptOpen = "<script>"
+	const scriptClose = "</script>"
+	scriptStart := strings.Index(page, scriptOpen)
+	scriptEnd := strings.Index(page, scriptClose)
+	if scriptStart < 0 || scriptEnd <= scriptStart {
+		t.Fatalf("callback page does not contain one inline script")
+	}
+	script := page[scriptStart+len(scriptOpen) : scriptEnd]
+	scriptHash := sha256.Sum256([]byte(script))
+	wantScriptSource := "'sha256-" + base64.StdEncoding.EncodeToString(scriptHash[:]) + "'"
+	csp := response.Header.Get("Content-Security-Policy")
+	for _, directive := range []string{
+		"default-src 'none'",
+		"script-src " + wantScriptSource,
+		"connect-src 'self'",
+		"base-uri 'none'",
+		"form-action 'none'",
+		"frame-ancestors 'none'",
+	} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("Content-Security-Policy = %q; missing %q", csp, directive)
+		}
+	}
+	if strings.Contains(csp, "'unsafe-inline'") {
+		t.Fatalf("Content-Security-Policy = %q; must not allow unsafe inline content", csp)
+	}
+
+	orderedSteps := []string{
+		`new URLSearchParams(window.location.hash.slice(1))`,
+		`const token = params.get("token")`,
+		`const service = params.get("service")`,
+		`const state = params.get("state")`,
+		`history.replaceState(null, "", window.location.pathname + window.location.search)`,
+		`if (!token || !service || !state)`,
+		`fetch("/token"`,
+	}
+	previous := -1
+	for _, step := range orderedSteps {
+		index := strings.Index(script, step)
+		if index < 0 {
+			t.Fatalf("callback script is missing %q", step)
+		}
+		if index <= previous {
+			t.Fatalf("callback script step %q occurs out of order", step)
+		}
+		previous = index
 	}
 }
 

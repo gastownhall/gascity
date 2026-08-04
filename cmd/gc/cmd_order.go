@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -427,6 +429,7 @@ type orderJSON struct {
 	On           string            `json:"on,omitempty"`
 	Target       string            `json:"target,omitempty"`
 	Timeout      string            `json:"timeout,omitempty"`
+	CheckTimeout string            `json:"check_timeout,omitempty"`
 	Enabled      bool              `json:"enabled"`
 	Source       string            `json:"source,omitempty"`
 	FormulaLayer string            `json:"formula_layer,omitempty"`
@@ -496,6 +499,7 @@ func orderToJSON(a orders.Order) orderJSON {
 		On:           a.On,
 		Target:       a.Pool,
 		Timeout:      a.Timeout,
+		CheckTimeout: a.CheckTimeout,
 		Enabled:      a.IsEnabled(),
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
@@ -699,6 +703,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	scoped := a.ScopedName()
 	var cfg *config.City
 	var cityName string
+	var storeTarget execStoreTarget
 	if citylayout.HasCityConfig(cityPath) || citylayout.HasRuntimeRoot(cityPath) {
 		var err error
 		cfg, err = loadCityConfig(cityPath, stderr)
@@ -707,6 +712,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			return 1
 		}
 		cityName = config.EffectiveCityName(cfg, filepath.Base(cityPath))
+		storeTarget, err = resolveOrderStoreTarget(cityPath, cfg, a)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Compile wisp from formula so graph workflows can be decorated with
@@ -743,10 +753,9 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		}
 	}
 
-	if a.Pool != "" && cfg != nil {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", genericStore, cityName, cityPath, cfg); err != nil {
-			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, genericStore, cityName, cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	cookResult, err := molecule.Instantiate(context.Background(), genericStore, recipe, molecule.Options{})
@@ -755,6 +764,11 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 	rootID := cookResult.RootID
+	if cookResult.GraphWorkflow {
+		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: genericStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
+			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
+		}
+	}
 
 	// Track the spawned root in the same store that created it so manual runs
 	// stay provider-aware and do not fall back to ambient bd CLI state.
@@ -897,15 +911,20 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 	}
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
+	// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into the
+	// child, so any order that echoes one would leak it. Redact the exec error
+	// and combined output against the projected env on both the failure and
+	// success paths, matching the controller dispatch path (order_dispatch.go).
+	redactionEnv := append(os.Environ(), env...)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: exec failed: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(err.Error(), redactionEnv)) //nolint:errcheck
 		if len(output) > 0 {
-			fmt.Fprintf(stderr, "%s", output) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 		}
 		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
 	if len(output) > 0 {
-		fmt.Fprintf(stdout, "%s", output) //nolint:errcheck
+		fmt.Fprintf(stdout, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
 	return orderRunExecResult{code: 0}
@@ -1271,34 +1290,28 @@ var orderHistoryAPIClient = func(cityPath string) (*api.Client, string) {
 // back to the local iterator. Emits exactly one route=... log line per exit
 // path (gated on GC_DEBUG).
 func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa []orders.Order, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "order history"
 	// Multi-order mode (no name provided) has no single scoped_name to
 	// request against /orders/history; stay on the local iterator so we
 	// produce the same aggregated output. The log line documents the
 	// deliberate fallback reason so operators aren't surprised by a
 	// missing route=api.
 	if name == "" {
-		logRoute(stderr, cmdName, "fallback", "multi-order")
+		logRoute(stderr, "order history", "fallback", "multi-order")
 		return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
 	}
 
-	if c != nil {
-		scopedName := orderScopedName(name, rig, aa)
-		cr, err := c.GetOrderHistory(scopedName, 0, "")
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderOrderHistoryFromAPI(cr, name, rig, jsonOutput, stdout, stderr)
-		}
-		if !api.ShouldFallbackForRead(err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.OrderHistoryView]
+	return routeRead(c, "order history", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetOrderHistory(orderScopedName(name, rig, aa), 0, "")
+			return err
+		},
+		func() int { return renderOrderHistoryFromAPI(cr, name, rig, jsonOutput, stdout, stderr) },
+		func() int {
+			return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
+		},
+	)
 }
 
 // orderScopedName returns the rig-qualified key for the server's
@@ -1740,12 +1753,31 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 	return orders.Order{}, false
 }
 
+// bdCursorRecentRunsLimit caps the cursor read to the newest tracking beads.
+// The seq:<n> cursor is forward-only — every new run records a seq >= all prior
+// runs — so the true max(seq) is the newest run, which the canonical
+// (created_at DESC, id DESC) order that ApplyListQuery applies places at the
+// front; a client-side prefix cut therefore always retains it. This is a
+// client-side result cap, NOT a backing pushdown: bdCursor must stay off the
+// backing's bounded created-desc read (AllowBackingCreatedLimit), whose id-ASC
+// tie-break would drop the newest largest-id row — exactly the max-seq run —
+// when a same-second burst exceeds the cap.
+const bdCursorRecentRunsLimit = 256
+
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
+		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
 		TierMode:      beads.TierBoth,
+		// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces to
+		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the created_at
+		// sort key — so the backing's id-ASC created-desc limit could drop the newest
+		// largest-id row carrying the max seq when a same-second burst exceeds the
+		// cap, regressing the event cursor into replaying consumed events. Fetch the
+		// full candidate set and let ApplyListQuery cut the canonical
+		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the front.
 	})
 	if err != nil {
 		if len(beadList) == 0 {

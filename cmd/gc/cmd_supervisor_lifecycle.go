@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -540,6 +541,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	child.Stdout = logFile
 	child.Stderr = logFile
 	child.Env = os.Environ()
+	disableProductMetricsForChild(child)
 
 	if err := child.Start(); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1128,6 +1130,7 @@ var supervisorServiceEnvKeys = map[string]bool{
 
 var supervisorServiceFixedEnvKeys = map[string]bool{
 	"GC_HOME":                             true,
+	execenv.UsageMetricsDisableEnv:        true,
 	supervisorPreserveSessionsOnSignalEnv: true,
 	"PATH":                                true,
 	"XDG_RUNTIME_DIR":                     true,
@@ -1203,6 +1206,10 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 			env[key] = val
 		}
 	}
+	// This process is a Gas City-owned recursive child. Assign the canonical
+	// fixed value after every inherited, explicit, secrets-file, and launchctl
+	// tier so none can re-enable product metrics in the service process.
+	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
 
 	keys := make([]string, 0, len(env))
 	for key := range env {

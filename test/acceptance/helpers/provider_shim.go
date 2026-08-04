@@ -31,6 +31,20 @@ func StageProviderBinary(binDir, name, defaultShim string) error {
 	return os.Symlink(path, dst)
 }
 
+// StageIdleProviderBinary materializes a provider process double that stays
+// alive until the runtime stops it. Tier A uses it to exercise subprocess
+// session lifecycle without requiring inference, credentials, or a host CLI.
+func StageIdleProviderBinary(binDir, name string) error {
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+
+	dst := filepath.Join(binDir, name)
+	_ = os.Remove(dst)
+	const script = "#!/bin/sh\nexec sleep 3600\n"
+	return os.WriteFile(dst, []byte(script), 0o755)
+}
+
 func providerShimCommand(name, defaultShim string) (string, bool) {
 	key := "GC_ACCEPTANCE_PROVIDER_SHIM_" + strings.ToUpper(strings.NewReplacer("-", "_", "/", "_", ".", "_").Replace(name))
 	if value, ok := os.LookupEnv(key); ok {

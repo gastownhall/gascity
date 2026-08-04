@@ -775,16 +775,23 @@ func TestIsTransientGraphApplyErrorTreatsCommandTimeoutAsTransient(t *testing.T)
 }
 
 func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
+	// Multi-step workflow (two authored work nodes): every non-root node,
+	// including the generated workflow-finalize, gains a "tracks" ownership
+	// edge back to the root. Single-step workflows drop the finalize edge to
+	// avoid the finalize <-> root deadlock (su-mla5h); see
+	// TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks.
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
 			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
 			{ID: "wf.body", Title: "Body", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
+			{ID: "wf.body2", Title: "Body 2", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
 			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
 		},
 		Deps: []formula.RecipeDep{
 			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
 			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body", Type: "blocks"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.body2", Type: "blocks"},
 		},
 	}
 
@@ -824,6 +831,64 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 	}
 	if !finalizeTracksRoot {
 		t.Fatal("missing workflow-finalize -> root tracks ownership edge")
+	}
+}
+
+// TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks regresses the
+// single-step graph-workflow deadlock (su-mla5h). The v2 compiler emits
+// root --blocks--> workflow-finalize for every graph workflow. When the
+// workflow also gains a workflow-finalize --tracks--> root ownership edge, the
+// two controller-managed beads form a mutual finalize <-> root cycle that
+// never resolves: neither the finalizer nor the root can close because each
+// depends on the other, so both strand open until force-closed. A single
+// authored work step is the shape that recurred in production
+// (mol-superlzy-capture). The finalizer must not gain the tracks edge here,
+// while the lone work step still tracks the root and the root still blocks on
+// the finalizer.
+func TestBuildRecipeApplyPlan_SingleStepOmitsFinalizeRootTracks(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.review", Title: "Review", Type: "task"},
+			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.review", Type: "blocks"},
+		},
+	}
+
+	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if !graphWorkflow || rootKey != "wf" {
+		t.Fatalf("graphWorkflow=%v rootKey=%q, want true/wf", graphWorkflow, rootKey)
+	}
+
+	var rootBlocksFinalize bool
+	var reviewTracksRoot bool
+	var finalizeTracksRoot bool
+	for _, edge := range plan.Edges {
+		if edge.FromKey == "wf" && edge.ToKey == "wf.workflow-finalize" && edge.Type == "blocks" {
+			rootBlocksFinalize = true
+		}
+		if edge.FromKey == "wf.review" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			reviewTracksRoot = true
+		}
+		if edge.FromKey == "wf.workflow-finalize" && edge.ToKey == "wf" && edge.Type == "tracks" {
+			finalizeTracksRoot = true
+		}
+	}
+	if !rootBlocksFinalize {
+		t.Fatal("missing root -> workflow-finalize blocks edge (workflow must still block on its finalizer)")
+	}
+	if !reviewTracksRoot {
+		t.Fatal("missing review -> root tracks ownership edge (the lone work step must still track the root)")
+	}
+	if finalizeTracksRoot {
+		t.Fatal("single-step workflow emitted a deadlocking workflow-finalize -> root tracks edge (su-mla5h)")
 	}
 }
 

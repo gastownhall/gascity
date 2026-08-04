@@ -35,6 +35,14 @@ func RuntimeEnv(sessionID, sessionName string, generation, continuationEpoch int
 		"GC_RUNTIME_EPOCH":      strconv.Itoa(generation),
 		"GC_CONTINUATION_EPOCH": strconv.Itoa(continuationEpoch),
 		"GC_INSTANCE_TOKEN":     instanceToken,
+		// BEADS_HOLDER_TOKEN is the incarnation credential bd records on a claim
+		// (ownership-fencing DESIGN §2.4). It IS the instance token — deriving it
+		// here, the single authoritative wiring point, keeps the token a session
+		// presents to bd identical to the one the controller persists, so a stale
+		// incarnation cannot pass as the current owner. Set unconditionally (even
+		// when empty, mirroring GC_INSTANCE_TOKEN) so a fresh incarnation never
+		// inherits a parent's stale holder token.
+		"BEADS_HOLDER_TOKEN": instanceToken,
 	}
 	return env
 }

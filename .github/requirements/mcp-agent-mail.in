@@ -2,11 +2,17 @@
 # publishes current wheel/sdist assets.
 mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz
 
-# Security floor: GitPython 3.1.49 has GHSA-mv93-w799-cj2w (HIGH).
-# Pinning floor at 3.1.50 to ensure the resolver picks the patched version
-# even if mcp-agent-mail's transitive constraint allows older. Drop this
-# line once mcp-agent-mail upstream pins GitPython>=3.1.50 itself.
-gitpython>=3.1.50
+# Security floor: GitPython < 3.1.52 has multiple HIGH-severity command
+# injection and path traversal advisories reported by the image gate.
+# Pinning the floor ensures the resolver picks the patched version even if
+# mcp-agent-mail's transitive constraint allows older. Drop this line once
+# mcp-agent-mail upstream pins GitPython>=3.1.52 itself.
+gitpython>=3.1.52
+
+# Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
+# vulnerabilities reported by the image gate. Drop this line once transitive
+# constraints carry the patched version themselves.
+pillow>=12.3.0
 
 # Security floor: urllib3 < 2.7.0 has GHSA-mf9v-mfxr-j63j (HIGH,
 # decompression-bomb safeguards bypassed in parts of the streaming API)
@@ -30,6 +36,15 @@ litellm>=1.84.0
 # < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
 # authlib's transitive constraint carries the patched version itself.
 joserfc>=1.6.8
+
+# Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
+# transports serve session requests without verifying the authenticated
+# session, and experimental task handlers are reachable by any client) and
+# CVE-2026-59950 (HIGH, fixed 1.28.1 — WebSocket transport lacks Host/Origin
+# validation) in the mcp Python SDK < 1.28.1. mcp arrives transitively via
+# fastmcp-slim (mcp<2.0,>=1.24.0); floor at 1.28.1 to clear all three. Drop
+# once fastmcp-slim's transitive constraint carries the patched version itself.
+mcp>=1.28.1
 
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail

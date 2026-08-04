@@ -216,7 +216,9 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 // new-session (the reconciler decides whether to Start fresh). This is the ssh
 // half of the runtime/transport un-weld (B3a), mirroring tmux's Relaunch (B1).
 //
-// PreStart is NOT re-run (it is provision-half — it prepares the box). Env is
+// PreStart is NOT re-run (it is provision-half here — it prepares the box).
+// NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs PreStart on
+// Relaunch (launch-half); ssh intentionally keeps it provision-half. Env is
 // also provision-half: respawn-pane has no -e, so the session keeps the env set
 // by the original new-session; a launch-only env change is not re-applied
 // (matching tmux B1's "does not re-inject env hints").

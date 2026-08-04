@@ -2286,7 +2286,7 @@ func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 				wantPort := fb.setup(t, cityDir)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -2417,7 +2417,7 @@ exit 1
 				writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 				writeExecutable(t, filepath.Join(binDir, "lsof"), tc.lsofBody)
@@ -2552,7 +2552,7 @@ exit 1
 				writeManagedRuntimeStateWithPID(t, cityDir, listener.Addr().(*net.TCPAddr).Port, 424242)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 				writeExecutable(t, filepath.Join(binDir, "lsof"), tc.lsofBody)
@@ -2644,7 +2644,7 @@ func TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed(t *testin
 			writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 			writeExecutable(t, filepath.Join(binDir, "sed"), fmt.Sprintf(`#!/bin/sh
@@ -2762,7 +2762,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2840,7 +2840,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2912,7 +2912,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -2981,7 +2981,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3025,7 +3025,7 @@ func TestReaperMailWispsSummaryFieldAlwaysPresent(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3111,7 +3111,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 			gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3211,7 +3211,7 @@ case "$*" in
 esac
 exit 0
 `)
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3358,7 +3358,7 @@ func TestReaperSQLReflectsCurrentSchema(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3455,7 +3455,7 @@ func TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets(t *testing.
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3506,7 +3506,7 @@ func TestReaperSkipsDependencyQueriesWithoutWispDependencyTable(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3555,7 +3555,7 @@ func TestReaperSplitSchemaQueriesUseSplitColumns(t *testing.T) {
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3620,6 +3620,7 @@ func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
 		cityDir = resolved
 	}
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	canonicalCityDir, err := filepath.EvalSymlinks(cityDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(city dir): %v", err)
@@ -3631,7 +3632,7 @@ func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3676,6 +3677,10 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
+	wantRoute := "bd --city " + canonicalCityDir + " prune --pattern gm-* --older-than 720h --force --json"
+	if !strings.Contains(string(gcData), wantRoute) {
+		t.Fatalf("reaper did not route session pruning through the explicit city scope %q:\n%s", wantRoute, gcData)
+	}
 	if !strings.Contains(string(gcData), "sessions-pruned:7") {
 		t.Fatalf("reaper summary did not report pruned sessions:\n%s", gcData)
 	}
@@ -3687,6 +3692,7 @@ func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
 		cityDir = resolved
 	}
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3694,7 +3700,7 @@ func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$*" in
   "session prune --state drained --before 24h --json")
@@ -3744,7 +3750,7 @@ func TestReaperSessionStatePruneFailureEscalates(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$*" in
   "session prune --state drained --before 24h --json")
@@ -3791,6 +3797,7 @@ exit 0
 func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3798,7 +3805,7 @@ func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3851,6 +3858,7 @@ exit 0
 func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3858,7 +3866,7 @@ func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3899,12 +3907,13 @@ exit 0
 func TestReaperSessionPruneMissingBdDegradesToZero(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -3940,6 +3949,7 @@ exit 0
 func TestReaperSessionPruneRunsWhenNoDoltDatabases(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -3955,7 +3965,7 @@ esac
 exit 0
 `)
 	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4044,7 +4054,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4119,7 +4129,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4191,7 +4201,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4234,6 +4244,7 @@ exit 0
 func TestReaperRowQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -4266,7 +4277,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4344,7 +4355,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4424,7 +4435,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4574,7 +4585,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4723,7 +4734,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4818,7 +4829,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4894,7 +4905,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -4965,7 +4976,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5033,7 +5044,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5061,6 +5072,78 @@ exit 0
 	}
 	if !strings.Contains(gcLogText, "Error 1105 (HY000): wisp_dependencies.depends_on_id missing from schema") {
 		t.Fatalf("reaper escalation lost Dolt stderr error tail:\n%s", gcLogText)
+	}
+}
+
+// TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery covers the
+// regression reported in #4161: dolt sql embeds the full failing query in
+// its stderr ("error on line 1 for query <query>: <error>"), so once the
+// query text alone exceeds sanitize_output's window the trailing error
+// message is silently dropped. TestReaperFailureAnomalyPreservesDoltErrorTail
+// above only exercises a short (~90 char) stderr and cannot catch this.
+func TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'error on line 1 for query ' >&2
+    i=0
+    while [ "$i" -lt 4200 ]; do
+      printf 'x' >&2
+      i=$((i + 1))
+    done
+    printf ': WITH RECURSIVE iteration limit exceeded\n' >&2
+    exit 42
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
+		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "WITH RECURSIVE iteration limit exceeded") {
+		t.Fatalf("reaper escalation lost Dolt error tail for a long query:\n%s", gcLogText)
 	}
 }
 
@@ -5114,7 +5197,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5196,7 +5279,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5232,6 +5315,7 @@ exit 0
 func TestReaperAutoClosesIssuesOnlyInCityDatabase(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -5265,7 +5349,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5354,7 +5438,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5448,7 +5532,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5527,7 +5611,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5632,7 +5716,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5703,7 +5787,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5789,7 +5873,7 @@ exit 0
 printf 'pwd=%s beads=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5826,6 +5910,14 @@ exit 0
 	}
 	if strings.Contains(bdLogText, "beads="+ambientBeadsDir) {
 		t.Fatalf("reaper used ambient BEADS_DIR for city auto-close:\n%s", bdLogText)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	wantRoute := "bd --city " + canonicalCityDir + " close ga-city --reason stale:auto-closed by reaper"
+	if !strings.Contains(string(gcData), wantRoute) {
+		t.Fatalf("reaper did not route issue close through the explicit city scope %q:\n%s", wantRoute, gcData)
 	}
 }
 
@@ -5865,7 +5957,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5949,7 +6041,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -5993,8 +6085,9 @@ exit 0
 func TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	writeFreshBackupState(t, cityDir)
 	binDir := t.TempDir()
-	for _, tool := range []string{"bash", "dirname", "tail", "grep", "cut", "tr", "mktemp", "rm", "sed", "wc", "cat", "head"} {
+	for _, tool := range []string{"bash", "date", "dirname", "tail", "grep", "cut", "tr", "mktemp", "rm", "sed", "wc", "cat", "head"} {
 		linkTestPathTool(t, binDir, tool)
 	}
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -6026,7 +6119,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6106,7 +6199,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6179,7 +6272,7 @@ exit 0
 printf '%s\n' "$*" >> "$BD_CALL_LOG"
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6254,7 +6347,7 @@ case "$*" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6426,7 +6519,7 @@ func TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable(t *testing.T) {
 			gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
-			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6524,7 +6617,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6579,7 +6672,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6639,7 +6732,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6700,7 +6793,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6767,7 +6860,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 exit 0
 `)
 
@@ -6820,7 +6913,7 @@ func runReaperCloseFixture(t *testing.T, fixture string) (doltLog string, gcLog 
 	gcLog = filepath.Join(t.TempDir(), "gc.log")
 
 	writeReaperCloseFixtureDoltStub(t, filepath.Join(binDir, "dolt"))
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
@@ -6870,6 +6963,19 @@ func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
 	metadata := fmt.Sprintf("{\n  \"dolt_database\": %q\n}\n", db)
 	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+}
+
+func writeFreshBackupState(t *testing.T, cityDir string) {
+	t.Helper()
+	backupDir := filepath.Join(cityDir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(backup dir): %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	content := fmt.Sprintf(`{"timestamp":%q}`, ts)
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(backup_state.json): %v", err)
 	}
 }
 
@@ -7042,6 +7148,32 @@ case "$1" in
 esac
 exit 0
 `)
+}
+
+// writeMaintenanceGCStub installs a gc test double whose gc-bd branch
+// conforms to the wrapper boundary used by the shipped maintenance scripts.
+// The caller-provided body continues to define every non-bd command.
+func writeMaintenanceGCStub(t *testing.T, path, body string) {
+	t.Helper()
+	const shebang = "#!/bin/sh\n"
+	if !strings.HasPrefix(body, shebang) {
+		t.Fatalf("gc stub must start with %q", strings.TrimSpace(shebang))
+	}
+	const gcBDRoute = `if [ "${1:-}" = "bd" ]; then
+  if [ -n "${GC_CALL_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$GC_CALL_LOG"
+  fi
+  shift
+  if [ "${1:-}" = "--city" ]; then
+    city="$2"
+    shift 2
+    cd "$city" || exit 1
+    export BEADS_DIR="$city/.beads"
+  fi
+  exec bd "$@"
+fi
+`
+	writeExecutable(t, path, shebang+gcBDRoute+strings.TrimPrefix(body, shebang))
 }
 
 func mergeTestEnv(overrides map[string]string) []string {
@@ -9981,6 +10113,7 @@ func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
 	t.Helper()
 	binDir = t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 	env = map[string]string{
 		"BD_LOG":       bdLog,
 		"GC_CITY":      t.TempDir(),
@@ -10358,6 +10491,7 @@ EOF
     ;;
 esac
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -10592,6 +10726,7 @@ EOF
     ;;
 esac
 `, closedJSON, depsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -10707,6 +10842,7 @@ JSON
 esac
 exit 0
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env := map[string]string{
 		"BD_LOG":       bdLog,
@@ -10759,6 +10895,7 @@ JSON
 esac
 exit 0
 `, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	writeExecutable(t, filepath.Join(binDir, "date"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$DATE_LOG"
@@ -10866,6 +11003,7 @@ JSON
 esac
 exit 0
 `, closedJSON, depsForClosed1, depsForClosed2, depsForClosedInternal))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 
 	env := map[string]string{
 		"BD_LOG":       bdLog,

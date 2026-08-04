@@ -153,6 +153,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if template == "" {
 			continue
 		}
+		template = agentutil.NormalizePoolRouteTarget(cfg, template)
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil {
 			continue

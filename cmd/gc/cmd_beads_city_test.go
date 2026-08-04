@@ -741,6 +741,7 @@ func TestDoBeadsCityUseManagedPreservesCompatOnlyExplicitRigs(t *testing.T) {
 func TestSyncCityEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
 	cityDir := "/city"
+	fs.Dirs[cityDir] = true
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Dolt:      config.DoltConfig{Host: "old-city.example.com", Port: 3306},

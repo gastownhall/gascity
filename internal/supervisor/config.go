@@ -46,6 +46,11 @@ type Section struct {
 	// and full semantics.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges a non-loopback bind with
+	// allow_mutations and no verify key (an unauthenticated write plane behind a
+	// network front); without it that combination is a fail-closed boot error
+	// (gate G10). See config.APIConfig for the full semantics.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
 	// ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every
 	// read (GET/HEAD) of an already-registered city (the per-city routes under
 	// /v0/city/{cityName}); supervisor-scope reads (/v0/cities, /health) stay
@@ -80,6 +85,10 @@ type EventsSection struct {
 type ExportConfig struct {
 	// Endpoint is the HTTP URL that receives batched, envelope-only events.
 	Endpoint string `toml:"endpoint,omitempty"`
+	// Cities optionally restricts export to exact registered city names. A nil
+	// slice preserves the all-city default; an explicitly empty slice exports no
+	// city events.
+	Cities []string `toml:"cities,omitempty"`
 	// Token, when set, is sent as an Authorization: Bearer header.
 	Token string `toml:"token,omitempty"`
 	// TokenFile, when set, is a path to a file holding the bearer token. It is

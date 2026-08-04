@@ -637,3 +637,31 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
 	}
 }
+
+func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stalled-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = 20 * time.Millisecond
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		<-release
+		return time.Time{}, nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
+		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
+	}
+}

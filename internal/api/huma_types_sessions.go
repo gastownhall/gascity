@@ -6,30 +6,18 @@ package api
 // These types drive the OpenAPI spec for all /v0/session* endpoints.
 
 import (
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionListInput is the Huma input for GET /v0/city/{cityName}/sessions.
+// Keyset cursors made the old "cursor present but empty" distinction moot: an
+// empty cursor is first-page paging, anything else must be a valid v1 token.
 type SessionListInput struct {
 	CityScope
 	PaginationParam
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
-
-	// cursorPresent is set by Resolve to distinguish "cursor absent" from
-	// "cursor present but empty" in the query string. Huma gives "" for both.
-	cursorPresent bool
-}
-
-// Resolve implements huma.Resolver to detect whether the cursor query
-// parameter was explicitly provided (even as an empty string).
-func (s *SessionListInput) Resolve(ctx huma.Context) []error {
-	// huma.Context.URL() returns the parsed URL; check raw query for cursor key.
-	u := ctx.URL()
-	s.cursorPresent = u.Query().Has("cursor")
-	return nil
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
@@ -97,17 +85,21 @@ type SessionIDInput struct {
 type SessionTranscriptInput struct {
 	CityScope
 	TailParam
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
-	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
-	After  string `query:"after" required:"false" doc:"Pagination cursor: return entries after this UUID."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise."`
+	Before          string `query:"before" required:"false" doc:"Pagination cursor: return entries before this stable transcript entry ID."`
+	After           string `query:"after" required:"false" doc:"Pagination cursor: return entries after this stable transcript entry ID."`
 }
 
 // SessionStreamInput is the Huma input for GET /v0/city/{cityName}/session/{id}/stream.
 type SessionStreamInput struct {
 	CityScope
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise."`
+	AfterCursor     string `query:"after_cursor" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect."`
+	LastEventID     string `header:"Last-Event-ID" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor."`
 
 	resolved *sessionStreamState
 }

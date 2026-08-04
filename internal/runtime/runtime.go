@@ -440,6 +440,21 @@ type CopyEntry struct {
 // runtime-generated Python cache and editor backup artifacts. Returns empty
 // string on any error (caller should treat as "unknown").
 func HashPathContent(path string) string {
+	return HashPathContentExcluding(path, nil)
+}
+
+// HashPathContentExcluding is HashPathContent with an extra per-file filter:
+// when path is a directory, any file whose slash-separated path relative to
+// path satisfies skip is left out of the hashed manifest. The file stays on
+// disk and is still staged — it just does not contribute to the fingerprint. A
+// nil skip hashes everything, byte-identical to HashPathContent. skip is only
+// consulted for regular files (never directories, never the single-file case).
+//
+// This lets a caller keep a probed directory entry content-fingerprinted while
+// excluding files whose changes must NOT cascade a config-drift restart — e.g.
+// operational/host-tooling scripts under .gc/scripts (issue #3840), mirroring
+// the path-only treatment .gc/settings.json already receives.
+func HashPathContentExcluding(path string, skip func(rel string) bool) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ""
@@ -474,6 +489,9 @@ func HashPathContent(path string) string {
 			return nil
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if skip != nil && skip(filepath.ToSlash(rel)) {
 			return nil
 		}
 		entries = append(entries, rel)

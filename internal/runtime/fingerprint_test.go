@@ -815,6 +815,51 @@ func TestHashPathContentUnreadableChild(t *testing.T) {
 	}
 }
 
+func TestHashPathContentExcluding(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(sub, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("agent-helper.sh", "aaa")
+	write("update-gascity.sh", "vvv")
+
+	skip := func(rel string) bool { return strings.HasPrefix(rel, "update-") }
+
+	base := HashPathContentExcluding(sub, skip)
+	if base == "" {
+		t.Fatal("expected non-empty hash")
+	}
+
+	// Editing an excluded file must NOT change the hash.
+	write("update-gascity.sh", "vvv-edited")
+	if got := HashPathContentExcluding(sub, skip); got != base {
+		t.Error("editing an excluded file changed the hash; it must be ignored")
+	}
+	// Adding another excluded file must NOT change the hash.
+	write("update-external-tools.sh", "ttt")
+	if got := HashPathContentExcluding(sub, skip); got != base {
+		t.Error("adding an excluded file changed the hash; it must be ignored")
+	}
+
+	// Editing a non-excluded file MUST change the hash.
+	write("agent-helper.sh", "changed")
+	if got := HashPathContentExcluding(sub, skip); got == base {
+		t.Error("editing a non-excluded file should change the hash")
+	}
+
+	// A nil skip is byte-identical to HashPathContent (regression guard).
+	if HashPathContentExcluding(sub, nil) != HashPathContent(sub) {
+		t.Error("nil skip must match HashPathContent")
+	}
+}
+
 // TestFingerprintVersionedOutputFormat enforces FR-5/FR-7 from ga-s760.1:
 // every fingerprint helper emits "<FingerprintVersion>:<hex>" so the
 // reconciler can tell which binary produced a stored hash.
@@ -893,7 +938,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v5 prefix (future mismatched version)", "v5:" + bareHex, true},
+		{"v6 prefix (future mismatched version)", "v6:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

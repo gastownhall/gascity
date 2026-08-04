@@ -102,7 +102,7 @@ func TestWorkAssignmentReleaseWorkBead_OpenStaysOpen(t *testing.T) {
 	if got.opts.Status != nil {
 		t.Fatalf("Status should be nil for an already-open bead, got %q", *got.opts.Status)
 	}
-	wantMeta := withClearedSessionAffinityMetadata(nil)
+	wantMeta := clearedSessionAffinityMetadata()
 	if !reflect.DeepEqual(got.opts.Metadata, wantMeta) {
 		t.Fatalf("Metadata mismatch:\n got %#v\n want %#v", got.opts.Metadata, wantMeta)
 	}

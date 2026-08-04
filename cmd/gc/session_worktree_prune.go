@@ -20,6 +20,7 @@ import (
 // without standing up real git worktrees.
 type gitProbe interface {
 	IsRepo() bool
+	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
@@ -29,6 +30,21 @@ type gitProbe interface {
 // newGitProbe returns a gitProbe scoped to the given directory. Indirected
 // through a package-level var so tests can stub the git invocations.
 var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
+
+// writeWorktreeStaleMarker records why workerDir was left in place instead of
+// pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
+// can later detect when it's safe to reclaim. Best-effort: write failures are
+// logged but never alter the caller's control flow.
+func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.Writer) {
+	branch, err := gp.CurrentBranch()
+	if err != nil {
+		branch = ""
+	}
+	content := fmt.Sprintf("branch=%s\nreason=%s\n", branch, reason)
+	if err := os.WriteFile(filepath.Join(workerDir, worktreeStaleFileName), []byte(content), 0o644); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: writing %s marker for %s: %v\n", worktreeStaleFileName, workerDir, err) //nolint:errcheck
+	}
+}
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
 // worker_dir, after applying the same safety gates as doctor's
@@ -80,6 +96,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if gp.HasUncommittedWork() {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
 		return false
 	}
 	hasUnpushed, err := gp.HasUnpushedCommitsResult()
@@ -89,6 +106,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if hasUnpushed {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return false
 	}
 	hasStashes, err := gp.HasStashesResult()
@@ -98,6 +116,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if hasStashes {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
 		return false
 	}
 
@@ -152,6 +171,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if gp.HasUncommittedWork() {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
 		return
 	}
 	hasUnpushed, err := gp.HasUnpushedCommitsResult()
@@ -161,6 +181,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if hasUnpushed {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return
 	}
 	hasStashes, err := gp.HasStashesResult()
@@ -170,6 +191,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if hasStashes {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
 		return
 	}
 

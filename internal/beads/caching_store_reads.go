@@ -111,19 +111,17 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
 	}
 	if !query.Live && query.ParentID == "" && !query.IncludesClosed() {
-		var n int
-		if err := c.readCacheWithOverlay(c.cacheServableLocked, func(suppressed map[string]struct{}) {
-			n = 0
-			for _, b := range c.beads {
-				if _, gone := suppressed[b.ID]; gone {
-					continue
-				}
-				if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
-					n++
-				}
-			}
-		}); err == nil {
+		n, ok, err := c.cachedCountContext(ctx, query, excludeTypes)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
 			return n, nil
+		}
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
 	}
 	counter, ok := c.backing.(Counter)
@@ -131,6 +129,48 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 		return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
 	}
 	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
+}
+
+// cachedCountContext serves only a clean active snapshot. Dirty overlays use
+// context-blind Store.Get calls, so a deadline-sensitive Count delegates those
+// cases to the backing Counter instead. Lock acquisition and the scan both
+// observe ctx, ensuring a cache writer cannot strand the caller's goroutine.
+func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, excludeTypes []string) (int, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	if !c.mu.TryRLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !c.mu.TryRLock() {
+			select {
+			case <-ctx.Done():
+				return 0, false, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	defer c.mu.RUnlock()
+
+	if !c.cacheServableLocked() || len(c.dirty) > 0 {
+		return 0, false, nil
+	}
+	var n int
+	for _, b := range c.beads {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
+			n++
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean
@@ -468,6 +508,24 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
 	return result, nil
+}
+
+// ReadyContext answers only from the dependency-complete active cache. It
+// deliberately does not fall back to the context-blind backing Ready method:
+// deadline-sensitive callers must receive ErrCacheUnavailable instead of
+// abandoning database work after their context expires.
+func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // CachedReady returns ready beads from the in-memory active read model.

@@ -1,20 +1,33 @@
 package api
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
+	t.Setenv("API_SESSION_WORKSPACE_VALUE", "expanded-workspace-value")
 	metadata := map[string]string{
 		"session_origin": "named",
 		"agent_name":     "myrig/worker-adhoc-123",
 	}
-	env := map[string]string{"API_TOKEN": "present"}
+	workspaceEnv := map[string]string{
+		"WORKSPACE_ONLY":         "$API_SESSION_WORKSPACE_VALUE",
+		"SESSION_ENV_PRECEDENCE": "workspace",
+		"GC_BIN":                 "/workspace/bin/gc",
+	}
+	env := map[string]string{
+		"API_TOKEN":              "present",
+		"SESSION_ENV_PRECEDENCE": "provider",
+		"GC_BIN":                 "/provider/bin/gc",
+	}
 	mcpServers := []runtime.MCPServerConfig{{
 		Name:    "filesystem",
 		Command: "/bin/mcp",
@@ -36,6 +49,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		workspaceEnv,
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -90,11 +104,86 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	if got, want := cfg.Runtime.SessionEnv["API_TOKEN"], "present"; got != want {
 		t.Fatalf("Runtime.SessionEnv[API_TOKEN] = %q, want %q", got, want)
 	}
+	gcBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	for key, want := range map[string]string{
+		"WORKSPACE_ONLY":         "expanded-workspace-value",
+		"SESSION_ENV_PRECEDENCE": "provider",
+		"GC_BIN":                 gcBin,
+	} {
+		if got := cfg.Runtime.SessionEnv[key]; got != want {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := cfg.Runtime.Hints.Env[key]; got != want {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	// PR #4577 review (behavioral-correctness major): the API create path must
+	// pair authoritative GC_BIN with the same PATH prepend the CLI applies, so a
+	// bare `gc` in the session resolves to this binary, not a colliding one.
+	wantPATHPrefix := filepath.Dir(gcBin)
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		parts := strings.Split(env["PATH"], string(os.PathListSeparator))
+		if len(parts) == 0 || parts[0] != wantPATHPrefix {
+			t.Errorf("%s[PATH] = %q, want first entry %q (dir of GC_BIN)", name, env["PATH"], wantPATHPrefix)
+		}
+	}
+}
+
+// TestResolvedSessionConfigForProviderScrubsControllerToken is the regression
+// for the PR #4577 review (security major): cityAnchoredSessionEnv expands
+// workspace and provider env against the controller process, so a configured
+// `GC_CONTROLLER_TOKEN = "$GC_CONTROLLER_TOKEN"` (or a literal) would otherwise
+// leak the controller-only token into a managed session. The final API env must
+// scrub convergence.TokenEnvVar — matching cmd/gc/template_resolve.go — so it
+// reaches neither Runtime.SessionEnv nor Runtime.Hints.Env, regardless of which
+// layer supplied it.
+func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	workspaceEnv := map[string]string{
+		// Expands from the controller process env — the exact leak vector.
+		convergence.TokenEnvVar: "$" + convergence.TokenEnvVar,
+	}
+	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
+		workspaceEnv,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{
+			Name:    "stub",
+			Command: "/bin/echo",
+			Env: map[string]string{
+				convergence.TokenEnvVar: "literal-token-value",
+			},
+		},
+		"",
+		"/tmp/workdir",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	if got, present := cfg.Runtime.SessionEnv[convergence.TokenEnvVar]; present {
+		t.Errorf("Runtime.SessionEnv[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
+	}
+	if got, present := cfg.Runtime.Hints.Env[convergence.TokenEnvVar]; present {
+		t.Errorf("Runtime.Hints.Env[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
+	}
 }
 
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -178,6 +267,7 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -267,6 +357,7 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
+		nil,
 		"worker",
 		"",
 		"myrig/worker",
@@ -302,7 +393,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 		"PROVIDER_TOKEN": "ok",
 	}
 
-	got := cityAnchoredSessionEnv(" \t\n ", providerEnv)
+	got := cityAnchoredSessionEnv(" \t\n ", nil, providerEnv)
 	if got["GC_CITY"] != "/provider/city" {
 		t.Fatalf("GC_CITY = %q, want provider value", got["GC_CITY"])
 	}
@@ -325,6 +416,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		nil,
 		"worker",
 		"",
 		"myrig/worker",

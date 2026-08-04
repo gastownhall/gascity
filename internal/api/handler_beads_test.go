@@ -256,6 +256,14 @@ func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
 }
 
+func (s *prefixedAliasStore) SetLocalString(id, key, value string) error {
+	return s.base.SetLocalString(s.aliasToBase(id), key, value)
+}
+
+func (s *prefixedAliasStore) GetLocalString(id, key string) (string, error) {
+	return s.base.GetLocalString(s.aliasToBase(id), key)
+}
+
 func (s *prefixedAliasStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
 	if fn == nil {
 		return s.base.Tx(commitMsg, nil)

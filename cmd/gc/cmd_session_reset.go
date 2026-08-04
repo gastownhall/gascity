@@ -76,7 +76,12 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		return 1
 	}
 
-	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, newSessionProvider(), cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

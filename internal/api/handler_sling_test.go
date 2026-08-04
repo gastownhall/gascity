@@ -717,6 +717,117 @@ title = "Do work"
 	}
 }
 
+// listFailBeadStore fails every List call, modeling a schema-skewed rig store
+// whose live-root scan errors lazily — the exact failure the tolerant
+// source-workflow scan is meant to survive.
+type listFailBeadStore struct {
+	beads.Store
+	err error
+}
+
+func (s listFailBeadStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+// TestSlingToleratesDegradedNonSourceStoreScan proves the API sling path wires
+// SourceWorkflowStoreScanWarning so a running city's sling degrades a
+// non-source rig store's failed live-root scan to a warning instead of aborting
+// the launch. The domain keeps every non-source scan failure fatal when the
+// sink is nil (internal/sling/sling_core.go), so before the fix this graph.v2
+// launch failed on the skewed "rig:stale" store — the dominant production path,
+// since a running city routes `gc sling` through this API handler rather than
+// the CLI's local sling.
+func TestSlingToleratesDegradedNonSourceStoreScan(t *testing.T) {
+	// Same compile-time flag choreography as
+	// TestSlingGraphV2RejectsLegacySourceWorkflowConflict: flip the shared
+	// FormulaV2 + graph-apply flags only after New() has run so syncFeatureFlags
+	// cannot stomp them back.
+	setFormulaV2 := formulatest.LockV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() {
+		molecule.SetGraphApplyEnabled(prevGraphApply)
+	})
+
+	var capturedStderr bytes.Buffer
+	origStderr := apiSlingStderr
+	apiSlingStderr = func() io.Writer { return &capturedStderr }
+	t.Cleanup(func() { apiSlingStderr = origStderr })
+
+	srv, state := newSlingTestServer(t)
+	setFormulaV2(true)
+	molecule.SetGraphApplyEnabled(true)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	state.cfg.Agents = append(state.cfg.Agents,
+		config.Agent{Name: config.ControlDispatcherAgentName, MaxActiveSessions: intPtr(1)},
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: intPtr(1)},
+	)
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := state.stores["myrig"]
+	source, err := store.Create(beads.Bead{ID: "BL-42", Title: "test task", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second, schema-skewed rig store that fails its live-root scan. It is not
+	// the selected source store (rig:myrig holds the source bead), so a wired
+	// sink must skip it with a warning rather than abort the singleton check.
+	scanErr := errors.New("schema v54 has no revision")
+	state.stores["stale"] = listFailBeadStore{Store: beads.NewMemStore(), err: scanErr}
+
+	body := `{"target":"myrig/worker","formula":"graph-work","attached_bead_id":"` + source.ID + `"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a degraded non-source store must not abort the sling); body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string   `json:"status"`
+		WorkflowID string   `json:"workflow_id"`
+		Warnings   []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "slung" {
+		t.Fatalf("status = %q, want slung", resp.Status)
+	}
+	if resp.WorkflowID == "" {
+		t.Fatal("workflow_id empty, want graph.v2 launch to mint a run root despite the degraded store")
+	}
+	warning := capturedStderr.String()
+	if !strings.Contains(warning, "rig:stale") || !strings.Contains(warning, "revision") {
+		t.Fatalf("scan warning = %q, want an operator warning naming the skipped rig:stale store and its scan error", warning)
+	}
+	// The degraded-scan warning must also reach the API caller through the
+	// response `warnings` field, not only the server log: a running city routes
+	// `gc sling` through this handler, so the invoking human/agent sees only the
+	// JSON response and would otherwise be blind to the coverage degradation.
+	var respWarning string
+	for _, w := range resp.Warnings {
+		if strings.Contains(w, "rig:stale") {
+			respWarning = w
+			break
+		}
+	}
+	if respWarning == "" {
+		t.Fatalf("response warnings = %v, want an entry naming the skipped rig:stale store", resp.Warnings)
+	}
+	if !strings.Contains(respWarning, "revision") {
+		t.Fatalf("response warning = %q, want it to name the rig:stale scan error", respWarning)
+	}
+}
+
 // TestQualifySlingTarget covers the rig-aware target qualification
 // helper. Given a rigContext (derived from scope_ref for UI dispatches
 // or body.Rig for dashboard dispatches), the helper rewrites a bare

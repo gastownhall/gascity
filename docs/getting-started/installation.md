@@ -111,7 +111,7 @@ Release tarballs are published for every tagged version. Supported platforms:
 
 ```bash
 # Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=1.3.0
+VERSION=1.4.0
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')

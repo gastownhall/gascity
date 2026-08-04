@@ -112,6 +112,17 @@ func EnrichRunSummary(s RunSummary, sessions []DashboardSession, sessionsAvailab
 	out.BlockedLanes = blockedLanes
 	out.RunCounts = runCounts(liveActive, len(liveActive), len(blockedLanes))
 	out.Census = RunCensusState{Status: "available", Data: buildCensus(censusInput)}
+	// HistoricalLanes/RecentChanges are not derived here (BuildRunSummary owns
+	// them); a zero-value input (the warming snapshot, served while the run
+	// projection is still cold-replaying) would otherwise leave them nil,
+	// which marshals as JSON null. The SPA's strict edge decoder requires
+	// every RunSummary array field to be an actual array (issue #4142).
+	if out.HistoricalLanes == nil {
+		out.HistoricalLanes = []RunLane{}
+	}
+	if out.RecentChanges == nil {
+		out.RecentChanges = []RunChange{}
+	}
 	return out
 }
 

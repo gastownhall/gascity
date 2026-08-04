@@ -91,6 +91,72 @@ func claimPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info 
 	}
 }
 
+// preferredPoolSlotAboveCapacityInfo recovers a preferred session's concrete
+// identity when the only configured bound it exceeds is max_active_sessions.
+//
+// Capacity shrink blocks new slots; it must not rename an already-assigned
+// session. Requiring a matching stored template plus a concrete persisted
+// agent/alias/session identity keeps stale, identity-less out-of-bounds
+// pool_slot metadata on the existing bounded fallback path. Namepool length
+// remains an identity bound even when max_active_sessions is temporarily lower.
+func preferredPoolSlotAboveCapacityInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	if cfgAgent == nil || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	if cfg != nil && !storedTemplateMatchesPoolTemplate(
+		sessionBeadStoredTemplateInfo(info),
+		cfgAgent.QualifiedName(),
+		cfg,
+	) {
+		return 0
+	}
+	maxSessions := cfgAgent.EffectiveMaxActiveSessions()
+	if maxSessions == nil || *maxSessions <= 0 {
+		return 0
+	}
+
+	slot := resolvePersistedPoolIdentitySlot(cfgAgent, true, sessionBeadAgentNameInfo(info))
+	if slot == 0 {
+		slot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.Alias)
+	}
+	if slot == 0 && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+		slot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
+	}
+	if slot <= *maxSessions {
+		return 0
+	}
+	if len(cfgAgent.NamepoolNames) > 0 && slot > len(cfgAgent.NamepoolNames) {
+		return 0
+	}
+	return slot
+}
+
+// claimPreferredPoolSlotWithConfigInfo preserves the concrete slot of a
+// session carrying assigned work across a capacity reduction when
+// preserveAboveCapacity is true. General reuse, in-flight-new, and
+// fresh-create paths stay bounded by claimPoolSlotWithConfigInfo.
+func claimPreferredPoolSlotWithConfigInfo(
+	cfg *config.City,
+	cfgAgent *config.Agent,
+	info session.Info,
+	preserveAboveCapacity bool,
+	used map[int]bool,
+) int {
+	if cfgAgent == nil || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return 0
+	}
+	if preserveAboveCapacity {
+		if slot := preferredPoolSlotAboveCapacityInfo(cfg, cfgAgent, info); slot > 0 {
+			if used[slot] {
+				return 0
+			}
+			used[slot] = true
+			return slot
+		}
+	}
+	return claimPoolSlotWithConfigInfo(cfg, cfgAgent, info, used)
+}
+
 // claimDesiredPoolSlotInfo is the session.Info sibling of claimDesiredPoolSlot.
 func claimDesiredPoolSlotInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info, used map[int]bool) int {
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
@@ -113,6 +179,14 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	if isFailedCreateSessionInfo(info) {
+		return false
+	}
+	// A draining session is being shut down (e.g. drain-ack-stop-pending) and
+	// must not occupy the desired slot. Without this exclusion the min-floor
+	// fires (draining doesn't consume demand) but the slot is filled by the
+	// existing draining bead, so no replacement is started until the bead is
+	// closed — one to several ticks later than necessary.
+	if strings.TrimSpace(info.MetadataState) == string(session.StateDraining) {
 		return false
 	}
 	if info.MetadataState == "asleep" {

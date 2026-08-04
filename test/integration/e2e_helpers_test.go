@@ -654,10 +654,9 @@ const controllerSocketPathLimit = 100
 
 func controllerSocketPath(cityPath string) string {
 	canonicalCityPath := pathutil.NormalizePathForCompare(cityPath)
-	legacy := filepath.Join(cityPath, ".gc", "controller.sock")
 	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
 	if len(canonicalLegacy) <= controllerSocketPathLimit {
-		return legacy
+		return canonicalLegacy
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
 	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))

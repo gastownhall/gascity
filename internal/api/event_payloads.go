@@ -48,6 +48,7 @@ const (
 	RequestOperationSessionCreate  = "session.create"
 	RequestOperationSessionMessage = "session.message"
 	RequestOperationSessionSubmit  = "session.submit"
+	RequestOperationRigCreate      = "rig.create"
 )
 
 // --- Typed async request result payloads ---
@@ -104,6 +105,35 @@ type SessionSubmitSucceededPayload struct {
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
+
+// RigCreateSucceededPayload is emitted on request.result.rig.create — the
+// terminal success of a server-side async rig add (POST /v0/city/{n}/rigs with
+// a git_url). It carries the correlation id plus the resolved rig identity a
+// watcher needs to confirm the provision without a follow-up GET.
+type RigCreateSucceededPayload struct {
+	RequestID     string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Rig           string `json:"rig" doc:"Rig name that was provisioned."`
+	Prefix        string `json:"prefix" doc:"Resolved session-name prefix."`
+	DefaultBranch string `json:"default_branch" doc:"Resolved mainline branch."`
+}
+
+// IsEventPayload marks RigCreateSucceededPayload as an events.Payload variant.
+func (RigCreateSucceededPayload) IsEventPayload() {}
+
+// RigProvisionProgressPayload is emitted on rig.provision.progress, one per
+// provisioning step. RequestID lets watchers filter a single async rig-add on
+// the shared city stream. Step/Detail/Warn are a 1:1 projection of
+// rig.ProvisionStep.
+type RigProvisionProgressPayload struct {
+	RequestID string `json:"request_id,omitempty" doc:"Correlation ID from the 202 response (empty on sync 201 provisions)."`
+	Rig       string `json:"rig" doc:"Rig name being provisioned."`
+	Step      string `json:"step" doc:"Provisioning step that completed (clone, beads-init, packs, config, routes, …)."`
+	Detail    string `json:"detail,omitempty" doc:"Human-readable step detail."`
+	Warn      bool   `json:"warn,omitempty" doc:"True when the step reports a warn-and-continue condition."`
+}
+
+// IsEventPayload marks RigProvisionProgressPayload as an events.Payload variant.
+func (RigProvisionProgressPayload) IsEventPayload() {}
 
 // WebhookReceivedPayload is the webhook.received event body — emitted on every
 // accepted, authentic delivery (dispatched, deduped, or no-match). It doubles as
@@ -163,7 +193,7 @@ func (ProjectIdentityStampedPayload) IsEventPayload() {}
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
 	RequestID    string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit" doc:"Which operation failed."`
+	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
 	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
 	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
 }
@@ -209,6 +239,7 @@ type SupervisorRequestPayload struct {
 	Host            string `json:"host,omitempty" doc:"Canonical Host header without port."`
 	OriginAllowed   bool   `json:"origin_allowed" doc:"Whether the Origin header, if present, matched CORS policy."`
 	Phase           string `json:"phase" enum:"start,complete" doc:"Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only."`
+	RequestID       string `json:"request_id,omitempty" doc:"The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line."`
 }
 
 // IsEventPayload marks SupervisorRequestPayload as an events.Payload variant.
@@ -622,6 +653,8 @@ func init() {
 	events.RegisterPayload(events.RequestResultSessionCreate, SessionCreateSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionMessage, SessionMessageSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{})
+	events.RegisterPayload(events.RequestResultRigCreate, RigCreateSucceededPayload{})
+	events.RegisterPayload(events.RigProvisionProgress, RigProvisionProgressPayload{})
 	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
 
 	// Non-terminal city lifecycle events (diagnostics only).
