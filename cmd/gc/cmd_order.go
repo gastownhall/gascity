@@ -255,7 +255,11 @@ operator acknowledgement.`,
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
-	cmd.Flags().BoolVar(&confirm, "confirm", false, fmt.Sprintf("confirm bulk deletion when eligible count > GC_BULK_DELETE_CONFIRM_THRESHOLD (default %d)", bulkDeleteConfirmThreshold()))
+	// The help text hardcodes the default threshold rather than calling
+	// bulkDeleteConfirmThreshold(): that reads the environment at command
+	// construction time, which would make docs/reference/cli.md regenerate
+	// differently depending on the generator's environment.
+	cmd.Flags().BoolVar(&confirm, "confirm", false, fmt.Sprintf("confirm bulk deletion when eligible count > GC_BULK_DELETE_CONFIRM_THRESHOLD (default %d)", defaultBulkDeleteConfirmThreshold))
 	return cmd
 }
 
@@ -1593,6 +1597,10 @@ type orderHistoryJSONSummary struct {
 
 // --- gc order sweep-tracking ---
 
+// defaultBulkDeleteConfirmThreshold is the built-in value of
+// bulkDeleteConfirmThreshold when GC_BULK_DELETE_CONFIRM_THRESHOLD is unset.
+const defaultBulkDeleteConfirmThreshold = 20
+
 // bulkDeleteConfirmThreshold returns the maximum number of eligible retention
 // deletions allowed without an explicit --confirm flag. Configurable via
 // GC_BULK_DELETE_CONFIRM_THRESHOLD (positive integer); default 20.
@@ -1603,7 +1611,7 @@ func bulkDeleteConfirmThreshold() int {
 			return n
 		}
 	}
-	return 20
+	return defaultBulkDeleteConfirmThreshold
 }
 
 func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
@@ -1641,39 +1649,45 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	now := time.Now()
-
-	// Bulk-delete confirm gate: before any retention deletions, count eligible
-	// beads and require --confirm when above GC_BULK_DELETE_CONFIRM_THRESHOLD.
-	// Fail-closed: a store read error aborts rather than proceeding unguarded —
-	// a degraded store is exactly when accidental mass deletion is most dangerous.
-	if !dryRun {
-		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
-		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
-		if countErr != nil {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc order sweep-tracking: cannot count eligible beads for confirm gate: %v — aborting to avoid unguarded bulk delete\n",
-				countErr)
-			return 1
-		}
-		threshold := bulkDeleteConfirmThreshold()
-		if eligible > threshold && !confirm {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
-				eligible, threshold)
-			return 1
-		}
-	}
-
 	var result orderTrackingSweepResult
 	var sweepErr error
 	var retentionResult orderTrackingRetentionSweepResult
 	var retentionErr error
+	// Set when the bulk-delete confirm gate blocks the retention sweep. By that
+	// point stale-close has already run, so normal reporting still happens and
+	// the non-zero exit is deferred to the end of the function.
+	confirmGateBlocked := false
 	if dryRun {
 		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, now, staleAfter, onlyOrders, includeWisps)
 	} else {
 		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, now, staleAfter, onlyOrders, includeWisps)
-		retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
-		result.trackingDeleted = retentionResult.deleted
+
+		// Bulk-delete confirm gate: before any retention deletions, count
+		// eligible beads and require --confirm when above
+		// GC_BULK_DELETE_CONFIRM_THRESHOLD. The gate covers only the retention
+		// sweep — stale-close runs first and unconditionally, so a tripped gate
+		// can never wedge the stale-close every caller depends on.
+		// Fail-closed: a store read error blocks deletion rather than proceeding
+		// unguarded — a degraded store is exactly when accidental mass deletion
+		// is most dangerous.
+		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
+		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
+		threshold := bulkDeleteConfirmThreshold()
+		switch {
+		case countErr != nil:
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc order sweep-tracking: cannot count eligible beads for confirm gate: %v — aborting to avoid unguarded bulk delete\n",
+				countErr)
+			confirmGateBlocked = true
+		case eligible > threshold && !confirm:
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
+				eligible, threshold)
+			confirmGateBlocked = true
+		default:
+			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
+			result.trackingDeleted = retentionResult.deleted
+		}
 	}
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1697,6 +1711,9 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		} else {
 			fmt.Fprintf(stdout, "%s %d stale order-tracking bead(s)%s\n", verb, result.trackingClosed, deletedClause) //nolint:errcheck // best-effort stdout
 		}
+	}
+	if confirmGateBlocked {
+		return 1
 	}
 	return 0
 }

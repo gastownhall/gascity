@@ -1510,6 +1510,8 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
 
+	// The cityPath guard is a test affordance: real controllers always set it,
+	// so the backup-age check below always runs in production.
 	if cr.cityPath != "" {
 		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
 			if cr.stderr != nil {
