@@ -508,6 +508,14 @@ func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) c
 }
 
 func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {
+	return waitForControllerStop(cityPath, timeout)
+}
+
+func waitForSupervisorControllerStop(cityPath string, timeout time.Duration) error {
+	return waitForControllerStop(cityPath, timeout)
+}
+
+func waitForControllerStop(cityPath string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -522,16 +530,37 @@ func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) err
 		case err == nil:
 			lock.Close() //nolint:errcheck // best-effort probe cleanup
 		case !errors.Is(err, errControllerAlreadyRunning):
-			return fmt.Errorf("probing standalone controller: %w", err)
+			return fmt.Errorf("probing controller: %w", err)
 		}
 		if time.Now().After(deadline) {
 			if pid != 0 {
-				return fmt.Errorf("timed out waiting for standalone controller (PID %d) to stop", pid)
+				identity := probeControllerIdentity(cityPath)
+				if identity.PID == 0 {
+					identity.PID = pid
+				}
+				return controllerStopTimeoutError(identity, false)
 			}
-			return fmt.Errorf("timed out waiting for standalone controller to release its lock")
+			return controllerStopTimeoutError(controllerIdentityReply{}, true)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func controllerStopTimeoutError(identity controllerIdentityReply, waitingForLock bool) error {
+	authority := "controller"
+	switch identity.HostingMode {
+	case controllerHostingStandalone:
+		authority = "standalone controller"
+	case controllerHostingSupervisor:
+		authority = "supervisor-hosted controller"
+	}
+	if identity.PID != 0 {
+		return fmt.Errorf("timed out waiting for %s (PID %d) to stop", authority, identity.PID)
+	}
+	if waitingForLock {
+		return fmt.Errorf("timed out waiting for controller to release its lock")
+	}
+	return fmt.Errorf("timed out waiting for %s to stop", authority)
 }
 
 // doStop is the pure logic for "gc stop". Filters to running sessions and

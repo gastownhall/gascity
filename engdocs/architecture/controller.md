@@ -3,7 +3,7 @@ title: "Controller"
 ---
 
 
-> Last verified against code: 2026-04-25
+> Last verified against code: 2026-08-03
 
 ## Summary
 
@@ -183,6 +183,14 @@ indicate bugs.
   machine-wide supervisor path and the hidden standalone
   `gc start --foreground` path.
 
+- **Controller hosting identity is process-authored**: Every
+  `startControllerSocket()` caller declares whether the serving process is
+  the machine-wide supervisor or the hidden standalone controller. The typed
+  `identify` command returns that hosting mode with the process PID. The
+  legacy `ping` command remains a numeric PID for mixed-version compatibility;
+  clients may use it for liveness but must leave ambiguous legacy hosting
+  unknown rather than silently labeling it standalone.
+
 - **Graceful shutdown sends Interrupt before Stop**: `gracefulStopAll()`
   always sends `Interrupt()` to all sessions before sleeping
   `shutdown_timeout` and calling `Stop()` on survivors. Zero timeout
@@ -337,9 +345,10 @@ testing philosophy and tier boundaries.
   until all checks complete. A hung `check` command blocks the entire
   reconciliation cycle. There is no per-check timeout.
 
-- **Socket probes are for discovery, not liveness**: Per-city controller
-  status uses `controller.sock` ping responses, and supervisor status uses
-  `supervisor.sock`. Liveness still comes from `flock` for singleton
+- **Socket probes are for discovery, not sole liveness authority**: Per-city
+  controller status uses the typed `controller.sock` `identify` response and
+  retains numeric `ping` as a legacy liveness fallback; supervisor status uses
+  `supervisor.sock`. Singleton authority still comes from `flock` for
   control loops and `runtime.Provider.IsRunning()` for agents.
 
 - **Unix socket has no authentication**: Any local process with filesystem

@@ -38,11 +38,11 @@ var (
 	registerCityWithSupervisorTestHook func(cityPath, commandName string, stdout, stderr io.Writer) (bool, int)
 	supervisorCityErrorHook            = supervisorCityError
 	reloadSupervisorNoWaitHook         = reloadSupervisorNoWait
-	// controllerAliveHook is the standalone-controller probe. Defaults to the
-	// real socket probe; tests override it to detect a controller without
+	// controllerIdentityHook is the process-authored controller hosting probe.
+	// Tests override it to detect a controller without
 	// depending on a live socket-accept handshake racing the probe's read
 	// deadline under parallel/high-load runs (#3847).
-	controllerAliveHook = controllerAlive
+	controllerIdentityHook = probeControllerIdentity
 )
 
 // assumeYesForSupervisorCycle is set by the --yes flag on commands that
@@ -180,8 +180,22 @@ func cityUsesManagedReconciler(cityPath string) bool {
 // this process.
 var justRestartedSupervisorPID int
 
+var errControllerHostingUnknown = errors.New("controller hosting mode unknown")
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
-	if pid := controllerAliveHook(cityPath); pid != 0 {
+	identity := controllerIdentityHook(cityPath)
+	if pid := identity.PID; pid != 0 {
+		switch identity.HostingMode {
+		case controllerHostingSupervisor:
+			return 0, nil
+		case controllerHostingStandalone:
+			return pid, errControllerAlreadyRunning
+		}
+
+		// Compatibility with controllers predating the identity command: PID
+		// equality can prove that the shared supervisor hosts the controller.
+		// Any other legacy result stays unknown instead of being mislabeled as
+		// standalone.
 		// If we just auto-restarted the supervisor in this invocation,
 		// the new supervisor process is briefly visible on the controller
 		// socket before the registry catches up. Treat that as our own
@@ -190,7 +204,10 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 		if justRestartedSupervisorPID != 0 && pid == justRestartedSupervisorPID {
 			return 0, nil
 		}
-		return pid, errControllerAlreadyRunning
+		if supervisorPID := supervisorAliveHook(); supervisorPID != 0 && pid == supervisorPID {
+			return 0, nil
+		}
+		return pid, errControllerHostingUnknown
 	}
 	gcDir := filepath.Join(cityPath, ".gc")
 	if fi, err := os.Stat(gcDir); err != nil {
@@ -207,7 +224,10 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 		return 0, nil
 	}
 	if errors.Is(err, errControllerAlreadyRunning) {
-		return 0, err
+		// Both standalone controllers and the supervisor hold this lock. Until
+		// the socket answers with identity, lock ownership alone cannot prove
+		// which process hosts the controller.
+		return 0, errControllerHostingUnknown
 	}
 	return 0, err
 }
@@ -339,10 +359,13 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 	}
 	if !supervisorAlreadyManagesCity(cityPath) {
 		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
-			if errors.Is(err, errControllerAlreadyRunning) {
+			switch {
+			case errors.Is(err, errControllerAlreadyRunning):
 				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
-			} else {
-				fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+			case errors.Is(err, errControllerHostingUnknown):
+				writeUnknownControllerHostingConflict(stderr, commandName, cityPath, pid)
+			default:
+				fmt.Fprintf(stderr, "%s: probing controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 			}
 			return 1
 		}
@@ -521,6 +544,18 @@ func writeStandaloneControllerConflict(stderr io.Writer, commandName, cityPath s
 		commandName, shellQuotePath(cityPath), pidSuffix)
 	fmt.Fprintf(stderr, "%s: Authority: %s\n", commandName, authority) //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "%s: Next: %s\n", commandName, nextCommand)    //nolint:errcheck // best-effort stderr
+}
+
+func writeUnknownControllerHostingConflict(stderr io.Writer, commandName, cityPath string, pid int) {
+	pidSuffix := ""
+	if pid != 0 {
+		pidSuffix = fmt.Sprintf(" (PID %d)", pid)
+	}
+	_, _ = fmt.Fprintf(stderr,
+		"%s: controller already running for %s%s, but its hosting mode is unavailable; refusing to assume it is standalone\n",
+		commandName, shellQuotePath(cityPath), pidSuffix)
+	fmt.Fprintf(stderr, "%s: Authority: controller hosting mode unknown\n", commandName)                  //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: Next: upgrade or restart the running controller, then retry\n", commandName) //nolint:errcheck // best-effort stderr
 }
 
 func supervisorRetryCommand(commandName, cityPath string) string {
@@ -702,7 +737,7 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	return true, 0
 }
 
-var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
 
 var waitForSupervisorCityHook = waitForSupervisorCity
 

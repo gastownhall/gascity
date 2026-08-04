@@ -560,6 +560,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,

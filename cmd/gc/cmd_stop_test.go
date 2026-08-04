@@ -573,6 +573,29 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 }
 
+func TestControllerStopTimeoutUsesHostingMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode controllerHostingMode
+		want string
+	}{
+		{name: "supervisor", mode: controllerHostingSupervisor, want: "supervisor-hosted controller"},
+		{name: "standalone", mode: controllerHostingStandalone, want: "standalone controller"},
+		{name: "legacy unknown", mode: controllerHostingUnknown, want: "waiting for controller (PID 4242)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := controllerStopTimeoutError(controllerIdentityReply{PID: 4242, HostingMode: tt.mode}, false)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("controllerStopTimeoutError = %v, want %q", err, tt.want)
+			}
+			if tt.mode == controllerHostingUnknown && strings.Contains(err.Error(), "standalone") {
+				t.Fatalf("controllerStopTimeoutError = %v, legacy unknown must not be labeled standalone", err)
+			}
+		})
+	}
+}
+
 func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
