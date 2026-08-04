@@ -89,8 +89,12 @@ type ArchiveResult struct {
 // DedupSender is an optional [Provider] capability: send-time suppression of
 // duplicate notifications. Repeating notifiers (cooldown orders, maintenance
 // loops) re-detect the same condition every interval; a provider implementing
-// DedupSender lets them emit "at most one live copy" per notification stream
-// instead of one message per interval. The dedup horizon is deliberately the
+// DedupSender lets them emit at most one live copy per notification stream
+// instead of one message per interval. Suppression is best-effort, not a
+// hard guarantee: the check-then-create is not atomic, so two concurrent
+// senders of the same stream can race past each other and both create a
+// message. The repeating notifiers this serves are single-goroutine loops,
+// where the race does not arise. The dedup horizon is deliberately the
 // message's own lifetime: archiving a message deletes its bead, so an
 // archived notification leaves nothing to dedup against and the stream may
 // re-alert — callers that want a longer re-alert cadence keep their own
