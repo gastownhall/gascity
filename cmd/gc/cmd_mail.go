@@ -1435,8 +1435,10 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
-the recipient after sending. Use --from to override the sender identity.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
+a recipient turn after sending. In a managed city, it can request a wake for
+a non-running recipient. Unread mail alone does not request a wake.
+Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").`,
@@ -1461,7 +1463,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this message, even if earlier mail is still unread")
+	cmd.Flags().BoolVar(&notify, "notify", false, "request a recipient turn (including a managed wake if not running), even with earlier unread mail")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
@@ -1548,7 +1550,9 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use --notify to nudge the recipient after replying.
+Use --notify to request a recipient turn after replying. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1566,7 +1570,7 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	}
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this reply, even if earlier mail is still unread")
+	cmd.Flags().BoolVar(&notify, "notify", false, "request a recipient turn (including a managed wake if not running), even with earlier unread mail")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	_ = cmd.Flags().MarkHidden("nudge")

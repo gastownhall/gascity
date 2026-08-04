@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/spf13/cobra"
 )
 
 type countOnlyMailProvider struct{}
@@ -2984,6 +2986,33 @@ func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 }
 
 // --- gc mail send --notify ---
+
+func TestMailNotifyHelpDocumentsManagedWake(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func(io.Writer, io.Writer) *cobra.Command
+	}{
+		{name: "send", cmd: newMailSendCmd},
+		{name: "reply", cmd: newMailReplyCmd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := tt.cmd(&stdout, &stderr)
+			notify := cmd.Flags().Lookup("notify")
+			if notify == nil {
+				t.Fatal("--notify flag is missing")
+			}
+			if !strings.Contains(notify.Usage, "managed wake") {
+				t.Fatalf("--notify help = %q, want managed-wake behavior", notify.Usage)
+			}
+			if !strings.Contains(cmd.Long, "Unread mail alone does not request a wake") {
+				t.Fatalf("Long help = %q, want unread-mail wake boundary", cmd.Long)
+			}
+		})
+	}
+}
 
 func TestMailSendNotifySuccess(t *testing.T) {
 	store := beads.NewMemStore()

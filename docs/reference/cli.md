@@ -2374,7 +2374,9 @@ gc mail read <id> [flags]
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use --notify to nudge the recipient after replying.
+Use --notify to request a recipient turn after replying. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -2385,7 +2387,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
-| `--notify` | bool |  | nudge the recipient about this reply, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
@@ -2393,8 +2395,10 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
-the recipient after sending. Use --from to override the sender identity.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
+a recipient turn after sending. In a managed city, it can request a wake for
+a non-running recipient. Unread mail alone does not request a wake.
+Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
@@ -2421,7 +2425,7 @@ gc mail send --all "Status update: tests passing"
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
-| `--notify` | bool |  | nudge the recipient about this message, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
 
