@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -270,6 +271,19 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		return nil
 	}
 	if result.Processed {
+		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID != "" {
+			graphStore := resolveGraphStore(store, cfg, cityPath, nil)
+			recorder := openCityRecorderAt(cityPath, stderr)
+			emitErr := executionevent.EmitCurrent(recorder, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}, rootID, "control-dispatch")
+			var closeErr error
+			if closer, ok := recorder.(io.Closer); ok {
+				closeErr = closer.Close()
+			}
+			if err := errors.Join(emitErr, closeErr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
+			}
+		}
 		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
 		if result.Created > 0 {
 			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)

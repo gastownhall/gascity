@@ -74,8 +74,26 @@ func (e controllerCommandError) Is(target error) bool {
 
 const (
 	controllerSocketPathLimit        = 100
+	controllerIdentityCommand        = "identify"
 	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
 )
+
+type controllerHostingMode string
+
+const (
+	controllerHostingUnknown    controllerHostingMode = ""
+	controllerHostingStandalone controllerHostingMode = "standalone"
+	controllerHostingSupervisor controllerHostingMode = "supervisor"
+)
+
+func (m controllerHostingMode) known() bool {
+	return m == controllerHostingStandalone || m == controllerHostingSupervisor
+}
+
+type controllerIdentityReply struct {
+	PID         int                   `json:"pid"`
+	HostingMode controllerHostingMode `json:"hosting_mode"`
+}
 
 type sessionCircuitResetRequest struct {
 	Identity  string `json:"identity"`
@@ -123,6 +141,7 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 // to the event loop for serialized processing. Returns the listener for cleanup.
 func startControllerSocket(
 	cityPath string,
+	hostingMode controllerHostingMode,
 	cancelFn context.CancelFunc,
 	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
@@ -131,6 +150,9 @@ func startControllerSocket(
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
 ) (net.Listener, error) {
+	if !hostingMode.known() {
+		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
+	}
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("creating controller socket dir: %w", err)
@@ -147,7 +169,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
@@ -155,11 +177,13 @@ func startControllerSocket(
 
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
-// interrupt grace), "ping" (liveness check, returns PID), "converge:{json}"
-// (convergence commands routed to event loop).
+// interrupt grace), "ping" (legacy liveness check, returns numeric PID),
+// "identify" (typed process identity), and "converge:{json}" (convergence
+// commands routed to event loop).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
+	hostingMode controllerHostingMode,
 	cancelFn context.CancelFunc,
 	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
@@ -187,6 +211,8 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
+		case line == controllerIdentityCommand:
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.
@@ -567,6 +593,22 @@ func controllerAlive(cityPath string) int {
 		return 0
 	}
 	return pid
+}
+
+// probeControllerIdentity asks the serving controller process how it is
+// hosted. The separate command keeps the legacy numeric ping response stable
+// for older gc clients. When talking to an older controller that does not
+// support identity, it falls back to ping for liveness and leaves HostingMode
+// unknown so callers cannot accidentally label an inferred role as fact.
+func probeControllerIdentity(cityPath string) controllerIdentityReply {
+	resp, err := sendControllerCommandWithTimeouts(cityPath, controllerIdentityCommand, 500*time.Millisecond, 500*time.Millisecond, 2*time.Second)
+	if err == nil {
+		var identity controllerIdentityReply
+		if json.Unmarshal(resp, &identity) == nil && identity.PID > 0 && identity.HostingMode.known() {
+			return identity
+		}
+	}
+	return controllerIdentityReply{PID: controllerAlive(cityPath)}
 }
 
 // debounceDelay is the coalesce window for filesystem events. Multiple
@@ -1278,7 +1320,7 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

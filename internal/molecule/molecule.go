@@ -1072,7 +1072,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
-	if err := applyExternalNativeStepDependencies(store, recipe.Steps, opts.ExternalDeps); err != nil {
+	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
 		return nil, err
 	}
 	opts.nativeStepTopologyPrepared = true

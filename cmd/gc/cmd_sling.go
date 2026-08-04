@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -491,14 +492,20 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	var eventRecorder events.Recorder
+	if !dryRun {
+		eventRecorder = openCityRecorderAt(cityPath, stderr)
+	}
 	deps := slingDeps{
-		CityName: cityName,
-		CityPath: cityPath,
-		Cfg:      cfg,
-		SP:       sp,
-		Runner:   runner,
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:   cityName,
+		CityPath:   cityPath,
+		Cfg:        cfg,
+		SP:         sp,
+		Runner:     runner,
+		Store:      store,
+		GraphStore: resolveGraphStore(store, cfg, cityPath, eventRecorder),
+		Events:     eventRecorder,
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
