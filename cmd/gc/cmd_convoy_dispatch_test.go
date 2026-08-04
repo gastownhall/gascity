@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -2456,7 +2455,6 @@ func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *te
 }
 
 func TestRunControlDispatcherReprojectsCurrentExecutionFactsAfterControl(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	cityPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city config: %v", err)
