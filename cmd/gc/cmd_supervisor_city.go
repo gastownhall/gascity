@@ -556,6 +556,8 @@ func writeUnknownControllerHostingConflict(stderr io.Writer, commandName, cityPa
 		commandName, shellQuotePath(cityPath), pidSuffix)
 	fmt.Fprintf(stderr, "%s: Authority: controller hosting mode unknown\n", commandName)                  //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "%s: Next: upgrade or restart the running controller, then retry\n", commandName) //nolint:errcheck // best-effort stderr
+	nextCommand := "gc stop " + shellQuotePath(cityPath) + " && " + supervisorRetryCommand(commandName, cityPath)
+	fmt.Fprintf(stderr, "%s: Next: %s\n", commandName, nextCommand) //nolint:errcheck // best-effort stderr
 }
 
 func supervisorRetryCommand(commandName, cityPath string) string {

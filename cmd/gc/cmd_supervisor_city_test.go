@@ -102,8 +102,15 @@ func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T)
 	if code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true); code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
 	}
-	if got := stderr.String(); !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
+	got := stderr.String()
+	if !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
 		t.Fatalf("stderr = %q, want unknown-hosting diagnostic without standalone label", got)
+	}
+	if !strings.Contains(got, "gc stop ") {
+		t.Fatalf("stderr = %q, want an actionable 'gc stop' remedy", got)
+	}
+	if want := supervisorRetryCommand("gc start", cityPath); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want retry command %q", got, want)
 	}
 }
 
