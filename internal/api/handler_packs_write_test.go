@@ -1,13 +1,18 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
 )
 
@@ -62,6 +67,69 @@ func TestHandlePackAdd(t *testing.T) {
 				t.Errorf("created body missing binding name: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandlePackAddMapsAuthErrorToCredentialRequiredConflict(t *testing.T) {
+	restoreResolver := stubPackSourceResolver(t, map[string][]net.IP{
+		"github.com": {net.ParseIP("140.82.112.3")},
+	})
+	defer restoreResolver()
+
+	const secret = "ghp_must_not_reach_the_response"
+	orig := packAddImport
+	packAddImport = func(fsys.FS, string, string, string, string) (*importsvc.AddResult, error) {
+		return nil, fmt.Errorf("resolving pack version: %w", &gitcred.AuthError{
+			Host:      "github.com",
+			OrgPrefix: "github.com/gascity",
+			Repo:      "https://github.com/gascity/maintainer-city",
+			Output:    "fatal: Authentication failed for " + secret,
+			Err:       errors.New(secret),
+		})
+	}
+	defer func() { packAddImport = orig }()
+
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/packs"),
+		strings.NewReader(`{"source":"https://github.com/gascity/maintainer-city/tree/main"}`))
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem apierr.ErrorModel
+	if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem response: %v; body = %s", err, rec.Body.String())
+	}
+	if problem.Type != "urn:gascity:error:pack-credential-required" ||
+		problem.Code != "pack-credential-required" {
+		t.Fatalf("type/code = %q/%q, want pack-credential-required; body = %s",
+			problem.Type, problem.Code, rec.Body.String())
+	}
+	wantDetails := map[string]string{
+		"body.host": "github.com/gascity",
+		"body.repo": "https://github.com/gascity/maintainer-city",
+		"body.hint": "register a pack credential for this host",
+	}
+	for _, detail := range problem.Errors {
+		value, ok := detail.Value.(string)
+		if !ok {
+			continue
+		}
+		if want, exists := wantDetails[detail.Location]; exists && value == want {
+			delete(wantDetails, detail.Location)
+		}
+	}
+	if len(wantDetails) != 0 {
+		t.Fatalf("missing safe credential details %v; body = %s", wantDetails, rec.Body.String())
+	}
+	for _, forbidden := range []string{secret, "Authentication failed"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("credential response leaked %q: %s", forbidden, rec.Body.String())
+		}
 	}
 }
 

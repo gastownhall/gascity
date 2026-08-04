@@ -232,3 +232,99 @@ func (s *workflowProjectionStore) List(query beads.ListQuery) ([]beads.Bead, err
 	}
 	return s.MemStore.List(query)
 }
+
+// collapsedStatusProjectionStore models the production read path for the
+// workflow projection. A non-Live read (the raw scan, or any cached read)
+// returns blocked and deferred beads indistinguishable from ready work:
+// mapBdStatus folds bd's blocked/deferred/review/testing into Gas City's
+// "open", and CachingStore.List matches on that already-collapsed status. Only
+// the backing store filters on the raw status, by passing --status to bd, and
+// only a Live query reaches it.
+type collapsedStatusProjectionStore struct {
+	beads.Store
+	rawScan      []beads.Bead            // non-Live: blocked rows present, collapsed to "open"
+	liveByStatus map[string][]beads.Bead // Live: bd filtered on the raw status
+	liveStatuses []string
+}
+
+func (s *collapsedStatusProjectionStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if !q.Live {
+		return append([]beads.Bead(nil), s.rawScan...), nil
+	}
+	s.liveStatuses = append(s.liveStatuses, q.Status)
+	return append([]beads.Bead(nil), s.liveByStatus[q.Status]...), nil
+}
+
+// TestListActiveWorkflowProjectionBeadsExcludesBlocked covers the read side of
+// gc-4zb. The workflow-root spawn path selects on gc.routed_to without
+// re-checking status, so a blocked root that reaches this projection while
+// still carrying a route is spawned against and burns a polecat slot on a no-op
+// drain.
+//
+// Live reproduction (gc-nz5i, root gc-27xf, step mol-do-work.do-work):
+// dolt_history_issues shows status=blocked while gc.routed_to stayed
+// /home/ds/gascity/polecat from 04:00:21 to 04:08:17, and the bead's own
+// reroute_observed records a second slot burned against it while blocked. It
+// carries no gc.run_target, so the writer-side restore cannot re-stamp it —
+// this is the reader, not the writer.
+//
+// Filtering the scan on b.Status cannot fix it: the blocked bead's Status is
+// already the collapsed "open", so it satisfies an {open, in_progress}
+// allowlist. The gate has to be a status-scoped Live read that lets bd filter
+// on the raw status.
+func TestListActiveWorkflowProjectionBeadsExcludesBlocked(t *testing.T) {
+	const route = "/home/ds/gascity/polecat"
+	// Blocked in bd, but every non-Live read decodes it as "open".
+	blocked := beads.Bead{
+		ID: "gc-nz5i", Title: "do-work", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": route},
+	}
+	ready := beads.Bead{
+		ID: "gc-ready", Title: "ready", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": route},
+	}
+	claimed := beads.Bead{
+		ID: "gc-claimed", Title: "claimed", Type: "task", Status: "in_progress",
+		Assignee: route + "/th-abc", Metadata: map[string]string{"gc.run_target": route},
+	}
+
+	store := &collapsedStatusProjectionStore{
+		Store:   beads.NewMemStoreFrom(0, nil, nil),
+		rawScan: []beads.Bead{blocked, ready, claimed},
+		liveByStatus: map[string][]beads.Bead{
+			// bd's --status filter sees the raw status; gc-nz5i is blocked and absent.
+			"open":        {ready},
+			"in_progress": {claimed},
+		},
+	}
+
+	got, err := listActiveWorkflowProjectionBeads(store)
+	if err != nil {
+		t.Fatalf("listActiveWorkflowProjectionBeads: %v", err)
+	}
+	ids := make(map[string]bool, len(got))
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if ids["gc-nz5i"] {
+		t.Errorf("blocked bead gc-nz5i reached the workflow projection; the spawn path routes on its gc.routed_to and burns a slot")
+	}
+	// The gate must not shrink the projection to open-only: in_progress work is
+	// active and drives the running-run view.
+	if !ids["gc-ready"] {
+		t.Errorf("open routed bead gc-ready missing from projection")
+	}
+	if !ids["gc-claimed"] {
+		t.Errorf("in_progress bead gc-claimed missing from projection")
+	}
+	if len(got) != 2 {
+		t.Errorf("projection size = %d, want 2 (gc-ready, gc-claimed); got %v", len(got), ids)
+	}
+	// Every read must be Live and status-scoped, and in_progress must be read
+	// before open: the two reads are not one snapshot, so this order confines
+	// the missable flip to open->in_progress (a bead just claimed, which must
+	// not be spawned against anyway).
+	if want := strings.Join([]string{"in_progress", "open"}, ","); strings.Join(store.liveStatuses, ",") != want {
+		t.Errorf("live status reads = %v, want [in_progress open] (status-scoped, in_progress first)", store.liveStatuses)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 type cityDiscoveryOptions struct {
@@ -35,7 +36,12 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 			// cityPath-derived store scopes fail the native-store identity
 			// gate ("database project_id could not be confirmed") and every
 			// command degrades to the bd-subprocess fallback.
-			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			// Normalize through pathutil rather than bare EvalSymlinks: the
+			// latter leaves the darwin /private alias in place, so a city
+			// discovered from an already-canonical /var path would be
+			// reported as /private/var and fail identity comparisons against
+			// the very path it was found from.
+			if resolved := pathutil.NormalizePathForCompare(dir); resolved != "" {
 				return resolved, nil
 			}
 			return dir, nil
@@ -149,31 +155,19 @@ func normalizeDiscoveryPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	abs, err := filepath.Abs(path)
-	if err == nil {
-		path = abs
-	}
 	// Resolve symlinks so ceiling comparisons match regardless of how the
 	// path was obtained: on macOS, t.Chdir/os.Getwd can yield /tmp/... while
 	// the same directory resolves to /private/tmp/..., and comparing the two
 	// raw forms silently defeats the ceiling. Both the walked directory and
 	// the configured ceilings flow through here, so resolution stays
-	// symmetric. For paths that do not (fully) exist, resolve the longest
-	// existing ancestor and re-append the remainder, so a configured-but-
-	// not-yet-created ceiling still normalizes consistently instead of
-	// silently dropping out of the comparison.
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(resolved)
-	}
-	dir, rest := path, ""
-	for dir != string(filepath.Separator) && dir != "." {
-		parent := filepath.Dir(dir)
-		rest = filepath.Join(filepath.Base(dir), rest)
-		dir = parent
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Clean(filepath.Join(resolved, rest))
-		}
-	}
-	return path
+	// symmetric. For paths that do not (fully) exist, the normalizer resolves
+	// the longest existing ancestor and re-appends the remainder, so a
+	// configured-but-not-yet-created ceiling still normalizes consistently
+	// instead of silently dropping out of the comparison.
+	//
+	// pathutil is the single normalizer: it additionally collapses the darwin
+	// /private alias, which bare EvalSymlinks does not. Resolving without that
+	// collapse turns an already-canonical /var input into /private/var output,
+	// so two paths naming one directory compare unequal.
+	return pathutil.NormalizePathForCompare(path)
 }

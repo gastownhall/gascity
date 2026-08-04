@@ -116,8 +116,12 @@ auto-export behavior, invoke bd directly.`,
 	return cmd
 }
 
-var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) bool {
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+// bdBeadExists reports whether a bead ID resolves in a candidate store. It is
+// called only to decide which store a bd invocation is scoped to, so it takes
+// the city config the caller already loaded: without it, every candidate probe
+// re-loaded the whole city config inside the store open.
+var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarget, beadID string) bool {
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		return false
 	}
@@ -229,7 +233,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
+		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
@@ -259,23 +263,36 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	//
 	// Note: gc bd show (read passthrough) does NOT have this guard and still
 	// substring-resolves. That is intentional — reads are non-destructive.
+	//
+	// guardStore/guardBeads capture the store this guard opens and the beads
+	// it reads so the work-record close gate below can reuse them instead of
+	// opening the store and re-fetching the same bead a second time.
+	var (
+		guardStore beads.Store
+		guardBeads map[string]beads.Bead
+	)
 	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
 		if ambiguous {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCity(target.ScopeRoot, cityPath)
+			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 			// Store-unavailable: we cannot verify, but we must not block
 			// legitimate writes. Fall through; bd will error on actual problems.
 			if storeErr == nil {
+				guardStore = store
+				guardBeads = make(map[string]beads.Bead, len(writeIDs))
 				for _, id := range writeIDs {
-					_, getErr := store.Get(id)
+					bead, getErr := store.Get(id)
 					if errors.Is(getErr, beads.ErrIDCollision) {
 						// bd resolved a different bead — block the write to prevent
 						// mutating the wrong bead via substring resolution.
 						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
 						return 1
+					}
+					if getErr == nil {
+						guardBeads[id] = bead
 					}
 					// ErrNotFound or any other error: bead may be absent, ephemeral,
 					// or the read seam differs from the write seam — fall through.
@@ -287,8 +304,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
-	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
+	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
+	// store/beads the write-ID guard above already opened and read, and the
+	// config the caller already loaded.
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
 		return 1
 	}
 
@@ -487,8 +506,8 @@ func bdMutationWriteID(args []string) (string, bool) {
 	return ids[0], true
 }
 
-func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -616,7 +635,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
-			if bdBeadExists(cityPath, cityTarget, arg) {
+			if bdBeadExists(cityPath, cfg, cityTarget, arg) {
 				return cityTarget, nil
 			}
 		}
@@ -635,7 +654,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 				continue
 			}
 			target := bdRigScopeTarget(cityPath, rig)
-			if bdBeadExists(cityPath, target, arg) {
+			if bdBeadExists(cityPath, cfg, target, arg) {
 				return target, nil
 			}
 		}

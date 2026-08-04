@@ -1,10 +1,12 @@
 package pidutil
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,9 +51,6 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 }
 
 func TestStartTimeStableForLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time reads /proc/<pid>/stat on linux")
-	}
 	first, err := StartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
@@ -79,9 +78,6 @@ func TestStartTimeRejectsInvalidPID(t *testing.T) {
 // one (the recycled-PID case) reports dead even though the PID is live, and an
 // empty start time falls back to plain liveness.
 func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time identity uses /proc on linux")
-	}
 	self := os.Getpid()
 	st, err := StartTime(self)
 	if err != nil {
@@ -114,10 +110,6 @@ func TestAliveWithStartTimeDeadPID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
 		return false
 	}) {
@@ -126,10 +118,6 @@ func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
 		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
 	}) {
@@ -138,10 +126,6 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 }
 
 func TestCmdlineReturnsOwnArgv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	argv, err := Cmdline(os.Getpid())
 	if err != nil {
 		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)
@@ -185,6 +169,89 @@ func TestArgvContainsSequence(t *testing.T) {
 				t.Fatalf("ArgvContainsSequence(%v, %v) = %v, want %v", argv, tc.seq, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestChildPIDsFindsLiveChild is a RED test for ga-gxmz9n: ChildPIDs must
+// enumerate a real live direct child portably (no /proc dependency), on
+// linux and darwin alike.
+func TestChildPIDsFindsLiveChild(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	var pids []int
+	for time.Now().Before(deadline) {
+		var err error
+		pids, err = ChildPIDs(os.Getpid())
+		if err != nil {
+			t.Fatalf("ChildPIDs(%d): %v", os.Getpid(), err)
+		}
+		if slices.Contains(pids, cmd.Process.Pid) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("ChildPIDs(%d) = %v, want to contain live child pid %d", os.Getpid(), pids, cmd.Process.Pid)
+}
+
+// TestChildPIDsReturnsErrorWhenPSHangs is a RED test for ga-gxmz9n's binding
+// constraint: when enumeration cannot complete, ChildPIDs must report an
+// error rather than silently returning an empty (falsely "no children")
+// result — otherwise a leak-detection caller cannot tell "checked, found
+// none" apart from "never actually checked". Mirrors
+// TestPSReportsZombieReturnsWhenPSHangs's PATH-shadowing technique.
+func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
+	binDir := t.TempDir()
+	psPath := filepath.Join(binDir, "ps")
+	if err := os.WriteFile(psPath, []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(ps): %v", err)
+	}
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	start := time.Now()
+	pids, err := ChildPIDs(os.Getpid())
+	if err == nil {
+		t.Fatalf("ChildPIDs with a hanging ps: got pids=%v err=nil, want a non-nil error", pids)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("ChildPIDs took %s, want bounded timeout", elapsed)
+	}
+}
+
+// TestChildPIDsExcludesItsOwnEnumerationHelper is a regression test: ps is
+// itself alive, and a child of the caller, at the instant it captures the
+// process table, so an unfiltered ChildPIDs(os.Getpid()) always reports at
+// least one phantom "child" — the transient ps invocation itself — even
+// when no real child exists. This is exactly the self-monitoring pattern
+// this package's callers use for leak checks (ChildPIDs(os.Getpid())), and
+// it produced a false-positive "leaked child" on every run of
+// internal/workspacesvc's TestMain regardless of any real leak (ga-gxmz9n).
+//
+// The fake ps here reports a single row for itself ($$, the real parent),
+// mirroring the one spurious row a genuine ps produces in the self-check
+// case; ChildPIDs must recognize that row as its own helper and exclude it.
+func TestChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
+	binDir := t.TempDir()
+	psPath := filepath.Join(binDir, "ps")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$$ %d\"\n", os.Getpid())
+	if err := os.WriteFile(psPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(ps): %v", err)
+	}
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	pids, err := ChildPIDs(os.Getpid())
+	if err != nil {
+		t.Fatalf("ChildPIDs(%d): %v", os.Getpid(), err)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("ChildPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
 	}
 }
 

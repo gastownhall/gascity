@@ -467,6 +467,7 @@ func TestOpenRigAwareStoreUsesProviderAwareRigStore(t *testing.T) {
 	writeGraphFileStoreFixture(t, rigDir, beads.Bead{ID: "fe-1", Title: "rig bead", Status: "open", Type: "task"})
 
 	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	var stderr bytes.Buffer
 	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
 	if code != 0 {
@@ -497,6 +498,7 @@ func TestOpenRigAwareStoreLegacyFileCityUsesSharedCityStore(t *testing.T) {
 	writeGraphFileStoreFixture(t, cityDir, beads.Bead{ID: "fe-1", Title: "legacy shared bead", Status: "open", Type: "task"})
 
 	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	var stderr bytes.Buffer
 	store, code := openRigAwareStore([]string{"fe-1"}, &stderr)
 	if code != 0 {

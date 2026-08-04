@@ -523,20 +523,26 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:        "subcommand",
 	},
 	"opencode": {
-		DisplayName:      "OpenCode",
-		Command:          "opencode",
-		Args:             []string{},
-		PromptMode:       "flag",
-		PromptFlag:       "--prompt",
-		ReadyDelayMs:     8000,
-		ProcessNames:     []string{"opencode", "node", "bun"},
-		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "--session",
-		ResumeStyle:      "flag",
-		ACPArgs:          []string{"acp"},
+		DisplayName:  "OpenCode",
+		Command:      "opencode",
+		Args:         []string{},
+		PromptMode:   "flag",
+		PromptFlag:   "--prompt",
+		ReadyDelayMs: 8000,
+		ProcessNames: []string{"opencode", "node", "bun"},
+		// OpenCode handles permissions through OPENCODE_PERMISSION and does not
+		// show the Claude/Codex startup dialogs. Without this override, its
+		// process-name hint enables two acceptance passes. Each pass polls
+		// multiple unsupported dialog classes with independent timeouts, so the
+		// first can exhaust the managed startup lease while OpenCode is working.
+		AcceptStartupDialogs: boolPtr(false),
+		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:          true,
+		SupportsHooks:        true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		ACPArgs:              []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			{
 				Key:   "model",

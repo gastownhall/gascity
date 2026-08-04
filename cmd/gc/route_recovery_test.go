@@ -299,3 +299,79 @@ func mustRoutedTo(t *testing.T, store beads.Store, id string) string {
 	}
 	return b.Metadata["gc.routed_to"]
 }
+
+// collapsedBlockedStatusStore models the production read path for a bead that is
+// blocked in the backing store. Two behaviors combine there, and neither is
+// visible from the bead alone:
+//
+//  1. mapBdStatus folds bd's blocked/deferred/review/testing into Gas City's
+//     three statuses, so a blocked bead decodes with Status "open". Every read
+//     that returns a beads.Bead — the cached List and the live Get alike — sees
+//     "open", so no status comparison downstream can recognize the block.
+//  2. CachingStore.List serves a non-Live query from its in-memory active set,
+//     filtering with ListQuery.Matches against that already-collapsed status.
+//     bd's server-side --status=open filter does see the raw status and does
+//     exclude blocked, but a cached read never reaches it.
+//
+// A Live query bypasses the cache and reaches bd, which filters on the raw
+// status, so the blocked bead is correctly absent from liveSnapshot.
+type collapsedBlockedStatusStore struct {
+	beads.Store
+	cachedSnapshot []beads.Bead // non-Live: blocked rows present, collapsed to "open"
+	liveSnapshot   []beads.Bead // Live: bd filtered the raw status server-side
+}
+
+func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		return append([]beads.Bead(nil), s.liveSnapshot...), nil
+	}
+	return append([]beads.Bead(nil), s.cachedSnapshot...), nil
+}
+
+// TestRestoreCarriedWorkRoutesSkipsBlockedBead covers gc-4zb: restore must not
+// re-stamp gc.routed_to onto a bead that is blocked in the backing store.
+//
+// Live reproduction (EnterpriseBench-42o8, root EnterpriseBench-c7ga, step
+// mol-focus-review.finalize): dolt_history_issues shows status=blocked at every
+// revision while gc.routed_to oscillated empty -> set on a patrol cadence
+// (03:10:05 set, 03:14:04 cleared by blocked-routed-reaper, 03:18:20 set again),
+// each restored value equal to gc.run_target — carriedPoolRoute's copy. The
+// bead never reopened, so this is a write onto a continuously blocked bead, not
+// a legitimate re-route of work that briefly became ready.
+//
+// The existing open+unassigned guards cannot catch it: the snapshot bead, the
+// belt-and-braces b.Status check, and the live re-read all observe the collapsed
+// "open". Gating requires a read that filters on the raw status, which is what
+// the Live query delegates to bd.
+func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
+	const pool = "/home/ds/projects/EnterpriseBench/enterprisebench-worker"
+	// Backing bead: blocked in bd, but decoded as "open" by mapBdStatus, so a
+	// live Get cannot reveal the block either. The reaper has already cleared
+	// gc.routed_to, leaving exactly carriedPoolRoute's recoverable shape.
+	live := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "EB-42o8", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.run_target": pool,
+		}},
+	}, nil)
+	store := collapsedBlockedStatusStore{
+		Store: live,
+		cachedSnapshot: []beads.Bead{
+			{ID: "EB-42o8", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
+				"gc.run_target": pool,
+			}},
+		},
+		// bd's --status=open filter sees the raw status=blocked and excludes it.
+		liveSnapshot: nil,
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0 (must not re-stamp gc.routed_to onto a blocked bead)", restored)
+	}
+	if route := strings.TrimSpace(mustRoutedTo(t, live, "EB-42o8")); route != "" {
+		t.Errorf("gc.routed_to = %q, want empty (a blocked bead must stay unrouted)", route)
+	}
+}

@@ -70,6 +70,11 @@ func carriedPoolRoute(b beads.Bead) string {
 // live re-read and SetMetadata is still possible. The re-stamp stays monotonic
 // (never worse than the prior blind write), so the residual window degrades to
 // the pre-guard behavior rather than a new failure.
+//
+// That re-read guards claims but cannot guard blocks: a claim flips the bead to
+// in_progress, which mapBdStatus preserves, while a block flips it to a status
+// that collapses to "open" (gc-4zb). Blocked work is therefore excluded at the
+// snapshot, by the Live query below, and not here.
 func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	if store == nil {
 		return 0, nil
@@ -80,7 +85,19 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	// carriers of a legacy route — plain work beads and workflow roots — which a
 	// gc.kind=workflow query would miss. Mirrors sweepDetachedHandoffOrphans'
 	// open-bead scan (AllowScan acknowledges the intentional population read).
-	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true})
+	//
+	// Live is what makes Status:"open" mean open (gc-4zb). mapBdStatus folds
+	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
+	// blocked bead decodes with Status "open" and is indistinguishable from
+	// ready work in every beads.Bead this function can read. A cached List
+	// filters with ListQuery.Matches against that collapsed status and so hands
+	// back blocked beads; only the backing store filters on the raw status, by
+	// passing --status=open to bd. Live bypasses the CachingStore to get there.
+	// Without it a blocked root that carries gc.run_target is re-stamped on
+	// every patrol tick — the blocked-routed-reaper's recurring offenders. The
+	// workflow-root spawn path selects on gc.routed_to without re-checking
+	// status, so each re-stamp respawns a worker that drains no-op.
+	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing open work: %w", err)
 	}

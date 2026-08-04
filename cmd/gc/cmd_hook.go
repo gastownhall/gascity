@@ -342,7 +342,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	if isAgentEffectivelySuspendedWith(cfg, &a, st) {
+	if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st) {
 		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -449,8 +449,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingOrAssigned); it must be scoped to this
-			// session's OWN runtime identity, never the bare pool template. A
+			// work (hookClaimExistingAssignment and
+			// claimFirstReadyHookAssignment); it must be scoped to this session's
+			// OWN runtime identity, never the bare pool template. A
 			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
 			// resolvedAgentName == a.QualifiedName() is the bare template, which is
 			// ALSO the [[named_session]] holder's identity — including it let a

@@ -38,8 +38,60 @@ else
     SYNC="${4:-}"
 fi
 
+append_exclude() {
+    PATTERN="$1"
+    grep -qxF "$PATTERN" "$EXCLUDE" 2>/dev/null || printf '%s\n' "$PATTERN" >> "$EXCLUDE"
+}
+
+# Idempotent: bead redirect, submodule init, and local excludes. Safe to
+# call on every invocation (fresh-create AND pre-existing-worktree), so a
+# worktree that already existed before this provisioning was added — or
+# whose redirect/excludes were later clobbered — converges on re-run
+# instead of staying stuck with whatever it had at creation time.
+ensure_worktree_provisioning() {
+    # Bead redirect for filesystem beads.
+    mkdir -p "$WT/.beads"
+    echo "$RIG_ROOT/.beads" > "$WT/.beads/redirect"
+
+    # Submodule init (best-effort).
+    git -C "$WT" submodule init 2>/dev/null || true
+
+    # Keep runtime ignores local to git metadata instead of mutating the tracked
+    # repository .gitignore.
+    EXCLUDE=$(git -C "$WT" rev-parse --git-path info/exclude)
+    case "$EXCLUDE" in
+        /*) ;;
+        *) EXCLUDE="$WT/$EXCLUDE" ;;
+    esac
+    mkdir -p "$(dirname "$EXCLUDE")"
+    touch "$EXCLUDE"
+
+    MARKER="# Gas City worktree infrastructure (local excludes)"
+    if ! grep -qF "$MARKER" "$EXCLUDE" 2>/dev/null; then
+        if [ -s "$EXCLUDE" ] && [ "$(tail -c 1 "$EXCLUDE" 2>/dev/null || true)" != "" ]; then
+            printf '\n' >> "$EXCLUDE"
+        fi
+        printf '%s\n' "$MARKER" >> "$EXCLUDE"
+    fi
+
+    append_exclude ".beads/redirect"
+    append_exclude ".beads/hooks/"
+    append_exclude ".beads/formulas/"
+    append_exclude ".logs/"
+    append_exclude "worktrees/"
+    append_exclude "__pycache__/"
+    append_exclude ".claude/"
+    append_exclude ".codex/"
+    append_exclude ".gemini/"
+    append_exclude ".opencode/"
+    append_exclude ".github/hooks/"
+    append_exclude ".github/copilot-instructions.md"
+    append_exclude "state.json"
+}
+
 # Idempotent: skip if worktree already exists.
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
+    ensure_worktree_provisioning
     [ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
     exit 0
 fi
@@ -111,49 +163,7 @@ if [ -n "$STAGE" ]; then
 fi
 trap - EXIT HUP INT TERM
 
-# Bead redirect for filesystem beads.
-mkdir -p "$WT/.beads"
-echo "$RIG_ROOT/.beads" > "$WT/.beads/redirect"
-
-# Submodule init (best-effort).
-git -C "$WT" submodule init 2>/dev/null || true
-
-# Keep runtime ignores local to git metadata instead of mutating the tracked
-# repository .gitignore.
-EXCLUDE=$(git -C "$WT" rev-parse --git-path info/exclude)
-case "$EXCLUDE" in
-    /*) ;;
-    *) EXCLUDE="$WT/$EXCLUDE" ;;
-esac
-mkdir -p "$(dirname "$EXCLUDE")"
-touch "$EXCLUDE"
-
-MARKER="# Gas City worktree infrastructure (local excludes)"
-if ! grep -qF "$MARKER" "$EXCLUDE" 2>/dev/null; then
-    if [ -s "$EXCLUDE" ] && [ "$(tail -c 1 "$EXCLUDE" 2>/dev/null || true)" != "" ]; then
-        printf '\n' >> "$EXCLUDE"
-    fi
-    printf '%s\n' "$MARKER" >> "$EXCLUDE"
-fi
-
-append_exclude() {
-    PATTERN="$1"
-    grep -qxF "$PATTERN" "$EXCLUDE" 2>/dev/null || printf '%s\n' "$PATTERN" >> "$EXCLUDE"
-}
-
-append_exclude ".beads/redirect"
-append_exclude ".beads/hooks/"
-append_exclude ".beads/formulas/"
-append_exclude ".logs/"
-append_exclude "worktrees/"
-append_exclude "__pycache__/"
-append_exclude ".claude/"
-append_exclude ".codex/"
-append_exclude ".gemini/"
-append_exclude ".opencode/"
-append_exclude ".github/hooks/"
-append_exclude ".github/copilot-instructions.md"
-append_exclude "state.json"
+ensure_worktree_provisioning
 
 # Optional sync.
 [ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
