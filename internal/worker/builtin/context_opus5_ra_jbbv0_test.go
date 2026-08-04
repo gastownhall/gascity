@@ -86,7 +86,7 @@ func TestBuiltinClaudeModelChoicesAcceptCanonicalIDsVerbatim(t *testing.T) {
 		byValue[choice.Value] = choice
 	}
 
-	for _, canonical := range []string{"claude-opus-5", "claude-sonnet-5", "claude-fable-5"} {
+	for _, canonical := range []string{"claude-opus-5", "claude-opus-5[1m]", "claude-sonnet-5", "claude-fable-5"} {
 		choice, ok := byValue[canonical]
 		if !ok {
 			t.Errorf("claude model choices missing canonical id %q as a directly-accepted value", canonical)

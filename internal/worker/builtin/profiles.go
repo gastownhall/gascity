@@ -180,6 +180,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					// city ran unpinned for hours on the launch side while four agents
 					// were unwakeable on the resolution side (ra-jbbv0).
 					{Value: "claude-opus-5", Label: "Opus 5 (canonical id)", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
+					// The "[1m]" launch suffix is a valid Claude Code model-id form and
+					// operators pin it directly; it is emitted verbatim rather than
+					// normalized down to "claude-opus-5", because silently rewriting an
+					// explicit pin is the same class of surprise these entries exist to
+					// eliminate.
+					{Value: "claude-opus-5[1m]", Label: "Opus 5 1M (canonical id)", FlagArgs: []string{"--model", "claude-opus-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-5[1m]"}}},
 					{Value: "claude-sonnet-5", Label: "Sonnet 5 (canonical id)", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
 					{Value: "claude-fable-5", Label: "Fable 5 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 				},
