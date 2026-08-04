@@ -127,6 +127,7 @@ const (
 	ModelMetadataKey                     = "gc.model"
 	NativeStepDependenciesMetadataKey    = "gc.native_step_dependencies.v1"
 	NextAttemptMetadataKey               = "gc.next_attempt"
+	NudgedForTriggerMetadataKey          = "gc.nudged_for_trigger"
 	OnExhaustedMetadataKey               = "gc.on_exhausted"
 	OnFailMetadataKey                    = "gc.on_fail"
 	OriginalKindMetadataKey              = "gc.original_kind"
@@ -369,6 +370,7 @@ var KnownMetadataKeys = []string{
 	ModelMetadataKey,
 	NativeStepDependenciesMetadataKey,
 	NextAttemptMetadataKey,
+	NudgedForTriggerMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
 	OriginalKindMetadataKey,
