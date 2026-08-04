@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -79,6 +80,18 @@ func TestConditionEnvEnviron(t *testing.T) {
 	}
 	if _, ok := lookup["TMPDIR"]; !ok {
 		t.Error("missing TMPDIR env var")
+	}
+}
+
+func TestConditionGCHomeFallbackIsNotSharedTempDir(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+
+	got := conditionGCHome()
+	if got == filepath.Join(os.TempDir(), ".gc") {
+		t.Fatalf("conditionGCHome() = %q, must not be the shared world-writable temp home (gastownhall/gascity#3506)", got)
+	}
+	if want := gchome.ResolveReadOnly().Path(); got != want {
+		t.Fatalf("conditionGCHome() = %q, want canonical gchome resolution %q", got, want)
 	}
 }
 

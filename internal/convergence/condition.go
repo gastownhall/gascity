@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -28,13 +29,7 @@ const (
 // HOME is intentionally sandboxed to the city, so it cannot also be used for
 // gc's machine-level cache and registry state.
 func conditionGCHome() string {
-	if value := strings.TrimSpace(os.Getenv("GC_HOME")); value != "" {
-		return value
-	}
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".gc")
-	}
-	return filepath.Join(os.TempDir(), ".gc")
+	return gchome.ResolveReadOnly().Path()
 }
 
 // conditionPATH resolves the tool directories gate scripts actually need.
