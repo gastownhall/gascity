@@ -2028,16 +2028,9 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	return rows, nil
 }
 
-// liveReadyForControllerDemandQuery returns the live ready set that feeds the
-// controller-demand awake/readiness gate (readyAssignedIDs). Under
-// graph_store=sqlite it prefers the graph-class ready slice (ReadyGraphOnly):
-// a worker only executes graph nodes, and the full federated Router.Ready
-// unions the Dolt work-leg backlog and truncates to the per-tick wake limit,
-// which evicts genuinely-ready assigned graph wisps (routed cleanup/finalize
-// steps) out of the window and leaves their sessions un-woken. This mirrors
-// readyStoreSet (gc ready) and the dispatch/API read paths; default Dolt-only
-// cities lack the capability and fall back to the federated Live.Ready
-// byte-identically.
+// liveReadyForControllerDemandQuery prefers graph-only readiness when the
+// store supports it, keeping work-backend rows from consuming the controller's
+// bounded graph-work window. Other stores retain the full live-ready path.
 func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
 	query.TierMode = beads.TierBoth
 	if probe, ok := beads.GraphOnlyReadyFor(store); ok {

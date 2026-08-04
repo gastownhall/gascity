@@ -3605,16 +3605,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
-			// Stamp currently_processing_bead_id so the next divergence check has
-			// a baseline. Backfills legacy sessions that were already alive before
-			// this metadata existed and refreshes the record after the agent
-			// picks up its next bead in resume mode. Unconditional on
-			// idleAssignedWorkOnly: a resume-mode session reassigned while alive
-			// and idle-assigned-work-only would otherwise never refresh this
-			// record, so a later crash-recovery restart could re-anchor on a
-			// stale sibling bead instead of the session's actual current
-			// assignment (Finding 4/#3835 review). Idempotent —
-			// recordCurrentBeadIDOnWake no-ops when the bead ID is unchanged.
+			// Keep the crash-recovery anchor current for every alive session,
+			// including assigned-work-only sessions that skip drain cancellation.
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
@@ -3635,15 +3627,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if info.SleepIntent == "idle-stop-pending" {
-				// Clear unconditionally on any re-wake, including
-				// assigned-work-only sessions that skip the cancel/clear above so
-				// their idle-respawn drain/probe can run to completion: the
-				// session did new work between the mark and now, so a future
-				// idle decision must re-prove idleness via
-				// shouldBeginIdleDrainInfo rather than bypass it on this stale
-				// authorization (Finding 2/#3835 review — an unhoisted clear let
-				// reason=="idle" fall through to beginSessionDrainInfo on
-				// authorization set before the work ran).
 				// OPTIMISTIC fold (origin/main parity): main cleared sleep_intent with an
 				// error-ignored write and folded the clear UNCONDITIONALLY (tick.apply),
 				// so the local fold must survive a failed write here too. This runs on an
@@ -5226,11 +5209,8 @@ func shouldBeginIdleDrainInfo(
 	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt)
 }
 
-// idleRespawnDrainReason marks a drain begun on an idle session that is awake
-// only because it owns ready assigned work. The session sleeps (its bead stays
-// open, never closed) so resume-on-ready re-spawns it fresh to run that work.
-// The reason is non-cancelable (drainReasonCancelable) so the persistent
-// assigned-work demand cannot undo the drain before the session sleeps.
+// idleRespawnDrainReason marks a non-cancelable sleep-and-respawn drain for an
+// idle session whose only wake reason is assigned work.
 const idleRespawnDrainReason = "idle-respawn"
 
 // idleAssignedWorkOnly reports whether a session's sole reason to be awake is
@@ -5240,20 +5220,13 @@ func idleAssignedWorkOnly(eval wakeEvaluation) bool {
 	return eval.Reason == "assigned-work" && len(eval.Reasons) == 1 && containsWakeReason(eval.Reasons, WakeWork)
 }
 
-// beginIdleRespawnDrainIfIdle drains an alive session that is awake only for
-// assigned work to asleep when a completed idle probe proves its agent idle, so
-// resume-on-ready can re-spawn it fresh. It returns true when a drain was begun.
-// It deliberately neither cancels the drain nor clears the idle probe for these
-// sessions — that cancel/clear is what previously pinned them awake-but-idle.
+// beginIdleRespawnDrainIfIdle starts a drain after an idle probe proves an
+// assigned-work-only pool session idle. It reports whether a drain began.
 func beginIdleRespawnDrainIfIdle(info sessionpkg.Info, eval wakeEvaluation, dt *drainTracker, sp runtime.Provider, clk clock.Clock) bool {
 	if !idleAssignedWorkOnly(eval) {
 		return false
 	}
-	// Restrict to pool sessions on the interactive-resume sleep path. Named
-	// sessions are materialized by the named-session loop, not pool respawn, and
-	// non-interactive sessions do not re-spawn from a fresh prompt (and
-	// shouldBeginIdleDrainInfo short-circuits true for them without a probe). Both
-	// keep their existing "stay awake with assigned work" behavior.
+	// Named and non-interactive sessions do not use the pool resume path.
 	if isNamedSessionInfo(info) || eval.Policy.Class == config.SessionSleepNonInteractive {
 		return false
 	}
@@ -5305,21 +5278,12 @@ func selectIdleProbeTargets(
 		if !ok || !eval.Policy.enabled() {
 			continue
 		}
-		// Probe a session that is either idle with no wake demand (the original
-		// case) OR awake solely for assigned work. The latter must be probed so
-		// an idle assigned-work session can sleep-and-respawn (resume-on-ready)
-		// instead of staying pinned awake-but-idle.
+		// Probe sessions with no wake demand and assigned-work-only sessions.
 		if (len(eval.Reasons) != 0 || !eval.ConfigSuppressed) && !idleAssignedWorkOnly(eval) {
 			continue
 		}
-		// Named sessions awake solely for assigned work are materialized by the
-		// named-session loop, not pool respawn: beginIdleRespawnDrainIfIdle
-		// refuses to drain them (mirrors this guard exactly). A probe started
-		// for that case is never consumed by any clear site, so the
-		// dt.idleProbes[id] != nil guard above would then block every future
-		// probe for this session ID permanently. Named sessions idle with no
-		// wake demand at all (eval.Reasons empty) are unaffected — they still
-		// need probing for their own ordinary "idle"-reason drain path.
+		// The pool resume path cannot consume assigned-work probes for named
+		// sessions, so admitting one would permanently block later probes.
 		if idleAssignedWorkOnly(eval) && isNamedSessionInfo(infoByID[target.info.ID]) {
 			continue
 		}
