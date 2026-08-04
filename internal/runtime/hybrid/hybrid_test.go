@@ -285,3 +285,26 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
 	}
 }
+
+// capsFake overrides the fake's capabilities so the intersection logic can be
+// exercised with differing backend support.
+type capsFake struct {
+	*runtime.Fake
+	caps runtime.ProviderCapabilities
+}
+
+func (c *capsFake) Capabilities() runtime.ProviderCapabilities { return c.caps }
+
+// Capabilities must intersect CanAttachTTY: a backend without TTY attach makes
+// the composite report false, and two capable backends keep it true.
+func TestProvider_CapabilitiesIntersectsCanAttachTTY(t *testing.T) {
+	tty := runtime.ProviderCapabilities{CanAttachTTY: true}
+	both := New(&capsFake{runtime.NewFake(), tty}, &capsFake{runtime.NewFake(), tty}, isRemote)
+	if !both.Capabilities().CanAttachTTY {
+		t.Error("CanAttachTTY = false with both backends capable, want true")
+	}
+	oneOnly := New(&capsFake{runtime.NewFake(), tty}, &capsFake{runtime.NewFake(), runtime.ProviderCapabilities{}}, isRemote)
+	if oneOnly.Capabilities().CanAttachTTY {
+		t.Error("CanAttachTTY = true with one incapable backend, want false")
+	}
+}

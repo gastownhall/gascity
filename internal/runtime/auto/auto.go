@@ -383,6 +383,7 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: dc.CanReportAttachment && ac.CanReportAttachment,
 		CanReportActivity:   dc.CanReportActivity && ac.CanReportActivity,
+		CanAttachTTY:        dc.CanAttachTTY && ac.CanAttachTTY,
 		NeedsClaimBackstop:  dc.NeedsClaimBackstop || ac.NeedsClaimBackstop,
 	}
 }
