@@ -364,10 +364,15 @@ func resyncEvent() runtime.SessionEvent {
 
 // ── socket-native request helpers ────────────────────────────────────────────
 
-// dialSocket connects to this session server's unix socket.
+// dialSocket connects to this session server's unix socket. The connect
+// itself is bounded by sessionEventOpTimeout even when ctx carries no
+// deadline, so a stalled dial cannot hang callers that rely on the
+// documented per-op bound.
 func (c *client) dialSocket(ctx context.Context) (net.Conn, error) {
+	dctx, cancel := context.WithTimeout(ctx, sessionEventOpTimeout)
+	defer cancel()
 	var d net.Dialer
-	return d.DialContext(ctx, "unix", c.socketPath())
+	return d.DialContext(dctx, "unix", c.socketPath())
 }
 
 // sockSend writes one request line. params must be non-nil — the server
