@@ -784,6 +784,7 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
+				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -913,6 +914,12 @@ func emitFormulaCookExecutionFacts(store beads.Store, cityPath string, result *m
 	}
 	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, result.RootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", result.RootID, err) //nolint:errcheck // successful cook is preserved
+	}
+}
+
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
 	}
 }
 

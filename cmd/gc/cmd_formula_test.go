@@ -1173,6 +1173,28 @@ title = "Do work for {{convoy_id}}"
 			t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, root.ID)
 		}
 	}
+	recorded, err := events.ReadAll(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read execution events: %v", err)
+	}
+	for _, root := range roots {
+		seenAssociation := false
+		seenStep := false
+		for _, event := range recorded {
+			if event.RunID != root.ID {
+				continue
+			}
+			if event.Type == events.ExecutionWorkAssociated && event.Subject == source.ID {
+				seenAssociation = true
+			}
+			if event.Type == events.ExecutionStepDefined && event.Subject != root.ID {
+				seenStep = true
+			}
+		}
+		if !seenAssociation || !seenStep {
+			t.Fatalf("execution events for root %s missing attached work or graph step: %#v", root.ID, recorded)
+		}
+	}
 	sourceAfter, err := store.Get(source.ID)
 	if err != nil {
 		t.Fatalf("get source: %v", err)
