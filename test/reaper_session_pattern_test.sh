@@ -60,10 +60,10 @@ run_step6() {
     cat > "$run_script" << RUNEOF
 #!/usr/bin/env bash
 set -euo pipefail
-bd()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
+gc()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
 dolt_sql()      { touch '$dolt_flag'; }
 record_anomaly(){ :; }
-export -f bd dolt_sql record_anomaly
+export -f gc dolt_sql record_anomaly
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 SESSION_BEAD_PATTERN='$pattern'
@@ -111,10 +111,10 @@ run_step6_via_env() {
     cat > "$run_script" << RUNEOF
 #!/usr/bin/env bash
 set -euo pipefail
-bd()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
+gc()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
 dolt_sql()      { touch '$dolt_flag'; }
 record_anomaly(){ :; }
-export -f bd dolt_sql record_anomaly
+export -f gc dolt_sql record_anomaly
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 GC_REAPER_SESSION_BEAD_PATTERN='$env_val'
