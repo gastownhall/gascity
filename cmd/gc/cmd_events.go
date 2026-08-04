@@ -229,6 +229,7 @@ DTO or SSE envelope.`,
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
 	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
 	cmd.AddCommand(newEventsRotateCmd(stdout, stderr))
+	cmd.AddCommand(newEventsReemitExecutionCmd(stdout, stderr))
 	return cmd
 }
 

@@ -1460,7 +1460,24 @@ gc events --follow --after-cursor city-a:12,city-b:9
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc events reemit-execution](#gc-events-reemit-execution) | Project one graph execution run into event facts |
 | [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events reemit-execution
+
+Project exactly one stopped local graph.v2 execution run into execution facts.
+
+The default is a dry run. Pass --apply to append the projected snapshot to the
+default city event log.
+
+```
+gc events reemit-execution --city <city> --run <run> [--apply] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | append projected facts to the default file event log |
+| `--run` | string |  | graph.v2 workflow root ID to project |
 
 ## gc events rotate
 
