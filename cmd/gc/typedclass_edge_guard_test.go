@@ -175,7 +175,14 @@ var typedClassCodecCensus = map[string]map[string]int{
 	// cmd_wait's waitNudgePollerKey onto PollerKeyFromInfo (fed by FindInfoByID), so
 	// the last interior caller is gone. The needle stays policed as a tripwire until
 	// the WI-7 unexport (pollerKeyFromBead) lands.
+	// cmd/gc/stranded_routed_demand.go's failStrandedOrderRuns fold-in: it
+	// already holds the candidate bead from strandedRoutedDemandCandidates and
+	// needs the run identity off of it before mirroring the Require-mode
+	// mutation through the orders.Store front door (MarkFailed) — the same
+	// crack-a-bead-in-hand shape huma_handlers_orders.go uses, not a fresh
+	// store lookup.
 	"RunFromTrackingBead(": {
+		"cmd/gc/stranded_routed_demand.go":     1,
 		"internal/api/huma_handlers_orders.go": 1,
 	},
 	"MaxSeqFromLabels(": {

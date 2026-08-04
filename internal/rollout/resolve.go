@@ -55,6 +55,13 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
 
+	// demand.stranded_route_policy — Mode gate, EnvOverrides semantics.
+	if err := resolveModeGate(cfg, lookup, &f, demandStrandedRoutePolicySpec(),
+		readDemandStrandedRoutePolicy,
+		func(f *Flags, r resolved[Mode]) { f.strandedRoutedDemand = r }); err != nil {
+		return Flags{}, err
+	}
+
 	return f, nil
 }
 
@@ -78,7 +85,7 @@ func resolveModeGate(
 	key := spec.Key
 
 	raw, defined := read(cfg)
-	mode, origin := Off, OriginBuiltin
+	mode, origin := *spec.Default.Mode, OriginBuiltin
 	if defined {
 		m, err := ParseMode(raw)
 		if err != nil {

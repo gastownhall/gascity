@@ -3273,6 +3273,24 @@ type RotatedPayload struct {
 	PriorLastSeq  int64  `json:"prior_last_seq"`
 }
 
+// RoutedDemandStrandedPayload defines model for RoutedDemandStrandedPayload.
+type RoutedDemandStrandedPayload struct {
+	// BeadIds IDs of the stranded demand beads routed to Template. Never truncated.
+	BeadIds *[]string `json:"bead_ids,omitempty"`
+
+	// Escalated False on the first-sight emission; true when re-emitted after a bead has sat stranded past the escalation threshold.
+	Escalated bool `json:"escalated"`
+
+	// FirstSeen RFC3339 timestamp the earliest bead driving this emission was first observed stranded; the escalation clock counts from here.
+	FirstSeen *string `json:"first_seen,omitempty"`
+
+	// Severity Resolved policy severity for this detection: "warning" (Auto) or "failure" (Require).
+	Severity string `json:"severity"`
+
+	// Template The gc.routed_to target that no session can currently wake for.
+	Template *string `json:"template,omitempty"`
+}
+
 // Run defines model for Run.
 type Run struct {
 	// Formula Formula name driving the run, when known.
@@ -6101,6 +6119,22 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRoutedDemandStranded defines model for TypedEventStreamEnvelopeRoutedDemandStranded.
+type TypedEventStreamEnvelopeRoutedDemandStranded struct {
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RoutedDemandStrandedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor            string                   `json:"actor"`
@@ -7433,6 +7467,23 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
 	Message          *string                     `json:"message,omitempty"`
 	Payload          RigProvisionProgressPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRoutedDemandStranded defines model for TypedTaggedEventStreamEnvelopeRoutedDemandStranded.
+type TypedTaggedEventStreamEnvelopeRoutedDemandStranded struct {
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RoutedDemandStrandedPayload `json:"payload"`
 	RunId            *string                     `json:"run_id,omitempty"`
 	Seq              int64                       `json:"seq"`
 	SessionId        *string                     `json:"session_id,omitempty"`
@@ -10052,6 +10103,32 @@ func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
 
 // MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
 func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRoutedDemandStrandedPayload returns the union data inside the EventPayload as a RoutedDemandStrandedPayload
+func (t EventPayload) AsRoutedDemandStrandedPayload() (RoutedDemandStrandedPayload, error) {
+	var body RoutedDemandStrandedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRoutedDemandStrandedPayload overwrites any union data inside the EventPayload as the provided RoutedDemandStrandedPayload
+func (t *EventPayload) FromRoutedDemandStrandedPayload(v RoutedDemandStrandedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRoutedDemandStrandedPayload performs a merge with any union data inside the EventPayload, using the provided RoutedDemandStrandedPayload
+func (t *EventPayload) MergeRoutedDemandStrandedPayload(v RoutedDemandStrandedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13825,6 +13902,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProg
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRoutedDemandStranded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRoutedDemandStranded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRoutedDemandStranded() (TypedEventStreamEnvelopeRoutedDemandStranded, error) {
+	var body TypedEventStreamEnvelopeRoutedDemandStranded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRoutedDemandStranded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRoutedDemandStranded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRoutedDemandStranded(v TypedEventStreamEnvelopeRoutedDemandStranded) error {
+	v.Type = "routed_demand.stranded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRoutedDemandStranded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRoutedDemandStranded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRoutedDemandStranded(v TypedEventStreamEnvelopeRoutedDemandStranded) error {
+	v.Type = "routed_demand.stranded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedEventStreamEnvelopeSessionColdStartTimeout
@@ -14625,6 +14730,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
+	case "routed_demand.stranded":
+		return t.AsTypedEventStreamEnvelopeRoutedDemandStranded()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -16254,6 +16361,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigP
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRoutedDemandStranded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRoutedDemandStranded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRoutedDemandStranded() (TypedTaggedEventStreamEnvelopeRoutedDemandStranded, error) {
+	var body TypedTaggedEventStreamEnvelopeRoutedDemandStranded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRoutedDemandStranded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRoutedDemandStranded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRoutedDemandStranded(v TypedTaggedEventStreamEnvelopeRoutedDemandStranded) error {
+	v.Type = "routed_demand.stranded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRoutedDemandStranded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRoutedDemandStranded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRoutedDemandStranded(v TypedTaggedEventStreamEnvelopeRoutedDemandStranded) error {
+	v.Type = "routed_demand.stranded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
@@ -17054,6 +17189,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
+	case "routed_demand.stranded":
+		return t.AsTypedTaggedEventStreamEnvelopeRoutedDemandStranded()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":

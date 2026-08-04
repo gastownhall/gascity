@@ -2210,6 +2210,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// Emit any due compute usage facts by reusing the open-session snapshot this
 	// tick already loaded, rather than issuing a second redundant store scan.
 	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
+	if err := detectStrandedRoutedDemand(store, cr.cfg, sessionBeads, cr.rec, cr.stderr, time.Now()); err != nil {
+		logDispatchError(cr.stderr, "gc: stranded routed demand detection: %v", err)
+	}
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs

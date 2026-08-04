@@ -40,6 +40,7 @@ City is the top-level configuration for a Gas City instance.
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
+| `demand` | DemandConfig |  |  | Demand configures stranded routed-demand detection policy. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
 | `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
@@ -341,6 +342,15 @@ DaemonConfig holds controller daemon settings.
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
+
+## DemandConfig
+
+DemandConfig configures stranded routed-demand detection: a gc.routed_to target with min_active_sessions=0 and no session that can ever wake it (dead or misspelled route).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `stranded_route_policy` | string |  |  | StrandedRoutePolicy selects the off\|auto\|require rollout gate (rollout.KeyDemandStrandedRoutePolicy). Empty defers to the gate's built-in default. |
+| `stranded_route_debounce` | string |  | `60s` | StrandedRouteDebounce is the minimum bead age before it counts as stranded, as a duration string (e.g., "60s"). Defaults to 60s. |
 
 ## DoctorConfig
 

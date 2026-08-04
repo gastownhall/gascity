@@ -246,6 +246,15 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// RoutedDemandStranded fires when a gc.routed_to demand target (a ready
+	// work bead or an order-dispatch pool-demand wisp) resolves to a template
+	// no session can ever wake for — a dead/misspelled route, or an agent
+	// whose effective min_active_sessions is 0 with zero sessions currently
+	// open. Gated by the demand.stranded_route_policy rollout gate: Auto
+	// emits with severity=warning and never blocks; Require emits with
+	// severity=failure and also fails the owning order run.
+	RoutedDemandStranded = "routed_demand.stranded"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -292,6 +301,7 @@ var KnownEventTypes = []string{
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	RoutedDemandStranded,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

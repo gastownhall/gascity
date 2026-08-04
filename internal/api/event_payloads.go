@@ -564,6 +564,45 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// RoutedDemandStrandedPayload is the typed payload for routed_demand.stranded
+// events. Emitted when one or more gc.routed_to demand beads (ready work
+// beads, or order-dispatch pool-demand molecule/wisp beads) resolve to a
+// template no session can ever wake for — a dead/misspelled route, or an
+// agent whose effective min_active_sessions is 0 with zero sessions
+// currently open. Severity mirrors the resolved demand.stranded_route_policy
+// gate mode: "warning" under Auto (never blocks), "failure" under Require
+// (also fails the owning order run). BeadIDs is the full, untruncated set of
+// stranded demand beads routed to Template in this tick. Emission itself is
+// throttled to first-sight plus one escalation (see FirstSeen/Escalated)
+// rather than firing every reconcile tick for a persisting condition.
+type RoutedDemandStrandedPayload struct {
+	Severity  string   `json:"severity" doc:"Resolved policy severity for this detection: \"warning\" (Auto) or \"failure\" (Require)."`
+	Template  string   `json:"template,omitempty" doc:"The gc.routed_to target that no session can currently wake for."`
+	BeadIDs   []string `json:"bead_ids,omitempty" doc:"IDs of the stranded demand beads routed to Template. Never truncated."`
+	FirstSeen string   `json:"first_seen,omitempty" doc:"RFC3339 timestamp the earliest bead driving this emission was first observed stranded; the escalation clock counts from here."`
+	Escalated bool     `json:"escalated" doc:"False on the first-sight emission; true when re-emitted after a bead has sat stranded past the escalation threshold."`
+}
+
+// IsEventPayload marks RoutedDemandStrandedPayload as an events.Payload variant.
+func (RoutedDemandStrandedPayload) IsEventPayload() {}
+
+// RoutedDemandStrandedPayloadJSON builds the JSON wire form for attachment to
+// an events.Event.Payload field. Template, BeadIDs, and FirstSeen are emitted
+// only when non-empty/non-zero.
+func RoutedDemandStrandedPayloadJSON(severity, template string, beadIDs []string, firstSeen time.Time, escalated bool) json.RawMessage {
+	p := RoutedDemandStrandedPayload{
+		Severity:  severity,
+		Template:  template,
+		BeadIDs:   beadIDs,
+		Escalated: escalated,
+	}
+	if !firstSeen.IsZero() {
+		p.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -615,6 +654,10 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+
+	// routed_demand.* — carries the resolved policy severity, the stranded
+	// gc.routed_to template, and the full stranded bead-ID set.
+	events.RegisterPayload(events.RoutedDemandStranded, RoutedDemandStrandedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

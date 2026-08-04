@@ -142,26 +142,42 @@ const (
 	PackRootMetadataKey                  = "gc.pack_root"
 	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey               = "gc.ralph_step_id"
-	ReasoningMetadataKey                 = "gc.reasoning"
-	RequiredArtifactMetadataKey          = "gc.required_artifact"
-	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
-	RetryCountMetadataKey                = "gc.retry_count"
-	RetryFromMetadataKey                 = "gc.retry_from"
-	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
-	RetryStateMetadataKey                = "gc.retry_state"
-	RigRootMetadataKey                   = "gc.rig_root"
-	RootBeadIDMetadataKey                = "gc.root_bead_id"
-	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// PoolDemandWispMetadataKey marks a molecule/wisp bead as carrying
+	// order-dispatch pool demand, the one narrow additive exception to
+	// readyExcludeTypes for stranded-routed-demand detection purposes. See
+	// cmd/gc's stranded_routed_demand.go.
+	PoolDemandWispMetadataKey       = "gc.pool_demand_wisp"
+	RalphStepIDMetadataKey          = "gc.ralph_step_id"
+	ReasoningMetadataKey            = "gc.reasoning"
+	RequiredArtifactMetadataKey     = "gc.required_artifact"
+	RequiredArtifactsMetadataKey    = "gc.required_artifacts"
+	RetryCountMetadataKey           = "gc.retry_count"
+	RetryFromMetadataKey            = "gc.retry_from"
+	RetrySessionRecycledMetadataKey = "gc.retry_session_recycled"
+	RetryStateMetadataKey           = "gc.retry_state"
+	RigRootMetadataKey              = "gc.rig_root"
+	RootBeadIDMetadataKey           = "gc.root_bead_id"
+	RootStoreRefMetadataKey         = "gc.root_store_ref"
+	// RoutedDemandStrandedEscalatedAtMetadataKey stamps the RFC3339 timestamp
+	// a stranded routed-demand template's escalation emission fired, so later
+	// ticks know the escalation has already happened once. See
+	// cmd/gc's stranded_routed_demand.go.
+	RoutedDemandStrandedEscalatedAtMetadataKey = "gc.routed_demand_stranded_escalated_at"
+	// RoutedDemandStrandedFirstSeenMetadataKey stamps the RFC3339 timestamp a
+	// bead was first observed as stranded routed demand, so the reconciler
+	// emits routed_demand.stranded once at first detection and once more at
+	// the escalation threshold instead of every reconcile tick. See
+	// cmd/gc's stranded_routed_demand.go.
+	RoutedDemandStrandedFirstSeenMetadataKey = "gc.routed_demand_stranded_first_seen"
+	RoutedToMetadataKey                      = "gc.routed_to"
+	RunTargetMetadataKey                     = "gc.run_target"
+	RuntimeVarsMetadataKey                   = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey                     = "gc.scope_kind"
+	ScopeNameMetadataKey                     = "gc.scope_name"
+	ScopeRefMetadataKey                      = "gc.scope_ref"
+	ScopeRoleMetadataKey                     = "gc.scope_role"
+	SessionAffinityMetadataKey               = "gc.session_affinity"
+	SessionIDMetadataKey                     = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -384,6 +400,7 @@ var KnownMetadataKeys = []string{
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
+	PoolDemandWispMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
@@ -395,6 +412,8 @@ var KnownMetadataKeys = []string{
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
+	RoutedDemandStrandedEscalatedAtMetadataKey,
+	RoutedDemandStrandedFirstSeenMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,

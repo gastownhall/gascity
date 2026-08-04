@@ -62,6 +62,22 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:            keyDemandStrandedRoutePolicy,
+		Category:       InfraRollout,
+		ConfigPath:     "demand.stranded_route_policy",
+		EnvOverride:    envDemandStrandedRoutePolicy,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Auto)},
+		Owner:          Owner{Bead: "ga-o3ko1j", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-01-15",
+		VersionAnchor:  "GC_DEMAND_STRANDED_ROUTE_MIN_VERSION",
+		SelectsBetween: [2]string{"silently strand routed-but-unwakeable min=0 demand", "surface it via a warning or failure event"},
+		Justification: "Adopt fail-loud detection for gc.routed_to demand that no session can " +
+			"ever satisfy (a dead or misspelled route target with min_active_sessions=0), so an " +
+			"operator sees a warning event by default and can flip to a hard failure once the " +
+			"detector has proven itself across the fleet.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers
@@ -100,3 +116,7 @@ func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWri
 // beadsGuardedReleaseSpec returns the canonical Spec for the beads
 // guarded-release gate.
 func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }
+
+// demandStrandedRoutePolicySpec returns the canonical Spec for the stranded
+// routed-demand policy gate.
+func demandStrandedRoutePolicySpec() Spec { return specByKey(keyDemandStrandedRoutePolicy) }
