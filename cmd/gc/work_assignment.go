@@ -167,6 +167,25 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 	if store == nil {
 		return nil
 	}
+	// The callers' enumerations can answer from the CachingStore's stale view
+	// (the closed-session release path deliberately runs the unflagged, cached
+	// query). A work bead whose worker closed it inside the staleness window
+	// arrives here still reading in_progress, and the release below would reset
+	// an honestly COMPLETED close back to open — detaching it for re-claim and
+	// producing the claim → work → close → reopen → re-claim loop (fast-lifecycle
+	// bodies lose this race every cycle; lanes claim but never advance). Re-read
+	// the bead through the live handle before mutating: a bead that is already
+	// closed needs no release, and the in_progress→open decision must key off
+	// current status, not the enumeration snapshot's. A failed live read falls
+	// back to the snapshot rather than skipping: releasing a vanished bead is
+	// harmless (Update errors are the caller's per-item log line), while skipping
+	// a genuinely stuck one would strand it assigned to a dead session.
+	if current, err := beads.HandlesFor(store).Live.Get(item.ID); err == nil {
+		if current.Status == "closed" {
+			return nil
+		}
+		item = current
+	}
 	empty := ""
 	update := beads.UpdateOpts{
 		Assignee: &empty,
