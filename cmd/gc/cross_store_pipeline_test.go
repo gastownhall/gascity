@@ -14,7 +14,7 @@ import (
 // (crossStoreClaimDir): a bead ID surfaced by federation from a rig store
 // must be correctly redirected to that same rig store by the claim path.
 //
-// Uses the same injectable-runner approach as TestFirstStoreWithWork so no
+// Uses the same injectable-runner approach as TestBestStoreWithWork so no
 // real Dolt or gc subprocess is needed.
 func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 	rigPath := t.TempDir()

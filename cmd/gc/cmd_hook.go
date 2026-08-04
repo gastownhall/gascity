@@ -606,10 +606,11 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
-// ops injected for tests. It selects the first store reporting ready work,
-// re-validates it for claim-time freshness and falls back to a later store if it
-// emptied since discovery (claimStoreWithFallback), then attempts the claim
-// against that store's captured rows, against that store's dir/env.
+// ops injected for tests. It selects the best-ranked store reporting ready work
+// (see bestStoreWithWork), re-validates it for claim-time freshness and falls
+// back to a later store if it emptied since discovery (claimStoreWithFallback),
+// then attempts the claim against that store's captured rows, against that
+// store's dir/env.
 //
 // When a selected store still reports ready work but every claimable row is lost
 // to another claimant before the mutation, the single-store claim drains without

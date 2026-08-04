@@ -276,7 +276,7 @@ func TestBestHookCandidateRank(t *testing.T) {
 	}
 }
 
-func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
+func TestBestStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
 	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
@@ -291,7 +291,7 @@ func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	}
 }
 
-func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
+func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	// The agent's own store (first) timing out must be surfaced even if a
 	// federated rig store returns no work — otherwise emitCityWorkQueryFailure
 	// never fires and a transient timeout is silently downgraded to "no work".
@@ -307,7 +307,7 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	}
 }
 
-func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
+func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
 	// A flaky federated rig store must not wedge the hook: when the agent's own
 	// store is healthy (no work), a rig-store error is best-effort and dropped.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
@@ -329,7 +329,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	}
 }
 
-func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
+func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	// A store whose only row is dep-blocked is NOT a hit; federation moves on.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, dir string, _ []string) (string, error) {
