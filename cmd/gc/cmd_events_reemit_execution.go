@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/spf13/cobra"
 )
@@ -69,14 +71,14 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 		return err
 	}
 
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return fmt.Errorf("loading city config: %w", err)
 	}
 	if apply && (cfg.Events.Provider != "" || os.Getenv("GC_EVENTS") != "") {
 		return fmt.Errorf("--apply requires the default file event provider")
 	}
-	store, err := openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+	store, err := openExistingExecutionReemitStore(cmd.Context(), cityPath, cfg)
 	if err != nil {
 		return fmt.Errorf("opening city work store: %w", err)
 	}
@@ -108,6 +110,50 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 		EventCount: len(facts),
 		Applied:    apply,
 	})
+}
+
+// openExistingExecutionReemitStore opens only an already-materialized city
+// store for the reemit projection. It deliberately bypasses the normal store
+// factory because that path performs provider preflight and may repair runtime
+// assets or recover managed Dolt. Reemit is an offline projection: it must
+// fail rather than activate missing infrastructure.
+func openExistingExecutionReemitStore(ctx context.Context, cityPath string, cfg *config.City) (beads.Store, error) {
+	scopeRoot := resolveStoreScopeRoot(cityPath, cityPath)
+	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
+	switch {
+	case provider == "file":
+		store, err := openExistingScopeLocalFileStore(scopeRoot)
+		if err != nil {
+			return nil, fmt.Errorf("opening existing file store: %w", err)
+		}
+		return wrapStoreWithBeadPolicies(store, cfg), nil
+	case providerUsesBdStoreContract(provider):
+		if err := requireExistingExecutionReemitBdStore(scopeRoot); err != nil {
+			return nil, err
+		}
+		store, err := scopedBdStoreForCity(ctx, cityPath)
+		if err != nil {
+			return nil, fmt.Errorf("opening existing bd store without recovery: %w", err)
+		}
+		return wrapStoreWithBeadPolicies(store, cfg), nil
+	default:
+		return nil, fmt.Errorf("beads provider %q is not supported for offline execution reemit", provider)
+	}
+}
+
+func requireExistingExecutionReemitBdStore(scopeRoot string) error {
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	info, err := os.Stat(beadsDir)
+	if err != nil {
+		return fmt.Errorf("validating existing bd store: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("validating existing bd store: %s is not a directory", beadsDir)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err != nil {
+		return fmt.Errorf("validating existing bd store metadata: %w", err)
+	}
+	return nil
 }
 
 func requireStoppedExecutionReemitCity(cityPath string) error {

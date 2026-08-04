@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -40,6 +41,91 @@ func TestEventsReemitExecutionDryRunProjectsWithoutOpeningEventLog(t *testing.T)
 	}
 	if got.RunID != root.ID || got.WorkCount != 0 || got.StepCount != 1 || got.EventCount != 1 || got.Applied {
 		t.Fatalf("dry-run summary = %+v, want one unapplied step for %q", got, root.ID)
+	}
+}
+
+func TestEventsReemitExecutionDryRunDoesNotRefreshRuntimeAssets(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "")
+
+	cityPath, root := setupExecutionReemitCity(t)
+	retiredAsset := filepath.Join(cityPath, ".gc", "system", "packs", "retired.txt")
+	if err := os.MkdirAll(filepath.Dir(retiredAsset), 0o755); err != nil {
+		t.Fatalf("create retired runtime asset: %v", err)
+	}
+	if err := os.WriteFile(retiredAsset, []byte("preserve me"), 0o644); err != nil {
+		t.Fatalf("write retired runtime asset: %v", err)
+	}
+	before := snapshotExecutionReemitRuntime(t, cityPath)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "events", "reemit-execution", "--run", root.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc events reemit-execution dry run = %d; stderr=%s", code, stderr.String())
+	}
+	if after := snapshotExecutionReemitRuntime(t, cityPath); !reflect.DeepEqual(after, before) {
+		t.Fatalf("dry run changed runtime assets:\n got %#v\nwant %#v", after, before)
+	}
+	if _, err := os.Stat(retiredAsset); err != nil {
+		t.Fatalf("dry run changed runtime assets: %v", err)
+	}
+}
+
+func TestEventsReemitExecutionDryRunFailureDoesNotRefreshBdRuntimeAssets(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BOOTSTRAP", "")
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"reemit\"\n\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("create city runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "controller.lock"), nil, 0o600); err != nil {
+		t.Fatalf("write controller lock: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "events", "reemit-execution", "--run", "gcg-missing"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc events reemit-execution unexpectedly succeeded; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "validating existing bd store") {
+		t.Fatalf("dry-run failure = %q, want existing bd store validation", stderr.String())
+	}
+	if _, err := os.Stat(gcBeadsBdScriptPath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run failure refreshed bd runtime assets: stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run failure created a bd store: stat err=%v", err)
+	}
+}
+
+func TestEventsReemitExecutionDryRunRejectsMissingFileStoreWithoutCreatingIt(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath, root := setupExecutionReemitCity(t)
+	storePath := filepath.Join(cityPath, ".gc", "beads.json")
+	if err := os.Remove(storePath); err != nil {
+		t.Fatalf("remove persisted file store: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "events", "reemit-execution", "--run", root.ID}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc events reemit-execution unexpectedly succeeded; stdout=%q", stdout.String())
+	}
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("dry run created missing file store: stat err=%v", err)
 	}
 }
 
@@ -219,4 +305,33 @@ func setupExecutionReemitCity(t *testing.T) (string, beads.Bead) {
 		t.Fatalf("create graph step: %v", err)
 	}
 	return cityPath, root
+}
+
+func snapshotExecutionReemitRuntime(t *testing.T, cityPath string) map[string]string {
+	t.Helper()
+	runtimeDir := filepath.Join(cityPath, ".gc")
+	snapshot := make(map[string]string)
+	err := filepath.WalkDir(runtimeDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(runtimeDir, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			snapshot[relative] = "directory"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		snapshot[relative] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot runtime assets: %v", err)
+	}
+	return snapshot
 }
