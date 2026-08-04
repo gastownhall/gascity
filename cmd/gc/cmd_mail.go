@@ -1464,10 +1464,10 @@ message the stream may alert again — senders that want a longer re-alert
 cadence keep their own last-sent state.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+  gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
+  gc mail send worker "Priority task" --notify
   gc mail send --all "Status update: tests passing"
   gc mail send mayor -s "disk warning" --dedup "disk-warn:hq"`,
 		Args: cobra.ArbitraryArgs,
