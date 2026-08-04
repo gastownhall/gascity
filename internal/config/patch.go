@@ -69,6 +69,9 @@ type AgentPatch struct {
 	MaxSessionAge *string `toml:"max_session_age,omitempty"`
 	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -493,6 +496,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.MaxSessionAgeJitter != nil {
 		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
+	}
+	if p.AssignedWorkDeferLimit != nil {
+		a.AssignedWorkDeferLimit = p.AssignedWorkDeferLimit
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)

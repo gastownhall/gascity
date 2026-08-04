@@ -87,7 +87,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
 		"lastFreshAt": true, "mutationSeq": true, "primePartialErr": true,
-		"syncFailures": true, "stats": true, // stats compared field-wise below
+		"syncFailures": true, "circuitTripped": true,
+		"stats": true, // stats compared field-wise below
 	}
 	excludedStore := map[string]bool{
 		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,

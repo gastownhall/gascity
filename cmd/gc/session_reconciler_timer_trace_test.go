@@ -7,20 +7,22 @@ import (
 )
 
 // TestTimerTraceCodesTotal drives every reachable TimerDecision from
-// DecideMaxSessionAge and DecideIdleTimeout (all TimerFacts combinations,
-// including both blocker kinds) and asserts that timerTraceCodes (a) maps each
+// DecideMaxSessionAge, DecideIdleTimeout (all TimerFacts combinations,
+// including both blocker kinds), and the parameterless
+// DecideAssignedWorkExhausted, and asserts that timerTraceCodes (a) maps each
 // traced reason/outcome onto a NAMED constant — never falling through to the
 // identity default arm — and (b) round-trips to the exact producer strings.
 // When the timer ladders grow a new traced value, this test goes red instead
 // of silently un-typing the vocabulary.
 func TestTimerTraceCodesTotal(t *testing.T) {
 	namedReasons := map[TraceReasonCode]bool{
-		TraceReasonMaxSessionAge: true,
-		TraceReasonIdleTimeout:   true,
-		TraceReasonUserHold:      true,
-		TraceReasonQuarantine:    true,
-		TraceReasonPending:       true,
-		TraceReasonAssignedWork:  true,
+		TraceReasonMaxSessionAge:         true,
+		TraceReasonIdleTimeout:           true,
+		TraceReasonUserHold:              true,
+		TraceReasonQuarantine:            true,
+		TraceReasonPending:               true,
+		TraceReasonAssignedWork:          true,
+		TraceReasonAssignedWorkExhausted: true,
 	}
 	namedOutcomes := map[TraceOutcomeCode]bool{
 		TraceOutcomeStop:               true,
@@ -28,6 +30,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceOutcomeDeferredQuarantine: true,
 		TraceOutcomeDeferredPending:    true,
 		TraceOutcomeDeferredBusy:       true,
+		TraceOutcomeStopDeferExhausted: true,
 	}
 
 	blockers := []string{"", "user_hold", "quarantine"}
@@ -48,6 +51,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 			}
 		}
 	}
+	decisions = append(decisions, sessionpkg.DecideAssignedWorkExhausted())
 
 	sawTraced := false
 	for _, dec := range decisions {

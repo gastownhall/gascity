@@ -30,6 +30,32 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
+// excludeHoldLabelsShellArgs renders a repeated --exclude-label flag for
+// every beadmeta.DispatchHoldLabels value, so route-scoped, unassigned
+// pool-demand queries never surface a bead intentionally parked on a
+// dispatch hold (ga-x9kptu / ga-5736js). Assignee-scoped tiers (Tier 1/2)
+// must stay hold-transparent by design and must never call this.
+func excludeHoldLabelsShellArgs() string {
+	var args string
+	for _, label := range beadmeta.DispatchHoldLabels {
+		args += ` --exclude-label "` + label + `"`
+	}
+	return args
+}
+
+// excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
+// that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
+// filters that have no bd-side --exclude-label flag to lean on. Mirrors the
+// bracketed-count style of the dependency-blocking select above it so both
+// clauses read the same way (ga-x9kptu / ga-5736js).
+func excludeHoldLabelsJQClause() string {
+	conds := make([]string, len(beadmeta.DispatchHoldLabels))
+	for i, label := range beadmeta.DispatchHoldLabels {
+		conds[i] = `. == "` + label + `"`
+	}
+	return ` | select(([ (.labels // [])[] | select(` + strings.Join(conds, " or ") + `) ] | length) == 0)`
+}
+
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
 // builders use it so embedded key spellings stay anchored to the beadmeta
@@ -39,7 +65,7 @@ func jqMeta(key string) string {
 }
 
 func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -51,7 +77,7 @@ func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -70,13 +96,16 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
-func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
-	filter := `[.[] | ` + selector +
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
+	body := selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
 		` | select(([ (.dependencies // [])[]` +
 		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
-		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)]` +
-		` | sort_by(.created_at // "")`
+		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)`
+	if excludeHoldLabels {
+		body += excludeHoldLabelsJQClause()
+	}
+	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "")`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -91,6 +120,7 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
+		true,
 	)
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
@@ -287,7 +317,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 	if includeEphemeralReady {
 		return ""
 	}
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
+	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `

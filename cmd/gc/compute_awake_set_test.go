@@ -2068,7 +2068,7 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := &tt.cfg.Agents[0]
-			if !isAgentEffectivelySuspendedWith(&tt.cfg, a, suspensionstate.State{}) {
+			if !isAgentEffectivelySuspendedWith(&tt.cfg, "", a, suspensionstate.State{}) {
 				t.Fatalf("expected agent to be effectively suspended")
 			}
 			qn := a.QualifiedName()

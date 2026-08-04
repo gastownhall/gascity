@@ -217,7 +217,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
   `docs/reference/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `internal/api/dashboardspa/web/shared/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -314,6 +314,9 @@ These decisions are final. Do not revisit them.
   consumer layer. Apply this before adding any new primitive.
 - **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
   lifecycle analysis, and Gas Town cleanup bug lessons.
+- **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
+  "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
+  before signing off that criterion on any deploy gate.
 
 ## Key design principles
 
@@ -372,6 +375,14 @@ becoming more useful as models improve — it becomes LESS useful instead.
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
   for city shutdown. Treat personal tmux servers as out of bounds.
+- **Git safety:** Never run `git checkout <ref> -- .` (or any pathspec
+  checkout) in a worktree you do not own — above all the shared rig root
+  (`$GC_RIG_ROOT`). Unlike `git checkout <ref>`, the pathspec form overwrites
+  the index and worktree for every tracked path, moves no HEAD (so no reflog
+  entry) and stages nothing (so no dangling blob): overwritten uncommitted
+  work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
+  To check something out, use your own worktree or a disposable
+  `git worktree add`.
 - **Adding agent config fields:** When adding a field to `config.Agent`,
   also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
   merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
@@ -447,12 +458,12 @@ Before considering any task complete:
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
-- `make dashboard-check` passes for any change touching `internal/api/`,
+- `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-ci`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases

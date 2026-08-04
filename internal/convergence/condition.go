@@ -199,18 +199,25 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 		base = envelope
 	}
 
-	// Canonicalize envelope and base first so that symlinked workspace
-	// roots (e.g., /tmp → /private/tmp on macOS) don't cause false
-	// rejections and so the post-resolution containment check below
-	// compares like with like.
-	canonEnvelope, err := filepath.EvalSymlinks(envelope)
-	if err != nil {
-		canonEnvelope = filepath.Clean(envelope) // best-effort if envelope doesn't exist yet
-	}
-	canonBase, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		canonBase = filepath.Clean(base) // best-effort if base doesn't exist yet
-	}
+	// Canonicalize envelope and base first via pathutil.NormalizePathForCompare,
+	// which absolutizes before resolving symlinks (falling back to a
+	// best-effort ancestor walk when the path doesn't exist yet). This keeps
+	// symlinked workspace roots (e.g., /tmp → /private/tmp on macOS) from
+	// causing false rejections, keeps a relative envelope/base (e.g. ".")
+	// from staying relative while a resolved target becomes absolute via a
+	// symlink — which broke filepath.Rel in the containment checks below —
+	// and ensures the post-resolution containment check compares like with
+	// like.
+	//
+	// NormalizePathForCompare does more than absolutize-and-resolve: on
+	// darwin it also collapses the /private/tmp and /private/var host
+	// aliases back to /tmp and /var, which is the REVERSE direction from
+	// bare filepath.EvalSymlinks. Any value compared against canonEnvelope
+	// or canonBase must therefore go through pathutil too — a bare
+	// EvalSymlinks result is in a different convention and will mismatch on
+	// darwin even when the paths name the same location.
+	canonEnvelope := pathutil.NormalizePathForCompare(envelope)
+	canonBase := pathutil.NormalizePathForCompare(base)
 
 	var absPath string
 	if filepath.IsAbs(conditionPath) {
@@ -231,6 +238,11 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 
 	// Resolve symlinks to the real path. Scripts may be symlinked from
 	// a shared tooling directory (e.g., ~/tooling/scripts/).
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. This call's error path is the behavior — a dangling or
+	// unresolvable conditionPath must fail gate resolution here, so it
+	// cannot be replaced with pathutil.NormalizePathForCompare, which never
+	// errors.
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
@@ -241,8 +253,16 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 	// Re-validate the symlink-resolved path against the same envelope-OR-base
 	// rule to close the symlink-escape gap (gastownhall/gascity#2354 review).
 	// Absolute paths still skip — same rationale as the pre-resolution check.
+	//
+	// Use pathutil.PathWithin rather than the lexical containedIn: resolved
+	// comes from bare filepath.EvalSymlinks, so on darwin it carries the
+	// /private prefix that canonEnvelope/canonBase have had collapsed away.
+	// PathWithin normalizes both operands, so the alias collapse applies
+	// symmetrically. (The pre-resolution check above keeps containedIn:
+	// absPath is derived from canonBase, so both sides already share a
+	// convention there.)
 	if !filepath.IsAbs(conditionPath) {
-		if !containedIn(resolved, canonEnvelope) && !containedIn(resolved, canonBase) {
+		if !pathutil.PathWithin(canonEnvelope, resolved) && !pathutil.PathWithin(canonBase, resolved) {
 			return "", fmt.Errorf("resolving gate condition path: symlink target outside containment: %s", conditionPath)
 		}
 	}

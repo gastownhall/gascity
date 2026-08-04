@@ -122,6 +122,25 @@ Store health:
   Last GC:     2026-04-22T10:00:00Z (success)
 ```
 
+When the row count cannot be completed — there is no store, the scan
+errors, or it exceeds its 1 s bound — the block reports the count as
+unavailable instead:
+
+```text
+Store health:
+  Path:        /path/to/city/.beads/dolt
+  Size:        11.2 GB
+  Live rows:   unknown (count unavailable)
+  Last GC:     2026-04-22T10:00:00Z (success)
+```
+
+The `Ratio:` line is omitted entirely rather than printed as a
+misleading `0.0 MB/row`, and `gc status --json` sets
+`live_rows_unknown: true`. **That state means retry / investigate, not
+pass:** `live_rows`, `ratio_mb_per_row` and `warning` carry no meaning
+when the count is unknown, so a `0` row count or an absent warning there
+must never be read as a healthy store.
+
 The `⚠ maintenance overdue` suffix appears when
 `size_bytes > 1.0 MB × live_rows`. The same data is available under
 `store_health` in `gc status --json`.

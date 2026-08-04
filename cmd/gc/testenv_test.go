@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -342,13 +343,27 @@ func writeTestDoltIdentity(homeDir string) error {
 	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
 }
 
+// doltIdentityHomeDir returns a fresh directory for dolt/git identity files,
+// created outside every t.TempDir() tree rather than nested inside one.
+// t.TempDir()'s cleanup is a single-pass, non-retrying RemoveAll on its
+// shared parent (see ga-7dgcg6); a dolt/bd child process still writing
+// under DOLT_ROOT_PATH when that RemoveAll fires turns an otherwise-passing
+// test into an ENOTEMPTY failure. Cleanup here is best-effort so a lingering
+// writer fails only this directory's own removal, not the whole test tree.
+func doltIdentityHomeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "gc-dolt-identity-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(dolt identity home): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Helper()
 
-	homeDir := filepath.Join(t.TempDir(), "home")
-	if err := os.MkdirAll(homeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(test home): %v", err)
-	}
+	homeDir := doltIdentityHomeDir(t)
 	if err := writeTestGitIdentity(homeDir); err != nil {
 		t.Fatalf("write test git identity: %v", err)
 	}
@@ -358,4 +373,24 @@ func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
+}
+
+// TestConfigureTestDoltIdentityEnvHomeIsOutsideTestTempDir guards against
+// ga-7dgcg6: a live dolt/bd child process rooted under DOLT_ROOT_PATH can
+// still be writing when this test's t.TempDir() runs its single-pass
+// RemoveAll, turning an otherwise-passing test into an ENOTEMPTY failure.
+// DOLT_ROOT_PATH must live outside every t.TempDir() this test allocates.
+func TestConfigureTestDoltIdentityEnvHomeIsOutsideTestTempDir(t *testing.T) {
+	marker := t.TempDir()
+	tempRoot := filepath.Dir(marker)
+
+	configureTestDoltIdentityEnv(t)
+
+	doltRoot := os.Getenv("DOLT_ROOT_PATH")
+	if doltRoot == "" {
+		t.Fatal("DOLT_ROOT_PATH not set by configureTestDoltIdentityEnv")
+	}
+	if pathutil.PathWithin(tempRoot, doltRoot) {
+		t.Fatalf("DOLT_ROOT_PATH %q must not live under this test's t.TempDir() root %q — a live child process still writing there when t.TempDir()'s single-pass RemoveAll runs fails an otherwise-passing test (ga-7dgcg6)", doltRoot, tempRoot)
+	}
 }

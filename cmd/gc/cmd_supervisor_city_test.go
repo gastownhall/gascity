@@ -29,9 +29,89 @@ import (
 // real probe mechanics stay covered by controller_test.go.
 func withControllerAlive(t *testing.T, pid int) {
 	t.Helper()
-	prev := controllerAliveHook
-	controllerAliveHook = func(string) int { return pid }
-	t.Cleanup(func() { controllerAliveHook = prev })
+	withControllerHosting(t, pid, controllerHostingStandalone)
+}
+
+func withControllerHosting(t *testing.T, pid int, hostingMode controllerHostingMode) {
+	t.Helper()
+	prev := controllerIdentityHook
+	controllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: pid, HostingMode: hostingMode}
+	}
+	t.Cleanup(func() { controllerIdentityHook = prev })
+}
+
+func TestEnsureNoStandaloneControllerAcceptsSupervisorHostedController(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingSupervisor)
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerRecognizesLegacySupervisorPID(t *testing.T) {
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+	oldSupervisorAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() { supervisorAliveHook = oldSupervisorAlive })
+
+	pid, err := ensureNoStandaloneController(t.TempDir())
+	if err != nil {
+		t.Fatalf("ensureNoStandaloneController: %v", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0", pid)
+	}
+}
+
+func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) {
+	cityPath := t.TempDir()
+	gcDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatalf("acquire controller lock: %v", err)
+	}
+	defer lock.Close() //nolint:errcheck // test cleanup
+	withControllerHosting(t, 0, controllerHostingUnknown)
+
+	pid, err := ensureNoStandaloneController(cityPath)
+	if !errors.Is(err, errControllerHostingUnknown) {
+		t.Fatalf("ensureNoStandaloneController error = %v, want unknown hosting", err)
+	}
+	if pid != 0 {
+		t.Fatalf("ensureNoStandaloneController pid = %d, want 0 without a responding controller", pid)
+	}
+}
+
+func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withControllerHosting(t, 4242, controllerHostingUnknown)
+
+	var stdout, stderr bytes.Buffer
+	if code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true); code != 1 {
+		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "hosting mode is unavailable") || strings.Contains(got, "standalone controller already running") {
+		t.Fatalf("stderr = %q, want unknown-hosting diagnostic without standalone label", got)
+	}
+	if !strings.Contains(got, "gc stop ") {
+		t.Fatalf("stderr = %q, want an actionable 'gc stop' remedy", got)
+	}
+	if want := supervisorRetryCommand("gc start", cityPath); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want retry command %q", got, want)
+	}
 }
 
 //nolint:unparam // tests override hook behavior but keep fixed timeout/poll values for determinism
@@ -54,7 +134,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorAliveHook = alive
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
-	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
 	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
@@ -1881,6 +1961,10 @@ shutdown_timeout = "100ms"
 	if pid := controllerAlive(canonicalTestPath(cityPath)); pid == 0 {
 		t.Fatal("controller socket exists but does not respond to ping")
 	}
+	identity := probeControllerIdentity(canonicalTestPath(cityPath))
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("controller identity = %+v, want PID %d hosted by supervisor", identity, os.Getpid())
+	}
 
 	// Verify convergence commands are routed through the event loop.
 	// An unknown command returns a domain error rather than the "no bead store"
@@ -2804,5 +2888,26 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 	}
 	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
 		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
+	}
+}
+
+func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	realCity := filepath.Join(root, "real-city")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-city")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got, err := normalizeRegisteredCityPath(link)
+	if err != nil {
+		t.Fatalf("normalizeRegisteredCityPath(%q): %v", link, err)
+	}
+	want := normalizePathForCompare(realCity)
+	if got != want {
+		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
 	}
 }

@@ -390,6 +390,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 			dst.OptionDefaults[k] = v
 		}
 	}
+	if src.AssignedWorkDeferLimit != nil {
+		v := *src.AssignedWorkDeferLimit
+		dst.AssignedWorkDeferLimit = &v
+	}
 	return dst
 }
 

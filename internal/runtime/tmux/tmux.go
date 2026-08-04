@@ -154,6 +154,12 @@ var (
 	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
 
+// ErrNoCurrentTarget is tmux's reply when the server IS alive but holds no
+// sessions (exit-empty off — gc's configured default). It wraps ErrNoServer so
+// existing idempotent-teardown callers are unchanged; only the new-session
+// preflight distinguishes it.
+var ErrNoCurrentTarget = fmt.Errorf("%w: no current target", ErrNoServer)
+
 const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
@@ -243,6 +249,12 @@ type Tmux struct {
 	// agentSlice wraps pane commands in a transient systemd user scope when
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
+
+	// serverSocketObserver observes a named socket only after tmux reports
+	// ErrNoServer during the new-session preflight. Nil selects the production
+	// observer; tests inject a deterministic observation without opening a
+	// socket.
+	serverSocketObserver func(context.Context, string) error
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -319,9 +331,13 @@ func wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// Detect specific error types
+	if strings.Contains(stderr, "no current target") {
+		// The server answered — it is simply holding zero sessions. Wraps
+		// ErrNoServer so idempotent-teardown callers are unaffected.
+		return ErrNoCurrentTarget
+	}
 	if strings.Contains(stderr, "no server running") ||
 		strings.Contains(stderr, "error connecting to") ||
-		strings.Contains(stderr, "no current target") ||
 		strings.Contains(stderr, "server exited unexpectedly") {
 		return ErrNoServer
 	}
@@ -351,8 +367,10 @@ func wrapError(err error, stderr string, args []string) error {
 //   - nil when SocketName is empty (default-server case is out of scope) or
 //     when the server replies (alive — including the expected "session not
 //     found" for the bogus probe target).
-//   - nil with ErrNoServer semantics absorbed (no server bound is safe; tmux
-//     will create a fresh server cleanly).
+//   - nil when tmux reports "no current target" (ErrNoCurrentTarget): the
+//     server answered and is alive with zero sessions, so new-session attaches
+//     rather than unlinking and rebinding.
+//   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -372,10 +390,24 @@ func (t *Tmux) probeServerAlive() error {
 		// Healthy server, just doesn't have the probe session. Safe.
 		return nil
 	}
-	if errors.Is(err, ErrNoServer) {
-		// No server bound (stale socket or never existed). Safe — tmux will
-		// unlink any stale socket and bind a fresh server.
+	if errors.Is(err, ErrNoCurrentTarget) {
+		// The server answered: it is alive with zero sessions, so new-session
+		// attaches rather than unlinking and rebinding. Never a stale socket.
 		return nil
+	}
+	if errors.Is(err, ErrNoServer) {
+		observer := t.serverSocketObserver
+		if observer == nil {
+			observer = observeNamedSocket
+		}
+		path := namedSocketPath(t.cfg.SocketName)
+		observationErr := observer(ctx, path)
+		if observationErr == nil {
+			return nil
+		}
+		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
+		// must not retry a guarded no-server result as an ordinary absence.
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
@@ -1589,6 +1621,13 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if text == "" {
 		return true, nil
 	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too (the residual NudgeNow gap): capture the
+	// pre-nudge activity before the first write and stamp it only after the
+	// trailing Enter is delivered, so a later GetSessionActivity discounts gc's
+	// echo instead of counting this nudge as the agent responding (see
+	// discountPokeActivity). A failed write records nothing.
+	commitPoke := t.beginPoke(target)
 	if err := client.write([]byte(text)); err != nil {
 		return true, err
 	}
@@ -1598,6 +1637,7 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if err := client.write([]byte{'\r'}); err != nil {
 		return true, err
 	}
+	commitPoke()
 	return true, nil
 }
 
@@ -1831,11 +1871,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// entry would let the final Enter's echo land outside the discount window.
 	// pokePrior also carries a still-unanswered earlier poke's baseline forward
 	// so chained nudges inside pokeGrace don't record gc's own echo as prior.
-	prior := t.pokePrior(session)
+	commitPoke := t.beginPoke(session)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(session, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -1918,11 +1958,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// See NudgeSession for why prior is captured before the first keystroke
 	// (via pokePrior, which also carries a still-unanswered earlier poke's
 	// baseline forward) and the poke stamped only on confirmed delivery.
-	prior := t.pokePrior(pane)
+	commitPoke := t.beginPoke(pane)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(pane, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -2373,6 +2413,20 @@ func (t *Tmux) recordPokeAt(session string, prior, at time.Time) {
 	}
 	t.pokes[session] = pokeInfo{at: at, prior: prior}
 	t.pokeMu.Unlock()
+}
+
+// beginPoke snapshots the genuine pre-nudge activity for session (via pokePrior,
+// which also carries a still-unanswered earlier poke's baseline forward) and
+// returns a commit closure. Callers invoke commit only after the nudge's final
+// keystroke is confirmed delivered; it stamps the poke so a later
+// GetSessionActivity discounts gc's own keystroke echo (see discountPokeActivity)
+// instead of counting the nudge as the agent responding. A nudge that never
+// confirms delivery must not call commit, leaving last_active untouched. This is
+// the shared prior-before-write / stamp-after-delivery contract used by
+// NudgeSession, NudgePane, and the hidden-attached send path.
+func (t *Tmux) beginPoke(session string) (commit func()) {
+	prior := t.pokePrior(session)
+	return func() { t.recordPokeAt(session, prior, time.Now()) }
 }
 
 // pokePrior snapshots the genuine session activity to record as a new poke's
