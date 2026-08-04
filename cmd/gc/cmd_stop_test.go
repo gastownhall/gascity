@@ -184,10 +184,10 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// cmdStop's wall-clock cap returns 1 while cmdStopBody is still blocked
-	// in hangingProvider.Stop. The body goroutine eventually calls back into
+	// cmdStop's wall-clock cap returns 1 while its worker is still blocked in
+	// hangingProvider.Stop. The worker eventually calls back into
 	// shutdownBeadsProviderForStop; if it does so after another test has
-	// installed its own override, the global state races. Capture the body's
+	// installed its own override, the global state races. Capture the worker's
 	// done channel via stopBodyLifecycleHook and wait for it to close in
 	// teardown so the leaked goroutine cannot outlive this test.
 	oldFactory := sessionProviderForStopCity
@@ -205,7 +205,7 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 			select {
 			case <-bodyDone:
 			case <-time.After(hangBudget):
-				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
+				t.Errorf("gc stop worker did not exit after hangingProvider release")
 			}
 		}
 		sessionProviderForStopCity = oldFactory
@@ -526,6 +526,29 @@ func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *test
 }
 
 func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testing.T) {
+	cityDir := setupSupervisorManagedInvalidCity(t)
+	var waitedPath string
+	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+		waitedPath = path
+		return nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertSameTestPath(t, waitedPath, cityDir)
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid config") {
+		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func setupSupervisorManagedInvalidCity(t *testing.T) string {
+	t.Helper()
 	resetFlags(t)
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -553,23 +576,94 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 		20*time.Millisecond,
 		time.Millisecond,
 	)
-	var waitedPath string
-	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
-		waitedPath = path
+	return cityDir
+}
+
+func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *testing.T) {
+	cityDir := setupSupervisorManagedInvalidCity(t)
+	waitEntered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	waitExited := make(chan struct{})
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		close(waitEntered)
+		<-releaseWait
+		close(waitExited)
 		return nil
 	}
 
+	oldHook := stopBodyLifecycleHook
+	var bodyDone <-chan struct{}
+	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
-	if code != 0 {
-		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	stopDone := make(chan int, 1)
+	commandExited := make(chan struct{})
+	released := false
+	workerDrained := false
+	releaseAndDrainWorker := func() {
+		if !released {
+			close(releaseWait)
+			released = true
+		}
+		select {
+		case <-waitExited:
+		case <-time.After(hangBudget):
+			t.Errorf("supervisor controller wait did not exit after release")
+		}
+		select {
+		case <-commandExited:
+		case <-time.After(hangBudget):
+			t.Errorf("gc stop command did not exit after supervisor wait release")
+		}
+		if bodyDone != nil {
+			select {
+			case <-bodyDone:
+			case <-time.After(hangBudget):
+				t.Errorf("gc stop worker did not exit after supervisor wait release")
+			}
+		}
+		workerDrained = true
 	}
-	assertSameTestPath(t, waitedPath, cityDir)
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	const testWallClockCap = 100 * time.Millisecond
+	started := time.Now()
+	go func() {
+		defer close(commandExited)
+		stopDone <- cmdStopJSON([]string{cityDir}, &stdout, &stderr, testWallClockCap, false, true)
+	}()
+	t.Cleanup(func() {
+		if !workerDrained {
+			releaseAndDrainWorker()
+		}
+		stopBodyLifecycleHook = oldHook
+	})
+
+	select {
+	case <-waitEntered:
+	case <-time.After(hangBudget):
+		t.Fatal("gc stop did not enter the supervisor controller wait")
+	}
+
+	var code int
+	select {
+	case code = <-stopDone:
+	case <-time.After(50 * testWallClockCap):
+		t.Fatalf("cmdStop did not honor wall-clock cap %s while unregistering invalid-config city", testWallClockCap)
+	}
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if elapsed := time.Since(started); elapsed > 50*testWallClockCap {
+		t.Fatalf("cmdStop returned after %s, want wall-clock cap near %s", elapsed, testWallClockCap)
+	}
+	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
+		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
+	}
+	releaseAndDrainWorker()
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q after timed-out worker exited, want no late success JSON", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "invalid config") {
-		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+		t.Fatalf("stderr = %q after timed-out worker exited, want invalid-config diagnostic", stderr.String())
 	}
 }
 
@@ -600,7 +694,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	})
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 5*time.Second, false)
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
