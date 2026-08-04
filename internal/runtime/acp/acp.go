@@ -67,6 +67,10 @@ type Provider struct {
 	activityWrite func(path string, data []byte) error // test seam
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that ACP preserves and carries
+// reconciler-owned settings files through its staging boundary.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 // Compile-time check.
 var (
 	_ runtime.Provider                    = (*Provider)(nil)

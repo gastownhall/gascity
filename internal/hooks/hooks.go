@@ -6,6 +6,7 @@ package hooks
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -17,9 +18,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/codexhooks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -683,6 +686,290 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 	return data, changed, nil
 }
 
+var codexHooksReconcileMu sync.Mutex
+
+var errCodexHooksConcurrentChange = errors.New("codex hooks changed during reconciliation")
+
+// ReconcileCodexHooks composes the embedded managed Codex hooks, configured
+// overlay layers, and the live hook document under in-process and cross-process
+// writer locks shared with legacy overlay staging.
+// It rejects symlinks/non-regular files, validates hook shapes before merging,
+// retries changes observed before commit, and publishes with an atomic rename.
+// Malformed or unreadable input is never written.
+//
+// A non-empty return value is the SHA-256 content hash of a complete,
+// city-bound fixed point. Callers must compare that hash again at the named-
+// session ownership boundary before suppressing normal overlay staging.
+func ReconcileCodexHooks(fs fsys.FS, cityDir, workDir string, configuredLayers [][]byte) (string, error) {
+	if fs == nil || strings.TrimSpace(workDir) == "" {
+		return "", nil
+	}
+	codexHooksReconcileMu.Lock()
+	defer codexHooksReconcileMu.Unlock()
+
+	dst := filepath.Join(workDir, ".codex", "hooks.json")
+	var digest string
+	err := codexhooks.WithPathLock(fs, dst, func() error {
+		var err error
+		digest, err = reconcileCodexHooksLocked(fs, cityDir, dst, configuredLayers)
+		return err
+	})
+	return digest, err
+}
+
+func reconcileCodexHooksLocked(fs fsys.FS, cityDir, dst string, configuredLayers [][]byte) (string, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		snapshot, err := readRegularCodexHooks(fs, dst)
+		if err != nil {
+			return "", err
+		}
+		candidate, verified, err := reconcileCodexHookData(snapshot.data, cityDir, configuredLayers)
+		if err != nil || !verified {
+			return "", err
+		}
+		if !bytes.Equal(candidate, snapshot.data) || !snapshot.exists {
+			if err := writeCodexHooksIfSnapshotUnchanged(fs, dst, snapshot, candidate); err != nil {
+				if errors.Is(err, errCodexHooksConcurrentChange) {
+					continue
+				}
+				return "", err
+			}
+		}
+		final, err := readRegularCodexHooks(fs, dst)
+		if err != nil {
+			return "", fmt.Errorf("verifying %s after reconcile: %w", dst, err)
+		}
+		if !final.exists || !bytes.Equal(final.data, candidate) {
+			continue
+		}
+		if !CodexHooksAreConvergedWithOverlays(final.data, cityDir, configuredLayers) {
+			return "", fmt.Errorf("verifying %s after reconcile: not a configured fixed point", dst)
+		}
+		return fmt.Sprintf("%x", sha256.Sum256(final.data)), nil
+	}
+	return "", fmt.Errorf("reconciling %s: %w", dst, errCodexHooksConcurrentChange)
+}
+
+type codexHooksFileSnapshot struct {
+	data   []byte
+	exists bool
+	mode   os.FileMode
+}
+
+func readRegularCodexHooks(fs fsys.FS, dst string) (codexHooksFileSnapshot, error) {
+	parent := filepath.Dir(dst)
+	if info, err := fs.Lstat(parent); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return codexHooksFileSnapshot{}, fmt.Errorf("refusing non-directory or symlinked Codex hooks parent %s", parent)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return codexHooksFileSnapshot{}, fmt.Errorf("inspecting %s: %w", parent, err)
+	}
+	info, err := fs.Lstat(dst)
+	if errors.Is(err, os.ErrNotExist) {
+		return codexHooksFileSnapshot{data: []byte("{}"), mode: 0o644}, nil
+	}
+	if err != nil {
+		return codexHooksFileSnapshot{}, fmt.Errorf("inspecting %s: %w", dst, err)
+	}
+	if !info.Mode().IsRegular() {
+		return codexHooksFileSnapshot{}, fmt.Errorf("refusing non-regular Codex hooks path %s", dst)
+	}
+	data, stableInfo, err := fsys.ReadRegularFileStable(fs, dst)
+	if err != nil {
+		return codexHooksFileSnapshot{}, fmt.Errorf("reading %s: %w", dst, err)
+	}
+	return codexHooksFileSnapshot{data: data, exists: true, mode: fsys.ComparableMode(stableInfo.Mode())}, nil
+}
+
+func writeCodexHooksIfSnapshotUnchanged(fs fsys.FS, dst string, expected codexHooksFileSnapshot, candidate []byte) error {
+	current, err := readRegularCodexHooks(fs, dst)
+	if err != nil {
+		return err
+	}
+	if current.exists != expected.exists || current.mode != expected.mode || !bytes.Equal(current.data, expected.data) {
+		return errCodexHooksConcurrentChange
+	}
+	dir := filepath.Dir(dst)
+	if err := fs.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := codexhooks.WriteFileAtomicNoFollow(fs, dst, candidate, expected.mode); err != nil {
+		return fmt.Errorf("writing %s atomically: %w", dst, err)
+	}
+	return nil
+}
+
+// CodexHooksAreConvergedWithOverlays is the read-only counterpart to
+// ReconcileCodexHooks. It proves both managed-hook convergence and that every
+// configured Codex overlay layer is already represented in the live document.
+func CodexHooksAreConvergedWithOverlays(data []byte, cityDir string, configuredLayers [][]byte) bool {
+	candidate, verified, err := reconcileCodexHookData(data, cityDir, configuredLayers)
+	return err == nil && verified && bytes.Equal(candidate, data)
+}
+
+// ReadCodexHookOverlayLayers reads the universal and flattened per-provider
+// Codex hook contributions from overlayDir in the same order runtime overlay
+// staging applies them. Missing files are no-ops; other read failures are
+// returned so callers can fail closed instead of claiming an incomplete
+// single-writer document.
+func ReadCodexHookOverlayLayers(overlayDir string, providers []string) ([][]byte, error) {
+	if strings.TrimSpace(overlayDir) == "" {
+		return nil, nil
+	}
+	paths := []string{filepath.Join(overlayDir, ".codex", "hooks.json")}
+	seen := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		paths = append(paths, filepath.Join(overlayDir, "per-provider", provider, ".codex", "hooks.json"))
+	}
+	layers := make([][]byte, 0, len(paths))
+	for _, hookPath := range paths {
+		data, _, err := fsys.ReadRegularFileStable(fsys.OSFS{}, hookPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", hookPath, err)
+		}
+		layers = append(layers, data)
+	}
+	return layers, nil
+}
+
+func reconcileCodexHookData(existing []byte, cityDir string, configuredLayers [][]byte) ([]byte, bool, error) {
+	desired, err := desiredCodexHookData(cityDir, configuredLayers)
+	if err != nil {
+		return nil, false, err
+	}
+	customExisting, err := codexHookDataWithoutManaged(existing, "existing Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	candidate, err := overlay.MergeSettingsJSON(customExisting, desired, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, false, fmt.Errorf("merging Codex hooks: %w", err)
+	}
+	if _, err := parseCodexHookDocument(candidate, "reconciled Codex hooks"); err != nil {
+		return nil, false, err
+	}
+	if !CodexHooksAreConverged(candidate, cityDir) {
+		return candidate, false, nil
+	}
+	secondCustom, err := codexHookDataWithoutManaged(candidate, "fixed-point Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	second, err := overlay.MergeSettingsJSON(secondCustom, desired, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, false, fmt.Errorf("verifying Codex hook fixed point: %w", err)
+	}
+	return candidate, bytes.Equal(candidate, second), nil
+}
+
+func desiredCodexHookData(cityDir string, configuredLayers [][]byte) ([]byte, error) {
+	coreHooks, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded Codex hooks: %w", err)
+	}
+	if _, err := parseCodexHookDocument(coreHooks, "embedded Codex hooks"); err != nil {
+		return nil, err
+	}
+	managedCore, _, err := normalizeCodexHookCommands(coreHooks, cityDir)
+	if err != nil {
+		return nil, fmt.Errorf("normalizing embedded Codex hooks: %w", err)
+	}
+	desired := []byte("{}")
+	for i, layer := range configuredLayers {
+		customLayer, layerErr := codexHookDataWithoutManaged(layer, fmt.Sprintf("configured Codex hook layer %d", i))
+		if layerErr != nil {
+			return nil, layerErr
+		}
+		desired, err = overlay.MergeSettingsJSON(desired, customLayer, overlay.WithMergeMatchedHookContents())
+		if err != nil {
+			return nil, fmt.Errorf("merging configured Codex hook layer %d: %w", i, err)
+		}
+	}
+	// Managed commands are appended after every configured custom hook. That
+	// ordering is the fixed point: stripping managed commands leaves the custom
+	// sequence intact, and re-applying this desired document reproduces the same
+	// bytes instead of moving configured commands around a shared matcher.
+	desired, err = overlay.MergeSettingsJSON(desired, managedCore, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, fmt.Errorf("merging embedded Codex hooks: %w", err)
+	}
+	return desired, nil
+}
+
+func codexHookDataWithoutManaged(data []byte, label string) ([]byte, error) {
+	doc, err := parseCodexHookDocument(data, label)
+	if err != nil {
+		return nil, err
+	}
+	stripCodexManagedHooks(doc)
+	return overlay.MarshalCanonicalJSON(doc)
+}
+
+func parseCodexHookDocument(data []byte, label string) (map[string]any, error) {
+	return codexhooks.ParseDocument(data, label)
+}
+
+func stripCodexManagedHooks(doc map[string]any) {
+	hooksMap, _ := doc["hooks"].(map[string]any)
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		keptEntries := make([]any, 0, len(entries))
+		for _, entryValue := range entries {
+			entry := entryValue.(map[string]any)
+			removedManaged := false
+			if command, ok := entry["command"].(string); ok && codexManagedBehavior(event, command) != "" {
+				delete(entry, "command")
+				removedManaged = true
+			}
+			if inner, ok := entry["hooks"].([]any); ok {
+				keptHooks := make([]any, 0, len(inner))
+				for _, hookValue := range inner {
+					hook := hookValue.(map[string]any)
+					command, _ := hook["command"].(string)
+					if codexManagedBehavior(event, command) != "" {
+						removedManaged = true
+						continue
+					}
+					keptHooks = append(keptHooks, hookValue)
+				}
+				entry["hooks"] = keptHooks
+			}
+			if removedManaged && codexHookEntryIsEmptyShell(entry) {
+				continue
+			}
+			keptEntries = append(keptEntries, entryValue)
+		}
+		hooksMap[event] = keptEntries
+	}
+}
+
+func codexHookEntryIsEmptyShell(entry map[string]any) bool {
+	for key, value := range entry {
+		switch key {
+		case "matcher", "type":
+			continue
+		case "hooks":
+			if hooks, ok := value.([]any); ok && len(hooks) == 0 {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // CodexHooksMissingManagedPreCompact reports whether data is a Gas City
 // managed Codex hooks document that can be upgraded with a PreCompact hook.
 func CodexHooksMissingManagedPreCompact(data []byte) bool {
@@ -702,6 +989,130 @@ func CodexHooksNeedManagedUpgrade(data []byte, cityDir string) bool {
 		return false
 	}
 	return applyCodexManagedHookUpgrade(root, nil, cityDir)
+}
+
+// CodexHooksAreConverged reports whether data contains exactly one current,
+// city-bound Gas City command for every managed Codex behavior. Custom hooks
+// may coexist. This stronger predicate is used when granting runtime staging
+// permission to preserve .codex/hooks.json: recognizing one legacy command is
+// not enough to prove the complete document is ready to become single-writer.
+func CodexHooksAreConverged(data []byte, cityDir string) bool {
+	root, err := parseCodexHookDocument(data, "Codex hooks")
+	if err != nil {
+		return false
+	}
+	counts := map[string]int{}
+	managedEntries := map[string]map[int]bool{}
+	valid := true
+	visitCodexHookCommands(root, func(event string, entryIndex int, entry, hook map[string]any, nested bool, command string) {
+		if !codexHookCommandLooksManaged(event, command) {
+			return
+		}
+		if !nested || hook["type"] != "command" {
+			valid = false
+			return
+		}
+		wantMatcher := ""
+		if event == "SessionStart" {
+			wantMatcher = "startup"
+		}
+		if matcher, ok := entry["matcher"].(string); !ok || matcher != wantMatcher {
+			valid = false
+			return
+		}
+		_, changed := upgradeCodexHookCommand(event, command, cityDir)
+		if changed {
+			valid = false
+			return
+		}
+		switch event {
+		case "SessionStart":
+			counts["session-start"]++
+		case "PreCompact":
+			counts["pre-compact"]++
+		case "UserPromptSubmit":
+			_, _, args, ok := parseManagedGCCommand(command)
+			if !ok {
+				valid = false
+				return
+			}
+			target, ok := codexManagedPromptTargetArgs(args, "codex")
+			if !ok {
+				valid = false
+				return
+			}
+			switch {
+			case strings.HasPrefix(target, "nudge drain --inject"):
+				counts["nudge"]++
+			case strings.HasPrefix(target, "mail check --inject"):
+				counts["mail"]++
+			default:
+				valid = false
+			}
+		}
+		if managedEntries[event] == nil {
+			managedEntries[event] = map[int]bool{}
+		}
+		managedEntries[event][entryIndex] = true
+	})
+	if !valid {
+		return false
+	}
+	for _, behavior := range []string{"session-start", "pre-compact", "nudge", "mail"} {
+		if counts[behavior] != 1 {
+			return false
+		}
+	}
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		if len(managedEntries[event]) != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// visitCodexHookCommands visits command strings only in the supported Codex
+// hook document shape: top-level hooks, known event arrays, and either a bare
+// command entry or its immediate nested hooks array. It intentionally avoids a
+// recursive default-event walk, which could mistake arbitrary metadata or a
+// user command under an unrelated event for Gas City ownership.
+func visitCodexHookCommands(root any, visit func(event string, entryIndex int, entry, hook map[string]any, nested bool, command string)) {
+	doc, ok := root.(map[string]any)
+	if !ok {
+		return
+	}
+	hooksMap, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		for entryIndex, value := range entries {
+			entry, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if command, ok := entry["command"].(string); ok {
+				visit(event, entryIndex, entry, entry, false, command)
+			}
+			inner, ok := entry["hooks"].([]any)
+			if !ok {
+				continue
+			}
+			for _, hookValue := range inner {
+				hook, ok := hookValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if command, ok := hook["command"].(string); ok {
+					visit(event, entryIndex, entry, hook, true, command)
+				}
+			}
+		}
+	}
 }
 
 func applyCodexManagedHookUpgrade(root any, desired []byte, cityDir string) bool {
@@ -862,6 +1273,34 @@ func codexHookEntryHasCommandBody(entry map[string]any, body string) bool {
 		}
 	}
 	return false
+}
+
+func codexManagedBehavior(event, command string) string {
+	if !codexHookCommandLooksManaged(event, command) {
+		return ""
+	}
+	switch event {
+	case "SessionStart":
+		return "session-start"
+	case "PreCompact":
+		return "pre-compact"
+	case "UserPromptSubmit":
+		_, _, args, ok := parseManagedGCCommand(command)
+		if !ok {
+			return ""
+		}
+		target, ok := codexManagedPromptTargetArgs(args, "codex")
+		if !ok {
+			return ""
+		}
+		switch {
+		case strings.HasPrefix(target, "nudge drain --inject"):
+			return "nudge"
+		case strings.HasPrefix(target, "mail check --inject"):
+			return "mail"
+		}
+	}
+	return ""
 }
 
 func codexHookCommandLooksManaged(event, command string) bool {

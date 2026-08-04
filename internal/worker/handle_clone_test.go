@@ -1,6 +1,10 @@
 package worker
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // TestProfileFamily pins the profile-to-family mapping used by clone and
 // continuation handling. Losing a case here silently routes that profile's
@@ -26,5 +30,17 @@ func TestProfileFamily(t *testing.T) {
 				t.Fatalf("profileFamily(%q) = %q, want %q", tt.profile, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCloneRuntimeConfigCopiesReconcilerOwnedMergeablePaths(t *testing.T) {
+	original := runtime.Config{
+		ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"},
+	}
+	cloned := cloneRuntimeConfig(original)
+	cloned.ReconcilerOwnedMergeablePaths[0] = ".gemini/settings.json"
+
+	if got := original.ReconcilerOwnedMergeablePaths[0]; got != ".codex/hooks.json" {
+		t.Fatalf("clone mutation changed original ownership path: %q", got)
 	}
 }

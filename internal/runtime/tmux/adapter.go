@@ -62,6 +62,10 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	}
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that tmux sessions validate
+// reconciler-owned files immediately before their staging handoff.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 // Start creates a new detached tmux session and performs a multi-step
 // startup sequence to ensure agent readiness. The sequence handles zombie
 // detection, command launch verification, permission warning dismissal,
@@ -99,24 +103,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
+	// V2 per-provider overlay support: configured staging copies universal
 	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
-	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
+	// with ProviderName fallback, plus any InstallAgentHooks entries. Named home
+	// sessions preserve reconciler-owned mergeable settings.
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := runtime.StageConfiguredProviderOverlayDir(od, cfg.WorkDir, cfg, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+		if err := runtime.StageConfiguredProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, cfg, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
+	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
 	}
 	for _, cf := range cfg.CopyFiles {
 		dst := cfg.WorkDir

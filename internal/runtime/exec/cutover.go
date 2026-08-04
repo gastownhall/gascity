@@ -23,10 +23,11 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                = (*seamBackedProvider)(nil)
-	_ runtime.DialogProvider          = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.DialogProvider                       = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider              = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider                     = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -63,4 +64,8 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // capability set through the production seam-backed composition.
 func (s *seamBackedProvider) Capabilities() runtime.ProviderCapabilities {
 	return s.raw.Capabilities()
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

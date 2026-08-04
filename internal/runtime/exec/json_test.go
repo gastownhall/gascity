@@ -2,6 +2,7 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -9,17 +10,18 @@ import (
 
 func TestMarshalStartConfig(t *testing.T) {
 	cfg := runtime.Config{
-		WorkDir:            "/tmp/work",
-		Command:            "claude --dangerously-skip-permissions",
-		Lifecycle:          runtime.LifecycleOneShot,
-		Env:                map[string]string{"FOO": "bar", "BAZ": "qux"},
-		ProcessNames:       []string{"claude", "node"},
-		Nudge:              "hello agent",
-		ReadyPromptPrefix:  "> ",
-		ReadyDelayMs:       2000,
-		SessionSetup:       []string{"echo setup1", "echo setup2"},
-		SessionSetupScript: "/tmp/setup.sh",
-		OverlayDir:         "/tmp/overlay",
+		WorkDir:                       "/tmp/work",
+		Command:                       "claude --dangerously-skip-permissions",
+		Lifecycle:                     runtime.LifecycleOneShot,
+		Env:                           map[string]string{"FOO": "bar", "BAZ": "qux"},
+		ProcessNames:                  []string{"claude", "node"},
+		Nudge:                         "hello agent",
+		ReadyPromptPrefix:             "> ",
+		ReadyDelayMs:                  2000,
+		SessionSetup:                  []string{"echo setup1", "echo setup2"},
+		SessionSetupScript:            "/tmp/setup.sh",
+		OverlayDir:                    "/tmp/overlay",
+		ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"},
 	}
 
 	data, err := marshalStartConfig(cfg)
@@ -65,6 +67,9 @@ func TestMarshalStartConfig(t *testing.T) {
 	if got.OverlayDir != cfg.OverlayDir {
 		t.Errorf("OverlayDir = %q, want %q", got.OverlayDir, cfg.OverlayDir)
 	}
+	if !slices.Equal(got.ReconcilerOwnedMergeablePaths, cfg.ReconcilerOwnedMergeablePaths) {
+		t.Errorf("ReconcilerOwnedMergeablePaths = %v, want %v", got.ReconcilerOwnedMergeablePaths, cfg.ReconcilerOwnedMergeablePaths)
+	}
 }
 
 func TestMarshalStartConfig_empty(t *testing.T) {
@@ -82,6 +87,39 @@ func TestMarshalStartConfig_empty(t *testing.T) {
 	// All fields have omitempty, so empty config → empty object.
 	if len(got) != 0 {
 		t.Errorf("expected empty JSON object, got %v", got)
+	}
+}
+
+func TestMarshalStartConfig_GatesOwnedCopyVerificationFields(t *testing.T) {
+	cfg := runtime.Config{
+		CopyFiles: []runtime.CopyEntry{
+			{Src: "/tmp/legacy", RelDst: ".claude/settings.json", Probed: true, ContentHash: "legacy-hash"},
+			{Src: "/tmp/owned", RelDst: ".codex/hooks.json", Probed: true, ContentHash: "owned-hash"},
+		},
+		ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"},
+	}
+
+	data, err := marshalStartConfig(cfg)
+	if err != nil {
+		t.Fatalf("marshalStartConfig: %v", err)
+	}
+	var raw struct {
+		CopyFiles []map[string]any `json:"copy_files"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw.CopyFiles[0]["probed"]; ok {
+		t.Fatal("legacy CopyFile unexpectedly emitted capability-gated probed field")
+	}
+	if _, ok := raw.CopyFiles[0]["content_hash"]; ok {
+		t.Fatal("legacy CopyFile unexpectedly emitted capability-gated content_hash field")
+	}
+	if got := raw.CopyFiles[1]["probed"]; got != true {
+		t.Fatalf("owned CopyFile probed = %v, want true", got)
+	}
+	if got := raw.CopyFiles[1]["content_hash"]; got != "owned-hash" {
+		t.Fatalf("owned CopyFile content_hash = %v, want owned-hash", got)
 	}
 }
 

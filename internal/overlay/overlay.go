@@ -2,11 +2,15 @@
 package overlay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/codexhooks"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // PreserveExistingWarningPrefix prefixes nonfatal warnings for provider overlay
@@ -133,7 +137,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				continue
 			}
 		}
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel), isCodexHooksPath(entryRel)); err != nil {
 			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 		}
 	}
@@ -198,7 +202,7 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel), isCodexHooksPath(entryRel)); err != nil {
 			return err
 		}
 	}
@@ -298,18 +302,10 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 // omits any file for which skip returns true, in BOTH the universal and the
 // per-provider copy phases.
 //
-// It exists for the build_desired_state home-dir staging path: that
-// path stages provider overlays and then runs hooks.Install on the SAME
-// directory. Reconciler-owned mergeable files (overlay.IsMergeablePath —
-// .codex/hooks.json et al.) must be skipped here so hooks.Install is the sole
-// writer on that reconcile tick and the two writers cannot leave a permanent
-// hybrid hook document. The runtime task-worktree staging path passes a nil
-// skip and keeps staging those files, because there hooks.Install never runs
-// and staging is the sole writer.
-//
-// The skip does not make hooks.Install the only writer everywhere: for a
-// persistent agent, session-start staging writes the same paths via the
-// nil-skip path, so a hybrid can reappear until the next tick converges it.
+// It is used at explicit ownership boundaries: configured-home preparation
+// collects an exact mergeable file into the reconciler transaction, and runtime
+// staging later preserves that same exact path while continuing to stage every
+// sibling. A nil skip retains the legacy full-overlay behavior.
 func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip SkipFunc, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
@@ -359,9 +355,15 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. When wrapBareHooks is true (Claude settings), bare
 // hook entries in the result are normalized into wrapped form, both when
-// merging and when creating the file fresh. Falls back to plain copy on any
-// merge error.
-func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
+// merging and when creating the file fresh. Codex hooks additionally preserve
+// same-matcher inner commands and fail closed on malformed/unreadable JSON so a
+// generic staging fallback cannot destroy a user hook document.
+func copyOrMergeFile(src, dst string, merge, wrapBareHooks, codexSafe bool) error {
+	if codexSafe {
+		return codexhooks.WithPathLock(fsys.OSFS{}, dst, func() error {
+			return copyOrMergeCodexHooks(src, dst)
+		})
+	}
 	if !merge {
 		return copyFile(src, dst)
 	}
@@ -387,7 +389,6 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	}
 	merged, err := MergeSettingsJSON(dstData, srcData, opts...)
 	if err != nil {
-		// Merge failed — fall back to overwrite.
 		return copyFile(src, dst)
 	}
 	// Ensure parent directory exists.
@@ -410,9 +411,12 @@ func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
 	if err != nil {
 		return copyCanonicalJSONFile(src, dst)
 	}
-	out, err := MergeSettingsJSON([]byte("{}"), data, WithWrapBareHooks())
+	var opts []MergeOption
+	if wrapBareHooks {
+		opts = append(opts, WithWrapBareHooks())
+	}
+	out, err := MergeSettingsJSON([]byte("{}"), data, opts...)
 	if err != nil {
-		// Source isn't a mergeable JSON object — fall back to canonical copy.
 		return copyCanonicalJSONFile(src, dst)
 	}
 	info, err := os.Stat(src)
@@ -423,6 +427,69 @@ func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
 	return os.WriteFile(dst, out, info.Mode().Perm())
+}
+
+func copyOrMergeCodexHooks(src, dst string) error {
+	osfs := fsys.OSFS{}
+	srcData, srcInfo, err := fsys.ReadRegularFileStable(osfs, src)
+	if err != nil {
+		return fmt.Errorf("reading Codex hook overlay %q without following symlinks: %w", src, err)
+	}
+	if err := codexhooks.ValidateDocument(srcData, "Codex hook overlay"); err != nil {
+		return fmt.Errorf("invalid Codex hook overlay %q: %w", src, err)
+	}
+
+	dstInfo, dstErr := os.Lstat(dst)
+	if os.IsNotExist(dstErr) {
+		out, mergeErr := MergeSettingsJSON([]byte("{}"), srcData, WithMergeMatchedHookContents())
+		if mergeErr != nil {
+			return fmt.Errorf("invalid Codex hook overlay %q: %w", src, mergeErr)
+		}
+		if validateErr := codexhooks.ValidateDocument(out, "merged Codex hooks"); validateErr != nil {
+			return fmt.Errorf("invalid Codex hook overlay %q after merge: %w", src, validateErr)
+		}
+		if _, currentErr := os.Lstat(dst); !os.IsNotExist(currentErr) {
+			if currentErr == nil {
+				currentErr = errCodexHooksChangedDuringMerge
+			}
+			return fmt.Errorf("preserving Codex hooks %q after concurrent change: %w", dst, currentErr)
+		}
+		return codexhooks.WriteFileAtomicNoFollow(osfs, dst, out, srcInfo.Mode().Perm())
+	}
+	if dstErr != nil {
+		return fmt.Errorf("preserving unreadable Codex hooks %q: %w", dst, dstErr)
+	}
+	if !dstInfo.Mode().IsRegular() {
+		return fmt.Errorf("preserving non-regular Codex hooks %q", dst)
+	}
+	dstData, stableDstInfo, err := fsys.ReadRegularFileStable(osfs, dst)
+	if err != nil {
+		return fmt.Errorf("preserving unreadable Codex hooks %q: %w", dst, err)
+	}
+	if err := codexhooks.ValidateDocument(dstData, "existing Codex hooks"); err != nil {
+		return fmt.Errorf("preserving Codex hooks %q with invalid schema: %w", dst, err)
+	}
+	merged, err := MergeSettingsJSON(dstData, srcData, WithMergeMatchedHookContents())
+	if err != nil {
+		return fmt.Errorf("preserving Codex hooks %q after merge failure: %w", dst, err)
+	}
+	if err := codexhooks.ValidateDocument(merged, "merged Codex hooks"); err != nil {
+		return fmt.Errorf("preserving Codex hooks %q after schema-invalid merge: %w", dst, err)
+	}
+	currentData, currentInfo, err := fsys.ReadRegularFileStable(osfs, dst)
+	if err != nil || !bytes.Equal(currentData, dstData) || !fsys.SameFileIdentity(stableDstInfo, currentInfo) {
+		if err == nil {
+			err = errCodexHooksChangedDuringMerge
+		}
+		return fmt.Errorf("preserving Codex hooks %q after concurrent change: %w", dst, err)
+	}
+	return codexhooks.WriteFileAtomicNoFollow(osfs, dst, merged, stableDstInfo.Mode().Perm())
+}
+
+var errCodexHooksChangedDuringMerge = fmt.Errorf("codex hooks changed during merge")
+
+func isCodexHooksPath(relPath string) bool {
+	return filepath.Clean(relPath) == filepath.Join(".codex", "hooks.json")
 }
 
 func copyCanonicalJSONFile(src, dst string) error {

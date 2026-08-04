@@ -428,6 +428,137 @@ func TestCopyDir_MergePreservesPermissions(t *testing.T) {
 	}
 }
 
+func TestCopyDirForProvidersCodexHooksFailsClosedOnMalformedJSON(t *testing.T) {
+	t.Run("malformed destination is preserved", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), `{"hooks":{}}`)
+		malformed := `{"hooks":`
+		dstPath := filepath.Join(dst, ".codex", "hooks.json")
+		writeFile(t, dstPath, malformed)
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		assertFileContent(t, dstPath, malformed)
+		if !bytes.Contains(stderr.Bytes(), []byte("preserving Codex hooks")) {
+			t.Fatalf("stderr = %q, want preservation warning", stderr.String())
+		}
+	})
+
+	t.Run("malformed source is not created", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), `{"hooks":`)
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dst, ".codex", "hooks.json")); !os.IsNotExist(err) {
+			t.Fatalf("malformed Codex overlay was staged (stat err=%v)", err)
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte("invalid Codex hook overlay")) {
+			t.Fatalf("stderr = %q, want invalid overlay warning", stderr.String())
+		}
+	})
+
+	t.Run("schema-invalid destination is preserved", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), `{"hooks":{}}`)
+		invalid := `{"hooks":{"SessionStart":"not-an-array"}}`
+		dstPath := filepath.Join(dst, ".codex", "hooks.json")
+		writeFile(t, dstPath, invalid)
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		assertFileContent(t, dstPath, invalid)
+		if !bytes.Contains(stderr.Bytes(), []byte("invalid schema")) {
+			t.Fatalf("stderr = %q, want schema preservation warning", stderr.String())
+		}
+	})
+
+	t.Run("schema-invalid source is not created", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{}]}]}}`)
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(dst, ".codex", "hooks.json")); !os.IsNotExist(err) {
+			t.Fatalf("schema-invalid Codex overlay was staged (lstat err=%v)", err)
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte("invalid Codex hook overlay")) {
+			t.Fatalf("stderr = %q, want invalid overlay warning", stderr.String())
+		}
+	})
+}
+
+func TestCopyDirForProvidersCodexHooksRejectsSymlinkPaths(t *testing.T) {
+	valid := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf overlay"}]}]}}`
+
+	t.Run("destination leaf", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), valid)
+		shared := filepath.Join(t.TempDir(), "shared-hooks.json")
+		original := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf shared"}]}]}}`
+		writeFile(t, shared, original)
+		dstPath := filepath.Join(dst, ".codex", "hooks.json")
+		mkdirAll(t, filepath.Dir(dstPath))
+		if err := os.Symlink(shared, dstPath); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		assertFileContent(t, shared, original)
+		if info, err := os.Lstat(dstPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("destination leaf symlink was replaced (info=%v err=%v)", info, err)
+		}
+	})
+
+	t.Run("destination parent", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), valid)
+		sharedDir := t.TempDir()
+		sharedPath := filepath.Join(sharedDir, "hooks.json")
+		original := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf shared-parent"}]}]}}`
+		writeFile(t, sharedPath, original)
+		if err := os.Symlink(sharedDir, filepath.Join(dst, ".codex")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		assertFileContent(t, sharedPath, original)
+	})
+
+	t.Run("source leaf", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		shared := filepath.Join(t.TempDir(), "shared-overlay.json")
+		writeFile(t, shared, valid)
+		srcPath := filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json")
+		mkdirAll(t, filepath.Dir(srcPath))
+		if err := os.Symlink(shared, srcPath); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		var stderr bytes.Buffer
+		if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+			t.Fatalf("CopyDirForProviders: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(dst, ".codex", "hooks.json")); !os.IsNotExist(err) {
+			t.Fatalf("source symlink was followed (lstat err=%v)", err)
+		}
+	})
+}
+
 // helpers
 
 func writeFile(t *testing.T, path, content string) {

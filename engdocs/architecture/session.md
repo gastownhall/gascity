@@ -220,7 +220,11 @@ Silent rebaseline atomically overwrites `started_config_hash`,
 the current binary. The session keeps running, no `SessionDraining` event is
 recorded, and the supervisor log shows one info line for the affected session.
 The `core_hash_breakdown` JSON shape is part of the same upgrade contract: a
-shape change must be paired with a fingerprint version bump.
+shape change must normally be paired with a fingerprint version bump. The one
+narrow compatibility exception is an optional provision field whose empty
+value emits neither hash bytes nor a breakdown key. An old v5 session and a new
+v5 session with that field empty are then byte-identical; setting it later is
+real same-version configuration drift and deliberately reprovisions the box.
 
 Implementation references:
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go)
@@ -253,6 +257,10 @@ Do not bump the version for:
 - Comments, tests, or documentation.
 - Changes to consumers such as `session_reconciler.go` or
   `LogCoreFingerprintDrift` that do not change hash output.
+- A newly optional field that is omitted from both the hash stream and
+  `core_hash_breakdown` when empty, with golden coverage proving every legacy
+  empty fixture is byte-identical. A non-empty value must still affect the
+  appropriate partition and report the new field as same-version drift.
 
 ### PR Review Checklist
 

@@ -1,13 +1,19 @@
 package rppcheck
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -102,6 +108,289 @@ func hasCheck(res Result, name string) bool {
 		}
 	}
 	return false
+}
+
+func capableHelperScript(stateDir string) string {
+	return capableHelperScriptWithMode(stateDir, "")
+}
+
+func capableHelperScriptWithMode(stateDir, mode string) string {
+	return fmt.Sprintf(`
+export GC_RPP_CHECK_HELPER=1
+export GC_RPP_CHECK_STATE=%q
+export GC_RPP_CHECK_MODE=%q
+exec %q -test.run='^TestRPPCheckerHelperProcess$' -- "$@"
+`, stateDir, mode, os.Args[0])
+}
+
+// TestRPPCheckerHelperProcess is invoked behind a shell wrapper so the checker
+// can exercise a deterministic provider without depending on jq, screen, or a
+// platform-specific SHA-256 command in the unit-test environment.
+func TestRPPCheckerHelperProcess(_ *testing.T) {
+	if os.Getenv("GC_RPP_CHECK_HELPER") != "1" {
+		return
+	}
+	var args []string
+	for i, arg := range os.Args {
+		if arg == "--" {
+			args = os.Args[i+1:]
+			break
+		}
+	}
+	if len(args) == 0 {
+		helperProcessFail("missing op")
+	}
+	op := args[0]
+	name := ""
+	if len(args) > 1 {
+		name = args[1]
+	}
+	state := os.Getenv("GC_RPP_CHECK_STATE")
+	marker := filepath.Join(state, name+".running")
+	switch op {
+	case "protocol":
+		fmt.Printf(`{"version":0,"capabilities":[%q]}`, runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths)
+		os.Exit(0)
+	case "start":
+		var cfg startConfig
+		if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
+			helperProcessFail(err.Error())
+		}
+		if os.Getenv("GC_RPP_CHECK_MODE") == "fail-positive-after-allocation" && strings.HasSuffix(name, "-ro-owned") {
+			if err := os.WriteFile(marker, nil, 0o644); err != nil {
+				helperProcessFail(err.Error())
+			}
+			helperProcessFail("positive staging failed after allocation")
+		}
+		if os.Getenv("GC_RPP_CHECK_MODE") == "fail-after-allocation" &&
+			len(cfg.ReconcilerOwnedMergeablePaths) > 0 &&
+			(strings.HasSuffix(name, "-ro-stale") || strings.HasSuffix(name, "-ro-missing")) {
+			if err := os.WriteFile(marker, nil, 0o644); err != nil {
+				helperProcessFail(err.Error())
+			}
+			helperProcessFail("staging rejected after allocation")
+		}
+		acknowledgement := ""
+		if len(cfg.ReconcilerOwnedMergeablePaths) > 0 {
+			helperStageOwnedConfig(cfg)
+			if os.Getenv("GC_RPP_CHECK_MODE") != "exit-after-first-poll" {
+				acknowledgement = ownedProbeAcknowledgement(cfg)
+				if err := os.WriteFile(marker+".ack", []byte(acknowledgement), 0o644); err != nil {
+					helperProcessFail(err.Error())
+				}
+			}
+		}
+		if err := os.WriteFile(marker, nil, 0o644); err != nil {
+			helperProcessFail(err.Error())
+		}
+		os.Exit(0)
+	case "stop":
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			helperProcessFail(err.Error())
+		}
+		if err := os.Remove(marker + ".ack"); err != nil && !os.IsNotExist(err) {
+			helperProcessFail(err.Error())
+		}
+		if err := os.Remove(marker + ".polled"); err != nil && !os.IsNotExist(err) {
+			helperProcessFail(err.Error())
+		}
+		os.Exit(0)
+	case "is-running":
+		if _, err := os.Stat(marker); err == nil {
+			if os.Getenv("GC_RPP_CHECK_MODE") == "exit-after-first-poll" && strings.HasSuffix(name, "-ro-owned") {
+				if _, err := os.Stat(marker + ".polled"); err == nil {
+					if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+						helperProcessFail(err.Error())
+					}
+					fmt.Print("false\n")
+					os.Exit(0)
+				}
+				if err := os.WriteFile(marker+".polled", nil, 0o644); err != nil {
+					helperProcessFail(err.Error())
+				}
+			}
+			fmt.Print("true\n")
+		} else {
+			fmt.Print("false\n")
+		}
+		os.Exit(0)
+	case "process-alive":
+		probe, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			helperProcessFail(err.Error())
+		}
+		ack, err := os.ReadFile(marker + ".ack")
+		if err == nil && strings.TrimSpace(string(probe)) == string(ack) {
+			fmt.Print("true\n")
+		} else {
+			fmt.Print("false\n")
+		}
+		os.Exit(0)
+	default:
+		os.Exit(2)
+	}
+}
+
+func helperStageOwnedConfig(cfg startConfig) {
+	if len(cfg.ReconcilerOwnedMergeablePaths) != 1 || cfg.ReconcilerOwnedMergeablePaths[0] != ".codex/hooks.json" || len(cfg.CopyFiles) != 1 {
+		helperProcessFail("invalid owned-path shape")
+	}
+	entry := cfg.CopyFiles[0]
+	if entry.RelDst != ".codex/hooks.json" || !entry.Probed || entry.ContentHash == "" {
+		helperProcessFail("invalid owned copy entry")
+	}
+	data, err := os.ReadFile(entry.Src)
+	if err != nil {
+		helperProcessFail(err.Error())
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != entry.ContentHash {
+		helperProcessFail("stale owned digest")
+	}
+	// The capability promises an exact-path exclusion, not an overlay-wide
+	// exclusion. Stage every unowned fixture while deliberately ignoring the
+	// conflicting overlay hook. The verifier must not rely on an implicit mirror
+	// of the controller-local work directory.
+	if _, err := os.Stat(filepath.Join(cfg.WorkDir, ".gc-rpp-owned-check.sh")); !os.IsNotExist(err) {
+		helperProcessFail("verifier unexpectedly pre-existed in work_dir")
+	}
+	for _, rel := range []string{".gc-rpp-overlay-sibling", ".gc-rpp-expected-hooks", ".gc-rpp-owned-check.sh", ownedProbeAcknowledgement(cfg)} {
+		data, err := os.ReadFile(filepath.Join(cfg.OverlayDir, rel))
+		if err != nil {
+			helperProcessFail(err.Error())
+		}
+		mode := os.FileMode(0o644)
+		if rel == ".gc-rpp-owned-check.sh" || rel == ownedProbeAcknowledgement(cfg) {
+			mode = 0o755
+		}
+		if err := os.WriteFile(filepath.Join(cfg.WorkDir, rel), data, mode); err != nil {
+			helperProcessFail(err.Error())
+		}
+	}
+	dst := filepath.Join(cfg.WorkDir, ".codex", "hooks.json")
+	if filepath.Clean(entry.Src) != filepath.Clean(dst) {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			helperProcessFail(err.Error())
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			helperProcessFail(err.Error())
+		}
+	}
+	expected, err := os.ReadFile(filepath.Join(cfg.WorkDir, ".gc-rpp-expected-hooks"))
+	if err != nil {
+		helperProcessFail(err.Error())
+	}
+	actual, err := os.ReadFile(dst)
+	if err != nil {
+		helperProcessFail(err.Error())
+	}
+	if !bytes.Equal(actual, expected) {
+		helperProcessFail("canonical handoff mismatch")
+	}
+}
+
+func helperProcessFail(message string) {
+	fmt.Fprintln(os.Stderr, message)
+	os.Exit(1)
+}
+
+func TestRun_ReconcilerOwnedStagingCapabilityPassesConformance(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, capableHelperScript(state), Options{})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true for capable staging provider: %+v", res.Checks)
+	}
+	for _, name := range []string{
+		reconcilerOwnedStagingCheckPrefix + "canonical handoff",
+		reconcilerOwnedStagingCheckPrefix + "stale digest rejection",
+		reconcilerOwnedStagingCheckPrefix + "missing source rejection",
+	} {
+		if check := findCheck(t, res, name); check.Status != StatusPass {
+			t.Errorf("check %q = %s (%s), want PASS", name, check.Status, check.Detail)
+		}
+	}
+	if check := findCheck(t, res, reconcilerOwnedStagingCheckPrefix+"canonical handoff"); !strings.Contains(check.Detail, "verifier process acknowledged") {
+		t.Fatalf("canonical handoff detail = %q, want fact-based verifier acknowledgement", check.Detail)
+	}
+}
+
+func TestRun_ReconcilerOwnedRejectedStartFailsIfSessionBecameRunnable(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, capableHelperScriptWithMode(state, "fail-after-allocation"), Options{})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false when invalid starts became runnable before returning an error")
+	}
+	for _, name := range []string{
+		reconcilerOwnedStagingCheckPrefix + "stale digest rejection",
+		reconcilerOwnedStagingCheckPrefix + "missing source rejection",
+	} {
+		check := findCheck(t, res, name)
+		if check.Status != StatusFail || !strings.Contains(check.Detail, "became runnable") {
+			t.Errorf("check %q = %s (%s), want runnable-contract FAIL", name, check.Status, check.Detail)
+		}
+	}
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".running") {
+			t.Fatalf("negative staging probe leaked running marker %q", entry.Name())
+		}
+	}
+}
+
+func TestRun_ReconcilerOwnedPositiveStartCleansUpAfterAllocationError(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, capableHelperScriptWithMode(state, "fail-positive-after-allocation"), Options{})
+
+	check := findCheck(t, res, reconcilerOwnedStagingCheckPrefix+"canonical handoff")
+	if check.Status != StatusFail || !strings.Contains(check.Detail, "positive staging failed after allocation") {
+		t.Fatalf("canonical handoff = %s (%s), want allocation-error FAIL", check.Status, check.Detail)
+	}
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), "-ro-owned.running") {
+			t.Fatalf("positive staging probe leaked running marker %q", entry.Name())
+		}
+	}
+}
+
+func TestRun_ReconcilerOwnedStagingVerifierMustRemainRunning(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, capableHelperScriptWithMode(state, "exit-after-first-poll"), Options{})
+
+	check := findCheck(t, res, reconcilerOwnedStagingCheckPrefix+"canonical handoff")
+	if check.Status != StatusFail {
+		t.Fatalf("canonical handoff = %s (%s), want FAIL for verifier that exits after the first poll", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, "before staging acknowledgement") {
+		t.Fatalf("canonical handoff detail = %q, want missing-acknowledgement failure", check.Detail)
+	}
+}
+
+func TestRun_ReconcilerOwnedStagingCapabilityCannotBeHandshakeOnly(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(minimalScript(state),
+		`case "$op" in`,
+		fmt.Sprintf("case \"$op\" in\n  protocol) printf '%%s' '{\"version\":0,\"capabilities\":[\"%s\"]}' ;;", runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths), 1)
+	res := runScript(t, body, Options{})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false for provider that advertises but ignores the staging contract")
+	}
+	for _, name := range []string{
+		reconcilerOwnedStagingCheckPrefix + "stale digest rejection",
+		reconcilerOwnedStagingCheckPrefix + "missing source rejection",
+	} {
+		if check := findCheck(t, res, name); check.Status != StatusFail {
+			t.Errorf("check %q = %s (%s), want FAIL", name, check.Status, check.Detail)
+		}
+	}
 }
 
 func TestRun_ConformantExecutablePasses(t *testing.T) {

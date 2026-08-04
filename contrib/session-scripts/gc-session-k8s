@@ -13,7 +13,7 @@
 #
 # See docs/exec-session-protocol.md for the full protocol specification.
 #
-# Dependencies: kubectl, jq, bash
+# Dependencies: kubectl, jq, tar, sha256sum or shasum, bash
 # Container requirements: tmux, bash
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-k8s gc start <city>
@@ -67,6 +67,137 @@ if [ -n "${GC_K8S_CONTEXT:-}" ]; then
   KUBECTL+=(--context "$GC_K8S_CONTEXT")
 fi
 KUBECTL+=(-n "$NS")
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
+validate_reconciler_owned_copy_files() {
+  local config="$1"
+  local work_dir="$2"
+  local counts owned_count unique_count owned_path match_count entry
+  local src probed expected_hash actual_hash expected_src parent
+
+  if ! printf '%s' "$config" | jq -e '
+    (.reconciler_owned_mergeable_paths // []) as $owned |
+    (.copy_files // []) as $copies |
+    ($owned | type == "array") and ($copies | type == "array") and
+    all($owned[]; type == "string" and length > 0) and
+    all($copies[]; type == "object")
+  ' >/dev/null; then
+    echo "start: invalid reconciler-owned staging payload" >&2
+    return 1
+  fi
+
+  counts=$(printf '%s' "$config" | jq -r '
+    (.reconciler_owned_mergeable_paths // []) as $owned |
+    [($owned | length), ($owned | unique | length)] | @tsv
+  ')
+  owned_count=${counts%%$'\t'*}
+  unique_count=${counts#*$'\t'}
+  if [ "$owned_count" -ne "$unique_count" ]; then
+    echo "start: duplicate reconciler-owned mergeable path" >&2
+    return 1
+  fi
+  if [ "$owned_count" -gt 0 ] && [ -z "$work_dir" ]; then
+    echo "start: reconciler-owned mergeable paths require work_dir" >&2
+    return 1
+  fi
+
+  while IFS= read -r owned_path; do
+    [ -z "$owned_path" ] && continue
+    case "$owned_path" in
+      .agents/hooks.json|.claude/settings.json|.gemini/settings.json|.codex/hooks.json|.cursor/hooks.json|.github/hooks/gascity.json)
+        ;;
+      *)
+        echo "start: unsupported reconciler-owned mergeable path $owned_path" >&2
+        return 1
+        ;;
+    esac
+
+    match_count=$(printf '%s' "$config" | jq -r --arg rel "$owned_path" '
+      [.copy_files[] | select(.rel_dst == $rel)] | length
+    ')
+    if [ "$match_count" -ne 1 ]; then
+      echo "start: reconciler-owned path $owned_path requires exactly one copy_file (got $match_count)" >&2
+      return 1
+    fi
+    entry=$(printf '%s' "$config" | jq -c --arg rel "$owned_path" '
+      [.copy_files[] | select(.rel_dst == $rel)][0]
+    ')
+    src=$(printf '%s' "$entry" | jq -r '.src // ""')
+    probed=$(printf '%s' "$entry" | jq -r '.probed == true')
+    expected_hash=$(printf '%s' "$entry" | jq -r '.content_hash // ""')
+    expected_src="${work_dir%/}/$owned_path"
+    if [ -z "$src" ] || [ "$src" != "$expected_src" ]; then
+      echo "start: reconciler-owned copy_file $owned_path must use canonical source $expected_src" >&2
+      return 1
+    fi
+    if [ "$probed" != "true" ]; then
+      echo "start: reconciler-owned copy_file $owned_path must be probed" >&2
+      return 1
+    fi
+    if [ "${#expected_hash}" -ne 64 ] || [[ "$expected_hash" == *[!0-9a-f]* ]]; then
+      echo "start: reconciler-owned copy_file $owned_path requires a SHA-256 content_hash" >&2
+      return 1
+    fi
+    parent=$(dirname "$src")
+    if [ ! -f "$src" ] || [ -L "$src" ] || [ ! -d "$parent" ] || [ -L "$parent" ]; then
+      echo "start: missing or unsafe reconciler-owned copy_file $src" >&2
+      return 1
+    fi
+    if ! actual_hash=$(sha256_stream < "$src"); then
+      echo "start: failed to hash reconciler-owned copy_file $src" >&2
+      return 1
+    fi
+    if [ "$actual_hash" != "$expected_hash" ]; then
+      echo "start: reconciler-owned copy_file $owned_path changed after reconciliation" >&2
+      return 1
+    fi
+  done < <(printf '%s' "$config" | jq -r '.reconciler_owned_mergeable_paths // [] | .[]')
+}
+
+verify_reconciler_owned_pod_files() {
+  local config="$1"
+  local pod="$2"
+  local pod_work_dir="$3"
+  local container="${4:-}"
+  local owned_path expected_hash dst actual_hash
+  local exec_args=(exec "$pod")
+
+  if [ -n "$container" ]; then
+    exec_args+=(-c "$container")
+  fi
+
+  while IFS= read -r owned_path; do
+    [ -z "$owned_path" ] && continue
+    expected_hash=$(printf '%s' "$config" | jq -r --arg rel "$owned_path" '
+      [.copy_files[] | select(.rel_dst == $rel)][0].content_hash
+    ')
+    dst="${pod_work_dir%/}/$owned_path"
+    if ! actual_hash=$("${KUBECTL[@]}" "${exec_args[@]}" -- sh -c '
+      set -eu
+      path=$1
+      [ -f "$path" ] && [ ! -L "$path" ]
+      parent=${path%/*}
+      [ -d "$parent" ] && [ ! -L "$parent" ]
+      cat "$path"
+    ' gc-read-owned "$dst" 2>/dev/null | sha256_stream); then
+      echo "start: failed to read and hash reconciler-owned pod destination $dst" >&2
+      return 1
+    fi
+    if [ "$actual_hash" != "$expected_hash" ]; then
+      echo "start: reconciler-owned pod destination $dst digest mismatch" >&2
+      return 1
+    fi
+  done < <(printf '%s' "$config" | jq -r '.reconciler_owned_mergeable_paths // [] | .[]')
+}
 
 # --- Helpers ---
 
@@ -122,11 +253,16 @@ get_any_pod_by_label() {
 # --- Operations ---
 
 case "$op" in
+  protocol)
+    printf '%s\n' '{"version":0,"capabilities":["staging.reconciler-owned-mergeable-paths"]}'
+    ;;
+
   start)
     # Read JSON config from stdin.
     config=$(cat)
     command=$(echo "$config" | jq -r '.command // ""')
     env_json=$(echo "$config" | jq -c '.env // {}')
+    work_dir=$(echo "$config" | jq -r '.work_dir // ""')
     payload_dolt_host=$(echo "$env_json" | jq -r ".GC_DOLT_HOST // empty")
     payload_dolt_port=$(echo "$env_json" | jq -r ".GC_DOLT_PORT // empty")
     emit_dolt_env=false
@@ -158,6 +294,7 @@ case "$op" in
       echo "start: GC_K8S_IMAGE is required" >&2
       exit 1
     fi
+    validate_reconciler_owned_copy_files "$config" "$work_dir"
 
     pod=$(pod_name "$name")
     label=$(sanitize_label "$name")
@@ -225,7 +362,6 @@ case "$op" in
     # Controller resolves agent dirs relative to its cityPath (e.g., /city),
     # but agent pods use /workspace as the city root. Rig agents need their
     # subpath preserved: /city/demo-rig → /workspace/demo-rig.
-    work_dir=$(echo "$config" | jq -r '.work_dir // ""')
     ctrl_city=$(echo "$env_json" | jq -r '.GC_CITY // ""')
     pod_work_dir="/workspace"
     if [ -n "$ctrl_city" ] && [ -n "$work_dir" ] && [ "$work_dir" != "$ctrl_city" ]; then
@@ -304,6 +440,14 @@ case "$op" in
 
     # Check if we need staging (overlay_dir, copy_files, or rig workdir).
     overlay_dir=$(echo "$config" | jq -r '.overlay_dir // ""')
+    overlay_excludes=()
+    while IFS= read -r owned_path; do
+      case "$owned_path" in
+        .agents/hooks.json|.claude/settings.json|.gemini/settings.json|.codex/hooks.json|.cursor/hooks.json|.github/hooks/gascity.json)
+          overlay_excludes+=("--exclude=./$owned_path")
+          ;;
+      esac
+    done < <(echo "$config" | jq -r '.reconciler_owned_mergeable_paths // [] | .[]' 2>/dev/null)
     copy_files_count=$(echo "$config" | jq '.copy_files // [] | length')
     needs_staging=false
     if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ]; then needs_staging=true; fi
@@ -485,30 +629,77 @@ case "$op" in
           echo "start: warning: failed to copy work_dir $work_dir" >&2
       fi
 
-      # Copy overlay_dir into /workspace/ via init container.
+      # Pod readiness and workdir staging can take minutes. Recheck before the
+      # overlay filter suppresses the fallback copy for an owned path.
+      validate_reconciler_owned_copy_files "$config" "$work_dir"
+
+      # Copy overlay_dir into the session's computed pod workdir via init
+      # container. Rig/nested sessions must not receive overlays at city root.
       if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ]; then
-        "${KUBECTL[@]}" cp "$overlay_dir/." "$pod:/workspace/" -c stage 2>/dev/null || \
+        overlay_stage_dir="$overlay_dir"
+        filtered_overlay_dir=""
+        if [ "${#overlay_excludes[@]}" -gt 0 ]; then
+          filtered_overlay_dir=$(mktemp -d "${TMPDIR:-/tmp}/gc-overlay.XXXXXX")
+          if ! (cd "$overlay_dir" && tar "${overlay_excludes[@]}" -cf - .) 2>/dev/null | \
+            (cd "$filtered_overlay_dir" && tar -xf -) 2>/dev/null; then
+            rm -rf "$filtered_overlay_dir"
+            echo "start: failed to filter reconciler-owned overlay paths" >&2
+            exit 1
+          fi
+          overlay_stage_dir="$filtered_overlay_dir"
+        fi
+        "${KUBECTL[@]}" cp "$overlay_stage_dir/." "$pod:$pod_work_dir/" -c stage 2>/dev/null || \
           echo "start: warning: failed to copy overlay" >&2
+        if [ -n "$filtered_overlay_dir" ]; then
+          rm -rf "$filtered_overlay_dir"
+        fi
       fi
 
+      # The filtered overlay transfer is another asynchronous boundary; bind
+      # the exact reconciled bytes once more immediately before canonical
+      # CopyFile delivery.
+      validate_reconciler_owned_copy_files "$config" "$work_dir"
+
       # Copy each copy_files entry via init container.
-      echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null | while IFS= read -r entry; do
+      while IFS= read -r entry; do
         [ -z "$entry" ] && continue
         src=$(echo "$entry" | jq -r '.src')
         rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
+        is_owned=$(echo "$config" | jq -r --arg rel "$rel_dst" 'any((.reconciler_owned_mergeable_paths // [])[]; . == $rel)')
         dst="/workspace"
-        [ -n "$rel_dst" ] && dst="/workspace/$rel_dst"
+        if [ "$is_owned" = "true" ]; then
+          dst="$pod_work_dir"
+        fi
+        [ -n "$rel_dst" ] && dst="${dst%/}/$rel_dst"
         if [ -d "$src" ]; then
-          "${KUBECTL[@]}" exec "$pod" -c stage -- mkdir -p "$dst" 2>/dev/null || true
-          "${KUBECTL[@]}" cp "$src/." "$pod:$dst/" -c stage 2>/dev/null || \
+          if ! "${KUBECTL[@]}" exec "$pod" -c stage -- mkdir -p "$dst" 2>/dev/null || \
+            ! "${KUBECTL[@]}" cp "$src/." "$pod:$dst/" -c stage 2>/dev/null; then
+            if [ "$is_owned" = "true" ]; then
+              echo "start: failed to stage reconciler-owned copy_file $src" >&2
+              exit 1
+            fi
             echo "start: warning: failed to copy $src" >&2
+          fi
         elif [ -f "$src" ]; then
           parent_dir=$(dirname "$dst")
-          "${KUBECTL[@]}" exec "$pod" -c stage -- mkdir -p "$parent_dir" 2>/dev/null || true
-          "${KUBECTL[@]}" cp "$src" "$pod:$dst" -c stage 2>/dev/null || \
+          if ! "${KUBECTL[@]}" exec "$pod" -c stage -- mkdir -p "$parent_dir" 2>/dev/null || \
+            ! "${KUBECTL[@]}" cp "$src" "$pod:$dst" -c stage 2>/dev/null; then
+            if [ "$is_owned" = "true" ]; then
+              echo "start: failed to stage reconciler-owned copy_file $src" >&2
+              exit 1
+            fi
             echo "start: warning: failed to copy $src" >&2
+          fi
+        elif [ "$is_owned" = "true" ]; then
+          echo "start: missing reconciler-owned copy_file $src" >&2
+          exit 1
         fi
-      done
+      done < <(echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null)
+
+      # kubectl cp reopens local sources after the last validation. Verify the
+      # raw bytes that actually landed in the pod before releasing the init
+      # container, so a mutation during transport fails closed.
+      verify_reconciler_owned_pod_files "$config" "$pod" "$pod_work_dir" stage
 
       # When GC_CITY differs from work_dir, mirror .gc/ into the city volume
       # so that $GC_CITY/.gc/scripts/ resolves for agents with custom dirs.
@@ -555,6 +746,11 @@ case "$op" in
         echo "start: warning: gc init failed" >&2
       "${KUBECTL[@]}" exec "$pod" -- rm -rf /tmp/city-src 2>/dev/null || true
     fi
+
+    # City initialization runs after the init-container handoff and may write
+    # into the same shared workspace. Verify the final agent-visible bytes again
+    # immediately before releasing the entrypoint.
+    verify_reconciler_owned_pod_files "$config" "$pod" "$pod_work_dir" agent
 
     # Signal the entrypoint to proceed with tmux creation. The entrypoint
     # waits for this sentinel before starting the agent command, ensuring

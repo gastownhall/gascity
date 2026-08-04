@@ -13,10 +13,11 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                    = (*seamBackedProvider)(nil)
-	_ runtime.InteractionProvider         = (*seamBackedProvider)(nil)
-	_ runtime.TransportCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider     = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.InteractionProvider                  = (*seamBackedProvider)(nil)
+	_ runtime.TransportCapabilityProvider          = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider              = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -50,4 +51,8 @@ func (s *seamBackedProvider) SupportsTransport(transport string) bool {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

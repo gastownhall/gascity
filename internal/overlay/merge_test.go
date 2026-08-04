@@ -785,3 +785,67 @@ func TestMergeSettingsJSON_NoWrap_LeavesBareEntries(t *testing.T) {
 		t.Errorf("bare entry was wrapped without WithWrapBareHooks: %v", arr[0])
 	}
 }
+
+func TestMergeSettingsJSON_MatchedHookContentsUnionsSharedMatcher(t *testing.T) {
+	base := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	over := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc mail check --inject"}]}]}}`)
+	merged, err := MergeSettingsJSON(base, over, WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal merged: %v", err)
+	}
+	entries := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("shared matcher wrappers = %d, want 1", len(entries))
+	}
+	inner := entries[0].(map[string]any)["hooks"].([]any)
+	if len(inner) != 2 {
+		t.Fatalf("shared matcher inner hooks = %d, want custom + managed", len(inner))
+	}
+	second, err := MergeSettingsJSON(merged, over, WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("second MergeSettingsJSON: %v", err)
+	}
+	if !bytes.Equal(merged, second) {
+		t.Fatalf("same-matcher union was not idempotent:\nfirst:\n%s\nsecond:\n%s", merged, second)
+	}
+}
+
+func TestMergeSettingsJSON_MatchedHookContentsPreservesExistingDuplicateMatcherWrappers(t *testing.T) {
+	base := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"one"}]},{"matcher":"","hooks":[{"type":"command","command":"two"}]}]}}`)
+	over := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"managed"}]}]}}`)
+	merged, err := MergeSettingsJSON(base, over, WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal merged: %v", err)
+	}
+	entries := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("duplicate custom matcher wrappers collapsed: %s", merged)
+	}
+	if got := len(entries[0].(map[string]any)["hooks"].([]any)); got != 1 {
+		t.Fatalf("first custom wrapper changed: %s", merged)
+	}
+	if got := len(entries[1].(map[string]any)["hooks"].([]any)); got != 2 {
+		t.Fatalf("overlay was not unioned into the last matching wrapper: %s", merged)
+	}
+}
+
+func TestMergeSettingsJSONPreservesLargeNumericMetadata(t *testing.T) {
+	base := []byte(`{"sequence":9007199254740993,"hooks":{}}`)
+	over := []byte(`{"hooks":{"UserPromptSubmit":[]}}`)
+
+	merged, err := MergeSettingsJSON(base, over)
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if !bytes.Contains(merged, []byte(`9007199254740993`)) {
+		t.Fatalf("large numeric metadata was rounded: %s", merged)
+	}
+}

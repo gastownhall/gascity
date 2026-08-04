@@ -132,7 +132,7 @@ The `protocol` operation declares which Runtime Provider Protocol version
 the script speaks and which optional capabilities it implements:
 
 ```json
-{"version": 0, "capabilities": ["report-attachment", "report-activity"]}
+{"version": 0, "capabilities": ["report-attachment", "report-activity", "staging.reconciler-owned-mergeable-paths"]}
 ```
 
 Scripts that do not implement `protocol` (exit 2) are treated as version 0
@@ -153,6 +153,7 @@ Capabilities:
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
+| `staging.reconciler-owned-mergeable-paths` | The script implements the exact-path staging handoff described below. Gas City sends `reconciler_owned_mergeable_paths` only to providers that declare this capability; without it, configured-home sessions retain legacy overlay staging. |
 
 The handshake runs once per provider instance and is cached.
 
@@ -168,7 +169,14 @@ The `start` operation receives a JSON object on stdin:
   "lifecycle": "one_shot",
   "process_names": ["claude", "node"],
   "nudge": "initial prompt text",
-  "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"]
+  "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"],
+  "copy_files": [{
+    "src": "/canonical/home/.codex/hooks.json",
+    "rel_dst": ".codex/hooks.json",
+    "probed": true,
+    "content_hash": "0123456789abcdef..."
+  }],
+  "reconciler_owned_mergeable_paths": [".codex/hooks.json"]
 }
 ```
 
@@ -216,6 +224,27 @@ hints or ignore them:
   session (e.g. `kubectl exec -i -- sh < script`). For local providers,
   run directly via `sh -c`. Non-fatal like `session_setup`.
 
+- **`reconciler_owned_mergeable_paths`** — exact workdir-relative JSON
+  hook/settings paths for which Gas City's reconciler owns the final write in a
+  configured agent or named-session home. Session-record origin is irrelevant;
+  isolated and task workdirs remain on legacy staging. This field is sent only after a runtime
+  declares `staging.reconciler-owned-mergeable-paths`.
+
+  For every listed path, the script MUST find exactly one `copy_files` entry
+  with the same `rel_dst`, `probed: true`, a non-empty `content_hash`, and a
+  regular `src`. Immediately before copying, it MUST hash `src` and require the
+  result to equal `content_hash`; a missing, duplicate, non-regular, unreadable,
+  or changed source is a fatal start/provision error. The script then stages
+  every overlay normally except that exact path, copies the verified canonical
+  source to that exact path under `work_dir`, and treats copy failure as fatal.
+  A remote runtime MUST hash the destination after transport and before
+  releasing the agent, requiring the landed bytes to equal `content_hash`.
+  Sibling files and unlisted mergeable settings continue to stage normally.
+
+  The field is omitted for isolated/manual workdirs and for runtimes that do not
+  declare the capability; those cases retain legacy overlay staging. Gas City's
+  maintained Screen and Kubernetes scripts declare and enforce the contract.
+
 Fields that are **not** included in the JSON (gc-internal, not part of
 the exec protocol):
 
@@ -249,7 +278,8 @@ responsibility. Session setup commands are the *script's* responsibility
 3. Return exit 2 for operations you don't support.
 4. Validate with `gc runtime check ./your-script` — it runs the protocol
    handshake, the required lifecycle round-trip (start, is-running, stop,
-   idempotent stop), exercises every capability the handshake declares,
+   idempotent stop), exercises every capability the handshake declares
+   (including positive and fail-closed owned-staging starts),
    and probes optional operations (absent ones are reported, not failed).
    It exits non-zero if any check fails, so CI can gate on it.
 5. Test with `GC_SESSION=exec:./your-script gc start <city>`.
@@ -279,4 +309,7 @@ reasonable default under `$TMPDIR` or `/tmp`.
 See `contrib/session-scripts/` for maintained implementations:
 
 - **gc-session-screen** — GNU screen backend. Dependencies: `screen`,
-  `jq`, `bash`.
+  `jq`, `bash`, `tar`, and either `sha256sum` or `shasum`.
+- **gc-session-k8s** — Kubernetes/tmux backend. Controller dependencies:
+  `kubectl`, `jq`, `bash`, `tar`, and either `sha256sum` or `shasum`;
+  container dependencies: `tmux` and `bash`.

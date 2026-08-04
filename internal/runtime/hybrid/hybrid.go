@@ -18,19 +18,33 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.Provider                             = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker            = (*Provider)(nil)
+	_ runtime.InteractionProvider                  = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider        = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider         = (*Provider)(nil)
+	_ runtime.RelaunchProvider                     = (*Provider)(nil)
+	_ runtime.LivenessObserver                     = (*Provider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
 // that should be managed by the remote provider.
 func New(local, remote runtime.Provider, isRemote func(string) bool) *Provider {
 	return &Provider{local: local, remote: remote, isRemote: isRemote}
+}
+
+// SupportsReconcilerOwnedMergeablePaths reports whether every backend can
+// preserve reconciler ownership. Desired-state construction cannot know which
+// route a future session will take, so a missing capability fails closed.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool {
+	for _, provider := range []runtime.Provider{p.local, p.remote} {
+		capability, ok := provider.(runtime.ReconcilerOwnedMergeablePathProvider)
+		if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Provider) route(name string) runtime.Provider {

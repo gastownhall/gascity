@@ -609,6 +609,75 @@ func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
 	}
 }
 
+func TestTemplateParamsToConfigProjectsPreparedConfiguredHomeOwnership(t *testing.T) {
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
+	named := TemplateParams{
+		ConfiguredNamedIdentity: "operator",
+		PreparedMergeableFiles: map[string]string{
+			".codex/hooks.json": runtime.HashPathContent(hookPath),
+		},
+		WorkDir: workDir,
+		Hints: agent.StartupHints{
+			InstallAgentHooks: []string{"codex"},
+		},
+	}
+	namedCfg := templateParamsToConfig(named)
+	if got := namedCfg.ReconcilerOwnedMergeablePaths; len(got) != 1 || got[0] != ".codex/hooks.json" {
+		t.Fatal("hook-backed named home should preserve reconciler-owned mergeable settings")
+	}
+	if len(namedCfg.CopyFiles) != 1 || namedCfg.CopyFiles[0].RelDst != ".codex/hooks.json" {
+		t.Fatalf("named canonical CopyFiles = %+v, want exact workdir-relative destination", namedCfg.CopyFiles)
+	}
+
+	unpreparedNamed := TemplateParams{
+		ConfiguredNamedIdentity: "operator",
+		Hints:                   agent.StartupHints{InstallAgentHooks: []string{"codex"}},
+	}
+	if len(templateParamsToConfig(unpreparedNamed).ReconcilerOwnedMergeablePaths) != 0 {
+		t.Fatal("named session must not claim ownership when hook preparation did not succeed")
+	}
+
+	namedWithoutHooks := TemplateParams{ConfiguredNamedIdentity: "operator"}
+	if len(templateParamsToConfig(namedWithoutHooks).ReconcilerOwnedMergeablePaths) != 0 {
+		t.Fatal("named session without installed hooks has no reconciler-owned mergeable settings")
+	}
+
+	missingPreparedFile := TemplateParams{
+		ConfiguredNamedIdentity: "operator",
+		PreparedMergeableFiles: map[string]string{
+			".codex/hooks.json": "expected-but-missing",
+		},
+		WorkDir: t.TempDir(),
+	}
+	missingCfg := templateParamsToConfig(missingPreparedFile)
+	if got := missingCfg.ReconcilerOwnedMergeablePaths; len(got) != 1 || got[0] != ".codex/hooks.json" {
+		t.Fatalf("named session lost fail-closed path protection after canonical file disappeared: %v", got)
+	}
+	if len(missingCfg.CopyFiles) != 0 {
+		t.Fatalf("missing canonical file produced an unverified CopyFile: %+v", missingCfg.CopyFiles)
+	}
+
+	legacyOrEphemeralAtConfiguredHome := TemplateParams{
+		PreparedMergeableFiles: map[string]string{".codex/hooks.json": "prepared"},
+		Hints:                  agent.StartupHints{InstallAgentHooks: []string{"codex"}},
+	}
+	if len(templateParamsToConfig(legacyOrEphemeralAtConfiguredHome).ReconcilerOwnedMergeablePaths) != 1 {
+		t.Fatal("preclassified configured home ownership must not depend on session origin metadata")
+	}
+
+	isolated := TemplateParams{Hints: agent.StartupHints{InstallAgentHooks: []string{"codex"}}}
+	if len(templateParamsToConfig(isolated).ReconcilerOwnedMergeablePaths) != 0 {
+		t.Fatal("isolated workdir without prepared ownership must keep full runtime overlay staging")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

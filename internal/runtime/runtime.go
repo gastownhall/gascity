@@ -229,6 +229,14 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// ReconcilerOwnedMergeablePathProvider is implemented by runtimes whose
+// staging layer can honor ReconcilerOwnedMergeablePaths. Returning false keeps
+// desired-state construction on the legacy overlay path, avoiding a
+// provision-drift restart into an adapter that cannot preserve the handoff.
+type ReconcilerOwnedMergeablePathProvider interface {
+	SupportsReconcilerOwnedMergeablePaths() bool
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.
@@ -638,6 +646,13 @@ type Config struct {
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.
 	PackOverlayDirs []string
+
+	// ReconcilerOwnedMergeablePaths lists the exact workdir-relative JSON
+	// hook/settings files for which reconciliation has established a managed
+	// owner. Runtime overlay staging preserves only these paths while continuing
+	// to stage every sibling. This changes box provisioning behavior and is
+	// therefore part of the core/provision fingerprint.
+	ReconcilerOwnedMergeablePaths []string
 
 	// OverlayDir is the host-side overlay directory whose contents should
 	// be copied into the session's working directory. Used by the exec

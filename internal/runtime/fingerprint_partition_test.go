@@ -38,6 +38,9 @@ var partitionHalfCases = []struct {
 	// hash, which also folds in ProviderName + InstallAgentHooks (see coreFieldHalf).
 	{"ProviderOverlayName", "provision", func(c *Config) { c.ProviderOverlayName = "different-overlay-provider" }},
 	{"CopyFiles", "provision", func(c *Config) { c.CopyFiles = []CopyEntry{{Src: "/different", RelDst: "z"}} }},
+	{"ReconcilerOwnedMergeablePaths", "provision", func(c *Config) {
+		c.ReconcilerOwnedMergeablePaths = []string{".gemini/settings.json"}
+	}},
 }
 
 // TestFingerprintPartitionCoversCoreDisjointly is the safety net for the un-weld
@@ -101,14 +104,15 @@ var coreFieldHalf = map[string]string{
 	"SessionSetup":         "launch",
 	"SessionSetupScript":   "launch",
 	// PROVISION (box) half.
-	"Env":                 "provision",
-	"FingerprintExtra":    "provision",
-	"PreStart":            "provision",
-	"OverlayDir":          "provision",
-	"CopyFiles":           "provision",
-	"ProviderName":        "provision",
-	"ProviderOverlayName": "provision",
-	"InstallAgentHooks":   "provision",
+	"Env":                           "provision",
+	"FingerprintExtra":              "provision",
+	"PreStart":                      "provision",
+	"OverlayDir":                    "provision",
+	"CopyFiles":                     "provision",
+	"ProviderName":                  "provision",
+	"ProviderOverlayName":           "provision",
+	"InstallAgentHooks":             "provision",
+	"ReconcilerOwnedMergeablePaths": "provision",
 }
 
 var excludedFromCore = map[string]string{

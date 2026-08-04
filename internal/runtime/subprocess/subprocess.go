@@ -46,6 +46,10 @@ type Provider struct {
 	ops      providerOps
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports that subprocess sessions use
+// the shared validated staging boundary.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return true }
+
 type providerOps struct {
 	start func(*exec.Cmd) error
 }

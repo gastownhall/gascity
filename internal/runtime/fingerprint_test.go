@@ -343,6 +343,22 @@ func TestCoreFingerprintIncludesOverlayProviderIdentity(t *testing.T) {
 	}
 }
 
+func TestCoreFingerprintIncludesReconcilerOwnedMergeablePaths(t *testing.T) {
+	base := Config{Command: "agent"}
+	owned := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"}}
+	if CoreFingerprint(base) == CoreFingerprint(owned) {
+		t.Fatal("ReconcilerOwnedMergeablePaths should affect the core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(base), owned); len(got) != 1 || got[0] != "ReconcilerOwnedMergeablePaths" {
+		t.Fatalf("drift fields = %v, want [ReconcilerOwnedMergeablePaths]", got)
+	}
+	permuted := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".gemini/settings.json", ".codex/hooks.json", ".codex/hooks.json"}}
+	reordered := Config{Command: "agent", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json", ".gemini/settings.json"}}
+	if CoreFingerprint(permuted) != CoreFingerprint(reordered) {
+		t.Fatal("ownership path fingerprint should be order- and duplicate-insensitive")
+	}
+}
+
 func TestConfigFingerprintIncludesMCPServers(t *testing.T) {
 	a := Config{Command: "claude"}
 	b := Config{
@@ -504,6 +520,7 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 		{Command: "claude", PreStart: []string{"echo hi"}},
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
+		{Command: "claude", ReconcilerOwnedMergeablePaths: []string{".codex/hooks.json"}},
 	}
 	for i, a := range cfgs {
 		for j, b := range cfgs {
@@ -513,20 +530,14 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			coreA := CoreFingerprint(a)
 			coreB := CoreFingerprint(b)
 			bdA := CoreFingerprintBreakdown(a)
-			bdB := CoreFingerprintBreakdown(b)
 
 			if coreA == coreB {
 				continue // same core hash, nothing to check
 			}
-			// Core hashes differ — at least one breakdown field must differ.
-			anyDiff := false
-			for field, va := range bdA.Fields {
-				if va != bdB.Fields[field] {
-					anyDiff = true
-					break
-				}
-			}
-			if !anyDiff {
+			// Core hashes differ — at least one breakdown field must differ. Use
+			// the production diff helper because optional fields are omitted when
+			// unset and therefore require comparing the union, not just A's keys.
+			if len(CoreFingerprintDriftFields(bdA, b)) == 0 {
 				t.Errorf("configs %d vs %d: CoreFingerprint differs but no CoreFingerprintBreakdown field differs", i, j)
 			}
 		}
@@ -938,7 +949,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v6 prefix (future mismatched version)", "v6:" + bareHex, true},
+		{"v7 prefix (future mismatched version)", "v7:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},
