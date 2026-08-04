@@ -762,13 +762,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[beadmeta.RalphStepIDMetadataKey] = stepID
 	}
 	rootStep := formula.RecipeStep{
-		ID:       attemptPrefix,
-		Title:    step.Title,
-		Type:     step.Type,
-		IsRoot:   true,
-		Labels:   append([]string{}, step.Labels...),
-		Assignee: step.Assignee,
-		Metadata: rootMeta,
+		ID:          attemptPrefix,
+		Title:       step.Title,
+		Description: step.Description,
+		Type:        step.Type,
+		IsRoot:      true,
+		Labels:      append([]string{}, step.Labels...),
+		Assignee:    step.Assignee,
+		Metadata:    rootMeta,
 	}
 	if step.Type == "" {
 		rootStep.Type = "task"
