@@ -197,6 +197,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
+	if err := config.ValidateManagedLaunchPermissionPolicy(resolved, command); err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
