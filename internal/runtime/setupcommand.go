@@ -29,10 +29,22 @@ const (
 // error so operators can see why a setup command failed without hunting for
 // logs.
 //
-// Extracted from the tmux adapter (whose startOps delegates here) so other
-// host-side providers (herdr) run lifecycle commands with identical
-// semantics: same timeout handling, same GC_DIR cwd contract, same
-// daemonizing-child tolerance, same failure detail.
+// Extracted from the tmux adapter as the shared core that host-side providers
+// (tmux, herdr) will delegate to, so lifecycle commands run with one set of
+// semantics: same GC_DIR cwd contract, same daemonizing-child tolerance, same
+// failure detail. As of this commit it has no callers — tmux
+// (internal/runtime/tmux/adapter.go) and herdr (internal/runtime/herdr/provider.go)
+// still run their own copies.
+//
+// PARITY REQUIRED BEFORE WIRING: both current callers have since grown an
+// execgrace layer this snapshot predates. Before either delegates here, this
+// runner must regain: execgrace.NewMonitor idle/ceiling budgets under
+// [session] setup_max_timeout (this version has a single fixed deadline),
+// execgrace.Apply cooperative process-group interrupt so shell rollback traps
+// run before SIGKILL (see adapter.go's note on stranded staged state), and
+// context.Cause in the failure wrap so the reported error names which budget
+// fired. Provider-specific behavior is also not covered here: tmux's
+// GC_TMUX_SOCKET injection and herdr's GC_DIR-exists-else-cityRoot fallback.
 func RunSetupCommand(ctx context.Context, command string, env map[string]string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
