@@ -507,6 +507,74 @@ func TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped(t 
 	}
 }
 
+// TestReadyAssignedByBeadIDResolvesStoreScopedReadiness verifies the basic
+// contract: for beads with distinct IDs, readyAssignedByBeadID resolves each
+// one's store-scoped readiness verdict into a plain ID-keyed map, matching
+// what readyAssignedFlagsForBeads would report index-aligned.
+func TestReadyAssignedByBeadIDResolvesStoreScopedReadiness(t *testing.T) {
+	work := []beads.Bead{{ID: "ga-ready"}, {ID: "ga-blocked"}}
+	storeRefs := []string{"", "rig"}
+	readyAssigned := map[storeScopedBeadKey]bool{
+		{StoreRef: "", ID: "ga-ready"}: true,
+	}
+
+	got := readyAssignedByBeadID(readyAssigned, work, storeRefs)
+
+	if !got["ga-ready"] {
+		t.Fatal("ga-ready must resolve to true")
+	}
+	if got["ga-blocked"] {
+		t.Fatal("ga-blocked must resolve to false")
+	}
+}
+
+// TestReadyAssignedByBeadIDAcceptsCrossStoreCollisionForPoolResumeUse
+// documents the deliberate trade-off readyAssignedByBeadID makes for its one
+// consumer (the pool reconciler's resume tier, ga-ebxikh): unlike
+// readyAssignedFlagsForBeads (store-scoped, see
+// TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped
+// above), collapsing to a plain bead-ID key means the LAST entry for a
+// shared ID wins. This is accepted because bead IDs are globally unique in
+// this fleet in practice; this test pins the resulting behavior so a future
+// change in ID-generation uniqueness assumptions is caught here rather than
+// silently changing pool resume decisions.
+func TestReadyAssignedByBeadIDAcceptsCrossStoreCollisionForPoolResumeUse(t *testing.T) {
+	const sharedID = "ga-shared"
+	work := []beads.Bead{{ID: sharedID}, {ID: sharedID}}
+	storeRefs := []string{"", "rig"}
+	readyAssigned := map[storeScopedBeadKey]bool{
+		{StoreRef: "", ID: sharedID}: true,
+	}
+
+	got := readyAssignedByBeadID(readyAssigned, work, storeRefs)
+
+	if got[sharedID] {
+		t.Fatal("last-write-wins: the rig copy (store ref \"rig\", not ready) must overwrite the city copy's true verdict")
+	}
+}
+
+func TestWorkBeadResumeReady(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		ready  bool
+		want   bool
+	}{
+		{"in_progress always actionable even when not marked ready", "in_progress", false, true},
+		{"open requires ready", "open", false, false},
+		{"open honors ready", "open", true, true},
+		{"closed never actionable", "closed", true, false},
+		{"empty status never actionable", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workBeadResumeReady(tc.status, tc.ready); got != tc.want {
+				t.Errorf("workBeadResumeReady(%q, %v) = %v, want %v", tc.status, tc.ready, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAwakeSetToWakeEvalsPreservesDecisionReason(t *testing.T) {
 	evals := awakeSetToWakeEvals(
 		map[string]AwakeDecision{

@@ -8,16 +8,17 @@ import (
 )
 
 // closedPoolSessionBead creates a closed pool-managed session bead whose
-// template metadata matches the given qualified template name. Used to
-// construct "session bead closed but template still configured" scenarios.
-func closedPoolSessionBead(id, template string) beads.Bead {
+// template metadata matches "rig/claude", the qualified template name every
+// caller in this file constructs. Used to construct "session bead closed but
+// template still configured" scenarios.
+func closedPoolSessionBead() beads.Bead {
 	return beads.Bead{
-		ID:     id,
+		ID:     "sess-1",
 		Status: "closed",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"template":             template,
+			"template":             "rig/claude",
 			poolManagedMetadataKey: boolMetadata(true),
 		},
 	}
@@ -39,9 +40,9 @@ func TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession(t *testing.T
 	work := []beads.Bead{
 		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
 	}
-	closed := closedPoolSessionBead("sess-1", "rig/claude")
+	closed := closedPoolSessionBead()
 
-	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil, nil)
 
 	wakeCount := 0
 	for _, ds := range result {
@@ -53,6 +54,59 @@ func TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession(t *testing.T
 	}
 	if wakeCount != 1 {
 		t.Errorf("wake-known-identity count = %d, want 1 — closed session with known template must produce a wake request", wakeCount)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentitySkipsUnreadyOpenBead is the
+// wake-known-identity-tier counterpart to
+// TestComputePoolDesiredStates_ResumeSkipsUnreadyOpenBead (ga-ebxikh): an
+// "open" work bead assigned directly to a known template with no live
+// session (the closed-session/orphan-recovery shape) must not produce a
+// wake request when readyAssigned does not mark it ready.
+func TestComputePoolDesiredStates_WakeKnownIdentitySkipsUnreadyOpenBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude", "rig/claude", "open", 5),
+	}
+	closed := closedPoolSessionBead()
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil, map[string]bool{})
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total requests = %d, want 0 — a blocked open bead must not wake a known identity", total)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentityIncludesReadyOpenBead is the
+// positive control: the identical shape still produces a wake-known-identity
+// request once readyAssigned marks the bead ready.
+func TestComputePoolDesiredStates_WakeKnownIdentityIncludesReadyOpenBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", nil, 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude", "rig/claude", "open", 5),
+	}
+	closed := closedPoolSessionBead()
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil, map[string]bool{"w1": true})
+
+	wakeCount := 0
+	for _, ds := range result {
+		for _, req := range ds.Requests {
+			if req.Tier == "wake-known-identity" {
+				wakeCount++
+			}
+		}
+	}
+	if wakeCount != 1 {
+		t.Errorf("wake-known-identity count = %d, want 1 — a ready open bead must still wake a known identity", wakeCount)
 	}
 }
 
@@ -68,7 +122,7 @@ func TestComputePoolDesiredStates_WakeKnownIdentityUnknownAssigneeProducesNoRequ
 		workBead("w1", "rig/claude", "unknown-session-id", "in_progress", 5),
 	}
 	// No session beads at all — assignee doesn't resolve.
-	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+	result := ComputePoolDesiredStates(cfg, work, nil, nil, nil)
 
 	total := 0
 	for _, ds := range result {
@@ -90,9 +144,9 @@ func TestComputePoolDesiredStates_WakeKnownIdentityDedupsMultipleBeadsForSameSes
 		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
 		workBead("w2", "rig/claude", "rig/claude", "open", 3),
 	}
-	closed := closedPoolSessionBead("sess-1", "rig/claude")
+	closed := closedPoolSessionBead()
 
-	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{closed}), nil, nil)
 
 	wakeCount := 0
 	for _, ds := range result {
@@ -119,7 +173,7 @@ func TestComputePoolDesiredStates_LiveSessionContinuesAsResumeTier(t *testing.T)
 	}
 	sessions := []beads.Bead{sessionBead("sess-live", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil, nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("expected 1 request, got %#v", result)

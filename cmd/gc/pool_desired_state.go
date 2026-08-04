@@ -76,13 +76,24 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // Each bead's gc.routed_to determines which agent template it belongs to.
 // scaleCheckCounts maps agent template → new session demand from scale_check.
 // Pass nil for either when unavailable.
+//
+// readyAssigned reports, per assignedWorkBeads[i].ID, whether an "open" bead
+// already passed a readiness/deps gate upstream (build via
+// readyAssignedByBeadID). A nil readyAssigned means no readiness snapshot
+// was threaded through by this caller yet and preserves legacy status-only
+// gating (every "open" bead is treated as ready) so existing callers are
+// unaffected; a non-nil map is authoritative and an unlisted bead ID is
+// treated as not ready. Production callers must always pass a real map —
+// see ga-ebxikh, where the absence of this gate let a BLOCKED-but-routed
+// bead repeatedly redispatch a session.
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
+	readyAssigned map[string]bool,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, readyAssigned)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -91,8 +102,9 @@ func ComputePoolDesiredStatesTraced(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
+	readyAssigned map[string]bool,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace, readyAssigned)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -102,8 +114,9 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
+	readyAssigned map[string]bool,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace, readyAssigned)
 }
 
 func computePoolDesiredStates(
@@ -113,6 +126,7 @@ func computePoolDesiredStates(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
+	readyAssigned map[string]bool,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, alias, or
@@ -161,7 +175,11 @@ func computePoolDesiredStates(
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
-			if wb.Status != "in_progress" && wb.Status != "open" {
+			ready := true
+			if readyAssigned != nil {
+				ready = readyAssigned[wb.ID]
+			}
+			if !workBeadResumeReady(wb.Status, ready) {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)

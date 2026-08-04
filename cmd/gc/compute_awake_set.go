@@ -700,14 +700,7 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 }
 
 func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
-	switch bead.Status {
-	case "in_progress":
-		return true
-	case "open":
-		return bead.Ready
-	default:
-		return false
-	}
+	return workBeadResumeReady(bead.Status, bead.Ready)
 }
 
 func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, assignee string) bool {

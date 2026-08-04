@@ -286,3 +286,56 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 	}
 	return flags
 }
+
+// workBeadResumeReady reports whether a work bead's status represents
+// actionable demand for a session to resume, wake, or stay awake:
+// in-progress work is always actionable; open work is actionable only when
+// it already passed a readiness/deps gate upstream (ready==true); any other
+// status is never actionable. This is the shared judgment that must be
+// applied everywhere a work bead can hold a session awake or trigger a
+// spawn — see ga-ebxikh, where the pool reconciler's resume tier was found
+// to be the third independent copy of this switch, and the only one
+// missing the readiness half of the check.
+func workBeadResumeReady(status string, ready bool) bool {
+	switch status {
+	case "in_progress":
+		return true
+	case "open":
+		return ready
+	default:
+		return false
+	}
+}
+
+// readyAssignedByBeadID collapses the store-scoped wake-demand readiness map
+// into a plain bead-ID map, built while beadList and storeRefs are still
+// index-aligned — i.e., before filterAssignedWorkBeadsForPoolDemand or any
+// other bead-dropping filter runs, since those filters do not produce a
+// correspondingly-filtered storeRefs slice.
+//
+// The collapse to a plain bead-ID key is a deliberate operational trade-off,
+// not an enforced invariant. Nothing asserts distinct bead-ID prefixes across
+// stores at config load — BdStore tracks only an owned prefix per store, not a
+// cross-store uniqueness guarantee — so on a shared-ID collision the last bead
+// written for that ID wins (last-write-wins by iteration order). The sibling
+// readyAssignedFlagsForBeads above keeps its store-scoped key precisely to
+// defend the wake path against that collision; this map's sole consumer, the
+// pool reconciler's resume tier, tolerates it because bead IDs are globally
+// unique across this fleet's stores in practice. That trade-off is pinned by
+// TestReadyAssignedByBeadIDAcceptsCrossStoreCollisionForPoolResumeUse, so a
+// future change in the ID-uniqueness assumption is caught there rather than
+// silently altering pool resume decisions.
+func readyAssignedByBeadID(readyAssigned map[storeScopedBeadKey]bool, beadList []beads.Bead, storeRefs []string) map[string]bool {
+	if len(beadList) == 0 {
+		return nil
+	}
+	byID := make(map[string]bool, len(beadList))
+	for i, wb := range beadList {
+		ref := ""
+		if i < len(storeRefs) {
+			ref = storeRefs[i]
+		}
+		byID[wb.ID] = readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}]
+	}
+	return byID
+}

@@ -2213,6 +2213,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
+	poolReadyByID := readyAssignedByBeadID(result.ReadyAssigned, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 	phaseStart := time.Now()
 	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
@@ -2253,7 +2254,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, trace, poolReadyByID)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -3061,10 +3062,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
+	poolReadyByID := readyAssignedByBeadID(wfcResult.ReadyAssigned, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts)),
+			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, poolReadyByID)),
 		filteredSnap,
 		wfcResult.PoolScaleCheckPartialTemplates,
 	)
@@ -3277,10 +3279,11 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
+		poolReadyByID := readyAssignedByBeadID(result.ReadyAssigned, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, trace, poolReadyByID)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)

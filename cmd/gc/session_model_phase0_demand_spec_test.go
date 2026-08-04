@@ -71,7 +71,7 @@ func TestPhase0PoolDesiredStates_AssigneeOnlyKeepsConcreteSessionAlive(t *testin
 	}}
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 
-	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil, nil)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))

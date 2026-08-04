@@ -833,11 +833,12 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
+		poolReadyByID := readyAssignedByBeadID(readyAssigned, assignedWorkBeads, assignedWorkStoreRefs)
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace, poolReadyByID)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -908,17 +909,11 @@ func buildDesiredStateWithSessionBeads(
 			// the readiness check, an open assigned bead that entered the snapshot
 			// via the open-routed orphan-release pass (no deps gate) would keep an
 			// on-demand named session awake forever even while blocked.
-			switch wb.Status {
-			case "in_progress":
-			case "open":
-				ref := ""
-				if i < len(assignedWorkStoreRefs) {
-					ref = assignedWorkStoreRefs[i]
-				}
-				if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
-					continue
-				}
-			default:
+			ref := ""
+			if i < len(assignedWorkStoreRefs) {
+				ref = assignedWorkStoreRefs[i]
+			}
+			if !workBeadResumeReady(wb.Status, readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}]) {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
