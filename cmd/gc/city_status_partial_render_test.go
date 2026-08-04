@@ -154,6 +154,8 @@ func TestPadStatusNameMatchesFixedPadBelowGutter(t *testing.T) {
 		{name: strings.Repeat("a", 23), width: 24, want: strings.Repeat("a", 23) + "  "},
 		{name: strings.Repeat("a", 24), width: 24, want: strings.Repeat("a", 24) + "  "},
 		{name: strings.Repeat("a", 40), width: 24, want: strings.Repeat("a", 40) + "  "},
+		{name: "wörker", width: 24, want: "wörker" + strings.Repeat(" ", 18)},
+		{name: strings.Repeat("ä", 22), width: 24, want: strings.Repeat("ä", 22) + "  "},
 	}
 	for _, tc := range tests {
 		got := padStatusName(tc.name, tc.width)

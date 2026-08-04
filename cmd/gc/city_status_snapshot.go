@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -504,12 +505,14 @@ const (
 // has no enforced minimum gutter, so a rig-qualified name at or past the pad
 // width runs straight into the status word
 // ("tar-valon/core.control-dispatcherunknown  (partial status)").
-// Names short enough to keep the gutter pad exactly as "%-*s" did.
+// Names short enough to keep the gutter pad exactly as "%-*s" did, measured in
+// runes to match fmt's width semantics.
 func padStatusName(name string, width int) string {
-	if len(name)+statusNameColumnGutter > width {
+	n := utf8.RuneCountInString(name)
+	if n+statusNameColumnGutter > width {
 		return name + strings.Repeat(" ", statusNameColumnGutter)
 	}
-	return name + strings.Repeat(" ", width-len(name))
+	return name + strings.Repeat(" ", width-n)
 }
 
 // agentSummaryLine renders the agent-count summary that closes the Agents
