@@ -6,7 +6,102 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestBulkDeleteSafe(t *testing.T) {
+	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	maxAge := 24 * time.Hour
+
+	t.Run("all scopes fresh → safe", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		writeBackupStateForFreshness(t, scope1, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, scope2, now.Add(-2*time.Hour).Format(time.RFC3339))
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("all fresh: want safe=true, got safe=false, reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("all fresh: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("one stale scope → unsafe, reason contains scope label", func(t *testing.T) {
+		fresh := t.TempDir()
+		stale := t.TempDir()
+		writeBackupStateForFreshness(t, fresh, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, stale, now.Add(-48*time.Hour).Format(time.RFC3339))
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: fresh},
+			{Path: stale},
+		}}
+		safe, reason := BulkDeleteSafe(fresh, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("stale scope: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, stale) {
+			t.Fatalf("stale scope: reason should name the stale scope %q, got %q", stale, reason)
+		}
+	})
+
+	t.Run("no backup_state.json in any scope → safe (unconfigured is not this check's job)", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("no backup config: want safe=true, got safe=false, reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("no backup config: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("migrated scope with a never-synced dolt backup → unsafe", func(t *testing.T) {
+		scope := t.TempDir()
+		writeDoltBackupRegistration(t, scope) // no dolt-backup-state.json
+		cfg := &config.City{Rigs: []config.Rig{{Path: scope}}}
+		safe, reason := BulkDeleteSafe(scope, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("never-synced dolt backup: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "never synced") {
+			t.Fatalf("reason should say the backup never synced, got %q", reason)
+		}
+	})
+
+	// With no config in hand the gate must discover scopes from disk. Narrowing
+	// to the city root would leave the rig unscanned and return safe=true —
+	// failing this gate OPEN on a destructive operation.
+	t.Run("nil config still scans rigs discovered on disk", func(t *testing.T) {
+		city := t.TempDir()
+		rig := filepath.Join(city, "rigs", "alpha")
+		if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir rig .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatalf("write metadata.json: %v", err)
+		}
+		writeBackupStateForFreshness(t, rig, now.Add(-48*time.Hour).Format(time.RFC3339))
+
+		safe, reason := BulkDeleteSafe(city, nil, maxAge, now)
+		if safe {
+			t.Fatalf("nil config with a stale rig: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "ago") {
+			t.Fatalf("reason should describe the stale age, got %q", reason)
+		}
+	})
+}
 
 func writeBackupStateForFreshness(t *testing.T, scopeRoot, timestamp string) {
 	t.Helper()

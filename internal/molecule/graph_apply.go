@@ -399,7 +399,7 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	}
 	if !opts.nativeStepTopologyPrepared {
 		recipe = fragmentRecipeWithNativeStepDependencies(recipe)
-		if err := applyExternalNativeStepDependencies(store, recipe.Steps, opts.ExternalDeps); err != nil {
+		if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
 			return nil, err
 		}
 		opts.nativeStepTopologyPrepared = true

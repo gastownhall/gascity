@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -726,6 +727,7 @@ conflicting live workflow from the same source is an error.`,
 							}
 							return err
 						}
+						emitFormulaCookExecutionFacts(store, cityPath, result, stderr)
 						return ensureFormulaCookAttachDep(store, attach, result.RootID)
 					})
 					if err != nil {
@@ -782,6 +784,7 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
+				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -851,6 +854,7 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
+				emitFormulaCookExecutionFacts(store, cityPath, result, stderr)
 			} else {
 				result, err = molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
 					Title: title,
@@ -902,6 +906,21 @@ conflicting live workflow from the same source is an error.`,
 	cmd.Flags().StringVar(&attach, "attach", "", "attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
 	return cmd
+}
+
+func emitFormulaCookExecutionFacts(store beads.Store, cityPath string, result *molecule.Result, stderr io.Writer) {
+	if result == nil || !result.GraphWorkflow {
+		return
+	}
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, result.RootID, "formula-cook"); err != nil {
+		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", result.RootID, err) //nolint:errcheck // successful cook is preserved
+	}
+}
+
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
+	}
 }
 
 type formulaCookJSONResult struct {

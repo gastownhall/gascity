@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -1606,6 +1607,11 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 	rootID := cookResult.RootID
+	if cookResult.GraphWorkflow {
+		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rootID, "order-dispatch"); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: projecting execution facts for %s: %v", scoped, rootID, err)
+		}
+	}
 
 	// Stamp the created wisp through the store contract rather than a raw
 	// bd subprocess so controller dispatch stays provider-aware.

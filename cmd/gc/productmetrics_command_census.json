@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 197,
+  "next_id": 198,
   "permanent_ids": [
     {
       "name": "help",
@@ -1466,6 +1466,21 @@
       "classification": "events",
       "owner": "immediate",
       "id": 50
+    },
+    {
+      "path": "gc events reemit-execution",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "events-stream",
+      "notice_policy": "ineligible",
+      "classification": "events-reemit-execution",
+      "owner": "immediate",
+      "id": 197
     },
     {
       "path": "gc events rotate",

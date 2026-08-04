@@ -621,11 +621,11 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 
 func controllerStatusForCity(cityPath string) ControllerJSON {
 	_, registered, err := registeredCityEntry(cityPath)
-	supervisorWasAlive := false
+	observedSupervisorPID := 0
 	if err == nil && registered {
 		ctrl := ControllerJSON{Mode: "supervisor"}
 		if pid := supervisorAliveHook(); pid != 0 {
-			supervisorWasAlive = true
+			observedSupervisorPID = pid
 			ctrl.PID = pid
 			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
@@ -638,13 +638,19 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 			}
 		}
 	}
-	if supervisorWasAlive {
-		if pid := controllerAliveWithin(cityPath, controllerStatusStandaloneFallbackTimeout); pid != 0 {
-			return ControllerJSON{Running: true, PID: pid, Mode: "supervisor"}
+	if observedSupervisorPID != 0 {
+		if identity := controllerIdentityWithin(cityPath, controllerStatusStandaloneFallbackTimeout); identity.PID != 0 {
+			mode := identity.HostingMode
+			if !mode.known() && identity.PID == observedSupervisorPID {
+				// PID equality ties this legacy numeric-only controller response
+				// to the supervisor observed immediately before the retry.
+				mode = controllerHostingSupervisor
+			}
+			return ControllerJSON{Running: true, PID: identity.PID, Mode: string(mode)}
 		}
 	}
-	if pid := controllerAlive(cityPath); pid != 0 {
-		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
+	if identity := probeControllerIdentity(cityPath); identity.PID != 0 {
+		return ControllerJSON{Running: true, PID: identity.PID, Mode: string(identity.HostingMode)}
 	}
 	if err == nil && registered {
 		return ControllerJSON{Mode: "supervisor"}
@@ -652,17 +658,17 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 	return ControllerJSON{}
 }
 
-func controllerAliveWithin(cityPath string, timeout time.Duration) int {
+func controllerIdentityWithin(cityPath string, timeout time.Duration) controllerIdentityReply {
 	if timeout <= 0 {
-		return controllerAlive(cityPath)
+		return probeControllerIdentity(cityPath)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if pid := controllerAlive(cityPath); pid != 0 {
-			return pid
+		if identity := probeControllerIdentity(cityPath); identity.PID != 0 {
+			return identity
 		}
 		if time.Now().After(deadline) {
-			return 0
+			return controllerIdentityReply{}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -704,6 +710,9 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 			return fmt.Sprintf("standalone-managed (PID %d)", ctrl.PID)
 		}
 	}
+	if ctrl.Running {
+		return fmt.Sprintf("controller running (PID %d, hosting mode unknown)", ctrl.PID)
+	}
 	return "stopped"
 }
 
@@ -742,6 +751,16 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 			return append(lines, "Next: gc supervisor logs to see the init failure")
 		}
 		return append(lines, "Next: gc supervisor logs to inspect startup progress")
+	}
+	if ctrl.Running {
+		authority := "Authority: controller hosting mode unknown"
+		if ctrl.PID != 0 {
+			authority = fmt.Sprintf("Authority: controller PID %d; hosting mode unknown", ctrl.PID)
+		}
+		return []string{
+			authority,
+			"Next: upgrade or restart the running controller to restore authoritative hosting information",
+		}
 	}
 	return nil
 }
