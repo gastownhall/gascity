@@ -819,7 +819,13 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+		// Skip agent session context directories: the "ga-" prefix is the
+		// naming convention for per-agent session context directories created
+		// by the orchestration system at the builder worktree root. They
+		// contain Claude/Codex session state (.claude/, .codex/) including
+		// synced skill packages (.claude/skills/**/*.md) — real markdown,
+		// but not a documentation tree to link-check.
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "ga-") || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {
