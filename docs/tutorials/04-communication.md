@@ -52,8 +52,8 @@ via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
 
 Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that
-request can wake a non-running recipient; unmanaged or storeless paths may only
-queue the nudge for later delivery.
+request can wake a non-running recipient; an unmanaged city queues the nudge for
+later delivery; without a city store the nudge is skipped.
 
 Check for unread mail:
 
