@@ -143,15 +143,6 @@ func TestEventsReemitExecutionRejectsRunningStateAndAllowsStoppedSupervisorCity(
 	configureIsolatedRuntimeEnv(t)
 	cityPath, root := setupExecutionReemitCity(t)
 
-	oldControllerAlive := eventsReemitExecutionControllerAliveHook
-	oldSupervisorAlive := supervisorAliveHook
-	oldSupervisorCityRunning := supervisorCityRunningHook
-	t.Cleanup(func() {
-		eventsReemitExecutionControllerAliveHook = oldControllerAlive
-		supervisorAliveHook = oldSupervisorAlive
-		supervisorCityRunningHook = oldSupervisorCityRunning
-	})
-
 	assertRejected := func(t *testing.T, want string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
@@ -160,26 +151,20 @@ func TestEventsReemitExecutionRejectsRunningStateAndAllowsStoppedSupervisorCity(
 		}
 	}
 
-	t.Run("controller", func(t *testing.T) {
-		eventsReemitExecutionControllerAliveHook = func(string) int { return 1 }
-		supervisorAliveHook = func() int { return 0 }
+	t.Run("held lock", func(t *testing.T) {
+		release := holdFlock(t, filepath.Join(cityPath, ".gc", "controller.lock"))
+		defer release()
 		assertRejected(t, "city controller is running")
 	})
-	t.Run("supervisor known running", func(t *testing.T) {
-		eventsReemitExecutionControllerAliveHook = func(string) int { return 0 }
-		supervisorAliveHook = func() int { return 1 }
-		supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "running", true }
-		assertRejected(t, "city is running under the supervisor")
-	})
-	t.Run("supervisor unknown", func(t *testing.T) {
-		supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "", false }
-		assertRejected(t, "could not determine supervisor city state")
-	})
-	t.Run("supervisor known stopped", func(t *testing.T) {
-		supervisorCityRunningHook = func(string) (bool, string, bool) { return false, "stopped", true }
+	t.Run("stopped local city does not call supervisor hooks", func(t *testing.T) {
+		oldSupervisorAlive := supervisorAliveHook
+		oldSupervisorCityRunning := supervisorCityRunningHook
+		supervisorAliveHook = func() int { panic("supervisor probe called") }
+		supervisorCityRunningHook = func(string) (bool, string, bool) { panic("city enumeration called") }
+		t.Cleanup(func() { supervisorAliveHook, supervisorCityRunningHook = oldSupervisorAlive, oldSupervisorCityRunning })
 		var stdout, stderr bytes.Buffer
 		if code := run([]string{"--city", cityPath, "events", "reemit-execution", "--run", root.ID}, &stdout, &stderr); code != 0 {
-			t.Fatalf("known stopped reemit = %d; stderr=%q", code, stderr.String())
+			t.Fatalf("stopped reemit = %d; stderr=%q", code, stderr.String())
 		}
 	})
 }
@@ -208,6 +193,9 @@ func setupExecutionReemitCity(t *testing.T) (string, beads.Bead) {
 	}
 	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
 		t.Fatalf("ensure file store layout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "controller.lock"), nil, 0o600); err != nil {
+		t.Fatalf("write controller lock: %v", err)
 	}
 	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
 		t.Fatalf("ensure file store: %v", err)

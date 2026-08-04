@@ -7,13 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/spf13/cobra"
 )
-
-var eventsReemitExecutionControllerAliveHook = controllerAlive
 
 type eventsReemitExecutionResult struct {
 	RunID      string `json:"run_id"`
@@ -66,17 +65,8 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 	if err != nil {
 		return fmt.Errorf("resolving --city: %w", err)
 	}
-	if eventsReemitExecutionControllerAliveHook(cityPath) != 0 {
-		return fmt.Errorf("city controller is running")
-	}
-	if supervisorAliveHook() != 0 {
-		running, _, known := supervisorCityRunningHook(cityPath)
-		if !known {
-			return fmt.Errorf("could not determine supervisor city state")
-		}
-		if running {
-			return fmt.Errorf("city is running under the supervisor")
-		}
+	if err := requireStoppedExecutionReemitCity(cityPath); err != nil {
+		return err
 	}
 
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -118,4 +108,30 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 		EventCount: len(facts),
 		Applied:    apply,
 	})
+}
+
+func requireStoppedExecutionReemitCity(cityPath string) error {
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		return fmt.Errorf("validating city config: %w", err)
+	}
+	runtimeDir := filepath.Join(cityPath, ".gc")
+	if info, err := os.Stat(runtimeDir); err != nil || !info.IsDir() {
+		if err != nil {
+			return fmt.Errorf("validating city runtime: %w", err)
+		}
+		return fmt.Errorf("validating city runtime: not a directory")
+	}
+	lock, err := os.OpenFile(filepath.Join(runtimeDir, "controller.lock"), os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("opening controller lock: %w", err)
+	}
+	defer lock.Close() //nolint:errcheck // probe cleanup
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return fmt.Errorf("city controller is running")
+		}
+		return fmt.Errorf("probing controller lock: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck // probe cleanup
+	return nil
 }
