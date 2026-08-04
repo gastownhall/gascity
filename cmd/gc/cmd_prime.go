@@ -12,11 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -188,6 +186,22 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 // into the output, but is not archived. Preview callers (--json) pass false so
 // that a diagnostic run cannot eat the continuation the real SessionStart hook
 // is supposed to deliver.
+// hookNudgePollerSessionProvider resolves the session provider used to gate
+// nudge-poller spawn on event-capable suppression. Fail open on resolution
+// errors — a hook must not start failing because the provider config is
+// momentarily broken. newSessionProviderFromContext already returns a nil
+// provider on error, which preserves the legacy sidecar spawn
+// (providerRetiresNudgePollers treats nil as not event-capable); only the
+// event-capable suppression is lost this pass.
+func hookNudgePollerSessionProvider(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+	sp, err := newSessionProviderFromContext(spctx, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", err) //nolint:errcheck
+		return nil
+	}
+	return sp
+}
+
 func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) int {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
@@ -332,24 +346,17 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			// broken; the possibly-nil provider is confined to the else branch so
 			// today's spawn still runs when construction fails.
 			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-			hookSP, hookSPErr := newSessionProviderFromContext(spctx, nil)
-			if hookSPErr != nil {
-				// Fail open: a momentarily-broken provider config must not fail
-				// the hook, so skip the event-capable nudge-poller wiring this
-				// pass — today's spawn still runs with the nil provider.
-				fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", hookSPErr) //nolint:errcheck
-			} else {
-				maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
-					cityPath:          cityPath,
-					cityName:          cityName,
-					cfg:               cfg,
-					agent:             a,
-					resolved:          resolved,
-					sessionID:         os.Getenv("GC_SESSION_ID"),
-					continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
-					sessionName:       sessionName,
-				}), hookSP)
-			}
+			hookSP := hookNudgePollerSessionProvider(spctx, stderr)
+			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
+				cityPath:          cityPath,
+				cityName:          cityName,
+				cfg:               cfg,
+				agent:             a,
+				resolved:          resolved,
+				sessionID:         os.Getenv("GC_SESSION_ID"),
+				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+				sessionName:       sessionName,
+			}), hookSP)
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
@@ -546,11 +553,16 @@ func startupPromptDeliveredMarkerStale(cityPath string) bool {
 	if err != nil {
 		return false
 	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return false
 	}
-	markers, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).PersistedMarkers(sessionID)
+	// Route the marker read through the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches this check, matching the other
+	// prime-hook session reads (see primeHookSessionTemplate). No-refresh config
+	// loader on this hot hook path; nil cfg → cliSessionStore identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	markers, err := cliSessionFrontDoor(store, cfg, cityPath).PersistedMarkers(sessionID)
 	if err != nil {
 		return false
 	}
