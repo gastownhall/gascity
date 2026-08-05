@@ -6,23 +6,26 @@
 review verdict is recorded directly in this bead's own notes)
 **Reviewed commit:** `df22e72dcbddb10713a39f400d8972d7f815c4c1`
 **Round 1 retried commit:** `eb87748d3c30e55f8edca958a91a435185f5c838` (superseded — see Round 2)
-**Round 2 commits (new, not yet code-reviewed):** `0fcb4406cb0aa517a7631a9cc538f6bb19303ab9`
+**Round 2 commits:** `0fcb4406cb0aa517a7631a9cc538f6bb19303ab9`
 (red), `8eb3b4a11f3b65a7ff57f5fb0f016d1beb42964d` (green) — CLI age-gate rework
+(superseded at the shipped head — see Round 3)
+**Round 3 head (shipped):** `cad296949ca2dd583ad7ff0a14df8006bdb0b56d`
 **Base checked:** `origin/main` at `679e6e46316aa50226ecf58e4f2df739dabcaf21`
-(round 1 rebase target); round 2 re-rebased onto `08bba7a3a63faaece48cf88976e11c51727fb4e6`
-(see Round 2 section below)
+(round 1 rebase target); round 2 re-rebased onto `08bba7a3a63faaece48cf88976e11c51727fb4e6`;
+round 3 merged `origin/main` twice, most recently at
+`3db4ed265db02a411b081e4581b435d80d4a5311` (see Round 3 section below)
 **Isolated branch:** `builder/ga-5hdwl6-session-creating-wedge`
 **Round 1 verdict:** **PASS** (superseded by mayor REQUEST-CHANGES on PR #4772 —
 see Round 2)
-**Round 2 verdict:** **TECHNICAL GATE PASS — code-review criteria (1, 4) pending
-mayor re-review of the new commits.** This document's technical criteria
-(build/vet/tests/clean branch/clean divergence) are builder-self-certified, as
-in round 1. The code-review criteria are NOT builder-self-certifiable: round 1's
-`ga-uco1ol` PASS review covers only the patch-id-identical projection-fix
-portion of the diff (confirmed unchanged below); the round 2 CLI age-gate
-rework is new code submitted here for the first time and has not yet been
-reviewed by anyone. Do not treat this document as full deploy clearance until
-mayor re-reviews PR #4772's new commits.
+**Round 2 verdict:** **TECHNICAL GATE PASS** at `8eb3b4a11`; its two code-review
+criteria (1, 4) were open at the time that section was written and are now
+resolved — the diff was reviewed on PR #4772 and merged. Round 2's technical
+criteria (build/vet/tests/clean branch/clean divergence) were
+builder-self-certified, as in round 1, and its evidence describes the
+`8eb3b4a11` head, not the shipped one.
+**Round 3 verdict:** **PASS** at `cad296949`. The CLI age-gate rework was
+reviewed on PR #4772 and merged; see the Round 3 section for what changed after
+`8eb3b4a11` and for the evidence that stands at the shipped head.
 
 ## Why this is a retry (round 1)
 
@@ -161,7 +164,7 @@ Mayor's WHAT TO DO list (verbatim, four items) and this round's disposition:
 | Item | Instruction | Disposition |
 |------|-------------|-------------|
 | 1 | Age-gate the CLI arm using the *existing* `isStaleCreatingInfo` helper (`cmd/gc/city_runtime.go:2927`), not a new one — "keeps the CLI and the sweep agreeing" | Done: `isStaleCreatingInfo(res.Info)` added as a third conjunct on the `hasRunnableTemplate && sessionWakeStuckInFlightInfo(...)` switch case. `sessionWakeStuckInFlightInfo` itself is untouched. |
-| 2 | Add `cmd_session_wake_test.go` coverage for the new arm, landing *with* this change, not deferred | Done: `TestDoSessionWake_StuckInFlightAgeGate` (4 subtests: fresh creating/start-pending wake normally; stale creating/start-pending reject). `ga-feuu02` (the P3 bead that had deferred this) closed as done-elsewhere. |
+| 2 | Add `cmd_session_wake_test.go` coverage for the new arm, landing *with* this change, not deferred | Done: `TestDoSessionWake_StuckInFlightAgeGate`, 5 subtests at the shipped head (fresh creating/start-pending wake normally; stale creating/start-pending reject; leased never-started create wakes normally). Four of those landed in this round at `8eb3b4a11`; the fifth, plus the mirror test `TestDoSessionWake_NoRunnableTemplateAgeGate`, landed in round 3 — see the Round 3 section. `ga-feuu02` (the P3 bead that had deferred this) closed as done-elsewhere. |
 | 3 | Reword the failure message to state only what was checked — "has been in state X since TIMESTAMP without completing its create" — not "no live runtime", which the path never probes | Done: message now reads `session %s has been in state %q since %s without completing its create`, sourced from new helper `stuckCreatingSinceInfo` (mirrors `isStaleCreatingInfo`'s anchor preference — `PendingCreateStartedAt` else `CreatedAt` — purely to pick what to print, not to re-decide staleness). |
 | 4 | The projection half is harmless defense-in-depth and can stay | Done (by omission): `internal/session/lifecycle_projection.go` is untouched this round. |
 
@@ -169,10 +172,10 @@ Mayor's WHAT TO DO list (verbatim, four items) and this round's disposition:
 
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
-| 1 | Review PASS present | **PARTIAL** | The patch-id-identical projection-fix portion retains `ga-uco1ol`'s round-1 PASS (verified unchanged below). The new CLI age-gate rework (`0fcb4406c`, `8eb3b4a11`) is submitted here for the first time and has not been reviewed by anyone yet — that is the purpose of pushing this candidate to PR #4772. Not builder-self-certifiable. |
+| 1 | Review PASS present | PASS (resolved in round 3) | The patch-id-identical projection-fix portion retains `ga-uco1ol`'s round-1 PASS (verified unchanged below). The CLI age-gate rework (`0fcb4406c`, `8eb3b4a11`) was unreviewed when this section was written; it was subsequently reviewed on PR #4772 and merged, together with the round-3 commits listed below. |
 | 2 | Acceptance criteria met | PASS | All four WHAT TO DO items addressed — see table above. |
 | 3 | Tests pass | PASS | See Round 2 test evidence below: build/vet, the new test in isolation, full `cmd/gc`+`internal/session` suite, `Wake\|Creating` scope with and without `GC_FAST_UNIT=0` (skip-hazard double-check), `make test-fast-parallel` (10/10), `make test-cmd-gc-process-parallel` (7/7, includes `TestTutorial01`). |
-| 4 | No high-severity review findings open | **PARTIAL** | Mayor's finding 2 (the blocking one) is addressed this round. Finding 3 (root-cause uncertainty) is informational, tracked on `ga-uco1ol`, explicitly out of scope per mayor's own item 4. No new HIGH findings self-identified. Full disposition is mayor's call on re-review, not builder's. |
+| 4 | No high-severity review findings open | PASS (resolved in round 3) | Mayor's finding 2 (the blocking one) is addressed this round. Finding 3 (root-cause uncertainty) is informational, tracked on `ga-uco1ol`, explicitly out of scope per mayor's own item 4. No new HIGH findings self-identified. The round-3 review on PR #4772 opened no high-severity findings either; the production wedge root cause remains open under `ga-pofwv9.1`. |
 | 5 | Final branch is clean | PASS | `git status --porcelain` empty after each commit on `builder/ga-5hdwl6-session-creating-wedge`. |
 | 6 | Branch diverges cleanly from main | PASS | Rebased onto `origin/main` @ `08bba7a3a63faaece48cf88976e11c51727fb4e6` with zero conflicts (`Successfully rebased and updated refs/heads/builder/ga-5hdwl6-session-creating-wedge`). `git merge-tree --write-tree origin/main HEAD` succeeds with tree `5445643ced265e6cdccb26e3068de9ceafaed0ed`. |
 | 7 | Single feature theme | PASS | Two new commits, RED then GREEN, touching exactly `cmd/gc/cmd_session_wake.go` and `cmd/gc/cmd_session_wake_test.go` — the CLI-arm regression mayor flagged, nothing else. The carried-forward round-1 diff remains patch-id-identical (criterion below), so no unrelated drift was introduced by the rebase. |
@@ -265,5 +268,129 @@ no skip-hazard in this scope. `local-concurrency-selftest` in the fast-parallel
 output is a job added to `main` since round 1 (unrelated to this diff) — not
 a regression in this branch.
 
-**Not yet done (this round):** pushing the branch and updating PR #4772; that
-is the action this evidence gates.
+All of the above was measured at `8eb3b4a11`. None of it was re-run at the
+shipped head — see Round 3 for the evidence that stands there.
+
+## Round 3: what shipped
+
+The head this gate actually covers is
+`cad296949ca2dd583ad7ff0a14df8006bdb0b56d`, not `8eb3b4a11`. The sections above
+describe the round-2 candidate; this section records everything added on top of
+it. Nothing in rounds 1-2 was reverted — the round-3 commits tighten the CLI
+arms and extend their coverage.
+
+### Round 3 history
+
+```text
+cad296949 fix(session): say the wake was recorded on the stuck-in-flight reject
+cc96e759c fix(session): gate gc session wake's create arms on the pending-create lease
+77afdfc9b Merge remote-tracking branch 'origin/main' (3db4ed265)
+8ed9f21af fix(lint): spell `canceled` the way misspell wants in session-wake
+10fa1122c fix(session): withdraw queued wait nudges on the stuck-in-flight wake reject
+66548ecbc fix(session): age-gate the no-runnable-template arm of gc session wake
+2a30cda3d Merge remote-tracking branch 'origin/main' (ad4d0ab4a)
+8325bafca docs(release-gates): add round 2 gate evidence for ga-5hdwl6 (mayor rework)
+8eb3b4a11 fix: green — age-gate gc session wake's stuck-in-flight rejection via isStaleCreatingInfo
+```
+
+Still only the same four files plus this gate doc:
+`cmd/gc/cmd_session_wake.go`, `cmd/gc/cmd_session_wake_test.go`,
+`internal/session/lifecycle_projection.go`,
+`internal/session/wedge_repro_test.go`. No configuration, HTTP/API schema,
+generated asset, dashboard, or CI workflow files touched.
+
+### Round 3 changes
+
+1. **Pending-create lease checked before staleness** (`cc96e759c`). Round 2
+   gated the CLI arms on `isStaleCreatingInfo` alone. That rejects a create the
+   reconciler still protects, because `pendingCreateNeverStartedTimeout` (10m)
+   is deliberately longer than `staleCreatingStateTimeout` (1m). The gate is now
+   factored into `sessionWakeCreateAbandonedInfo(info, startupTimeout)`, whose
+   conjuncts run in the sweep's own order — lease first via
+   `!pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout)`, staleness
+   second — mirroring `cmd/gc/city_runtime.go:2853-2857`. `startupTimeout` comes
+   from `deps.cfg.Session.StartupTimeoutDuration()`, or `0` when `cfg == nil`,
+   which the lease helper clamps to the 1-minute config default.
+2. **`leased never-started create wakes normally`** — a fifth subtest on
+   `TestDoSessionWake_StuckInFlightAgeGate`, pinning exactly the window a
+   staleness-only gate got wrong: past the 1-minute staleness bound, still
+   inside the 10-minute never-started lease, no `last_woke_at`. The sweep skips
+   that bead; the CLI now agrees.
+3. **`TestDoSessionWake_NoRunnableTemplateAgeGate`** (`66548ecbc`, 5 subtests) —
+   the mirror of the above on the *mutating* arm. The no-runnable-template arm
+   clears `pending_create_claim`/`pending_create_started_at`, so an ungated
+   version would yank the lease out from under a create a provider had just
+   legitimately started. Subtests: fresh creating / fresh start-pending / leased
+   never-started all keep their lease; stale creating / stale start-pending heal
+   to asleep.
+4. **Queued wait nudges withdrawn on reject** (`10fa1122c`). The reject arm now
+   sets a `rejectStuck` flag and defers `return 1` until after the
+   withdraw/poke block. `WakeSession` has already canceled the waits by the time
+   the arm is reached, so an early return stranded their nudges in the queue
+   with nothing left to withdraw them. Every subtest, including the rejecting
+   ones, asserts `withdrawQueuedWaitNudges` fired.
+5. **Reject message says the wake was recorded** (`cad296949`). `WakeSession`
+   commits `wake_request=explicit` / `wake_requested_at` before this arm runs,
+   so the message now reads "the wake request was recorded but cannot complete
+   now" rather than implying nothing happened, and the test asserts the arm does
+   not roll that record back.
+6. **Lint** (`8ed9f21af`) — `cancelled` → `canceled` in a comment, for
+   `misspell`. No behavior change.
+
+### Round 3 gate criteria
+
+| # | Criterion | Result | Evidence |
+|---|-----------|--------|----------|
+| 1 | Review PASS present | PASS | Reviewed on PR #4772 and merged. The review covered the shipped head `cad296949`, including the round-3 commits above; it re-derived the lease-before-staleness ordering against `city_runtime.go:2853-2857` and confirmed the `cfg == nil` → `startupTimeout = 0` path is benign. This supersedes the **PARTIAL** entries in the round-2 table. |
+| 2 | Acceptance criteria met | PASS | Mayor's four WHAT TO DO items remain addressed (round-2 table above), and the round-3 commits close the ordering gap that table's item 1 left open. |
+| 3 | Tests pass | PASS | Green CI on `cad2969` — see Round 3 test evidence. Round 2's local sweeps were **not** re-run at this head. |
+| 4 | No high-severity review findings open | PASS | The PR #4772 review opened no high-severity findings. Two acknowledged non-blocking gaps and the still-open root cause are recorded under "What this does NOT establish" below. |
+| 5 | Final branch is clean | PASS | `git status --porcelain` empty at `cad296949`. |
+| 6 | Branch diverges cleanly from main | PASS | `origin/main` was merged into the branch twice this round (`2a30cda3d`, `77afdfc9b`), most recently at `3db4ed265`, which is the current merge base. No conflicts. |
+| 7 | Single feature theme | PASS | Same four source files as rounds 1-2 plus this gate doc; every round-3 commit is CLI-arm gating, its coverage, or lint on the same file. |
+
+### Round 3 test evidence
+
+```text
+GitHub Actions run 30962072171, head cad2969 — GREEN
+  https://github.com/gastownhall/gascity/actions/runs/30962072171
+  8 workflows, ~50 executed check-runs green, including:
+    - 12 cmd/gc process shards
+    - integration
+    - acceptance
+    - CI / required
+  CodeQL: 0 open alerts on the merge ref
+  docs render: not applicable (no docs/ change)
+```
+
+**Not re-run at this head:** the local `make test-fast-parallel` and
+`make test-cmd-gc-process-parallel` sweeps, and the `GC_FAST_UNIT` skip-hazard
+double-check. Those numbers appear in the Round 1 and Round 2 evidence blocks
+and belong to `eb87748d3` and `8eb3b4a11` respectively; they are **not**
+evidence for `cad296949`. The CI run above is what covers the shipped head, and
+it exercises the same `cmd_gc_process` shards and `TestTutorial01` path those
+local targets do.
+
+### What this does NOT establish (unchanged at this head)
+
+- **The production wedge root cause is still open**, tracked under
+  `ga-pofwv9.1`. Nothing in rounds 1-3 confirms the mechanism that produced the
+  original 12-day `creating` bead.
+- **The projection half remains inert defense-in-depth at this head.** Both
+  non-test `RuntimeFacts{...}` construction sites set `Observed: true`, and the
+  sole consumer of the fields the new `!input.Runtime.Observed` branch sets
+  (`cmd/gc/session_reconcile.go`) sets `Observed: true` as well. The
+  `internal/session` tests therefore drive an input shape no production caller
+  constructs: they are legitimate contract pins for a future consumer that
+  builds a projection without runtime facts, and they demonstrate nothing about
+  the reported wedge. This is the disposition mayor already accepted in round 2
+  ("harmless defense-in-depth and can stay"), restated here because it is still
+  true of what shipped.
+- **The start-in-flight lease branch is untested end to end.** No subtest drives
+  `pending_create_claim=true` *with* `last_woke_at` set — the only branch where
+  `startupTimeout` participates — so the `cfg → StartupTimeoutDuration()`
+  plumbing added this round is exercised only through its never-started arm.
+  Non-blocking.
+- **`isStaleCreatingInfo` reads `time.Now()` directly**, bypassing the
+  injectable `deps.now`; the round-3 tests use real wall-clock offsets to work
+  with it. Pre-existing, shared with the sweep, out of scope here.
