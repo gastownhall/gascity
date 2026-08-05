@@ -2133,21 +2133,16 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
 	cs.startBeadEventWatcher(ctx)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
-		if listErr != nil {
-			t.Fatal(listErr)
-		}
-		if len(got) == 1 {
-			if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
-				t.Fatalf("reconciled completed event = %#v", got[0])
-			}
-			return
-		}
-		time.Sleep(time.Millisecond)
+	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if listErr != nil {
+		t.Fatal(listErr)
 	}
-	t.Fatal("restart did not reconcile completed graph step from durable close")
+	if len(got) != 1 {
+		t.Fatalf("reconciled completed events = %#v, want one", got)
+	}
+	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
+		t.Fatalf("reconciled completed event = %#v", got[0])
+	}
 }
 
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
