@@ -409,7 +409,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		}
 	}
 	if len(dispatchSkips) > 0 {
-		fmt.Fprintln(stdout, "") //nolint:errcheck
+		fmt.Fprintln(stdout, "")                                                         //nolint:errcheck
 		fmt.Fprintln(stdout, "dispatch-tick skips (city-wide, all agents, cumulative):") //nolint:errcheck
 		for _, reason := range sortedNudgeDispatchSkipReasons(dispatchSkips) {
 			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
