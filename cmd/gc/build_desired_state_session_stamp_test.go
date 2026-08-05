@@ -63,6 +63,32 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	}
 }
 
+func TestStampRunSessionIdentityDoesNotManufactureWorktreeEvidence(t *testing.T) {
+	const (
+		sessionName = "polecat-gc-734732"
+		slotDir     = "/home/ds/gascity-worktrees/polecat-slots/polecat-2"
+	)
+	run := beads.Bead{ID: "gc-demand", Type: "task", Status: "in_progress", Assignee: sessionName}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, slotDir)
+	poolSession.Metadata["pool_managed"] = "true"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity([]beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if got.Metadata["gc.session_name"] != sessionName {
+		t.Fatalf("gc.session_name = %q, want %q", got.Metadata["gc.session_name"], sessionName)
+	}
+	if value, exists := got.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("gc.work_dir was manufactured as %q from a pool slot; worktree ownership evidence must come from the worktree creator", value)
+	}
+}
+
 func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
 	// #2843: a worked in-progress STEP back-fills its workflow ROOT (which the
 	// dashboard's root-only snapshot reads). The root is a control-lane bead,
