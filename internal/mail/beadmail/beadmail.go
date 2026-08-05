@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -341,7 +342,10 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive deletes a message bead without reading it.
+// Archive closes a message bead, retaining its body for later retrieval via
+// gc mail peek or bd show. A closed message no longer appears in inbox views
+// (all listing paths filter Status != "open"). Archiving an already-closed
+// message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
@@ -354,15 +358,9 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
-		if err := p.store.Delete(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return mail.ErrAlreadyArchived
-			}
-			return fmt.Errorf("beadmail archive: %w", err)
-		}
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Delete(id); err != nil {
+	if err := p.store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
@@ -411,8 +409,9 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching deletes open messages selected by filter without per-message
-// lookups after the candidate list has already verified them.
+// ArchiveMatching archives open messages selected by filter without per-message
+// lookups after the candidate list has already verified them. Matched beads are
+// closed rather than deleted, so their bodies stay readable.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
 	if err != nil {
@@ -428,7 +427,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Delete(id); err != nil {
+		if err := p.store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -509,7 +508,7 @@ func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
-// ArchiveMany archives a batch of messages by deleting each bead eagerly,
+// ArchiveMany archives a batch of messages by closing each bead eagerly,
 // preserving per-id error reporting that matches [Provider.Archive].
 func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(ids) == 0 {
@@ -536,6 +535,35 @@ func (p *Provider) All(recipient string) ([]mail.Message, error) {
 // Check returns unread messages for the recipient without marking them read.
 func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, false)
+}
+
+// CheckAutoHandoffs returns unread continuation mail carrying both labels that
+// opt it into automatic SessionStart delivery. It deliberately excludes normal
+// mail so a recycle does not duplicate the UserPromptSubmit inbox injection.
+func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error) {
+	routes := p.recipientRoutesForAll(recipients)
+	candidates, err := p.messageCandidatesForRoutes(routes)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail: listing auto-handoff messages: %w", err)
+	}
+	var messages []mail.Message
+	for _, b := range candidates {
+		if b.Status != "open" ||
+			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
+			hasLabel(b.Labels, "read") ||
+			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
+			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+			continue
+		}
+		messages = append(messages, beadToMessage(b))
+	}
+	sort.Slice(messages, func(i, j int) bool {
+		if messages[i].CreatedAt.Equal(messages[j].CreatedAt) {
+			return messages[i].ID < messages[j].ID
+		}
+		return messages[i].CreatedAt.Before(messages[j].CreatedAt)
+	})
+	return messages, nil
 }
 
 // Reply creates a reply to an existing message. Inherits ThreadID from the

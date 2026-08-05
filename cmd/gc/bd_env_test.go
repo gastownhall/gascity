@@ -78,6 +78,116 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 }
 
+func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testing.T) {
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho clean-runner-sentinel credentials=$BEADS_CREDENTIALS_FILE >&2\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "custom-credentials")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	_, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err == nil {
+		t.Fatal("runner error = nil, want fake bd failure")
+	}
+	if !strings.Contains(err.Error(), "clean-runner-sentinel") {
+		t.Fatalf("runner error = %q, want fake bd stderr", err)
+	}
+	if !strings.Contains(err.Error(), "credentials="+credentialsPath) {
+		t.Fatalf("runner error = %q, want preserved credential file", err)
+	}
+	if strings.Contains(err.Error(), "managed recovery") || strings.Contains(err.Error(), "postgres storage binding") {
+		t.Fatalf("runner error = %q, managed retry path must not run", err)
+	}
+}
+
+func TestRuntimeEnvDelegatesCompleteStorageBindingToBd(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg","dolt_mode":"server","dolt_database":"legacy_hq","unknown":"preserve-me"}`)
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	projectedKeys := append([]string{}, projectedDoltEnvKeys...)
+	projectedKeys = append(projectedKeys, projectedPostgresEnvKeys...)
+	projectedKeys = append(projectedKeys, projectedBeadsBackendEnvKeys...)
+	for _, key := range projectedKeys {
+		t.Setenv(key, "stale-projection")
+	}
+	credentialsPath := filepath.Join(t.TempDir(), "custom-credentials")
+	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
+
+	assertNoProjection := func(t *testing.T, env map[string]string) {
+		t.Helper()
+		for _, key := range projectedKeys {
+			if key == "BEADS_CREDENTIALS_FILE" {
+				continue
+			}
+			if got := env[key]; got != "" {
+				t.Errorf("env[%q] = %q, want absent for bd-owned storage binding", key, got)
+			}
+		}
+		if got := env["BEADS_CREDENTIALS_FILE"]; got != credentialsPath {
+			t.Errorf("BEADS_CREDENTIALS_FILE = %q, want %q", got, credentialsPath)
+		}
+		if got := env["BD_BIN"]; got != bdPath {
+			t.Errorf("BD_BIN = %q, want workspace-pinned %q", got, bdPath)
+		}
+	}
+
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	assertNoProjection(t, env)
+
+	rigPath := filepath.Join(cityPath, "rigs", "remote")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: inherited_city\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rigEnv, err := sessionBackendEnvWithError(cityPath, rigPath, []config.Rig{{Name: "remote", Path: rigPath}})
+	if err != nil {
+		t.Fatalf("sessionBackendEnvWithError(inherited rig): %v", err)
+	}
+	assertNoProjection(t, rigEnv)
+
+	gotMetadata, err := os.ReadFile(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMetadata) != string(metadata) {
+		t.Fatalf("metadata changed: got %s, want %s", gotMetadata, metadata)
+	}
+}
+
 // ── Dolt config wiring tests (issue 011) ──────────────────────────────
 
 func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
@@ -348,6 +458,41 @@ func TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
+}
+
+// TestBdRuntimeEnvForRigResolvesSymlinkAlias pins ga-iawy13.8: GC_RIG_ROOT
+// and BEADS_DIR must canonicalize a symlink-alias rig path the same way
+// findCity canonicalizes city paths, not just filepath.Clean it. BEADS_DIR
+// and GC_RIG_ROOT are set unconditionally before any dolt/backend branching,
+// so the error return is deliberately ignored here -- only the two env
+// values are under test.
+func TestBdRuntimeEnvForRigResolvesSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	rigPath := filepath.Join(realRoot, "repo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+	aliasRigPath := filepath.Join(aliasRoot, "repo")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigPath}}}
+	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, aliasRigPath)
+	if err != nil {
+		t.Logf("bdRuntimeEnvForRigWithError() error = %v (ignored; BEADS_DIR/GC_RIG_ROOT are set before backend resolution)", err)
+	}
+
+	wantBeadsDir := filepath.Join(rigPath, ".beads")
+	if env["BEADS_DIR"] != wantBeadsDir {
+		t.Errorf("BEADS_DIR = %q, want canonical %q (must resolve the symlink alias, not just Clean it)", env["BEADS_DIR"], wantBeadsDir)
+	}
+	if env["GC_RIG_ROOT"] != rigPath {
+		t.Errorf("GC_RIG_ROOT = %q, want canonical %q (must resolve the symlink alias, not just Clean it)", env["GC_RIG_ROOT"], rigPath)
 	}
 }
 
@@ -3994,6 +4139,49 @@ dolt.auto-start: false
 	}
 }
 
+// TestBDCommandRunnerManagedRetry_RetryDelayApplied guards that
+// bdCommandRunnerWithManagedRetryErr sleeps bdCommandRetryBaseDelay before the
+// single retry on the transport-retryable path.
+func TestBDCommandRunnerManagedRetry_RetryDelayApplied(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	origSleep := bdCommandRetrySleep
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+		bdCommandRetrySleep = origSleep
+	})
+
+	var sleepCalled time.Duration
+	bdCommandRetrySleep = func(d time.Duration) { sleepCalled = d }
+
+	attempts := 0
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, fmt.Errorf("server unreachable")
+			}
+			return []byte("ok"), nil
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error { return nil }
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+		return map[string]string{}
+	})
+
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("runner error = %v, want nil", err)
+	}
+	if sleepCalled != bdCommandRetryBaseDelay {
+		t.Fatalf("bdCommandRetrySleep called with %v, want %v", sleepCalled, bdCommandRetryBaseDelay)
+	}
+}
+
 func TestBdRuntimeEnvDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -4007,11 +4195,10 @@ func TestBdRuntimeEnvDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
 	}
 }
 
-// TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that session
-// contexts (template_resolve.go sets BEADS_ACTOR=<sessname>) and exec
-// orders (orderExecEnv sets BEADS_ACTOR=order:<name>) are not clobbered by
-// the neutral bd runtime env. The key is omitted so the inherited value
-// passes through mergeEnv unchanged.
+// TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that the authoritative
+// session runtime context and exec orders can set BEADS_ACTOR without the
+// neutral bd runtime env clobbering it. The neutral map omits the key so the
+// inherited value passes through mergeEnv unchanged.
 func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")

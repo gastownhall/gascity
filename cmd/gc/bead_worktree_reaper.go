@@ -110,6 +110,12 @@ func reapClosedBeadWorktrees(
 	// Authoritative liveness signal, gathered once for the whole pass. When the
 	// scan is indeterminate the reaper protects every candidate (fail closed).
 	live := collectLiveWorktreeStateFn()
+	if live.scanned && live.source != "" && live.source != liveScanSourceProc {
+		// Name the mechanism when it is not the primary one, so a reap decision
+		// made on a fallback scan is not indistinguishable from one made on
+		// /proc.
+		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
+	}
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
@@ -444,6 +450,15 @@ func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 // isStrictlyUnderDir reports whether path is strictly contained within dir
 // (i.e., it is not dir itself and has dir as a prefix component).
 func isStrictlyUnderDir(dir, path string) bool {
+	// Normalize both sides. git worktree list reports canonical paths, while
+	// dir is derived from the configured city path, which may still contain a
+	// symlinked ancestor (on macOS every $TMPDIR path does, via /var ->
+	// private/var). Comparing the two raw forms makes filepath.Rel return a
+	// "../.." escape for a worktree that is plainly inside the city, so this
+	// defense-in-depth check silently drops every reap candidate. The
+	// PathWithin gate directly above already compares normalized.
+	dir = pathutil.NormalizePathForCompare(dir)
+	path = pathutil.NormalizePathForCompare(path)
 	rel, err := filepath.Rel(dir, path)
 	if err != nil {
 		return false

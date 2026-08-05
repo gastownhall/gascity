@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -74,6 +75,7 @@ type CityRuntime struct {
 	ct                      crashTracker
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
+	adt                     assignedWorkDeferTracker
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
@@ -106,6 +108,13 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+
+	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
+	// resolved transcript path, whether discovery definitively found nothing, and
+	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
+	// process-lifetime cache is what keeps a per-tick live lane from repeating
+	// bounded discovery and transcript reads for every awake session.
+	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -232,6 +241,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
+	adt := buildAssignedWorkDeferTracker(p.Cfg, p.CityName, p.SP)
 
 	wg := newWispGCForConfig(p.Cfg)
 
@@ -296,6 +306,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		ct:                      ct,
 		it:                      it,
 		mat:                     mat,
+		adt:                     adt,
 		wg:                      wg,
 		od:                      od,
 		orderSet:                orderSnapshot.Orders,
@@ -1482,6 +1493,19 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
+// deletions. Configurable via GC_BACKUP_MAX_AGE_FOR_BULK_DELETE (integer
+// seconds); defaults to 86400 s (24 h).
+func bulkDeleteMaxAge(_ *config.City) time.Duration {
+	if s := os.Getenv("GC_BACKUP_MAX_AGE_FOR_BULK_DELETE"); s != "" {
+		var secs int
+		if _, err := fmt.Sscanf(s, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 24 * time.Hour
+}
+
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
@@ -1492,6 +1516,17 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
+
+	// The cityPath guard is a test affordance: real controllers always set it,
+	// so the backup-age check below always runs in production.
+	if cr.cityPath != "" {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+			if cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
 	defer closeOpened()
@@ -1987,6 +2022,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
+	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
 	cr.wg = newWispGCForConfig(nextCfg)
 
@@ -2178,7 +2214,9 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
 // candidate × store × status × identifier bd-read fan-out that, serialized on
 // the readiness path, can exceed the startup watchdog on a heavy-session city —
-// gastownhall/gascity#3288). The first steady-state tick performs the sweep.
+// gastownhall/gascity#3288) and the usage lane's live transcript sweep (bounded
+// per-session file discovery and reads across every awake session at once). The
+// first steady-state tick performs both.
 func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	desiredState := result.State
 	store := cr.cityBeadStore()
@@ -2204,8 +2242,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
 	// Emit any due compute usage facts by reusing the open-session snapshot this
-	// tick already loaded, rather than issuing a second redundant store scan.
-	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
+	// tick already loaded, rather than issuing a second redundant store scan. The
+	// boot pass covers the whole fleet at once on the readiness path, so it takes
+	// only the marker-gated terminal lane and leaves the fleet-proportional live
+	// lane to the first steady-state tick.
+	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
@@ -2251,7 +2292,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
 				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, trace)),
 			sessionBeads,
-			result.PoolScaleCheckPartialTemplates,
+			effectivePoolPartialRetentionTemplates(result),
 		)
 		recordPhase(TraceSitePoolDemandCompute, "bead_reconcile.compute_pool_desired", phaseStart, map[string]any{
 			"pool_work_bead_count": len(poolWorkBeads),
@@ -2342,6 +2383,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncStartTracker(&cr.asyncStarts),
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
+		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 	}
 	if bootReconcile {
@@ -2356,6 +2398,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
 		poolDesired,
 		result.NamedSessionDemand,
+		result.NamedSessionRoutedDemand,
 		result.snapshotQueryPartial(),
 		workSet, cityName,
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
@@ -2398,7 +2441,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
-	// their assigned or ready-routed trigger bead. Runs for every runtime, not
+	// either their assigned/ready-routed trigger bead or the one ready graph-v2
+	// successor preassigned after a completed step. Runs for every runtime, not
 	// just herdr.
 	// tmux's relaunch/respawn path only heals a session that DIED; it does
 	// nothing for a session that is alive but idle at its prompt on a trigger
@@ -2428,6 +2472,18 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
 		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		nudgeStalledPoolContinuations(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.ContinuationClaimCandidates,
+			result.StoreQueryPartial ||
+				result.SessionQueryPartial ||
+				result.ContinuationClaimQueryPartial,
+			time.Now(),
+			cr.stdout,
+		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
@@ -3047,7 +3103,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts)),
 		filteredSnap,
-		wfcResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
@@ -3071,6 +3127,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.providerHealthGate,
 		poolDesired,
 		wfcResult.NamedSessionDemand,
+		wfcResult.NamedSessionRoutedDemand,
 		false, // storeQueryPartial: config-change path doesn't query work beads
 		nil,   // workSet: not computed for config-change reconcile
 		cr.cityName,
@@ -3262,7 +3319,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
 				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, trace)),
 			sessionBeads,
-			result.PoolScaleCheckPartialTemplates,
+			effectivePoolPartialRetentionTemplates(result),
 		)
 		if result.PoolDesiredCounts == nil {
 			result.PoolDesiredCounts = make(map[string]int)

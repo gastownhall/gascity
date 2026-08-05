@@ -878,6 +878,7 @@ func TestProductMetricsLifecycleRealPackDispatchMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	t.Setenv("GC_CITY_PATH", city)
 	tests := []struct {
 		name       string
 		args       []string
@@ -939,6 +940,7 @@ func TestProductMetricsLifecycleConfigChangeFallbackReportsBeforeInvoke(t *testi
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+			t.Setenv("GC_CITY_PATH", workingDirectory)
 			spy := &productMetricsInvocationSpy{recordResult: productmetrics.RecordDropped}
 			withProductMetricsInvocationSpy(t, spy)
 			stdout := &productMetricsOrderingWriter{spy: spy, name: "stdout"}

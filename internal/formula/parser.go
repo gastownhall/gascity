@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Formula file extensions. Canonical TOML is preferred, infixed TOML remains
@@ -206,10 +207,7 @@ func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, 
 }
 
 func descriptionFileBaseDir(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Dir(resolved)
-	}
-	return filepath.Dir(path)
+	return filepath.Dir(pathutil.NormalizePathForCompare(path))
 }
 
 // Parse parses a formula from JSON bytes.

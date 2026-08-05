@@ -401,9 +401,10 @@ export type RunPhaseConfidence = 'known' | 'inferred';
 export interface RunLaneHealth {
   /**
    * 'known' iff a formula matched AND the active gc.step_id resolved into a
-   * known stage; else 'inferred' (generic fallback / the includes('blocked')
-   * sniff). A structural fact about which code path fired (ZFC-clean). An
-   * 'inferred' lane must never drive the maroon One Mark (R2/R5).
+   * known stage; else 'inferred' (generic fallback). The blocked lane is keyed
+   * on the authoritative bd status, not on a substring scan of step text. A
+   * structural fact about which code path fired (ZFC-clean). An 'inferred'
+   * lane must never drive the maroon One Mark (R2/R5).
    */
   phaseConfidence: RunPhaseConfidence;
   /**
@@ -475,9 +476,11 @@ export interface RunLane {
   /**
    * Provenance fact (gascity-dashboard-3ax): the lane's stages came from a
    * RECOGNISED formula AND the active gc.step_id mapped into one of those
-   * formula stages — i.e. not the generic 5-stage fallback or the
-   * includes('blocked') sniff. The engine ANDs this with session-resolution
-   * to set phaseConfidence (PRD §6 / R2). Bead-side only; the builder owns it.
+   * formula stages — i.e. not the generic 5-stage fallback. (Independent of
+   * the phase: the blocked lane is keyed on the authoritative bd status, not
+   * on a substring scan of step text.) The engine ANDs this with
+   * session-resolution to set phaseConfidence (PRD §6 / R2). Bead-side only;
+   * the builder owns it.
    */
   formulaStageResolved: boolean;
   /**

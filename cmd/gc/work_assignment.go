@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 // workAssignment is the typed boundary façade the SESSION reconciler uses to
@@ -45,11 +46,13 @@ func (w workAssignment) unwrapped() beads.Store {
 
 // OpenAssignedTo returns the open or in-progress WORK beads in this store
 // assigned to the given identity for the given tier mode, excluding session
-// beads. It is the typed form of the raw
+// beads and mail message beads. It is the typed form of the raw
 // List{Assignee,Status,Live,TierMode} probe the reconciler ran directly.
 // status selects the bead status ("open" / "in_progress"); live mirrors the
 // raw ListQuery.Live flag. Session beads (and repairable session beads) are
-// filtered out, matching the raw probes.
+// filtered out, matching the raw probes; mail message beads are filtered out
+// here too (ra-59207) — a mail wisp has no claim/routing semantics, so every
+// caller that reassigns or releases what this returns must never see one.
 func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.TierMode, live bool) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
@@ -59,7 +62,7 @@ func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.T
 	if err != nil {
 		return nil, err
 	}
-	return items, nil
+	return excludeMailMessageBeads(items), nil
 }
 
 // CachedOpenAssignedWisps returns cached open-assigned wisp-tier WORK beads when
@@ -113,12 +116,40 @@ func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 // releaseWorkFromClosedSessionBead, kept distinct from OpenAssignedTo because the
 // close-release path deliberately runs the unflagged query — making it byte-
 // identical to OpenAssignedTo's flagged query would change the emitted bead op.
+// Like OpenAssignedTo, mail message beads are excluded (ra-59207): they are not
+// WORK and have no claim/routing semantics for the release path to act on.
 func (w workAssignment) OpenAssignedToBasic(assignee, status string) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
 		return nil, nil
 	}
-	return store.List(beads.ListQuery{Assignee: assignee, Status: status})
+	items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+	if err != nil {
+		return nil, err
+	}
+	return excludeMailMessageBeads(items), nil
+}
+
+// excludeMailMessageBeads filters mail message beads (beadmail.IsMessageBead)
+// out of a WORK query result. A mail wisp is a delivery route, not a claimable
+// unit of work — it can be neither released nor reassigned — so every WORK
+// enumeration in this file (and every caller downstream, all of which treat
+// their results as releasable/reassignable WORK) must exclude it at the source
+// rather than repeat the check at each call site (ra-59207: the session-close
+// WORK-RELEASE sweep clearing a mail bead's assignee silently destroyed its
+// only route to an inbox).
+func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
+	if len(items) == 0 {
+		return items
+	}
+	out := items[:0:0]
+	for _, item := range items {
+		if beadmail.IsMessageBead(item) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // ReleaseWorkBead detaches one WORK bead from its (closed/retired) session: it

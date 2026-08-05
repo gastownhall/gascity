@@ -208,9 +208,16 @@ func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) 
 			case ".git", ".gc", "node_modules", "worktrees":
 				return filepath.SkipDir
 			}
-			// Skip git worktrees embedded in the repo (have a .git file, not dir).
-			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
-				return filepath.SkipDir
+			// Skip git worktrees embedded in the repo (have a .git file, not
+			// dir) — but never apply this to repoRoot itself. gc agent
+			// sessions run from inside a worktree, so repoRoot legitimately
+			// has a .git file rather than a .git directory; skipping on that
+			// condition here would SkipDir the walk's very first entry and
+			// silently visit zero files.
+			if path != repoRoot {
+				if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -524,5 +531,86 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 	}
 	if second := SyntheticCacheKeyComponent(); second != got {
 		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
+	}
+}
+
+// TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
+// justifies validatePackFiles no longer walking its own directory. The whole-tree
+// walk in validateSyntheticRepoFileSet checks every path against the union of all
+// layout manifests, which strictly subsumes a per-pack check: a file that is
+// unexpected for its own pack is absent from the union too. Nested layouts
+// (examples/bd contains examples/bd/dolt) are covered explicitly, because that is
+// the case where a per-pack and a union check could conceivably disagree.
+func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rel  string
+	}{
+		{"pack root", "internal/bootstrap/packs/core/STRAY.txt"},
+		{"deep inside a pack", "internal/bootstrap/packs/core/assets/STRAY.txt"},
+		{"inside a nested pack", "examples/bd/dolt/STRAY.txt"},
+		{"in the parent of a nested pack", "examples/bd/STRAY.txt"},
+		{"cache root", "STRAY.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := materializeTestRepo(t)
+			stray := filepath.Join(dst, filepath.FromSlash(tc.rel))
+			if err := os.MkdirAll(filepath.Dir(stray), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+				t.Fatalf("ValidateSyntheticRepo accepted a stray file at %s", tc.rel)
+			}
+		})
+	}
+}
+
+// TestSyntheticRepoAllowedPathsIsStable pins that memoizing the allowed-path sets
+// does not change what they contain across calls.
+func TestSyntheticRepoAllowedPathsIsStable(t *testing.T) {
+	files1, dirs1, err := syntheticRepoAllowedPaths()
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+	}
+	files2, dirs2, err := syntheticRepoAllowedPaths()
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths (second call): %v", err)
+	}
+	if len(files1) != len(files2) || len(dirs1) != len(dirs2) {
+		t.Fatalf("allowed paths changed between calls: files %d/%d dirs %d/%d",
+			len(files1), len(files2), len(dirs1), len(dirs2))
+	}
+	if len(files1) == 0 {
+		t.Fatal("allowed file set is empty")
+	}
+}
+
+// TestManifestForPackMatchesUncached pins that the memoized per-pack manifest is
+// identical to a freshly built one.
+func TestManifestForPackMatchesUncached(t *testing.T) {
+	for _, pack := range All() {
+		cached, err := manifestForPack(pack)
+		if err != nil {
+			t.Fatalf("manifestForPack(%s): %v", pack.Name, err)
+		}
+		fresh, err := manifestForFS(pack.FS)
+		if err != nil {
+			t.Fatalf("manifestForFS(%s): %v", pack.Name, err)
+		}
+		if len(cached) != len(fresh) {
+			t.Fatalf("pack %s: memoized manifest has %d entries, fresh has %d", pack.Name, len(cached), len(fresh))
+		}
+		for rel, want := range fresh {
+			got, ok := cached[rel]
+			if !ok {
+				t.Fatalf("pack %s: memoized manifest missing %s", pack.Name, rel)
+			}
+			if got.perm != want.perm || !bytes.Equal(got.data, want.data) {
+				t.Fatalf("pack %s: memoized manifest differs for %s", pack.Name, rel)
+			}
+		}
 	}
 }

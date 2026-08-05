@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -268,8 +269,67 @@ type retryEvalResult struct {
 	Reason  string
 }
 
+// typedDeliverableCloseFor reports whether subject carries a complete, strict
+// gc-outcome-close deliverable envelope for itself. Producer names are open-world.
+func typedDeliverableCloseFor(subject beads.Bead) bool {
+	raw := strings.TrimSpace(subject.Metadata[beadmeta.CoordinatorOutcomeProducerDispositionMetadataKey])
+	if raw == "" {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var envelope struct {
+		ContractVersion int     `json:"contract_version"`
+		Disposition     string  `json:"disposition"`
+		WorkID          string  `json:"work_id"`
+		RecordedBy      string  `json:"recorded_by"`
+		Reason          string  `json:"reason"`
+		Producer        *string `json:"producer"`
+		PassingVerdict  string  `json:"passing_verdict"`
+	}
+	if err := decoder.Decode(&envelope); err != nil {
+		return false
+	}
+	// Reject trailing data after the envelope: DisallowUnknownFields only guards the
+	// first object, so a valid envelope followed by more JSON or garbage must fail
+	// closed rather than forge a pass.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return false
+	}
+	if envelope.Disposition != beadmeta.CoordinatorDispositionDeliverable {
+		return false
+	}
+	if envelope.ContractVersion != beadmeta.CoordinatorOutcomeContractVersion {
+		return false
+	}
+	if envelope.WorkID != subject.ID {
+		return false
+	}
+	if strings.TrimSpace(envelope.RecordedBy) == "" || strings.TrimSpace(envelope.Reason) == "" {
+		return false
+	}
+	if envelope.Producer == nil || strings.TrimSpace(*envelope.Producer) == "" {
+		return false
+	}
+	if envelope.PassingVerdict != "" {
+		switch envelope.PassingVerdict {
+		case beadmeta.CoordinatorPassingVerdictReview, beadmeta.CoordinatorPassingVerdictEvidence:
+		default:
+			return false
+		}
+		if subject.Metadata[beadmeta.ReviewGateMetadataKey] != "consumed" ||
+			subject.Metadata[envelope.PassingVerdict] != beadmeta.OutcomePass {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == "" && typedDeliverableCloseFor(subject) {
+		outcome = beadmeta.OutcomePass
+	}
 	switch outcome {
 	case beadmeta.OutcomePass:
 		if strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) != "" || strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey]) != "" {
@@ -427,11 +487,27 @@ func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
 	return pathutil.PathWithin(absWorktree, absPath), nil
 }
 
+// requiredArtifactTargetInWorktree reports whether path's symlink-resolved
+// target is contained within worktree's symlink-resolved root, tolerating a
+// missing path (treated as contained; the caller's earlier os.Stat is what
+// classifies missing artifacts as failures).
 func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. worktree is always an absolute git-worktree path stamped
+	// by the controller (never a bare "." or other unresolved relative
+	// value); a worktree that no longer resolves must fail this check,
+	// which pathutil.NormalizePathForCompare's never-errors contract would
+	// silently paper over.
 	resolvedWorktree, err := filepath.EvalSymlinks(filepath.Clean(worktree))
 	if err != nil {
 		return false, fmt.Errorf("resolving required artifact worktree symlinks %q: %w", worktree, err)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. A missing artifact target is deliberately treated as
+	// contained (true) here — validateRequiredArtifacts' earlier os.Stat
+	// call is what classifies missing/unreadable artifacts as failures;
+	// this function only needs to gate symlink escapes for targets that
+	// exist.
 	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		if os.IsNotExist(err) {

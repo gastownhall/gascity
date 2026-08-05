@@ -12,6 +12,7 @@ import (
 
 const (
 	testGCBinaryDirPrefix        = "gc-test-binary-pid"
+	testBDBinaryDirPrefix        = "bd-test-binary-pid"
 	testCmdGCTempRootPrefix      = "gct"
 	testCmdGCShardTempRootPrefix = "gcx"
 	testShardIndexEnv            = "GC_TEST_SHARD_INDEX"

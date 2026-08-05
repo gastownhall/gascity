@@ -52,9 +52,16 @@ func findBdExecViolations(root string) ([]string, error) {
 			if base == ".git" || base == "vendor" || base == ".claude" || base == ".gc" || strings.HasPrefix(base, ".beads-src") {
 				return filepath.SkipDir
 			}
-			// Skip git worktrees embedded in the repo (have a .git file, not dir).
-			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
-				return filepath.SkipDir
+			// Skip git worktrees embedded in the repo (have a .git file, not
+			// dir) — but never apply this to root itself. gc agent sessions run
+			// from inside a worktree, so root legitimately has a .git file
+			// rather than a .git directory; skipping on that condition here
+			// would SkipDir the walk's very first entry and silently visit
+			// zero files.
+			if path != root {
+				if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
 			}
 			// Skip nested Go modules: any directory other than root that owns
 			// its own go.mod is a separate module's source tree (a module-cache
@@ -189,6 +196,38 @@ func TestFindBdExecViolationsSkipsNestedGoModules(t *testing.T) {
 
 	if len(violations) != 1 {
 		t.Fatalf("violations = %v, want exactly 1 (the real violation, nested module skipped)", violations)
+	}
+	if !strings.Contains(violations[0], filepath.Join("cmd", "gc", "example.go")) {
+		t.Fatalf("violations[0] = %q, want the cmd/gc/example.go violation", violations[0])
+	}
+}
+
+// TestFindBdExecViolationsScansWorktreeRoot pins the fix for ga-vpcbsa: every
+// gc agent session runs from a worktree under .gc/worktrees/, where
+// root/.git is a FILE (a `gitdir:` pointer), not a directory.
+// filepath.Walk invokes the callback on root first, so without a
+// `path != root` guard around the .git-file SkipDir check, the walk returns
+// filepath.SkipDir on entry zero and visits zero files — the invariant
+// passes vacuously instead of actually scanning anything.
+func TestFindBdExecViolationsScansWorktreeRoot(t *testing.T) {
+	root := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(root, "go.mod"), "module example.com/fixture\n")
+
+	// Simulate a git worktree checkout: root's .git is a FILE, not a dir.
+	mustWriteFile(t, filepath.Join(root, ".git"), "gitdir: /nowhere\n")
+
+	// A real violation, directly in the checkout, outside any allowed dir.
+	mustWriteFile(t, filepath.Join(root, "cmd", "gc", "example.go"),
+		"package main\n\nfunc run() { exec.Command(\"bd\", \"prime\") }\n")
+
+	violations, err := findBdExecViolations(root)
+	if err != nil {
+		t.Fatalf("findBdExecViolations: %v", err)
+	}
+
+	if len(violations) != 1 {
+		t.Fatalf("violations = %v, want exactly 1 (root's .git file must not stop the walk)", violations)
 	}
 	if !strings.Contains(violations[0], filepath.Join("cmd", "gc", "example.go")) {
 		t.Fatalf("violations[0] = %q, want the cmd/gc/example.go violation", violations[0])

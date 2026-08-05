@@ -9,6 +9,8 @@ usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
+  GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
+                         outer job budget divided across concurrent jobs)
 USAGE
 }
 
@@ -23,6 +25,30 @@ cd "$repo_root"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
+# shellcheck source=lib/inner-parallelism.sh
+source "$repo_root/scripts/lib/inner-parallelism.sh"
+
+# Cross-invocation concurrency bound (ga-owh20p): at most
+# PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
+# regardless of caller (pre-push hook, direct `make`, or CI) — this is the
+# one place all four heavy targets (fast, cmd-gc-process, integration, full)
+# funnel through, so gating here covers all of them uniformly. On
+# contention this polls with a bounded wait rather than failing instantly;
+# exhausting the wait maps to exit 75 (EX_TEMPFAIL), distinct from a real
+# test failure and from push-ownership-guard.sh's unrelated exit-1 contract.
+# Held for this invocation's entire lifetime and released automatically on
+# exit — success, failure, or crash — via the kernel-managed flock plus this
+# trap. GC_PUSH_GATE_NO_CAP=1 bypasses the cap entirely for one invocation.
+# shellcheck source=push-gate-lock-lib.sh disable=SC1091
+source "$repo_root/scripts/push-gate-lock-lib.sh"
+gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$repo_root/.git/gate-slots"
+gate_fd=""
+gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${mode}"
+if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
+  echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+  exit 75
+fi
+trap 'push_gate_release_slot "$gate_fd"' EXIT
 
 # GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
 # server. They must never reach `go test`, or every bd-forking test writes to
@@ -67,6 +93,24 @@ add_fsys_compile_job() {
 add_unit_core_job() {
   add_job "unit-core" \
     'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+}
+
+# Runs as a direct shell job rather than through a `go test` wrapper because a
+# Go _test.go file invoking exec.Command to run this script would itself add
+# one os/exec call to the resourcecensus subprocess census (both the untagged
+# scope and the never-shrinks scope=all audit total), and that ratchet forbids
+# raising any baseline to accommodate growth — see TESTING.md's push-gate
+# slots section. Driving the script directly keeps it out of the Go AST scan
+# entirely, so it needs no baseline change and no owner exemption.
+add_push_gate_lock_selftest_job() {
+  add_job "push-gate-lock-selftest" "bash scripts/test-push-gate-lock.sh"
+}
+
+# Same census-avoidance rationale as add_push_gate_lock_selftest_job above:
+# driven as a direct shell job so it never adds an os/exec call to the
+# resourcecensus scope=all audit total.
+add_local_concurrency_selftest_job() {
+  add_job "local-concurrency-selftest" "bash scripts/test-local-concurrency.sh"
 }
 
 add_cmd_gc_shards() {
@@ -119,6 +163,8 @@ case "$mode" in
   fast)
     add_fsys_compile_job
     add_unit_core_job
+    add_push_gate_lock_selftest_job
+    add_local_concurrency_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -131,6 +177,8 @@ case "$mode" in
   full)
     add_fsys_compile_job
     add_unit_core_job
+    add_push_gate_lock_selftest_job
+    add_local_concurrency_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs
@@ -145,6 +193,14 @@ if [[ ${#jobspecs[@]} -eq 0 ]]; then
   echo "no jobs selected for mode ${mode}" >&2
   exit 1
 fi
+
+# Each outer job's `go test` binary defaults its internal -p to
+# GOMAXPROCS, so concurrent shards independently oversubscribe the
+# machine. Divide the outer budget across the concurrent jobs so each
+# claims only its fair share (see inner-parallelism.sh for the -p vs
+# -parallel scope caveat) (ga-04m84s).
+inner_p="$(gc_inner_parallelism "$local_jobs" "${#jobspecs[@]}")"
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=${inner_p}"
 
 cleanup_log_dir=1
 if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
@@ -174,10 +230,21 @@ if command -v ionice >/dev/null 2>&1; then
 fi
 export TEST_LOCAL_NICE="$nice_prefix"
 
-echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs}"
+echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
 
 set +e
-printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
+# Sever gate-FD inheritance at the fan-out boundary (ga-owh20p): the slot FD
+# is closed inside this subshell before any job starts, so no job — and no
+# daemon a job leaks (tmux server, dolt sql-server, an escaped `gc`) — ever
+# holds a copy of it and pins the slot after this invocation dies. The parent
+# keeps the FD for the whole run, so nothing is lost. The -n guard is
+# load-bearing: GC_PUSH_GATE_NO_CAP=1 and the missing-flock degrade path both
+# leave gate_fd empty, and `exec >&-` with an empty FD would close stdout.
+(
+  if [[ -n "$gate_fd" ]]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   set -euo pipefail
   spec="$1"
   label="${spec%%::*}"
@@ -226,6 +293,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     exit "$status"
   fi
 ' _
+)
 status=$?
 set -e
 

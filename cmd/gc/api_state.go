@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
@@ -33,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -239,16 +241,17 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+	onChange := func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 		if recorder != nil {
 			recorder.Record(events.Event{
-				Type:      eventType,
-				Actor:     "cache-reconcile",
-				Subject:   beadID,
-				RunID:     runID,
-				SessionID: sessionID,
-				StepID:    stepID,
-				Payload:   payload,
+				Type:             eventType,
+				Actor:            "cache-reconcile",
+				Subject:          beadID,
+				RunID:            runID,
+				SessionID:        sessionID,
+				StepID:           stepID,
+				DependsOnStepIDs: dependsOnStepIDs,
+				Payload:          payload,
 			})
 		}
 	}
@@ -445,6 +448,14 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
+	// A controller can crash after the durable bead.closed journal append but
+	// before its best-effort lifecycle append. The normal watcher intentionally
+	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
+	// before tailing to repair that otherwise permanent gap. ReconcileCompleted
+	// reads exact facts from the same journal to make restart passes idempotent.
+	graphStore := cs.GraphBeadStore()
+	graphStore.Store = uncachedBeadStore(graphStore.Store)
+	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -494,6 +505,25 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// uncachedBeadStore peels the controller's policy/cache read layers so a
+// recovery projection can inspect closed authoritative rows. The normal active
+// cache prime need not include closed beads, and therefore cannot safely drive
+// lifecycle gap repair.
+func uncachedBeadStore(store beads.Store) beads.Store {
+	for range 8 {
+		if base, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = base
+			continue
+		}
+		cached, ok := store.(*beads.CachingStore)
+		if !ok || cached == nil || cached.Backing() == nil {
+			return store
+		}
+		store = cached.Backing()
+	}
+	return store
 }
 
 // startMaintenanceLoop launches the periodic Dolt store maintenance
@@ -575,6 +605,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
+		rec := events.Discard
+		cs.mu.RLock()
+		if cs.eventProv != nil {
+			rec = cs.eventProv
+		}
+		cs.mu.RUnlock()
+		executionevent.EmitCompletedFromClosedNotification(rec, cs.GraphBeadStore().Store, evt.Payload, evt.Actor)
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
 	}
 }
@@ -1716,8 +1753,12 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // than a 500.
 func assertRigPathWithinCity(cityPath, resolved string) error {
 	// Lexical check first: rejects "../" escapes and absolute paths that resolve
-	// to a sibling/parent of the city.
-	if err := relWithinCity(cityPath, resolved); err != nil {
+	// to a sibling/parent of the city. Normalize both sides so a symlinked city
+	// ancestor (cityPath raw, resolved already resolveStoreScopeRoot-resolved)
+	// doesn't register as a false-positive escape.
+	normalizedCity := pathutil.NormalizePathForCompare(cityPath)
+	normalizedTarget := pathutil.NormalizePathForCompare(resolved)
+	if err := relWithinCity(normalizedCity, normalizedTarget); err != nil {
 		return err
 	}
 	// Symlink-aware check: a "../"-free lexical path can still escape through a
@@ -2252,7 +2293,8 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch:         func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ResolveRegistryPack: cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},

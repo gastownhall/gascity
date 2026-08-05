@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -639,10 +640,17 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 	return stores, errors.Join(errs...)
 }
 
+// cachedOrderHistoryStoresResolver returns a resolver that opens each scope's
+// store once and reuses it. The returned resolver is safe for concurrent use:
+// the order-firing doctor check fans its per-order lookups out across
+// goroutines, and an unguarded cache map would be a data race there.
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
+	var mu sync.Mutex
 	stores := make(map[string]beads.Store)
 	openCached := func(target execStoreTarget) (beads.Store, error) {
 		key := orderStoreTargetKey(target)
+		mu.Lock()
+		defer mu.Unlock()
 		if store, ok := stores[key]; ok {
 			return store, nil
 		}

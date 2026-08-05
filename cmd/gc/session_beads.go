@@ -1781,8 +1781,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				bySessionName[createdSessionName] = newBead
 				indexBySessionName[createdSessionName] = len(openBeads) - 1
 				if liveAlias := strings.TrimSpace(meta["alias"]); liveAlias != "" && state == "active" {
-					if err := session.SyncRuntimeAlias(sp, createdSessionName, liveAlias); err != nil {
-						fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
+					runtimeInfo, infoErr := sessFront.Get(newBead.ID)
+					if infoErr != nil {
+						fmt.Fprintf(stderr, "session beads: reading runtime identity for %s: %v\n", agentName, infoErr) //nolint:errcheck
+					} else {
+						runtimeInfo.SessionName = createdSessionName
+						runtimeInfo.Alias = liveAlias
+						if err := session.SyncRuntimeAlias(sp, runtimeInfo); err != nil {
+							fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
+						}
 					}
 				}
 			}
@@ -1975,8 +1982,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						openBeads[idx] = b
 					}
 					if aliasValue, ok := batch["alias"]; ok && state == "active" {
-						if err := session.SyncRuntimeAlias(sp, sn, aliasValue); err != nil {
-							fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", aliasValue, agentName, err) //nolint:errcheck
+						runtimeInfo, infoErr := sessFront.Get(b.ID)
+						if infoErr != nil {
+							fmt.Fprintf(stderr, "session beads: reading runtime identity for %s: %v\n", agentName, infoErr) //nolint:errcheck
+						} else {
+							runtimeInfo.SessionName = sn
+							runtimeInfo.Alias = aliasValue
+							if err := session.SyncRuntimeAlias(sp, runtimeInfo); err != nil {
+								fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", aliasValue, agentName, err) //nolint:errcheck
+							}
 						}
 					}
 				}

@@ -1003,3 +1003,38 @@ func TestResolveConfigProviderModel_PrefersStoredEnvelopeIntent(t *testing.T) {
 		t.Fatalf("model = %q, want gpt-5.4-mini", model)
 	}
 }
+
+// A transiently unreachable bridge is a failed observation, not an
+// authoritative claim that no T3 sessions are running.
+func TestListRunningSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() {
+		defaultWSURLCandidates = oldDefaults
+	})
+
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", "ws://127.0.0.1:1/ws")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+
+	names, err := p.ListRunning("")
+	if err == nil {
+		t.Fatalf("ListRunning during bridge outage returned (%v, nil); empty success would be read as authoritative absence", names)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ListRunning error = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want total observation failure rather than partial usable results", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("ListRunning names = %v, want none alongside total observation failure", names)
+	}
+}

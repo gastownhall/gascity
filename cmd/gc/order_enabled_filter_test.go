@@ -94,6 +94,7 @@ func TestCmdOrderShowIncludesOverrideDisabledOrder(t *testing.T) {
 	clearCityRigFlags(t)
 	cityDir, _ := newPersistedOrderEnabledFilterCity(t)
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdOrderShow("drop", "", &stdout, &stderr)
@@ -125,6 +126,7 @@ func TestCmdOrderHistoryIncludesOverrideDisabledOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdOrderHistory("drop", "", &stdout, &stderr)

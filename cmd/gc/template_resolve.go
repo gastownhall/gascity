@@ -281,7 +281,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_ORIGIN":   "ephemeral",
 		"GC_AGENT":            sessName,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
 		// Explicit empty values matter here. tmux session creation uses `env -u`

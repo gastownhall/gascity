@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -289,12 +290,49 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 	}, nil
 }
 
+// activeWorkflowProjectionStatuses are the bead statuses that count as active
+// work for workflow projection and spawn selection, in read order. It is an
+// allowlist, so a status this fork does not recognize is treated as inactive
+// rather than spawned against.
+//
+// in_progress is read before open on purpose. The two reads are not a single
+// snapshot, so a bead that changes status between them can fall through both;
+// in this order the only flip that can be missed is open->in_progress, a bead
+// that was just claimed and so must not be spawned anyway. An in_progress->open
+// release is always caught by one of the two reads, and anything missed
+// reappears on the next patrol.
+var activeWorkflowProjectionStatuses = []string{"in_progress", "open"}
+
 func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) {
-	// Preserve the old ListOpen() semantics as a single active snapshot. A
-	// union of separate open/in_progress queries can miss beads that change
-	// status between reads, so this is one of the intentional raw scans until
-	// ListQuery grows a multi-status selector.
-	return store.List(beads.ListQuery{AllowScan: true})
+	// One Live, status-scoped read per active status, unioned by ID.
+	//
+	// The old raw scan could not gate status at all (gc-4zb): mapBdStatus folds
+	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
+	// scanned blocked root arrives with Status "open" and is indistinguishable
+	// from ready work. Filtering the snapshot on b.Status keeps every one of
+	// them for the same reason. Only the backing store filters on the raw
+	// status, by passing --status to bd, and only a Live query reaches it — a
+	// cached read matches on the collapsed status.
+	//
+	// This matters because the workflow-root spawn path selects on gc.routed_to
+	// without re-checking status: a blocked root that still carries a route is
+	// spawned against and burns a polecat slot on a no-op drain (gc-nz5i).
+	seen := make(map[string]struct{})
+	var active []beads.Bead
+	for _, status := range activeWorkflowProjectionStatuses {
+		items, err := store.List(beads.ListQuery{Status: status, AllowScan: true, Live: true})
+		if err != nil {
+			return nil, fmt.Errorf("listing %s workflow projection beads: %w", status, err)
+		}
+		for _, b := range items {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			active = append(active, b)
+		}
+	}
+	return active, nil
 }
 
 func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
