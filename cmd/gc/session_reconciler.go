@@ -683,6 +683,13 @@ func finalizeDrainAckStoppedSession(
 	recordStopped(true)
 	if hasAssignedWork {
 		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, template, template, name, rec, stderr)
+		// ra-3y4okc: this is the exact loop signature (session drain-acked
+		// while still assigned to open/in-progress work) that livelocks a
+		// misrouted bead the pool may not execute or close. Count the cycle
+		// against the stranded work bead and, past the cap, auto-hold it —
+		// see enforceDrainAckAssignedWorkCycleCap's doc comment for why this
+		// acts on the work bead rather than the session bead finalized here.
+		enforceDrainAckAssignedWorkCycleCap(cityPath, cfg, store, rigStores, info, clk, rec, stderr)
 	}
 	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
 	return drainAckFinalizeResult{folded: &foldedInfo}
