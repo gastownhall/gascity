@@ -47,15 +47,6 @@ const controlReadyQueryMarkerPrefix = "BD_EXPORT_AUTO=false GC_CONTROL_TARGET="
 // controlReadyExcludeType mirrors the shell script's --exclude-type=epic.
 const controlReadyExcludeType = "epic"
 
-// controlReadyHoldMayorLabel gates the routed_to/run_target pool-routing
-// tier: a bead parked on hold:mayor is intentionally waiting on mayor
-// attention and must not be picked up by ambient control-dispatcher
-// discovery (ga-amdg7f). This is the only sanctioned hold label that applies
-// here -- hold:external beads are not control-dispatcher work in the first
-// place, and a bead already targeted by assignee has been deliberately
-// dispatched, so filterReadyByAssignee does not gate on this label.
-const controlReadyHoldMayorLabel = "hold:mayor"
-
 // controlReadyFallbackLimit bounds the single batched bd ready call issued
 // when the cache can't answer. It must be generous enough that per-candidate/
 // per-route filtering in Go (each capped at workflowServeScanLimit) is never
@@ -210,7 +201,11 @@ func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []bea
 	return out
 }
 
-// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --sort oldest --limit=N`.
+// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --sort oldest --limit=N`.
+// This is a route-scoped, unassigned tier (Tier 3 pool-demand/control-dispatcher
+// routing), so held beads must be excluded (ga-5736js): filterReadyByAssignee
+// (Tier 1/2, assignee-scoped) stays hold-transparent by design and must not
+// gain this filter.
 func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.Bead {
 	var matched []beads.Bead
 	for _, b := range ready {
@@ -220,7 +215,14 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.B
 		if b.Metadata[metadataKey] != route {
 			continue
 		}
-		if beadLabelsContain(b.Labels, controlReadyHoldMayorLabel) {
+		held := false
+		for _, label := range beadmeta.DispatchHoldLabels {
+			if beadLabelsContain(b.Labels, label) {
+				held = true
+				break
+			}
+		}
+		if held {
 			continue
 		}
 		matched = append(matched, b)

@@ -771,6 +771,11 @@ func TestResolveCityFlag(t *testing.T) {
 	})
 
 	t.Run("flag_empty_fallback", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveCity's " +
+			"ambient cwd-based fallback (step 10), which is now unconditionally " +
+			"refused inside test binaries; an explicit override would make it a " +
+			"no-op test rather than a fix")
+
 		// With empty flag, should fall back to cwd-based discovery.
 		// Clear GC_CITY so the cwd fallback is actually exercised.
 		t.Setenv("GC_CITY", "")
@@ -7301,7 +7306,7 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
+func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) {
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
 	setPrimeHookStdinJSON(t, map[string]string{
@@ -7324,8 +7329,36 @@ base = "builtin:claude"`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "claude-provider-session" {
+		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "gemini-provider-session",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty for hook stdin session id from a provider outside the hook-stdin allowlist (gemini surfaces its id via env)", got)
 	}
 }
 

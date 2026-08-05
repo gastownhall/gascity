@@ -5,12 +5,159 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 )
+
+func TestExportProvidersForCities(t *testing.T) {
+	north := events.NewFake()
+	south := events.NewFake()
+	invalid := events.NewFake()
+	providers := map[string]events.Provider{
+		"north":    north,
+		"south":    south,
+		"bad/name": invalid,
+	}
+	source := func() map[string]events.Provider {
+		result := make(map[string]events.Provider, len(providers))
+		for city, provider := range providers {
+			result[city] = provider
+		}
+		return result
+	}
+
+	tests := []struct {
+		name   string
+		cities []string
+		want   []string
+	}{
+		{name: "omitted cities keeps every provider", want: []string{"bad/name", "north", "south"}},
+		{name: "explicit empty exports no providers", cities: []string{}, want: []string{}},
+		{name: "only blank and invalid names export no providers", cities: []string{"", "  ", "bad/name"}, want: []string{}},
+		{name: "selects exact configured names only", cities: []string{"north", " south ", "bad/name"}, want: []string{"north"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := exportProvidersForCities(source, tt.cities)
+			got := filtered()
+			names := make([]string, 0, len(got))
+			for city := range got {
+				names = append(names, city)
+			}
+			slices.Sort(names)
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("provider names = %v, want %v", names, tt.want)
+			}
+		})
+	}
+}
+
+func TestExportProvidersForCitiesFiltersDynamicProviders(t *testing.T) {
+	north := events.NewFake()
+	south := events.NewFake()
+	providers := map[string]events.Provider{"north": north}
+	source := func() map[string]events.Provider {
+		result := make(map[string]events.Provider, len(providers))
+		for city, provider := range providers {
+			result[city] = provider
+		}
+		return result
+	}
+
+	filtered := exportProvidersForCities(source, []string{"north"})
+	if got := filtered(); len(got) != 1 || got["north"] != north {
+		t.Fatalf("initial providers = %#v, want north only", got)
+	}
+
+	providers["south"] = south
+	if got := filtered(); len(got) != 1 || got["north"] != north {
+		t.Fatalf("providers after dynamic update = %#v, want north only", got)
+	}
+}
+
+func TestExportProvidersForCitiesExcludesRegisteredAliasAfterInitFailure(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := newCityRegistry()
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("registry-only providers = %#v, want no matching configured city", got)
+	}
+
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("providers after init failure = %#v, want no matching configured city", got)
+	}
+}
+
+func TestExportProvidersForCitiesFailsClosedOnInitFailureWhenRegistryMalformed(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	registryFile := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := registryFile.Register(cityPath, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(supervisor.RegistryPath(), []byte("[[cities]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registryFile.List(); err == nil {
+		t.Fatal("malformed supervisor registry unexpectedly loaded")
+	}
+
+	registry := newCityRegistry()
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("providers with malformed registry = %#v, want no matching configured city", got)
+	}
+}
+
+func TestExportProvidersForCitiesExcludesUnregisteredInitFailureBasename(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := writeCityEventLog(t, "north")
+	registry := newCityRegistry()
+	registry.BatchUpdate(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initFailures[cityPath] = &initFailRecord{lastError: "test failure"}
+	})
+
+	providers := exportProvidersForCities(registry.TransientCityEventProviders, []string{"north"})
+	if got := providers(); len(got) != 0 {
+		t.Fatalf("unregistered failure providers = %#v, want no matching configured city", got)
+	}
+}
 
 // TestResolveExportCredentials_EmptyTokenFileErrors proves a configured but
 // empty (or whitespace-only) token_file fails closed: the provider returns an

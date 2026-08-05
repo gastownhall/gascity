@@ -1,0 +1,303 @@
+package main
+
+import (
+	"errors"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// TestCollectOpenUnassignedRoutedWorkExcludesBlocked covers gc-ft31x, the
+// build_desired_state.go sibling of gc-4zb/#4395: the controller-demand read at
+// collectOpenUnassignedRoutedWork must not count a blocked-but-routed bead as
+// spawn capacity. mapBdStatus folds bd's blocked/deferred/review/testing into
+// Gas City's "open", so a blocked routed bead decodes with Status "open" and a
+// cached (non-Live) List hands it back; only a Live read reaches bd's raw
+// --status=open filter and drops it. Before the fix the cached read counted the
+// blocked bead as controller-dispatcher demand; after it, only genuinely-open
+// routed work is demand.
+func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
+	const pool = "worker"
+	blocked := beads.Bead{ID: "BLK-1", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: pool,
+	}}
+	open := beads.Bead{ID: "OPN-1", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: pool,
+	}}
+	store := collapsedBlockedStatusStore{
+		Store:          beads.NewMemStore(),
+		cachedSnapshot: []beads.Bead{blocked, open}, // non-Live: blocked collapsed to "open", present
+		liveSnapshot:   []beads.Bead{open},          // Live: bd's raw --status=open filter dropped the blocked row
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	if partial {
+		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
+	}
+
+	got := make(map[string]bool, len(work))
+	for _, b := range work {
+		got[b.ID] = true
+	}
+	if !got["OPN-1"] {
+		t.Errorf("genuinely-open routed bead OPN-1 missing from demand: %v", ids(work))
+	}
+	if got["BLK-1"] {
+		t.Errorf("blocked routed bead BLK-1 counted as spawn demand: %v — a Live read must exclude it (gc-ft31x)", ids(work))
+	}
+}
+
+// liveOpenListErrorStore fails the LIVE open List — the exact read
+// collectOpenUnassignedRoutedWork uses via listOpenForControllerDemandLive — and
+// delegates every other read to the embedded store, modeling a transient
+// backing-store outage on the controller-demand path.
+type liveOpenListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s liveOpenListErrorStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live && q.Status == "open" {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage covers gc-ft31x's
+// fail-open-to-zero edge: a failed live demand read must be reported partial, not
+// swallowed into an empty route set. collectOpenUnassignedRoutedWork feeds only
+// openControlDispatcherDemand, so a swallowed outage reads as zero
+// control-dispatcher demand and buildDesiredStateWithSessionBeads drains a live
+// dispatcher. The partial flag is what lets the caller retain it instead.
+func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T) {
+	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+
+	if !partial {
+		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")
+	}
+	if len(work) != 0 {
+		t.Errorf("collectOpenUnassignedRoutedWork returned %v on a hard outage, want no beads", ids(work))
+	}
+}
+
+// TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage is the
+// end-to-end gc-ft31x guarantee: when the unassigned-routed live read fails, the
+// deterministic control-dispatcher template is marked partial so
+// retainScaleCheckPartialPoolDesired preserves the running dispatcher this tick
+// rather than draining it on a transient outage.
+func TestBuildDesiredStateRetainsControlDispatcherOnRoutedDemandOutage(t *testing.T) {
+	cityPath := t.TempDir()
+	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
+	dispatcherSession := beads.Bead{
+		ID:     "session-control-dispatcher",
+		Title:  "control dispatcher",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "template:control-dispatcher"},
+		Metadata: map[string]string{
+			"session_name":         "control-dispatcher-1",
+			"template":             config.ControlDispatcherAgentName,
+			"agent_name":           config.ControlDispatcherAgentName,
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			StartCommand:      "gc convoy control --serve",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	dispatcher := config.ControlDispatcherAgentName
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{dispatcherSession})
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, nil, snapshot, nil, io.Discard,
+	)
+
+	if got.PoolScaleCheckPartialTemplates[dispatcher] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want routed-demand outage to remain retention-only", got.PoolScaleCheckPartialTemplates)
+	}
+	if !got.PoolPartialRetentionTemplates[dispatcher] {
+		t.Fatalf("PoolPartialRetentionTemplates = %v, want control-dispatcher template %q retained on a routed-demand outage (gc-ft31x)", got.PoolPartialRetentionTemplates, dispatcher)
+	}
+	if !got.ScaleCheckPartialTemplates[dispatcher] {
+		t.Fatalf("ScaleCheckPartialTemplates = %v, want control-dispatcher template %q marked partial on a routed-demand outage (gc-ft31x)", got.ScaleCheckPartialTemplates, dispatcher)
+	}
+	if _, ok := got.State["control-dispatcher-1"]; !ok {
+		t.Fatalf("desired state = %v, want existing dispatcher retained during routed-demand outage", mapKeys(got.State))
+	}
+	retained := retainScaleCheckPartialPoolDesired(cfg, nil, snapshot, got.PoolPartialRetentionTemplates)
+	if retained[dispatcher] != 1 {
+		t.Fatalf("retained dispatcher count = %d, want 1", retained[dispatcher])
+	}
+}
+
+// TestBuildDesiredStateStartsColdControlDispatcherFromHealthyStoreDuringOtherStoreOutage
+// covers gc-ft31x.2: a failed live routed-demand read is retention-only. It
+// must preserve an existing dispatcher, but it must not veto a cold dispatcher
+// create justified by real control work visible in another store.
+func TestBuildDesiredStateStartsColdControlDispatcherFromHealthyStoreDuringOtherStoreOutage(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("city live open list outage")}
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "Finalize workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:     beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey: "core.control-dispatcher",
+		},
+	}); err != nil {
+		t.Fatalf("create rig control work: %v", err)
+	}
+
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), cityStore,
+		map[string]beads.Store{"fixture": rigStore}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if got.ScaleCheckCounts["core.control-dispatcher"] != 1 {
+		t.Fatalf("ScaleCheckCounts = %v, want healthy-store control demand for core.control-dispatcher", got.ScaleCheckCounts)
+	}
+	if got.PoolScaleCheckPartialTemplates["core.control-dispatcher"] {
+		t.Fatalf("PoolScaleCheckPartialTemplates = %v, want unrelated live-list outage not to suppress cold create", got.PoolScaleCheckPartialTemplates)
+	}
+	for _, desired := range got.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			return
+		}
+	}
+	t.Fatalf("desired state = %v, want cold core.control-dispatcher planned despite unrelated store outage", mapKeys(got.State))
+}
+
+// blockedDemandStore models the production controller-demand List reads for a
+// bead that is blocked in the backing store. mapBdStatus collapses it to Status
+// "open", so a non-Live Status:"open" read returns it (openCollapsed); a Live
+// Status:"open" read reaches bd's raw filter and excludes it (openLive). Status
+// is honored so the in-progress demand read stays empty and every other read
+// delegates to the embedded store (Ready/Get/DepList/writes).
+type blockedDemandStore struct {
+	beads.Store
+	openCollapsed []beads.Bead // Status:"open", non-Live: blocked rows present, collapsed
+	openLive      []beads.Bead // Status:"open", Live: raw filter excluded blocked
+}
+
+func (s blockedDemandStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	switch q.Status {
+	case "in_progress":
+		return nil, nil
+	case "open":
+		if q.Live {
+			return append([]beads.Bead(nil), s.openLive...), nil
+		}
+		return append([]beads.Bead(nil), s.openCollapsed...), nil
+	default:
+		return s.Store.List(q)
+	}
+}
+
+// TestCollectAssignedWorkBeadsExcludesBlockedFromDemandButReaperStillSeesIt
+// covers the second gc-ft31x call site (collectAssignedWorkBeads open-routed
+// pass). One read fed both a demand consumer (appendOpenAssignedMoleculeWorkUnique,
+// which markReadyAssigned) and the blocked-routed reaper
+// (appendOpenRoutedWorkUnique -> releaseOrphanedPoolAssignments). The fix splits
+// it: the demand consumer reads the Live tier so a blocked assigned molecule root
+// is NOT counted as wake demand, while the reaper keeps the collapsed-status read
+// so its input is unchanged and still captures the blocked-routed orphan — "do
+// not remove the blocked-routed reaper until a reviewed binary is deployed"
+// (gc-ft31x). (releaseOrphanedPoolAssignments' own live re-read then decides
+// whether to act on it; that gate is out of scope here.)
+func TestCollectAssignedWorkBeadsExcludesBlockedFromDemandButReaperStillSeesIt(t *testing.T) {
+	const deadAssignee = "worker--pool__coder-gc-session-deadbeef"
+	live := beads.NewMemStore()
+	blocker, err := live.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	// A blocked graph.v2 root orphaned by a dead session: an assigned molecule
+	// root (demand candidate) that is also routed (reaper candidate), decoded as
+	// Status "open" by mapBdStatus. The blocking dep keeps it out of the Ready
+	// path so the ONLY demand route is the molecule pass under test.
+	orphan, err := live.Create(beads.Bead{
+		Title:    "orphaned blocked workflow root",
+		Type:     "wisp",
+		Status:   "open",
+		Assignee: deadAssignee,
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+			beadmeta.RoutedToMetadataKey: "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create orphan: %v", err)
+	}
+	if err := live.DepAdd(orphan.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphan: %v", err)
+	}
+	collapsed := beads.Bead{
+		ID: orphan.ID, Title: "orphaned blocked workflow root", Type: "wisp", Status: "open",
+		Assignee: deadAssignee,
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+			beadmeta.RoutedToMetadataKey: "worker",
+		},
+	}
+	store := blockedDemandStore{
+		Store:         live,
+		openCollapsed: []beads.Bead{collapsed}, // non-Live: blocked orphan present, collapsed to "open"
+		openLive:      nil,                     // Live: bd's raw --status=open filter dropped it
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	found, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	// Demand: the blocked assigned molecule root must NOT be wake demand.
+	for k := range readyAssigned {
+		if k.ID == orphan.ID {
+			t.Fatalf("blocked assigned molecule root %s counted as demand (readyAssigned=%v) — the Live demand read must exclude it", orphan.ID, readyAssigned)
+		}
+	}
+	// Reaper: the collapsed-status read is unchanged, so the blocked-routed
+	// orphan is still captured (do not remove the blocked-routed reaper).
+	if len(found) != 1 || found[0].ID != orphan.ID {
+		t.Fatalf("reaper lost the blocked-routed orphan: found=%v, want [%s]", ids(found), orphan.ID)
+	}
+}
+
+func ids(bs []beads.Bead) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = b.ID
+	}
+	return out
+}

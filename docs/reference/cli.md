@@ -1460,7 +1460,24 @@ gc events --follow --after-cursor city-a:12,city-b:9
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc events reemit-execution](#gc-events-reemit-execution) | Project one graph execution run into event facts |
 | [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events reemit-execution
+
+Project exactly one stopped local graph.v2 execution run into execution facts.
+
+The default is a dry run. Pass --apply to append the projected snapshot to the
+default city event log.
+
+```
+gc events reemit-execution --city <city> --run <run> [--apply] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | append projected facts to the default file event log |
+| `--run` | string |  | graph.v2 workflow root ID to project |
 
 ## gc events rotate
 
@@ -1653,6 +1670,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -2373,7 +2391,9 @@ gc mail read <id> [flags]
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use --notify to nudge the recipient after replying.
+Use --notify to request a recipient turn after replying. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -2384,7 +2404,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
-| `--notify` | bool |  | nudge the recipient about this reply, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
@@ -2392,8 +2412,10 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
-the recipient after sending. Use --from to override the sender identity.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
+a recipient turn after sending. In a managed city, it can request a wake for
+a non-running recipient. Unread mail alone does not request a wake.
+Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
@@ -2420,7 +2442,7 @@ gc mail send --all "Status update: tests passing"
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
-| `--notify` | bool |  | nudge the recipient about this message, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
 
@@ -2741,12 +2763,18 @@ subtrees whose open descendants are also older than --stale-after. Pass one
 or more scoped order names when --include-wisps is set; wisp recovery is
 order-scoped to avoid scanning unrelated beads.
 
+When the number of eligible closed-bead deletions exceeds
+GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
+proceed. This guard prevents accidental mass-deletes without an explicit
+operator acknowledgement.
+
 ```
 gc order sweep-tracking [order ...] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
@@ -2818,6 +2846,7 @@ gc pack registry
 | [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry requests](#gc-pack-registry-requests) | Show your Registry publish request status |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
 | [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
@@ -2924,6 +2953,22 @@ gc pack registry remove <registry-name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc pack registry requests
+
+Show recent publish requests you submitted to Registry, or one request with its feedback comments.
+
+This command is read-only. Use a personal Registry token; run "gc pack registry login" if you have not logged in yet.
+
+```
+gc pack registry requests [request-id] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSON response object |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | personal registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc pack registry search
 

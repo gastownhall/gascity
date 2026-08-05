@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -671,6 +672,83 @@ func TestRequiredArtifactTemplatesTreatsSingularAsOnePath(t *testing.T) {
 			t.Fatalf("requiredArtifactTemplates()[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
 		}
 	}
+}
+
+// TestRequiredArtifactTargetInWorktree regression-pins the
+// existence/resolvability checks in requiredArtifactTargetInWorktree's two
+// bare EvalSymlinks calls (refs ga-iawy13.4): a missing target is treated
+// as contained (the caller's earlier os.Stat already classifies
+// missing/unreadable paths, so this function only needs to gate symlink
+// escapes for targets that exist), a symlinked worktree root resolves
+// correctly for a contained target, and a target that escapes via symlink
+// is rejected. These sites are deliberate existence/resolvability
+// checking, not comparison preparation, and must keep behaving identically
+// after the canonical-path-at-ingest migration.
+func TestRequiredArtifactTargetInWorktree(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing target treated as contained", func(t *testing.T) {
+		t.Parallel()
+		worktree := t.TempDir()
+		missing := filepath.Join(worktree, "does-not-exist.md")
+
+		got, err := requiredArtifactTargetInWorktree(worktree, missing)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected missing target to be treated as contained (true)")
+		}
+	})
+
+	t.Run("symlinked worktree root with contained target resolves", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		realDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(realDir, "review.md"), []byte("ok"), 0o644); err != nil {
+			t.Fatalf("write artifact: %v", err)
+		}
+		aliasParent := t.TempDir()
+		alias := filepath.Join(aliasParent, "worktree-alias")
+		if err := os.Symlink(realDir, alias); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(alias, filepath.Join(alias, "review.md"))
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected symlinked worktree root with contained target to resolve as contained")
+		}
+	})
+
+	t.Run("target escaping via symlink is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		worktree := t.TempDir()
+		outside := t.TempDir()
+		outsideFile := filepath.Join(outside, "secret.md")
+		if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+			t.Fatalf("write outside file: %v", err)
+		}
+		link := filepath.Join(worktree, "review.md")
+		if err := os.Symlink(outsideFile, link); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(worktree, link)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if got {
+			t.Fatal("expected target escaping worktree via symlink to be rejected (false)")
+		}
+	})
 }
 
 type fakeFileInfo struct {

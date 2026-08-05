@@ -1007,7 +1007,7 @@ func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	return &sessionChaosHarness{
 		t:        t,
 		env:      env,
-		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp),
+		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk)),
 		rng:      rand.New(rand.NewSource(seed)), //nolint:gosec // deterministic test chaos, not security-sensitive.
 		seed:     seed,
 		template: template,

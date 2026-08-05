@@ -710,6 +710,9 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -2935,9 +2938,11 @@ func (c *City) FormulasDir() string {
 
 // AllPackDirs returns the union of city-level and all rig-level pack directories
 // (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
-// global scans that intentionally need the full pack-fragment universe. Prompt
-// rendering for a specific rig should use PackDirsForRig so one rig's fragments
-// cannot override another rig's same-named fragments.
+// global scans that intentionally need the full pack-fragment universe, and as
+// the fallback PackDirsForRig("") uses for rig-less (scope="city") agents, which
+// have no single rig to scope to. Prompt rendering for a specific rig should use
+// PackDirsForRig so one rig's fragments cannot override another rig's
+// same-named fragments.
 func (c *City) AllPackDirs() []string {
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
@@ -2956,12 +2961,27 @@ func (c *City) AllPackDirs() []string {
 // directories imported by rigName, deduplicated with city-level dirs kept first.
 // Use this when rendering prompts for one agent so rig-imported template
 // fragments are available without exposing fragments imported by other rigs.
+//
+// rigName == "" means a rig-less (scope="city") agent — e.g. deep-investigator,
+// supervisor, pack-author — which has no single rig to scope to. Those agents
+// fall back to AllPackDirs(): the union across every rig, sorted by rig name for
+// determinism. A fragment name defined identically in more than one rig's pack
+// resolves fine (that's the common case: a shared vocabulary like
+// handoff-routing, meant to render identically everywhere). A name defined with
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
+// See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
+	if rigName == "" {
+		return c.AllPackDirs()
+	}
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
-	if rigName != "" {
-		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
-	}
+	dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
 	return dirs
 }
 
@@ -3255,6 +3275,19 @@ type Agent struct {
 	// disables jitter (every session restarts at exactly MaxSessionAge).
 	// Ignored when MaxSessionAge is unset.
 	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the
+	// idle-timeout ladder may defer on the same assigned-work bead
+	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
+	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
+	// Nil means use the built-in default. Without this backstop a session
+	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
+	// open due to an upstream status-mapping bug) would defer indefinitely,
+	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at
+	// the single-tick level. The counter resets whenever the anchor bead
+	// changes or the session is not idle-kill-eligible; see
+	// sessionHasAwakeAssignedWorkForReachableStore's caller in
+	// session_reconciler.go.
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -3448,6 +3481,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -4100,6 +4134,13 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
+			if agent.EffectiveWakeMode() == "fresh" {
+				warnings = append(warnings, fmt.Sprintf(
+					"named_session %q: mode %q with wake_mode %q on template %q %s; use only for a deliberate restart-per-cycle actor",
+					s.QualifiedName(), s.ModeOrDefault(), agent.EffectiveWakeMode(), agent.QualifiedName(),
+					alwaysFreshWakeModeMarker,
+				))
+			}
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
@@ -4116,6 +4157,20 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		}
 	}
 	return warnings, nil
+}
+
+// alwaysFreshWakeModeMarker is a stable substring on the warning emitted when a
+// mode="always" named session backs a wake_mode="fresh" template. CLI warning
+// classification keys off this marker, so keep it in sync with
+// IsAlwaysFreshWakeModeWarning.
+const alwaysFreshWakeModeMarker = "starts a fresh provider session after every drain"
+
+// IsAlwaysFreshWakeModeWarning reports whether a load warning is the non-fatal
+// always+fresh advisory. CLI warning filters use this to print the notice and
+// keep it non-fatal in strict mode. Keep in sync with
+// alwaysFreshWakeModeMarker.
+func IsAlwaysFreshWakeModeWarning(warning string) bool {
+	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a

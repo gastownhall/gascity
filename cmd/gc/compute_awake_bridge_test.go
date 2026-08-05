@@ -413,6 +413,105 @@ func TestBuildAwakeInputFromReconciler_InProgressAssignedBeadStillWakes(t *testi
 	}
 }
 
+// TestBuildAwakeInputFromReconciler_BlockedInProgressBeadDoesNotWake pins the
+// AwakeWorkBead.Blocked population expression, including its nil guard. Blocked
+// is derived only for in_progress work — open work's blocker state is already
+// folded into Ready — and a nil IsBlocked (what minimum-supported bd v1.0.4
+// produces, and what any store that omits the projection produces) must fail
+// open to not-blocked. That fail-open default is what makes the wake-side
+// narrowing unable to over-suppress: absent an explicit blocked verdict, the
+// session keeps waking exactly as it did before.
+func TestBuildAwakeInputFromReconciler_BlockedInProgressBeadDoesNotWake(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      string
+		isBlocked   *bool
+		wantBlocked bool
+		wantWake    bool
+	}{
+		{
+			name:        "in_progress with is_blocked=true is blocked and does not wake",
+			status:      "in_progress",
+			isBlocked:   boolPtr(true),
+			wantBlocked: true,
+			wantWake:    false,
+		},
+		{
+			name:        "in_progress with nil is_blocked fails open and still wakes",
+			status:      "in_progress",
+			isBlocked:   nil,
+			wantBlocked: false,
+			wantWake:    true,
+		},
+		{
+			// Open work routes through Ready, so its blocker state must not be
+			// double-counted into Blocked. With readyAssignedFlags omitted the
+			// bead is not ready, so it does not wake — via Ready, not Blocked.
+			name:        "open with is_blocked=true is not marked blocked",
+			status:      "open",
+			isBlocked:   boolPtr(true),
+			wantBlocked: false,
+			wantWake:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			cfg := &config.City{Agents: []config.Agent{{Name: "gc.run-operator"}}}
+			sessionBead := beads.Bead{
+				ID:     "mc-session-1",
+				Status: "open",
+				Type:   "session",
+				Metadata: map[string]string{
+					"state":        "active",
+					"session_name": "gc__run-operator-mc-1",
+					"template":     "gc.run-operator",
+				},
+			}
+			work := beads.Bead{
+				ID:        "ga-active",
+				Status:    tt.status,
+				Assignee:  "gc__run-operator-mc-1",
+				IsBlocked: tt.isBlocked,
+			}
+
+			input := buildAwakeInputFromReconciler(
+				cfg,
+				"",
+				[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				[]beads.Bead{work},
+				nil, // readyAssignedFlags omitted entirely
+				nil,
+				runtime.NewFake(),
+				now,
+			)
+
+			if len(input.WorkBeads) != 1 {
+				t.Fatalf("WorkBeads = %+v, want exactly one bead", input.WorkBeads)
+			}
+			if got := input.WorkBeads[0].Blocked; got != tt.wantBlocked {
+				t.Errorf("WorkBeads[0].Blocked = %v, want %v", got, tt.wantBlocked)
+			}
+
+			decisions := ComputeAwakeSet(input)
+			got := decisions["gc__run-operator-mc-1"]
+			if tt.wantWake {
+				if !got.ShouldWake || got.Reason != "assigned-work" {
+					t.Fatalf("session should wake on assigned-work; got decision = %+v", got)
+				}
+			} else if got.ShouldWake {
+				t.Fatalf("session should stay asleep; got decision = %+v", got)
+			}
+		})
+	}
+}
+
 // TestBuildAwakeInputFromReconciler_CrossStoreSameIDReadinessIsStoreScoped pins
 // the cross-store readiness fix: AssignedWorkBeads can carry the same bead ID
 // from independent city and rig stores. A ready city bead must NOT mark a

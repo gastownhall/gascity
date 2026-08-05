@@ -7000,6 +7000,97 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 	}
 }
 
+// seedRetentionWatchdogCity builds a CityRuntime whose cityPath points at a
+// scratch city carrying one legacy backup_state.json stamped at backupAge, plus
+// a store holding minClosedOrderTrackingRetained+2 prunable beads. Every other
+// TestOrderTrackingRetentionWatchdog_* case leaves cityPath empty, which skips
+// the doctor.BulkDeleteSafe guard entirely; these two exercise it.
+func seedRetentionWatchdogCity(t *testing.T, now time.Time, backupAge time.Duration) (*CityRuntime, beads.Store, *bytes.Buffer) {
+	t.Helper()
+	cityDir := t.TempDir()
+	backupDir := filepath.Join(cityDir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", backupDir, err)
+	}
+	stateJSON := fmt.Sprintf(`{"timestamp":%q}`, now.Add(-backupAge).Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write backup_state.json: %v", err)
+	}
+
+	// Beads are 8 days old (> 7d default TTL); the 2 oldest exceed the retain-10 floor.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("guard-%02d", i),
+			Title:     "order:guard",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:guard", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            cityDir,
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+	}
+	return cr, store, &stderrBuf
+}
+
+func TestOrderTrackingRetentionWatchdog_SkipsBulkDeleteWhenBackupStale(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 48h since the last backup, past the 24h bulkDeleteMaxAge default.
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, 48*time.Hour)
+
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// Nothing may be deleted while the recovery point is stale.
+	for i := range minClosedOrderTrackingRetained + 2 {
+		id := fmt.Sprintf("guard-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved when the backup is stale: %v", id, err)
+		}
+	}
+	if got := stderrBuf.String(); !strings.Contains(got, "skipping bulk delete") {
+		t.Fatalf("stderr = %q, want 'skipping bulk delete' in output", got)
+	}
+	// The interval stamp is consumed even on the skip path, so a blocked
+	// watchdog does not re-scan on every tick.
+	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 1h since the last backup, well inside the 24h bulkDeleteMaxAge default.
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
+
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	if got := stderrBuf.String(); strings.Contains(got, "skipping bulk delete") {
+		t.Fatalf("stderr = %q, want no skip with a fresh backup", got)
+	}
+	for _, id := range []string{"guard-00", "guard-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (should be pruned)", id, err)
+		}
+	}
+	for i := 2; i < minClosedOrderTrackingRetained+2; i++ {
+		id := fmt.Sprintf("guard-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved at the retain floor: %v", id, err)
+		}
+	}
+}
+
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
 	// 100 closed beads: at the threshold, no warning (fires only when > 100).
 	seed := make([]beads.Bead, 100)

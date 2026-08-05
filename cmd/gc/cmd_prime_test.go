@@ -1257,6 +1257,12 @@ func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
 
 			cityDir := t.TempDir()
 			cleanupManagedDoltTestCity(t, cityDir)
+			// This test's subject is agent-from-workdir inference (downstream
+			// of city resolution), not ambient city discovery itself, so an
+			// explicit override here doesn't defeat its purpose — it just
+			// keeps city resolution out of the ambient-discovery path that
+			// isTestBinary() refuses in test binaries (ga-klo4gz).
+			t.Setenv("GC_CITY", cityDir)
 			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
 			agentWorkDir := filepath.Join(agentWorkDirParts...)
 			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {

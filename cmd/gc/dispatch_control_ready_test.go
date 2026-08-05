@@ -147,25 +147,6 @@ func TestFilterReadyByRouteRequiresUnassignedAndSortsOldestFirst(t *testing.T) {
 	}
 }
 
-// TestFilterReadyByRouteExcludesHoldMayorLabel is ga-amdg7f: a bead parked on
-// hold:mayor must not be auto-routed into the control-dispatcher pool by the
-// routed_to/run_target tier -- that tier is ambient discovery, and hold:mayor
-// means the bead is intentionally waiting on mayor attention before it may be
-// picked up automatically. (An already-assignee-targeted bead is a distinct,
-// deliberate dispatch and is out of scope here; only the route tier gates on
-// the label.)
-func TestFilterReadyByRouteExcludesHoldMayorLabel(t *testing.T) {
-	ready := []beads.Bead{
-		{ID: "ga-routed", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
-		{ID: "ga-held", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{"hold:mayor"}},
-	}
-	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
-	want := []string{"ga-routed"}
-	if !stringSlicesEqual(beadIDs(got), want) {
-		t.Fatalf("filterReadyByRoute = %#v, want %#v (hold:mayor bead ga-held must be excluded from automatic pool routing)", beadIDs(got), want)
-	}
-}
-
 func TestMergeControlReadyGroupsDedupsPreservingFirstOccurrence(t *testing.T) {
 	assigned := []beads.Bead{
 		{ID: "ga-z-assigned"},
@@ -373,47 +354,6 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackExcludesHoldMayorRoutedBead is
-// ga-amdg7f end-to-end on the cache path: a routed_to-matching bead labeled
-// hold:mayor must not appear in the control-dispatcher's queue.
-func TestTryControlReadyFromCacheOrFallbackExcludesHoldMayorRoutedBead(t *testing.T) {
-	cityDir, store := setUpControlReadyFileStoreCity(t)
-	noBDOnPathForTest(t)
-
-	target := "gascity/control-dispatcher"
-	routed, err := store.Create(beads.Bead{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target}})
-	if err != nil {
-		t.Fatalf("create routed bead: %v", err)
-	}
-	held, err := store.Create(beads.Bead{
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
-		Labels:   []string{"hold:mayor"},
-	})
-	if err != nil {
-		t.Fatalf("create hold:mayor routed bead: %v", err)
-	}
-
-	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
-	query := workflowServeControlReadyQuery(agentCfg)
-
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
-	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
-	}
-	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
-	}
-
-	var gotIDs []string
-	for _, b := range queue {
-		gotIDs = append(gotIDs, b.ID)
-	}
-	wantIDs := []string{routed.ID}
-	if !stringSlicesEqual(gotIDs, wantIDs) {
-		t.Fatalf("queue ids = %#v, want %#v (hold:mayor bead %s must not be auto-routed to the pool)", gotIDs, wantIDs, held.ID)
-	}
-}
-
 func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
 	_, handled, err := tryControlReadyFromCacheOrFallback("bd ready --json --limit=20", cityDir, nil)
@@ -490,56 +430,6 @@ esac
 	}
 	if readyCalls != 1 {
 		t.Fatalf("bd ready calls = %d, want exactly 1; all calls:\n%s", readyCalls, string(logData))
-	}
-}
-
-// TestTryControlReadyFromCacheOrFallbackExcludesHoldMayorRoutedBeadOnFallbackPath
-// is ga-amdg7f end-to-end on the fallback path: a routed_to-matching bead
-// labeled hold:mayor in the single batched `bd ready --json` response must
-// not appear in the control-dispatcher's queue, matching the cache-path
-// behavior in TestTryControlReadyFromCacheOrFallbackExcludesHoldMayorRoutedBead.
-func TestTryControlReadyFromCacheOrFallbackExcludesHoldMayorRoutedBeadOnFallbackPath(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	target := "gascity/control-dispatcher"
-	script := fmt.Sprintf(`#!/bin/sh
-set -eu
-case "$1" in
-  list)
-    exit 7
-    ;;
-esac
-printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-fallback-held","metadata":{"gc.routed_to":"%s"},"labels":["hold:mayor"]}]'
-`, target, target)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_BEADS", "bd")
-
-	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
-	query := workflowServeControlReadyQuery(agentCfg)
-
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
-	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
-	}
-	if !handled {
-		t.Fatalf("handled = false, want true")
-	}
-	var gotIDs []string
-	for _, b := range queue {
-		gotIDs = append(gotIDs, b.ID)
-	}
-	wantIDs := []string{"ga-fallback-routed"}
-	if !stringSlicesEqual(gotIDs, wantIDs) {
-		t.Fatalf("queue ids = %#v, want %#v (hold:mayor bead ga-fallback-held must not be auto-routed to the pool)", gotIDs, wantIDs)
 	}
 }
 

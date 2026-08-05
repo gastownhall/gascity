@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,223 @@ func testTmux() *Tmux {
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
 	return NewTmuxWithConfig(cfg)
+}
+
+// noServerPreflightExecutor makes only the first has-session preflight report
+// ErrNoServer, then delegates every other operation to real tmux. It models a
+// stale protocol observation while retaining the real socket boundary.
+type noServerPreflightExecutor struct {
+	used bool
+}
+
+func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if !e.used && firstArgsContainHasSession(args) {
+		e.used = true
+		return "", ErrNoServer
+	}
+	return realExecutor{}.executeCtx(ctx, args)
+}
+
+func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	newTmux := func(socketName string) *Tmux {
+		cfg := DefaultConfig()
+		cfg.SocketName = socketName
+		return NewTmuxWithConfig(cfg)
+	}
+	newSocketName := func(suffix string) string {
+		return fmt.Sprintf("gctest-live-socket-%s-%d-%d", suffix, os.Getpid(), time.Now().UnixNano())
+	}
+
+	t.Run("live-server-refuses", func(t *testing.T) {
+		tm := newTmux(newSocketName("live"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+
+		const instanceToken = "live-server-instance-token"
+		original := fmt.Sprintf("gc-live-original-%d", time.Now().UnixNano())
+		if err := tm.NewSession(original, ""); err != nil {
+			t.Fatalf("create original session: %v", err)
+		}
+		if err := tm.SetEnvironment(original, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
+			t.Fatalf("seed original instance token: %v", err)
+		}
+		serverPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid}: %v", err)
+		}
+		beforeSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat live socket %q: %v", socketPath, err)
+		}
+		beforeSessions, err := tm.ListSessions()
+		if err != nil {
+			t.Fatalf("list original sessions: %v", err)
+		}
+
+		guarded := NewProviderWithConfig(tm.cfg)
+		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		err = guarded.Start(context.Background(), original, runtimepkg.Config{
+			Command: "sleep 600",
+			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
+		})
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("Provider.Start error = %v, want ErrServerDegraded", err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			t.Fatalf("Provider.Start error = %v, must not wrap ErrNoServer", err)
+		}
+		for _, want := range []string{
+			"protocol=no-server",
+			"path=" + socketPath,
+			"inode=" + socketInode(beforeSocket),
+			"peer_pid=" + serverPID,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Provider.Start error = %q, want %q", err, want)
+			}
+		}
+
+		hasOriginal, err := tm.HasSession(original)
+		if err != nil {
+			t.Fatalf("check original session: %v", err)
+		}
+		if !hasOriginal {
+			t.Fatalf("original session %q was removed after guarded refusal", original)
+		}
+		afterSessions, err := tm.ListSessions()
+		if err != nil {
+			t.Fatalf("list sessions after guarded refusal: %v", err)
+		}
+		if !reflect.DeepEqual(afterSessions, beforeSessions) {
+			t.Fatalf("sessions after guarded refusal = %v, want %v", afterSessions, beforeSessions)
+		}
+		afterPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after guarded refusal: %v", err)
+		}
+		if afterPID != serverPID {
+			t.Fatalf("server pid after guarded refusal = %q, want %q", afterPID, serverPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after guarded refusal: %v", err)
+		}
+		if !os.SameFile(beforeSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("absent-allows-cold-creation", func(t *testing.T) {
+		tm := newTmux(newSocketName("absent"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove prior socket %q: %v", socketPath, err)
+		}
+
+		session := fmt.Sprintf("gc-absent-socket-%d", time.Now().UnixNano())
+		if err := tm.NewSession(session, ""); err != nil {
+			t.Fatalf("NewSession with absent socket: %v", err)
+		}
+		has, err := tm.HasSession(session)
+		if err != nil || !has {
+			t.Fatalf("created session present = %t, err = %v", has, err)
+		}
+	})
+
+	t.Run("stale-refused-allows-cold-creation", func(t *testing.T) {
+		tm := newTmux(newSocketName("stale"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			t.Fatalf("create socket directory: %v", err)
+		}
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+		if err != nil {
+			t.Fatalf("create stale socket: %v", err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			t.Fatalf("close stale socket listener: %v", err)
+		}
+
+		session := fmt.Sprintf("gc-stale-socket-%d", time.Now().UnixNano())
+		if err := tm.NewSession(session, ""); err != nil {
+			t.Fatalf("NewSession with stale refused socket: %v", err)
+		}
+		has, err := tm.HasSession(session)
+		if err != nil || !has {
+			t.Fatalf("created session present = %t, err = %v", has, err)
+		}
+	})
+}
+
+// TestNewSessionSucceedsOnDrainedLiveServer covers gc's normal drained state:
+// exit-empty is off, so killing the last session leaves the server alive with
+// zero sessions and the socket still bound. tmux answers the preflight probe
+// with "no current target" — the server DID answer, so new-session attaches
+// rather than unlinking and rebinding, and creation must succeed.
+func TestNewSessionSucceedsOnDrainedLiveServer(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-drained-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		_ = tm.KillServer()
+		_ = os.Remove(socketPath)
+	})
+
+	first := fmt.Sprintf("gc-drained-first-%d", time.Now().UnixNano())
+	if err := tm.NewSession(first, ""); err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	if err := tm.SetExitEmpty(false); err != nil {
+		t.Fatalf("SetExitEmpty(false): %v", err)
+	}
+	if err := tm.KillSession(first); err != nil {
+		t.Fatalf("kill last session: %v", err)
+	}
+
+	sessions, err := tm.ListSessions()
+	if err != nil {
+		t.Fatalf("list sessions after drain: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions after drain = %v, want none", sessions)
+	}
+	if _, err := os.Lstat(socketPath); err != nil {
+		t.Fatalf("socket %q missing after drain: %v", socketPath, err)
+	}
+
+	second := fmt.Sprintf("gc-drained-second-%d", time.Now().UnixNano())
+	if err := tm.NewSession(second, ""); err != nil {
+		t.Fatalf("NewSession on drained live server: %v", err)
+	}
+	has, err := tm.HasSession(second)
+	if err != nil || !has {
+		t.Fatalf("session created on drained server present = %t, err = %v", has, err)
+	}
 }
 
 func ensureTestSocketSession(t *testing.T, tm *Tmux) {

@@ -49,6 +49,132 @@ func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", scopeRoot)
 }
 
+func TestScopeHasCompleteStorageBinding(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		want     bool
+		wantErr  bool
+	}{
+		{name: "missing metadata"},
+		{
+			name:     "legacy metadata has neither storage field",
+			metadata: `{"backend":"postgres","postgres_host":"db.example.test"}`,
+		},
+		{
+			name:     "complete opaque binding",
+			metadata: `{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server","unknown":{"preserve":true}}`,
+			want:     true,
+		},
+		{
+			name:     "one storage field is partial",
+			metadata: `{"backend":"postgres","storage_endpoint":"remote"}`,
+			wantErr:  true,
+		},
+		{
+			name:     "blank backend is partial",
+			metadata: `{"backend":" ","storage_endpoint":"remote","storage_database":"work"}`,
+			wantErr:  true,
+		},
+		{
+			name:     "malformed metadata remains unclassified",
+			metadata: `{"backend":`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scopeRoot := t.TempDir()
+			path := scopeMetadataJSONPath(scopeRoot)
+			if tt.metadata != "" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tt.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := scopeHasCompleteStorageBinding(path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("scopeHasCompleteStorageBinding() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("scopeHasCompleteStorageBinding() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScopeSkipsManagedDoltForInitChecksCompleteBindingFirst(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	scopeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(scopeRoot), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scopeSkipsManagedDoltForInit(scopeRoot, scopeRoot)
+	if err != nil {
+		t.Fatalf("scopeSkipsManagedDoltForInit: %v", err)
+	}
+	if !got {
+		t.Fatal("scopeSkipsManagedDoltForInit = false, want true for complete storage binding")
+	}
+}
+
+func TestScopeBackendIsPostgresRejectsCompleteDoltBinding(t *testing.T) {
+	scopeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(scopeRoot), []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if scopeBackendIsPostgres(scopeRoot, scopeRoot) {
+		t.Fatal("scopeBackendIsPostgres = true, want false for a Dolt storage binding")
+	}
+}
+
+func TestStartBeadsLifecycleDelegatesCompleteStorageBindingWithoutMutation(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "provider-calls.log")
+	script := writeManagedBdTestScript(t, "#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 99\n")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := scopeMetadataJSONPath(cityPath)
+	metadata := []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server","dolt_database":"legacy_hq","unknown":{"preserve":true}}`)
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	if err := healthBeadsProviderContext(context.Background(), cityPath, false); err != nil {
+		t.Fatalf("healthBeadsProviderContext: %v", err)
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("managed provider should not run for complete storage binding, stat err = %v", err)
+	}
+	got, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, metadata) {
+		t.Fatalf("metadata changed: got %s, want %s", got, metadata)
+	}
+}
+
 func mustProviderLifecycleProcessEnv(t *testing.T, cityPath, provider string) []string {
 	t.Helper()
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
@@ -2795,6 +2921,41 @@ dolt.auto-start: true
 	cfg := string(cfgData)
 	if strings.Contains(cfg, "dolt.user:") {
 		t.Fatalf("inherited rig config should clear stale dolt.user when city user is empty:%c%s", 10, cfg)
+	}
+}
+
+func TestSyncConfiguredDoltPortFilesSkipsInheritedRigForCompleteCityStorageBinding(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityMetadata := []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`)
+	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), cityMetadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rigConfig := []byte(`issue_prefix: frontend
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`)
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), rigConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir}}, io.Discard); err != nil {
+		t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
+	}
+	if got := mustReadFile(t, scopeMetadataJSONPath(cityDir)); string(got) != string(cityMetadata) {
+		t.Fatalf("city metadata changed:\n got %s\nwant %s", got, cityMetadata)
+	}
+	if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(rigConfig) {
+		t.Fatalf("inherited rig config changed:\n got %s\nwant %s", got, rigConfig)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("inherited rig port file should remain absent, stat err = %v", err)
 	}
 }
 
@@ -11794,5 +11955,65 @@ func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) fu
 	return func() {
 		_ = ln.Close()
 		<-done
+	}
+}
+
+// TestDefaultScopeDoltDatabase covers ga-p658sc: a rig whose derived prefix
+// is digit-leading (e.g. "001", the basename t.TempDir() hands to `gc rig
+// add` in acceptance tests) must not be used verbatim as a Dolt database
+// name, since Dolt rejects identifiers that start with a digit. The HQ
+// scope and ordinary letter-led prefixes must be unaffected.
+func TestDefaultScopeDoltDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "001")
+
+	tests := []struct {
+		name   string
+		dir    string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "hq scope always returns hq regardless of prefix",
+			dir:    cityPath,
+			prefix: "001",
+			want:   "hq",
+		},
+		{
+			name:   "ordinary letter-led prefix is unchanged",
+			dir:    rigPath,
+			prefix: "ga",
+			want:   "ga",
+		},
+		{
+			name:   "digit-leading prefix is sanitized to a non-digit-leading name",
+			dir:    rigPath,
+			prefix: "001",
+			want:   "r001",
+		},
+		{
+			name:   "longer all-numeric prefix is sanitized",
+			dir:    rigPath,
+			prefix: "12345",
+			want:   "r12345",
+		},
+		{
+			name:   "digit elsewhere in the prefix is unaffected",
+			dir:    rigPath,
+			prefix: "g1",
+			want:   "g1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultScopeDoltDatabase(cityPath, tt.dir, tt.prefix)
+			if got != tt.want {
+				t.Errorf("defaultScopeDoltDatabase(%q, %q, %q) = %q, want %q", cityPath, tt.dir, tt.prefix, got, tt.want)
+			}
+			if got != "hq" && got != "" && got[0] >= '0' && got[0] <= '9' {
+				t.Errorf("defaultScopeDoltDatabase(%q, %q, %q) = %q starts with a digit; Dolt rejects digit-leading database names", cityPath, tt.dir, tt.prefix, got)
+			}
+		})
 	}
 }

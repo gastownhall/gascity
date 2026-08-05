@@ -91,6 +91,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.cache.Invalidate()
 		return nil
 	}
+	if errors.Is(err, ErrServerDegraded) {
+		return err
+	}
 	p.cleanupFailedStart(name, cfg)
 	return err
 }

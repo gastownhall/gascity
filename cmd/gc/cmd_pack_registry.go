@@ -42,6 +42,7 @@ never persisted by gc and are never sent to custom Registry origins.`,
 	cmd.AddCommand(newPackRegistryShowCmd(stdout, stderr))
 	cmd.AddCommand(newRegistryLoginCmd(stdout, stderr))
 	cmd.AddCommand(newRegistryPublishCmd(stdout, stderr))
+	cmd.AddCommand(newRegistryRequestsCmd(stdout, stderr))
 	cmd.AddCommand(newRegistryWhoamiCmd(stdout, stderr))
 	return cmd
 }

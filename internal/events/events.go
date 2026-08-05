@@ -32,6 +32,14 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// ExecutionWorkAssociated records an authoritative association between a
+	// graph.v2 workflow run and one physical input work bead. Subject carries
+	// the work bead and RunID carries the workflow root.
+	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionStepDefined records one physical native execution-step
+	// occurrence. Subject carries the physical step bead, RunID the workflow
+	// root, and StepID/DependsOnStepIDs the semantic topology.
+	ExecutionStepDefined = "execution.step_defined"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -258,6 +266,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
+	ExecutionWorkAssociated, ExecutionStepDefined,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -309,6 +318,9 @@ type Event struct {
 	RunID     string          `json:"run_id,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	StepID    string          `json:"step_id,omitempty"`
+	// DependsOnStepIDs is nil for unknown native topology; a present empty
+	// slice represents a known root.
+	DependsOnStepIDs *[]string `json:"depends_on_step_ids,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.

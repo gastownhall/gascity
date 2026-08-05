@@ -195,10 +195,17 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			// onto in-progress work), but say so explicitly: without this
 			// warning the CLI prints only the generic "already routed" message,
 			// giving no signal that the requested --on formula was never
-			// attached or that --force would override the skip.
+			// attached or that --force would override the skip. opts.OnFormula
+			// is empty when this was reached via the target's
+			// default_sling_formula rather than an explicit --on, so fall back
+			// to naming that instead of rendering an empty flag value.
+			skippedFormula := opts.OnFormula
+			if skippedFormula == "" {
+				skippedFormula = a.EffectiveDefaultSlingFormula()
+			}
 			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
 				"bead %s is claimed by %s with no molecule attached; --on %s was skipped to avoid re-attaching onto in-progress work — rerun with --force to attach it anyway",
-				opts.BeadOrFormula, decision.Assignee, opts.OnFormula))
+				opts.BeadOrFormula, decision.Assignee, skippedFormula))
 		}
 	}
 	if !check.Idempotent {
@@ -295,7 +302,10 @@ type attachmentDecision struct {
 // fail-closed idempotent state rather than clear it and risk minting a
 // duplicate attachment.
 func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (attachmentDecision, error) {
-	if opts.OnFormula == "" {
+	// Both formula-backed routes reach the same attach path, so the
+	// routed-raw override has to apply to a target's default_sling_formula
+	// as well as an explicit --on.
+	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
 	}
 	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
@@ -491,9 +501,10 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title: opts.Title,
 			Vars:  formulaVars,
 		}); err != nil {
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
-		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
@@ -518,9 +529,24 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.Store, mResult.RootID, replacedSnapshot); rollbackErr != nil {
 					return wfResult, errors.Join(wfErr, rollbackErr)
 				}
+				return wfResult, wfErr
 			}
+			// The convoy-first branch deliberately passes an empty
+			// sourceBeadID (the source is tracked through the input convoy,
+			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
+			// never covers it. Stamp the work bead here instead.
+			restampWorkBeadRouting(deps, beadID, a, &wfResult)
 			return wfResult, wfErr
 		})
+		if lockedErr != nil {
+			// The pour failed after minting its synthetic input convoy
+			// (children-conflict, snapshot, instantiate, or start failure —
+			// the started-workflow path returns nil error). Close the pour's
+			// own artifact so repeated failures do not accumulate open
+			// claim-attracting convoys.
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+		}
+		return lockedResult, lockedErr
 	}
 	if err := validateSlingFormulaRuntimeVars(context.Background(), formulaName, searchPaths, molecule.Options{
 		Title: opts.Title,
@@ -712,6 +738,36 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 }
 
+// restampWorkBeadRouting stamps gc.execution_routed_to on the work bead a
+// graph workflow was attached to. A graph.v2 work bead must not get the
+// claim-semantics gc.routed_to key once its workflow has started, because the
+// pool's tier-3 claim query and the drain engine's own dispatch are two
+// uncoordinated authorities -- neither checks the bead's Assignee/the other's
+// lock field, so stamping gc.routed_to there is a structural double-dispatch
+// hazard, not merely an observability fix. The existing ExecutionRoutedToKey
+// (gc.execution_routed_to) is already read by the graphroute resolver, convoy
+// dispatch, dashboard orders feed, and dispatch engine. Apply
+// NormalizePoolRouteTarget to the computed target so slot-suffixed pool
+// instances collapse to their base template name (the same pass every other
+// gc.routed_to writer applies). Failures are reported as metadata errors
+// rather than failing the launch: by this point the workflow is already
+// running, and unwinding it over a routing restamp would be worse than a
+// surfaced warning.
+func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" || deps.Store == nil || result == nil {
+		return
+	}
+	target := agentutil.NormalizePoolRouteTarget(deps.Cfg, strings.TrimSpace(agentutil.RoutedToIdentity(&a)))
+	if target == "" {
+		return
+	}
+	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+	}
+}
+
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
 func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
 	var result SlingResult
@@ -742,6 +798,7 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
+		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 	if deps.Notify != nil {

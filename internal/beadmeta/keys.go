@@ -125,6 +125,7 @@ const (
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
 	ModelMetadataKey                     = "gc.model"
+	NativeStepDependenciesMetadataKey    = "gc.native_step_dependencies.v1"
 	NextAttemptMetadataKey               = "gc.next_attempt"
 	OnExhaustedMetadataKey               = "gc.on_exhausted"
 	OnFailMetadataKey                    = "gc.on_fail"
@@ -366,6 +367,7 @@ var KnownMetadataKeys = []string{
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
 	ModelMetadataKey,
+	NativeStepDependenciesMetadataKey,
 	NextAttemptMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,

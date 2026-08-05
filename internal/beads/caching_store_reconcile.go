@@ -256,8 +256,12 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
-		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+	if c.syncFailures > 0 && !c.stats.LastProblemAt.IsZero() {
+		backoff := cacheReconcileBaseBackoff << uint(c.syncFailures)
+		if backoff > cacheReconcileMaxBackoff || backoff <= 0 {
+			backoff = cacheReconcileMaxBackoff
+		}
+		dueAt := c.stats.LastProblemAt.Add(backoff)
 		if !now.Before(dueAt) {
 			return 0
 		}
@@ -298,6 +302,10 @@ func (c *CachingStore) runReconciliation() {
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
 			c.state = cacheDegraded
+			if !c.circuitTripped {
+				c.circuitTripped = true
+				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
+			}
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)
@@ -674,6 +682,12 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 // hold c.mu (write lock).
 func (c *CachingStore) promoteLiveLocked() {
 	c.state = cacheLive
+	// Re-arm the one-shot circuit-breaker signal. promoteLiveLocked is the single
+	// live-promotion point — both prime() and the reconcile success paths route
+	// through it — so resetting here ensures a store that recovers via reconcile
+	// (not just prime) will fire the trip log again on a subsequent re-degrade.
+	// Without this, a flapping store emits the breaker signal at most once.
+	c.circuitTripped = false
 }
 
 // reconcileSuccessLogLocked composes the per-reconcile success log line

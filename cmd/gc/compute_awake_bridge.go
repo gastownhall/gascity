@@ -52,7 +52,7 @@ func buildAwakeInputFromReconciler(
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
 			QualifiedName:     a.QualifiedName(),
-			Suspended:         isAgentEffectivelySuspendedWith(cfg, a, suspState),
+			Suspended:         isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState),
 			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
 			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
@@ -89,8 +89,15 @@ func buildAwakeInputFromReconciler(
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
 			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
+			// Blocked mirrors #4726's hook-side fix on the wake side: an
+			// in_progress bead's IsBlocked projection (bd's denormalized
+			// ready-work verdict, which folds in open blocking dependencies
+			// and gates) tells WakeWork not to fire on a bead the hook would
+			// not dispatch. Only meaningful for in_progress -- open work's
+			// blocker state is already folded into `ready` above.
+			blocked := wb.Status == "in_progress" && wb.IsBlocked != nil && *wb.IsBlocked
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
-				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready,
+				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
 			})
 		}
 	}

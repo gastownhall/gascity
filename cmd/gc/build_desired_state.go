@@ -39,6 +39,21 @@ type storeScopedBeadKey struct {
 	ID       string
 }
 
+// ContinuationClaimCandidate is a ready graph-v2 successor that may need a
+// bounded claim nudge after its current pool session completed the preceding
+// step but did not start another turn. All fields are exact provenance:
+// StoreRef is canonical (city:<name> or rig:<name>), RootBeadID was verified
+// through Store, and Assignee is the bead's persisted preassignment. Store is
+// retained for immediate pre-delivery revalidation; session identity
+// resolution happens later against the post-reconcile session snapshot.
+type ContinuationClaimCandidate struct {
+	WorkBeadID string
+	RootBeadID string
+	StoreRef   string
+	Assignee   string
+	Store      beads.Store
+}
+
 // DesiredStateResult bundles the desired session state with the scale_check
 // counts that produced it. Callers that need poolDesired for wake decisions
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
@@ -48,10 +63,13 @@ type DesiredStateResult struct {
 	BaseState        map[string]TemplateParams
 	ScaleCheckCounts map[string]int // nil when store is nil or scale_check not run
 	// ScaleCheckPartialTemplates records all templates whose bead-backed demand
-	// probe failed. PoolScaleCheckPartialTemplates drives generic pool retention;
+	// probe failed. PoolScaleCheckPartialTemplates blocks fresh pool creates;
+	// PoolPartialRetentionTemplates preserves existing pool capacity and may also
+	// contain retention-only failures where another store proved positive demand.
 	// NamedScaleCheckPartialTemplates only protects configured named sessions.
 	ScaleCheckPartialTemplates      map[string]bool
 	PoolScaleCheckPartialTemplates  map[string]bool
+	PoolPartialRetentionTemplates   map[string]bool
 	NamedScaleCheckPartialTemplates map[string]bool
 	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet                         map[string]bool
@@ -108,6 +126,13 @@ type DesiredStateResult struct {
 	// per-bead readiness slice for buildAwakeInputFromReconciler's
 	// AwakeWorkBead.Ready flag.
 	ReadyAssigned map[storeScopedBeadKey]bool
+	// ContinuationClaimCandidates is the fail-closed projection of
+	// ReadyAssigned used by the post-reconcile continuation-claim backstop.
+	// It is empty on any assigned-work partial read.
+	ContinuationClaimCandidates []ContinuationClaimCandidate
+	// ContinuationClaimQueryPartial preserves existing pacing markers when an
+	// exact candidate/root read was incomplete or internally contradictory.
+	ContinuationClaimQueryPartial bool
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -525,7 +550,31 @@ func buildDesiredStateWithSessionBeads(
 			}
 			if store != nil && isCold && !storeScopedControlDispatcher {
 				for _, source := range activeStores {
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref}
+					// Mirror the generic-pool cold-wake probe below (vp-s37 /
+					// #3078): a custom scale_check that is cold and asleep
+					// cannot see routed demand, so probe every active store
+					// and feed defaultScaleTargets too, not just
+					// defaultNamedScaleTargets (which only preserves
+					// partial-query retention for defaultNamedSessionDemand
+					// and never itself produces demand — see its doc
+					// comment). Gate on mode != "always": an always-on named
+					// session is already unconditionally desired by the
+					// named pass, so adding pool demand for the same
+					// template would spawn a redundant {name}-N phantom
+					// alongside it, mirroring the identical guard on the
+					// !hasCustomScaleCheck branch above.
+					if namedSessionMode != "always" {
+						defaultScaleTargets = append(defaultScaleTargets, target)
+					}
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, target)
+				}
+				if namedSessionMode != "always" {
+					// Clamp to 1 in the merge below (coldWakeTemplates), same
+					// as the generic-pool branch: this probe only wakes the
+					// pool from zero and must never override the custom
+					// check's own authoritative warm count.
+					coldWakeTemplates[template] = true
 				}
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
@@ -636,6 +685,7 @@ func buildDesiredStateWithSessionBeads(
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	var poolScaleCheckPartialTemplates map[string]bool
+	var poolPartialRetentionTemplates map[string]bool
 	var namedScaleCheckPartialTemplates map[string]bool
 	var scaleCheckPartialTemplates map[string]bool
 	var namedDefaultDemand map[string]bool
@@ -686,7 +736,8 @@ func buildDesiredStateWithSessionBeads(
 		// string, so the route must be canonicalized before demand is counted or
 		// the cold pool never wakes for it.
 		subPhaseStart = time.Now()
-		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs = collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
+		var unassignedRoutedPartial bool
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
@@ -745,6 +796,7 @@ func buildDesiredStateWithSessionBeads(
 				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 			}
 		}
+		poolPartialRetentionTemplates = mergeScaleCheckPartialTemplates(poolPartialRetentionTemplates, poolScaleCheckPartialTemplates)
 		if len(controlDispatcherOpenDemand) > 0 {
 			if scaleCheckCounts == nil {
 				scaleCheckCounts = make(map[string]int)
@@ -754,6 +806,15 @@ func buildDesiredStateWithSessionBeads(
 					scaleCheckCounts[template] = 1
 				}
 			}
+		}
+		if unassignedRoutedPartial {
+			// The unassigned-routed live read failed, so controlDispatcherOpenDemand
+			// above is a partial (possibly empty) view — not proof of zero demand.
+			// Mark every deterministic control-dispatcher template for retention so
+			// a running dispatcher survives this tick. This is intentionally not a
+			// create-suppression marker: another healthy store may have proved real
+			// control demand that justifies starting a cold dispatcher (gc-ft31x.2).
+			poolPartialRetentionTemplates = markControlDispatcherTemplatesPartial(cfg, poolPartialRetentionTemplates)
 		}
 		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = selectReadyUnassignedRoutedWork(
 			unassignedRoutedBeads,
@@ -773,7 +834,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 			namedScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(namedScaleCheckPartialTemplates, partialTemplates)
 		}
-		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolScaleCheckPartialTemplates)
+		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolPartialRetentionTemplates)
 		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
@@ -959,7 +1020,19 @@ func buildDesiredStateWithSessionBeads(
 	// Phase 2: discover session beads created outside config iteration
 	// (e.g., by "gc session new"). Include them in desired state if they
 	// have a valid template and are not held/closed.
-	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolScaleCheckPartialTemplates, namedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolPartialRetentionTemplates, namedScaleCheckPartialTemplates, stderr)
+
+	var continuationClaimCandidates []ContinuationClaimCandidate
+	continuationClaimQueryPartial := storePartial
+	if !storePartial {
+		continuationClaimCandidates, continuationClaimQueryPartial = selectReadyContinuationClaimCandidates(
+			cityName,
+			assignedWorkBeads,
+			assignedWorkStores,
+			assignedWorkStoreRefs,
+			readyAssigned,
+		)
+	}
 
 	return DesiredStateResult{
 		State:                              desired,
@@ -967,6 +1040,7 @@ func buildDesiredStateWithSessionBeads(
 		ScaleCheckCounts:                   scaleCheckCounts,
 		ScaleCheckPartialTemplates:         scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
+		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
 		NamedScaleCheckPartialTemplates:    namedScaleCheckPartialTemplates,
 		AssignedWorkBeads:                  assignedWorkBeads,
 		AssignedWorkStores:                 assignedWorkStores,
@@ -974,6 +1048,8 @@ func buildDesiredStateWithSessionBeads(
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ReadyAssigned:                      readyAssigned,
+		ContinuationClaimCandidates:        continuationClaimCandidates,
+		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
 		NamedSessionDemand:                 namedWorkReady,
 		NamedSessionRoutedDemand:           namedRoutedDemand,
 		StoreQueryPartial:                  storePartial,
@@ -1118,7 +1194,7 @@ func refreshDesiredStateWithSessionBeads(
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
-	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
 
@@ -1195,6 +1271,22 @@ func collectAssignedWorkBeadsWithStores(
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 				}
 			}
+			// Open assigned molecule roots that count as wake demand. Whether an
+			// open assigned root is demand must be decided from the bead's RAW
+			// status, not the collapsed Bead.Status: mapBdStatus folds bd's
+			// blocked/deferred/review/testing into "open", so a blocked assigned
+			// root reads as "open" through the cache and would wrongly re-enter
+			// demand (EB-42o8/gc-nz5i; extends gc-4zb/#4395). A Live read reaches
+			// the backing store's raw --status=open filter, which excludes it —
+			// see listOpenForControllerDemandLive.
+			if openDemand, err := listOpenForControllerDemandLive(source.store); err == nil {
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+			} else {
+				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
+				if beads.IsPartialResult(err) && len(openDemand) > 0 {
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				}
+			}
 			// Open pool-routed beads that still carry an assignee. These are
 			// invisible to the in-progress pass (status is "open") and to the
 			// ready-by-assignee pass (the assignee is a dead session's
@@ -1205,13 +1297,22 @@ func collectAssignedWorkBeadsWithStores(
 			// (issue #2793). The release loop further gates each bead on
 			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
 			// live-session step beads in the same range are skipped untouched.
+			//
+			// This read stays on the collapsed-status cache tier ON PURPOSE. The
+			// gc-ft31x fix narrows only the DEMAND read above to live and leaves
+			// the blocked-routed reaper's input (appendOpenRoutedWorkUnique ->
+			// releaseOrphanedPoolAssignments) exactly as it was, so nothing the
+			// reaper relied on is removed — "do not remove the blocked-routed
+			// reaper until a reviewed binary is deployed" (gc-ft31x). A blocked
+			// bead captured here is not counted as demand regardless:
+			// appendOpenRoutedWorkUnique never markReadyAssigned (see the
+			// skipReadyAssignees note below), and releaseOrphanedPoolAssignments'
+			// own live re-read (liveWorkAssignmentStillReleasable) skips it.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
@@ -1778,6 +1879,13 @@ func mergeScaleCheckPartialTemplates(dst, src map[string]bool) map[string]bool {
 	return dst
 }
 
+func effectivePoolPartialRetentionTemplates(result DesiredStateResult) map[string]bool {
+	return mergeScaleCheckPartialTemplates(
+		mergeScaleCheckPartialTemplates(nil, result.PoolScaleCheckPartialTemplates),
+		result.PoolPartialRetentionTemplates,
+	)
+}
+
 func sortedBoolMapKeys(values map[string]bool) []string {
 	out := make([]string, 0, len(values))
 	for value, include := range values {
@@ -1867,6 +1975,30 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 		return handles.Live.List(query)
 	}
 	return rows, err
+}
+
+// listOpenForControllerDemandLive reads open work for the controller-demand and
+// spawn-capacity paths on the LIVE tier so the backing store's raw-status filter
+// runs. listBothTiersForControllerDemand serves a Status:"open" query from the
+// cache (handles.Cached forces Live=false), which filters against the collapsed
+// Bead.Status: mapBdStatus folds bd's blocked/deferred/review/testing into Gas
+// City's "open", so a blocked bead is indistinguishable from ready work and
+// would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
+// a Live read reaches the backing store's server-side --status=open filter
+// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
+// excludes the raw blocked status. This extends the fix gc-4zb/#4395 applied to
+// restoreCarriedWorkRoutes and the workflow projection to the controller-demand
+// List reads. AllowScan opts into the intentional open-status population read;
+// handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
+// latency on the demand path (see readyDemandCache): this pays one live
+// backing-store read rather than over-counting blocked work as demand.
+//
+// Known gap: NativeDoltStore maps Status:"open" to
+// ExcludeStatus=[closed,in_progress] (see nativeIssueFilterFromListQuery), so it
+// still returns raw blocked/deferred rows regardless of Live — this gate is
+// inert on that backend, tracked separately.
+func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
@@ -3628,7 +3760,18 @@ func selectOrPlanPoolSessionBead(
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
-		slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, *preferred, usedSlots)
+		preserveAboveCapacity := poolRequestResumesAssignedWorkInfo(
+			request,
+			bp.assignedWorkBeads,
+			*preferred,
+		)
+		slot := claimPreferredPoolSlotWithConfigInfo(
+			bp.city,
+			cfgAgent,
+			*preferred,
+			preserveAboveCapacity,
+			usedSlots,
+		)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
 		}
@@ -3859,6 +4002,32 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
 			return true
 		}
+	}
+	return false
+}
+
+// poolRequestResumesAssignedWorkInfo proves that a concrete resume request is
+// still backed by its exact actionable work bead and that the bead is assigned
+// through any current or historical identity of the preferred session.
+func poolRequestResumesAssignedWorkInfo(request SessionRequest, workBeads []beads.Bead, info session.Info) bool {
+	workBeadID := strings.TrimSpace(request.WorkBeadID)
+	if request.Tier != "resume" || request.SessionBeadID != info.ID || workBeadID == "" {
+		return false
+	}
+	for _, wb := range workBeads {
+		if wb.ID != workBeadID || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			return false
+		}
+		for _, identity := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if assignee == identity {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -4181,11 +4350,13 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // and store ref that own each bead. It is the input collection for
 // canonicalizeLegacyBoundUnassignedRoutedWork: empty-assignee open work is dropped
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
-// migration re-home needs its own scan. Active-only List queries are served from
-// the CachingStore in steady state, so this adds no backing-store round trip.
-func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string) {
+// migration re-home needs its own scan. The scan now issues one live backing
+// read per store per tick so the raw-status filter runs, which costs a
+// backing-store round trip the cached read did not — the accepted tradeoff for
+// not counting blocked work as demand.
+func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
-		return nil, nil, nil
+		return nil, nil, nil, false
 	}
 	// Work arm (unassigned-routed re-home scan): iterate the work-class
 	// candidate fan-out, labeling the city store "city" for the diagnostic
@@ -4195,6 +4366,7 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 	var workBeads []beads.Bead
 	var workStores []beads.Store
 	var workStoreRefs []string
+	var partial bool
 	seen := make(map[storeScopedBeadKey]struct{})
 	for sourceIndex, source := range stores {
 		if source.store == nil {
@@ -4208,10 +4380,30 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 			}
 			storeRef = "city:" + cityName
 		}
-		open, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
-		if err != nil && !beads.IsPartialResult(err) {
-			fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", storeRef, err) //nolint:errcheck
-			continue
+		// Live so the backing store's raw --status=open filter excludes blocked/
+		// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
+		// and the route-repair passes, and mapBdStatus would otherwise collapse a
+		// blocked bead to "open" and let it count as spawn capacity or get its route
+		// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
+		open, err := listOpenForControllerDemandLive(source.store)
+		if err != nil {
+			// A failed live demand read must NOT read as zero demand: the only
+			// demand signal this set feeds is openControlDispatcherDemand (its
+			// other consumers — canonicalizeLegacyBoundUnassignedRoutedWork,
+			// repairControlDispatcherRoutesForStoreScope and
+			// selectReadyUnassignedRoutedWork — degrade to no-ops on an
+			// outage), so silently dropping a store's rows drains a live
+			// control dispatcher
+			// (gc-ft31x, the fail-open-to-zero sibling of the raw-status demand
+			// fix). Report it partial so the caller retains affected dispatchers
+			// this tick. A partial result still carries the rows it managed to
+			// read, so fall through and use them; a hard failure carries none,
+			// so skip only this store's population.
+			partial = true
+			if !beads.IsPartialResult(err) {
+				fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s: List(open): %v\n", storeRef, err) //nolint:errcheck
+				continue
+			}
 		}
 		for _, b := range open {
 			if b.Type == sessionBeadType || strings.TrimSpace(b.Assignee) != "" {
@@ -4233,7 +4425,29 @@ func collectOpenUnassignedRoutedWork(cfg *config.City, store beads.Store, rigSto
 			workStoreRefs = append(workStoreRefs, storeRef)
 		}
 	}
-	return workBeads, workStores, workStoreRefs
+	return workBeads, workStores, workStoreRefs, partial
+}
+
+// markControlDispatcherTemplatesPartial marks every deterministic control-
+// dispatcher template partial. The only demand signal
+// collectOpenUnassignedRoutedWork feeds is openControlDispatcherDemand — its
+// other consumers degrade to no-ops on an outage — so when its live read fails
+// the lost signal is exactly the control-dispatcher demand: without this the
+// tick reads zero demand
+// and drains a live dispatcher on a transient List outage. Marking the templates
+// partial routes them through retainScaleCheckPartialPoolDesired, which preserves
+// the running dispatcher session for this tick (gc-ft31x).
+func markControlDispatcherTemplatesPartial(cfg *config.City, partials map[string]bool) map[string]bool {
+	if cfg == nil {
+		return partials
+	}
+	for i := range cfg.Agents {
+		if !config.IsDeterministicControlDispatcher(&cfg.Agents[i]) {
+			continue
+		}
+		partials = markScaleCheckPartialTemplate(partials, cfg.Agents[i].QualifiedName())
+	}
+	return partials
 }
 
 // selectReadyUnassignedRoutedWork intersects the broad open-routed snapshot
@@ -4307,6 +4521,212 @@ func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 	}
 	candidateRig, candidateScoped := storeref.ScopeRigContext(candidateStoreRef)
 	return candidateScoped && candidateRig == rootRig
+}
+
+// selectReadyContinuationClaimCandidates projects the already-collected
+// assigned-work snapshot into the only rows the continuation nudge backstop may
+// consider. It adds no broad query: one bounded root Get is issued per
+// ready/open affinity candidate so the row's gc.root_bead_id is proven to name
+// a live graph-v2 root in the exact physical store described by
+// gc.root_store_ref.
+//
+// The slices must remain aligned and candidate rows must have an exact
+// ReadyAssigned entry. Any alignment failure, root read failure, or duplicate
+// disagreement is returned as a partial snapshot so callers preserve pacing
+// markers. Definite ineligibility simply omits that row. Identity and
+// exactly-one-per-session checks are intentionally deferred until after
+// reconciliation, when the current raw session snapshot is available.
+func selectReadyContinuationClaimCandidates(
+	cityName string,
+	work []beads.Bead,
+	workStores []beads.Store,
+	workStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) ([]ContinuationClaimCandidate, bool) {
+	if len(work) != len(workStores) || len(work) != len(workStoreRefs) {
+		return nil, true
+	}
+	if len(work) == 0 {
+		return nil, false
+	}
+
+	// Group before eligibility filtering. Otherwise a valid copy can survive
+	// beside a same-scope copy whose metadata or root read disagrees.
+	groups := make(map[storeScopedBeadKey][]int)
+	order := make([]storeScopedBeadKey, 0, len(work))
+	partial := false
+	for i, bead := range work {
+		id := strings.TrimSpace(bead.ID)
+		if id == "" {
+			continue
+		}
+		storeRef, ok := canonicalContinuationClaimStoreRef(cityName, workStoreRefs[i])
+		if !ok {
+			if continuationRowCouldBeCandidate(bead, workStoreRefs[i], readyAssigned) {
+				partial = true
+			}
+			continue
+		}
+		key := storeScopedBeadKey{StoreRef: storeRef, ID: id}
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+
+	result := make([]ContinuationClaimCandidate, 0, len(order))
+	for _, key := range order {
+		var (
+			valid  []ContinuationClaimCandidate
+			absent bool
+			hold   bool
+		)
+		for _, i := range groups[key] {
+			candidate, resolution := evaluateReadyContinuationClaimCandidate(
+				work[i],
+				workStores[i],
+				workStoreRefs[i],
+				key.StoreRef,
+				readyAssigned,
+			)
+			switch resolution {
+			case continuationCandidateAbsent:
+				absent = true
+			case continuationCandidateHold:
+				hold = true
+			case continuationCandidateValid:
+				valid = append(valid, candidate)
+			}
+		}
+		if hold {
+			partial = true
+			continue
+		}
+		if len(valid) == 0 {
+			continue
+		}
+		if absent {
+			partial = true
+			continue
+		}
+		first := valid[0]
+		identical := true
+		for _, candidate := range valid[1:] {
+			if !sameContinuationClaimCandidate(first, candidate) {
+				identical = false
+				break
+			}
+		}
+		if !identical {
+			partial = true
+			continue
+		}
+		result = append(result, first)
+	}
+	return result, partial
+}
+
+type continuationCandidateResolution int
+
+const (
+	continuationCandidateAbsent continuationCandidateResolution = iota
+	continuationCandidateHold
+	continuationCandidateValid
+)
+
+func continuationRowCouldBeCandidate(
+	bead beads.Bead,
+	storeRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) bool {
+	id := strings.TrimSpace(bead.ID)
+	return id != "" &&
+		id == bead.ID &&
+		strings.EqualFold(strings.TrimSpace(bead.Status), "open") &&
+		strings.EqualFold(strings.TrimSpace(bead.Type), "task") &&
+		strings.TrimSpace(bead.Assignee) != "" &&
+		readyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: id}] &&
+		strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey]) != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionAffinityMetadataKey]) == "require"
+}
+
+func evaluateReadyContinuationClaimCandidate(
+	bead beads.Bead,
+	store beads.Store,
+	rawStoreRef string,
+	canonicalStoreRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) (ContinuationClaimCandidate, continuationCandidateResolution) {
+	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if rootID == "" || rootStoreRef == "" || rootStoreRef != canonicalStoreRef {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+	if store == nil {
+		return ContinuationClaimCandidate{}, continuationCandidateHold
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		return ContinuationClaimCandidate{}, continuationCandidateHold
+	}
+	if root.ID != rootID ||
+		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
+		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
+		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != strings.TrimSpace(bead.Assignee) {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+	return ContinuationClaimCandidate{
+		WorkBeadID: strings.TrimSpace(bead.ID),
+		RootBeadID: rootID,
+		StoreRef:   canonicalStoreRef,
+		Assignee:   strings.TrimSpace(bead.Assignee),
+		Store:      store,
+	}, continuationCandidateValid
+}
+
+func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
+	return a.WorkBeadID == b.WorkBeadID &&
+		a.RootBeadID == b.RootBeadID &&
+		a.StoreRef == b.StoreRef &&
+		a.Assignee == b.Assignee
+}
+
+// canonicalContinuationClaimStoreRef turns the aligned assigned-work shorthand
+// (empty city ref or bare rig name) into the exact canonical ref graph-v2 roots
+// persist. Already-canonical refs are accepted only when they name this city or
+// a non-empty rig; arbitrary/legacy values fail closed.
+func canonicalContinuationClaimStoreRef(cityName, storeRef string) (string, bool) {
+	cityName = strings.TrimSpace(cityName)
+	storeRef = strings.TrimSpace(storeRef)
+	switch {
+	case storeRef == "":
+		if cityName == "" {
+			return "", false
+		}
+		return "city:" + cityName, true
+	case strings.HasPrefix(storeRef, "city:"):
+		if cityName == "" || storeRef != "city:"+cityName {
+			return "", false
+		}
+		return storeRef, true
+	case strings.HasPrefix(storeRef, "rig:"):
+		rigName := strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+		if rigName == "" || storeRef != "rig:"+rigName {
+			return "", false
+		}
+		return storeRef, true
+	case strings.Contains(storeRef, ":"):
+		return "", false
+	default:
+		return "rig:" + storeRef, true
+	}
 }
 
 // Keep migration writes within the same budget used for other reconciler
@@ -4651,13 +5071,30 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
+	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
+	// runs immediately after this staging on the SAME workDir (see
+	// prepareTemplateResolution), so it must be the sole writer of those files
+	// ON THE RECONCILE TICK. Staging them too leaves two writers with
+	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
+	// The runtime task-worktree staging path keeps staging them — it is their
+	// sole writer.
+	//
+	// "Sole writer" is scoped to the tick on purpose. For a persistent
+	// (non-task) agent the home dir is also the session workDir, and
+	// session-start staging writes these same files through the NON-skipping
+	// path — internal/runtime/tmux.stageStartFiles and
+	// runtime.StageSessionWorkDir (subprocess/acp) both call
+	// StageProviderOverlayDir with a nil skip. So a hybrid document can
+	// reappear at session start; the next tick converges it. That turns the
+	// permanent drift this fix targets into a transient one, which is the
+	// actual invariant — not that nothing else ever writes these paths.
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

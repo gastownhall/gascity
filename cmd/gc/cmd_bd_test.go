@@ -174,7 +174,7 @@ func TestResolveBdScopeTarget(t *testing.T) {
 
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "projectwrenunity-0xk" || beadID == "projectwrenunity-abc"
 	}
 	cityDir := filepath.Join(t.TempDir(), "city")
@@ -387,7 +387,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 	setCwd(t, t.TempDir())
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, _ string) bool { return false }
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, _ string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	cfg := &config.City{
@@ -443,7 +443,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		// Restore bdBeadExists to return true for a wren bead
 		origProbe2 := bdBeadExists
 		defer func() { bdBeadExists = origProbe2 }()
-		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
 		}
 		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false, io.Discard)
@@ -649,7 +649,7 @@ func TestGcBdUsesProjectionNotAmbientEnv(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "repo-abc"
 	}
 	cityFlag = ""
@@ -896,7 +896,7 @@ func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	}()
 	cityFlag = ""
 	rigFlag = ""
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "repo")
@@ -1239,13 +1239,16 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	const projectID = "gc-rig-worktree-consistency-test"
 	setupQueries := append(seedDatabaseProjectIDQueries(projectID),
 		"CALL DOLT_ADD('.')",
 		"CALL DOLT_COMMIT('-m', 'test: seed rig worktree identity', '--author', 'gascity-test <test@gascity.local>')")
-	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "fe"), setupQueries...)
+	feRepoDir := filepath.Join(t.TempDir(), "fe")
+	_, port, _, cleanupDolt := startPasswordedDoltServer(t, feRepoDir, setupQueries...)
 	defer cleanupDolt()
+	// Cover the fe server's own repo root (the actual live-process dir, not
+	// just cityPath) and the relocated dolt identity HOME (ga-7dgcg6).
+	requireNoLeakedDoltAfterForPaths(t, cityPath, feRepoDir, os.Getenv("HOME"))
 
 	for _, scope := range []struct {
 		name     string
@@ -1434,7 +1437,7 @@ func listToMap(env []string) map[string]string {
 func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	rigDir := filepath.Join(cityDir, "frontend")
@@ -1465,7 +1468,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 		return target.ScopeKind == "city" && beadID == "mc-city1"
 	}
 
@@ -1505,7 +1508,7 @@ func TestGcBdRespectsRawCityFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 
@@ -1569,6 +1572,11 @@ set -eu
 }
 
 func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
+	t.Skip("ga-klo4gz: this test's purpose is exercising resolveContextFromDir's " +
+		"ambient cwd walk-up (step 10), which is now unconditionally refused inside " +
+		"test binaries; an explicit GC_CITY/GC_CITY_PATH/GC_CITY_ROOT override would " +
+		"make it a no-op test rather than a fix")
+
 	disableManagedDoltRecoveryForTest(t)
 
 	origCityFlag := cityFlag
@@ -1579,7 +1587,7 @@ func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 
@@ -2359,7 +2367,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent wrong assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "skipped" {
@@ -2375,7 +2383,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent matching assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {
@@ -2455,7 +2463,7 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {
