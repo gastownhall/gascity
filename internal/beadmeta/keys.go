@@ -136,7 +136,21 @@ const (
 	FanoutModeMetadataKey                = "gc.fanout_mode"
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
-	ForEachMetadataKey                   = "gc.for_each"
+	// FireFormulaMetadataKey ("gc.fire_formula") names the formula a "fire-root"
+	// bead declares for the controller to auto-cook once the bead becomes
+	// bd ready (its blocked-by preconditions clear). It is the formula-cook
+	// analogue of RunTargetMetadataKey's carried pool route: a self-declared
+	// intent the judgment-free patrol promotion (promoteReadyFireRoots) executes
+	// verbatim. A bead with no gc.fire_formula is not a fire-root and is left for
+	// its owner to sling.
+	FireFormulaMetadataKey = "gc.fire_formula"
+	// FireVarsMetadataKey ("gc.fire_vars") holds the JSON var blob a fire-root
+	// declares for its gc.fire_formula, reusing the RuntimeVarsMetadataKey
+	// (gc.graphv2_vars.v1) map[string]string shape verbatim. The patrol promotion
+	// parses it with graphv2.ParseRuntimeVarsMetadata and passes the vars 1:1 into
+	// the cook, so base_ref/requirements_path/etc. reach the materialized root.
+	FireVarsMetadataKey = "gc.fire_vars"
+	ForEachMetadataKey  = "gc.for_each"
 	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
 	FormulaHashMetadataKey               = "gc.formula_hash"
@@ -422,6 +436,8 @@ var KnownMetadataKeys = []string{
 	FanoutModeMetadataKey,
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
+	FireFormulaMetadataKey,
+	FireVarsMetadataKey,
 	ForEachMetadataKey,
 	FormulaMetadataKey,
 	FormulaContractMetadataKey,
