@@ -400,6 +400,31 @@ func RecordNudge(ctx context.Context, target string, err error) {
 	)
 }
 
+// RecordNudgeUndeliverable emits the loud "session composer wedge" signal: a
+// nudge was drafted into the target's composer but no submit was ever confirmed,
+// even after the provider's bounded recovery ladder (or the composer's state
+// could not be observed at all). Unlike a transient nudge error, this is a
+// terminal, actionable condition — the session must be BOUNCED, not nudged
+// again — so it is emitted as a distinct high-severity event a
+// babysitter/reconciler can subscribe to (rather than being lost in the noise of
+// ordinary session.nudge errors). The status label also lets the nudge counter
+// distinguish a wedged composer from a plain send failure.
+func RecordNudgeUndeliverable(ctx context.Context, target string, err error) {
+	initInstruments()
+	inst.nudgeTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("target", target),
+			attribute.String("status", "undeliverable"),
+		),
+	)
+	emit(ctx, "session.nudge.undeliverable", otellog.SeverityError,
+		otellog.String("target", target),
+		otellog.String("status", "undeliverable"),
+		otellog.Bool("bounce_required", true),
+		errKV(err),
+	)
+}
+
 // RecordConfigReload records a config reload attempt (metrics + log event).
 func RecordConfigReload(ctx context.Context, revision, source, outcome string, warningCount int, err error) {
 	initInstruments()

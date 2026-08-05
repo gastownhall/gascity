@@ -43,6 +43,23 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrNudgeUndeliverable reports that a nudge was pasted into the target's
+// composer but the submit was never confirmed to land — even after the tmux
+// provider's bounded recovery ladder (verified re-Enter and, only when the
+// draft is verifiably still sitting in the composer, a single verified
+// C-u clear + re-paste). The composer is wedged in a mode that swallows
+// Enter/C-m (the "session composer wedge"); more sends will not help. It is the
+// loud, errors.Is-visible signal that the session must be BOUNCED, not nudged
+// again: higher layers surface it via telemetry (RecordNudgeUndeliverable) and
+// the babysitter/reconciler recycles the session instead of silently queueing
+// more undeliverable nudges behind a dead composer. It is also returned when the
+// composer's state cannot be observed at all (a pane-capture error): state is
+// unknown, so recovery must NOT gamble a destructive clear/re-paste on a
+// possibly-live turn — it bounces instead. Provider facades wrap the
+// tmux-package sentinel through this one so callers dispatch on it with
+// errors.Is regardless of the concrete runtime.
+var ErrNudgeUndeliverable = errors.New("nudge undeliverable: message drafted but submit never confirmed (composer wedged)")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
