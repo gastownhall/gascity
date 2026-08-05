@@ -2364,7 +2364,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
-	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+	if query.TierMode == TierIssues || query.TierMode == TierWisps || query.TierMode == TierHistory {
 		return true
 	}
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {

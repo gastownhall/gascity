@@ -65,6 +65,8 @@ func doltliteTableSetsForMode(mode TierMode) []doltliteTableSet {
 	switch mode {
 	case TierWisps:
 		return []doltliteTableSet{doltliteWispTables}
+	case TierHistory:
+		return []doltliteTableSet{doltliteIssueTables, doltliteWispTables}
 	default: // TierIssues, TierBoth
 		return []doltliteTableSet{doltliteIssueTables, doltliteWispTables}
 	}
@@ -1433,6 +1435,11 @@ func doltliteTierPredicate(mode TierMode, tables doltliteTableSet, flags doltlit
 		return "(" + flags.ephemeral + " = 1 OR " + flags.noHistory + " = 1)", false
 	case TierBoth:
 		return "", false
+	case TierHistory:
+		if tables.wisps && !flags.hasColumns {
+			return "", true
+		}
+		return "(" + flags.ephemeral + " = 0 AND " + flags.noHistory + " = 0)", false
 	default: // TierIssues keeps history and no-history rows, drops ephemeral.
 		if tables.wisps && !flags.hasColumns {
 			return "", true

@@ -27044,6 +27044,21 @@
             }
           },
           {
+            "description": "Storage tier: issues returns history-backed durable issues, operational returns no-history or ephemeral records, and all preserves the combined legacy view.",
+            "explode": false,
+            "in": "query",
+            "name": "tier",
+            "schema": {
+              "description": "Storage tier: issues returns history-backed durable issues, operational returns no-history or ephemeral records, and all preserves the combined legacy view.",
+              "enum": [
+                "issues",
+                "operational",
+                "all"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Include closed beads.",
             "explode": false,
             "in": "query",

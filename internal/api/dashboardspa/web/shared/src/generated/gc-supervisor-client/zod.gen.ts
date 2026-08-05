@@ -6921,6 +6921,11 @@ export const zGetV0CityByCityNameBeadsQuery = z.object({
     label: z.string().optional(),
     assignee: z.string().optional(),
     rig: z.string().optional(),
+    tier: z.enum([
+        'issues',
+        'operational',
+        'all'
+    ]).optional(),
     all: z.boolean().optional()
 });
 

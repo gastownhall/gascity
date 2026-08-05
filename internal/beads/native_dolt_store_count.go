@@ -69,8 +69,9 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 // List-cardinality parity. Rejected shapes and why:
 //   - excludeTypes: the upstream IssueFilter has no type-exclusion
 //     predicate; List's callers apply it post-hydration.
-//   - non-default tiers: nativeIssueFilterFromListQuery defers the wisp
-//     tier filter to ApplyListQuery, so the backend result is a superset.
+//   - the operational tier: nativeIssueFilterFromListQuery defers its
+//     ephemeral-or-no-history filter to ApplyListQuery, so the backend result
+//     is a superset.
 //   - Status "open": translated to an exclude-list (closed, in_progress)
 //     while Matches requires status == "open" exactly, so beads in any
 //     other non-excluded status would be overcounted.
@@ -88,15 +89,15 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 // narrowing anywhere — no SQL ephemeral predicate (nativeIssueFilterFromListQuery
 // emits no tier filter) and no Go-side re-filter (matchesTier returns true
 // unconditionally) — so CountIssues' SearchIssues-mirroring merge is already
-// the exact List cardinality. This matters in practice: beadPolicyStore
-// expands every TierIssues read to TierBoth, so a TierIssues-only gate makes
-// policy-wrapped cities (any city with bead policies, e.g. order_tracking
-// retention) silently lose the Counter fast path and fall back to hydration.
-// TierWisps stays unsupported: its ephemeral||no-history membership is
-// resolved Go-side and has no exact filter translation.
+// the exact List cardinality. TierHistory is also exact because SkipWisps keeps
+// the count entirely in the history-backed issues table. This matters in
+// practice: beadPolicyStore expands every TierIssues read to TierBoth, so a
+// TierIssues-only gate makes policy-wrapped cities silently lose the Counter
+// fast path and fall back to hydration. TierWisps stays unsupported: its
+// ephemeral||no-history membership is resolved Go-side.
 func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 	return len(excludeTypes) == 0 &&
-		(query.TierMode == TierIssues || query.TierMode == TierBoth) &&
+		(query.TierMode == TierIssues || query.TierMode == TierBoth || query.TierMode == TierHistory) &&
 		query.Status != "open" &&
 		len(query.Assignees) == 0 &&
 		len(query.ParentIDs) == 0 &&

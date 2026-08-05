@@ -633,6 +633,51 @@ func TestBeadListBoundedReadIsStableOrderedPrefixAcrossRigs(t *testing.T) {
 	}
 }
 
+func TestBeadListTierSeparatesHistoryAndOperationalRecords(t *testing.T) {
+	state := newFakeState(t)
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "gc-issue", Title: "durable issue", Status: "closed", Type: "task"},
+		{ID: "gc-tracking", Title: "order tracking", Status: "closed", Type: "task", NoHistory: true, Labels: []string{"order-tracking"}},
+		{ID: "gc-wisp", Title: "ephemeral wisp", Status: "closed", Type: "task", Ephemeral: true},
+	}, nil)
+	h := newTestCityHandler(t, state)
+
+	list := func(tier string) []beads.Bead {
+		t.Helper()
+		req := httptest.NewRequest("GET", cityURL(state, "/beads?tier="+tier+"&all=true&limit=10"), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("tier %s status = %d, want 200: %s", tier, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Items []beads.Bead `json:"items"`
+			Total int          `json:"total"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode tier %s: %v", tier, err)
+		}
+		if resp.Total != len(resp.Items) {
+			t.Fatalf("tier %s total/items = %d/%d", tier, resp.Total, len(resp.Items))
+		}
+		return resp.Items
+	}
+
+	issues := list("issues")
+	if len(issues) != 1 || issues[0].ID != "gc-issue" {
+		t.Fatalf("issues = %#v, want only gc-issue", issues)
+	}
+	operational := list("operational")
+	if len(operational) != 2 {
+		t.Fatalf("operational = %#v, want two records", operational)
+	}
+	got := []string{operational[0].ID, operational[1].ID}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"gc-tracking", "gc-wisp"}) {
+		t.Fatalf("operational IDs = %v, want gc-tracking and gc-wisp", got)
+	}
+}
+
 func TestBeadListFiltering(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -2347,6 +2392,23 @@ func TestPackListAddRemoveShareNamespace(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if len(resp.Packs) != 0 {
 		t.Fatalf("GET after DELETE = %#v, want empty", resp.Packs)
+	}
+}
+
+func TestBeadListTierMode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  beads.TierMode
+	}{
+		{"", beads.TierIssues},
+		{"issues", beads.TierHistory},
+		{"operational", beads.TierWisps},
+		{"all", beads.TierBoth},
+	}
+	for _, tt := range tests {
+		if got := beadListTierMode(tt.input); got != tt.want {
+			t.Errorf("beadListTierMode(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }
 

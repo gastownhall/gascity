@@ -810,6 +810,27 @@ func (e GetV0CityByCityNameAgentsParamsRunning) Valid() bool {
 	}
 }
 
+// Defines values for GetV0CityByCityNameBeadsParamsTier.
+const (
+	All         GetV0CityByCityNameBeadsParamsTier = "all"
+	Issues      GetV0CityByCityNameBeadsParamsTier = "issues"
+	Operational GetV0CityByCityNameBeadsParamsTier = "operational"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameBeadsParamsTier enum.
+func (e GetV0CityByCityNameBeadsParamsTier) Valid() bool {
+	switch e {
+	case All:
+		return true
+	case Issues:
+		return true
+	case Operational:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GetV0CityByCityNameExtmsgTranscriptParamsOrder.
 const (
 	Asc  GetV0CityByCityNameExtmsgTranscriptParamsOrder = "asc"
@@ -8388,9 +8409,15 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Rig Filter by rig.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
 
+	// Tier Storage tier: issues returns history-backed durable issues, operational returns no-history or ephemeral records, and all preserves the combined legacy view.
+	Tier *GetV0CityByCityNameBeadsParamsTier `form:"tier,omitempty" json:"tier,omitempty"`
+
 	// All Include closed beads.
 	All *bool `form:"all,omitempty" json:"all,omitempty"`
 }
+
+// GetV0CityByCityNameBeadsParamsTier defines parameters for GetV0CityByCityNameBeads.
+type GetV0CityByCityNameBeadsParamsTier string
 
 // CreateBeadParams defines parameters for CreateBead.
 type CreateBeadParams struct {
@@ -22003,6 +22030,22 @@ func NewGetV0CityByCityNameBeadsRequest(server string, cityName string, params *
 		if params.Rig != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "rig", *params.Rig, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Tier != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "tier", *params.Tier, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

@@ -7,6 +7,7 @@ import { activeCityOrThrow } from '../api/cityBase';
 import { SupervisorApiError, supervisorApi } from './client';
 
 export type SupervisorBead = Bead;
+export type SupervisorBeadTier = 'issues' | 'operational' | 'all';
 
 export interface SupervisorBeadList extends Omit<ListBodyBead, 'items' | 'total'> {
   items: SupervisorBead[];
@@ -19,6 +20,7 @@ export interface SupervisorBeadList extends Omit<ListBodyBead, 'items' | 'total'
 export interface ListSupervisorBeadsOptions {
   includeClosed?: boolean;
   includeBookkeeping?: boolean;
+  tier?: SupervisorBeadTier;
   rigFilter?: string;
   limit?: number;
   city?: string;
@@ -56,6 +58,7 @@ export async function listSupervisorBeads(
   const includeBookkeeping = options.includeBookkeeping ?? false;
   const baseQuery: NonNullable<GetV0CityByCityNameBeadsData['query']> = {
     limit,
+    ...(options.tier === undefined ? {} : { tier: options.tier }),
     ...(includeClosed ? { all: true } : {}),
     ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
   };

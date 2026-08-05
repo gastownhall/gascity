@@ -162,6 +162,11 @@ func TestTierWispsIncludesNoHistoryRows(t *testing.T) {
 	if got := idsOf(issues); got != "issue,no-history" {
 		t.Fatalf("TierIssues IDs = %s, want issue,no-history", got)
 	}
+
+	history := ApplyListQuery(items, ListQuery{TierMode: TierHistory, AllowScan: true})
+	if got := idsOf(history); got != "issue" {
+		t.Fatalf("TierHistory IDs = %s, want issue", got)
+	}
 }
 
 func idsOf(items []Bead) string {

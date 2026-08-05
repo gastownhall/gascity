@@ -23,6 +23,7 @@ type BeadListInput struct {
 	Label    string `query:"label" required:"false" doc:"Filter by label."`
 	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
+	Tier     string `query:"tier" required:"false" enum:"issues,operational,all" doc:"Storage tier: issues returns history-backed durable issues, operational returns no-history or ephemeral records, and all preserves the combined legacy view."`
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
 }
 

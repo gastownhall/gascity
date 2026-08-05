@@ -18,6 +18,8 @@ const supervisorWrites: Array<{
 
 beforeEach(() => {
   setActiveCity('test-city');
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   beadQueries.length = 0;
   supervisorWrites.length = 0;
   invalidate('beads:board:');
@@ -126,15 +128,26 @@ afterEach(() => {
 });
 
 describe('BeadsPage', () => {
-  it('renders the kanban board by default with no board/list compatibility switch', async () => {
+  it('renders the collapsible list by default and keeps the kanban board as a view option', async () => {
     renderPage();
 
     await screen.findByRole('heading', { name: /^beads$/i });
-    const board = await screen.findByRole('region', { name: PROJECT });
+    await screen.findByText('Sample bead');
 
-    expect(board).not.toBeNull();
+    const view = screen.getByRole('radiogroup', { name: /beads view/i });
+    expect(within(view).getByRole('radio', { name: /list/i }).getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(screen.getByText(/loose beads/i)).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'ready' })).toBeNull();
+
+    fireEvent.click(within(view).getByRole('radio', { name: /board/i }));
+
+    expect(await screen.findByRole('region', { name: 'ready' })).toBeTruthy();
+    expect(within(view).getByRole('radio', { name: /board/i }).getAttribute('aria-checked')).toBe(
+      'true',
+    );
     expect(screen.queryByRole('table')).toBeNull();
-    expect(screen.queryByRole('radiogroup', { name: /view/i })).toBeNull();
     expect(screen.getByRole('button', { name: /new bead/i })).toBeTruthy();
   });
 

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
@@ -20,6 +20,8 @@ const fetchCalls: FetchCall[] = [];
 
 beforeEach(() => {
   setActiveCity('test-city');
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   fetchCalls.length = 0;
   invalidate('beads:board:');
   invalidate('sessions');
@@ -42,8 +44,32 @@ describe('BeadsPage supervisor reads', () => {
     expect(screen.queryByText('supervisor noise bead')).toBeNull();
     expect(fetchCalls.some((call) => call.path === '/api/city/test-city/beads')).toBe(false);
     expect(beadFetches()).toHaveLength(1);
+    expect(beadFetches()[0]?.query.get('tier')).toBe('issues');
     expect(beadFetches().every((call) => call.query.has('all'))).toBe(false);
     expect(beadFetches().every((call) => call.query.has('type'))).toBe(false);
+  });
+
+  it('loads operational records explicitly and renders them outside the hierarchy', async () => {
+    renderPage();
+
+    await screen.findByText('direct supervisor bead');
+    fireEvent.click(screen.getByRole('radio', { name: 'Operational' }));
+
+    expect(await screen.findByRole('heading', { name: 'Operational records' })).toBeTruthy();
+    expect(await screen.findByText('order tracking record')).toBeTruthy();
+    expect(beadFetches().at(-1)?.query.get('tier')).toBe('operational');
+    expect(beadFetches().at(-1)?.query.get('all')).toBe('true');
+    expect(screen.queryByRole('radio', { name: 'Board' })).toBeNull();
+  });
+
+  it('places the low-use Records selector after the Rig filter', async () => {
+    renderPage();
+
+    await screen.findByText('direct supervisor bead');
+
+    const rig = screen.getByText('Rig');
+    const records = screen.getByText('Records');
+    expect(rig.compareDocumentPosition(records) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
   it('does not seed the board from another city cache entry', async () => {
@@ -175,7 +201,9 @@ function stubFetch() {
       fetchCalls.push({ method, path: url.pathname, query: url.searchParams });
 
       if (url.pathname === '/v0/city/test-city/beads') {
-        return jsonResponse(beadListForQuery(url.searchParams.get('type')));
+        return jsonResponse(
+          beadListForQuery(url.searchParams.get('type'), url.searchParams.get('tier')),
+        );
       }
       if (url.pathname === '/v0/city/test-city/bead/td-window-miss') {
         return jsonResponse(
@@ -241,8 +269,15 @@ function stubFetch() {
               running_count: 1,
               suspended: false,
             },
+            {
+              name: 'west',
+              path: '/home/ds/west',
+              agent_count: 0,
+              running_count: 0,
+              suspended: false,
+            },
           ],
-          total: 1,
+          total: 2,
         });
       }
       throw new Error(`unexpected fetch: ${url.pathname}${url.search}`);
@@ -250,7 +285,24 @@ function stubFetch() {
   );
 }
 
-function beadListForQuery(type: string | null): { items: SupervisorBead[]; total: number } {
+function beadListForQuery(
+  type: string | null,
+  tier: string | null,
+): { items: SupervisorBead[]; total: number } {
+  if (tier === 'operational') {
+    return {
+      items: [
+        bead({
+          id: 'td-wisp-1',
+          title: 'order tracking record',
+          status: 'closed',
+          no_history: true,
+          labels: ['order-tracking'],
+        }),
+      ],
+      total: 1,
+    };
+  }
   if (type === null || type === 'task') {
     return {
       items: [
