@@ -48,6 +48,55 @@ const pollInterval = 100 * time.Millisecond
 // alongside the family name.
 var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
+// defaultNudgeSubmitKeySequence is the ordered tmux key names sent, in
+// order, to submit a pasted nudge for a provider family with no explicit
+// entry in nudgeSubmitKeySequences. A single "Enter" is the historical,
+// still-correct behavior for every family this fork has verified.
+var defaultNudgeSubmitKeySequence = []string{"Enter"}
+
+// nudgeSubmitKeySequences declares, per provider family, the ordered tmux
+// key names sent (via sendNudgeSubmitSequence) to submit a pasted nudge —
+// the "declarative per-provider nudge submit-key sequence" design from
+// upstream gastownhall/gascity#4706. A family with no entry here gets
+// defaultNudgeSubmitKeySequence.
+//
+// #4706 was filed against a k8s codex agent whose first turn never started:
+// codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
+// is swallowed as a composer newline rather than treated as submit — codex's
+// actual submit sequence is Escape then Enter. This fork's tmux carrier does
+// not yet carry that fix; adding it here is left to a follow-up once the
+// change is exercised against a live codex TUI in this repo's own test
+// harness (it is out of scope for this claude-focused patch, but the table
+// exists precisely so that follow-up is a one-line addition, not another
+// pass through the delivery mechanics).
+//
+// This table does NOT yet contain an entry for the claude-specific stall
+// this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
+// "LIVE RESIDUAL": a claude TUI composer left with pasted-but-unsubmitted
+// text even after the unconfirmed-submit and clear-before-paste fixes
+// landed). Investigation (see ra-oudpha comments) could not identify a wrong
+// key as the cause — #4706 itself specifies claude's default submit
+// sequence as plain Enter, which is what this fork already sends, and the
+// live specimens showed text sitting visibly unsubmitted (not a
+// silently-succeeded-but-unconfirmed false negative), ruling out a busy-
+// indicator detection gap as the explanation too. Pinning the actual cause
+// needs a live trace this fork-patch pass does not have access to (the city
+// this bead is scoped against is live and read-only for this pass). Once
+// traced, the fix — whatever key sequence or timing claude's TUI turns out
+// to need — is a single entry in this table plus a test, not a rewrite of
+// NudgeSession.
+var nudgeSubmitKeySequences = map[string][]string{}
+
+// nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
+// for a provider family, or defaultNudgeSubmitKeySequence when the family
+// has no explicit entry.
+func nudgeSubmitKeySequenceForFamily(family string) []string {
+	if seq, ok := nudgeSubmitKeySequences[family]; ok {
+		return seq
+	}
+	return defaultNudgeSubmitKeySequence
+}
+
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {
@@ -1772,21 +1821,24 @@ const (
 	submitReEnterBackoff      = 200 * time.Millisecond
 )
 
-// submitEnterAndConfirm sends Enter and confirms the message submitted by
-// observing the agent transition to its busy/processing state. It re-sends
-// Enter only while the pane remains idle (submission not yet observed), so a
-// turn that already started can never receive a second Enter.
+// submitEnterAndConfirm sends the provider's submit key sequence (see
+// nudgeSubmitKeySequences — a single Enter for every family this fork has
+// verified so far) and confirms the message submitted by observing the
+// agent transition to its busy/processing state. It re-sends the sequence
+// only while the pane remains idle (submission not yet observed), so a turn
+// that already started can never receive a second submit.
 //
 // Returns:
 //   - (true, nil)  — the agent went busy: the message submitted.
-//   - (false, nil) — Enter was delivered to tmux but busy was never observed
-//     within the budget (best-effort; preserves the historical "nil == handed
-//     to tmux" contract so callers do not re-paste).
-//   - (false, err) — every Enter send failed at the tmux layer.
+//   - (false, nil) — the submit sequence was delivered to tmux but busy was
+//     never observed within the budget (best-effort; preserves the
+//     historical "nil == handed to tmux" contract so callers do not
+//     re-paste).
+//   - (false, err) — every submit attempt failed at the tmux layer.
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
@@ -1797,7 +1849,7 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 			}
 			sleep(submitReEnterBackoff)
 		}
-		if err := sendEnter(); err != nil {
+		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1832,6 +1884,48 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 		return sessionlog.ProviderFamily(provider) == "claude"
 	}
 	return t.targetLooksLikeProvider(target, "claude")
+}
+
+// nudgeSubmitKeySequence resolves target's declared submit key sequence (see
+// nudgeSubmitKeySequences), identifying the provider family the same way
+// submitVerifyEligible and shouldSendEscapeBeforeEnter do: prefer the
+// GC_PROVIDER pane environment variable, falling back to a process-name
+// sniff for panes without it (ad hoc sessions, some test harnesses).
+func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
+	if provider := t.providerEnv(target); provider != "" {
+		return nudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+	}
+	for family := range nudgeSubmitKeySequences {
+		if t.targetLooksLikeProvider(target, family) {
+			return nudgeSubmitKeySequenceForFamily(family)
+		}
+	}
+	return defaultNudgeSubmitKeySequence
+}
+
+// nudgeSubmitKeySettle is the pause between successive keys within a
+// multi-key submit sequence (e.g. a hypothetical Escape-then-Enter entry) —
+// long enough for the TUI to process the first key's effect before the next
+// arrives, short enough not to meaningfully lengthen the existing submit
+// budget. Not used when the sequence has a single key (today's default for
+// every family), so it changes no existing timing.
+const nudgeSubmitKeySettle = 100 * time.Millisecond
+
+// sendNudgeSubmitSequence sends target's declared provider-family submit key
+// sequence as an ordered series of tmux send-keys calls, pausing
+// nudgeSubmitKeySettle between keys. Returns the first error encountered;
+// remaining keys are not sent after an error, matching sendEnter's previous
+// single-key contract (the caller decides how to react to a failed submit).
+func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
+	for i, key := range keys {
+		if i > 0 {
+			time.Sleep(nudgeSubmitKeySettle)
+		}
+		if _, err := t.run("send-keys", "-t", target, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NudgeSession sends a message to a Claude Code session reliably.
@@ -1910,16 +2004,19 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
 
-	// 5. Send Enter and, for providers with a reliable busy indicator, confirm
-	// the draft actually submitted — re-sending Enter only while the pane stays
-	// idle. A lost submit Enter (raced against the paste or a detached-pane
-	// wake) is the ga-bwm "drafted but not submitted" stall; confirming here
-	// removes the town's dependence on an external observer re-kicking the
-	// session. Providers without a reliable indicator keep best-effort delivery.
-	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
+	// 5. Send the provider's declared submit key sequence (see
+	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
+	// a reliable busy indicator, confirm the draft actually submitted —
+	// re-sending the sequence only while the pane stays idle. A lost submit
+	// (raced against the paste or a detached-pane wake) is the ga-bwm
+	// "drafted but not submitted" stall; confirming here removes the town's
+	// dependence on an external observer re-kicking the session. Providers
+	// without a reliable indicator keep best-effort delivery.
+	submitKeys := t.nudgeSubmitKeySequence(target)
+	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
+		if _, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
 		delivered = true
@@ -1931,7 +2028,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		if attempt > 0 {
 			time.Sleep(submitReEnterBackoff)
 		}
-		if err := sendEnter(); err != nil {
+		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1984,13 +2081,15 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// happens before and after submit.
 	t.WakePaneIfDetached(pane)
 
-	// 5. Send Enter with retry (critical for message submission)
+	// 5. Send the provider's declared submit key sequence with retry
+	// (critical for message submission). See NudgeSession/nudgeSubmitKeySequences.
+	submitKeys := t.nudgeSubmitKeySequence(pane)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		if _, err := t.run("send-keys", "-t", pane, "Enter"); err != nil {
+		if err := t.sendNudgeSubmitSequence(pane, submitKeys); err != nil {
 			lastErr = err
 			continue
 		}
