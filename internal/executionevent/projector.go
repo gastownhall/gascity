@@ -235,3 +235,144 @@ func cloneTopology(dependencies *[]string) *[]string {
 	copy(clone, *dependencies)
 	return &clone
 }
+
+// LifecycleEvent constructs a lifecycle fact only for a physical native step
+// of the supplied authoritative graph.v2 root. It is shared by claim and close
+// notification producers so the event contract cannot drift between them.
+func LifecycleEvent(eventType string, root, step beads.Bead, actor string) (events.Event, bool) {
+	if eventType != events.ExecutionStepStarted && eventType != events.ExecutionStepCompleted {
+		return events.Event{}, false
+	}
+	if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
+		root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 ||
+		!eventexport.IsOpaqueRef(root.ID) || !eventexport.IsOpaqueRef(step.ID) ||
+		step.Metadata[beadmeta.RootBeadIDMetadataKey] != root.ID ||
+		beadmeta.IsControlKind(strings.TrimSpace(step.Metadata[beadmeta.KindMetadataKey])) {
+		return events.Event{}, false
+	}
+	stepID := step.Metadata[beadmeta.StepIDMetadataKey]
+	sessionID := step.Metadata[beadmeta.SessionIDMetadataKey]
+	if !validNativeStepID(stepID) || !eventexport.IsOpaqueRef(sessionID) {
+		return events.Event{}, false
+	}
+	return events.Event{
+		Type: eventType, Actor: actor, Subject: step.ID, RunID: root.ID,
+		SessionID: sessionID, StepID: stepID,
+		DependsOnStepIDs: canonicalTopology(step.Metadata[beadmeta.NativeStepDependenciesMetadataKey], stepID),
+	}, true
+}
+
+// EmitLifecycle records a validated lifecycle fact for a graph.v2 step. The
+// root is loaded from graphStore so a v1 or unrelated parent can never produce
+// a lifecycle event by metadata resemblance alone.
+func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType string, step beads.Bead, actor string) bool {
+	if recorder == nil || graphStore == nil {
+		return false
+	}
+	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if !eventexport.IsOpaqueRef(rootID) {
+		return false
+	}
+	root, err := graphStore.Get(rootID)
+	if err != nil {
+		return false
+	}
+	event, ok := LifecycleEvent(eventType, root, step, actor)
+	if !ok {
+		return false
+	}
+	recorder.Record(event)
+	return true
+}
+
+// EmitCompletedFromClosedNotification is the sole close-side lifecycle entry
+// point. It consumes the physical bead snapshot carried by the authoritative
+// bead.closed notification rather than inferring completion from dependencies
+// or re-projecting current graph state.
+func EmitCompletedFromClosedNotification(recorder events.Recorder, graphStore beads.Store, payload json.RawMessage, actor string) bool {
+	step, ok := beads.DecodeBeadEventPayload(payload)
+	if !ok || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+		return false
+	}
+	return EmitLifecycle(recorder, graphStore, events.ExecutionStepCompleted, step, actor)
+}
+
+// ReconcileCompleted repairs completed facts that were stranded between a
+// durable graph-step close and the best-effort event append. It projects only
+// closed physical steps of authoritative graph.v2 roots, and uses the event
+// journal as the durable idempotency record: an exact lifecycle fact is not
+// repeated, while a conflicting historical fact remains visible alongside the
+// newly projected correction.
+func ReconcileCompleted(recorder events.Provider, graphStore beads.GraphStore, actor string) int {
+	if recorder == nil || graphStore.Store == nil {
+		return 0
+	}
+	roots, err := graphStore.ListByMetadata(
+		map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+		0,
+		beads.IncludeClosed,
+		beads.WithBothTiers,
+	)
+	if err != nil {
+		return 0
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
+	emitted := 0
+	for _, root := range roots {
+		if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
+			continue
+		}
+		definitions, err := currentSteps(graphStore, root.ID)
+		if err != nil {
+			continue
+		}
+		for _, definition := range definitions {
+			step, err := graphStore.Get(definition.BeadID)
+			if err != nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+				continue
+			}
+			event, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, actor)
+			if !ok || completedFactExists(recorder, event) {
+				continue
+			}
+			recorder.Record(event)
+			emitted++
+		}
+	}
+	return emitted
+}
+
+func completedFactExists(provider events.Provider, want events.Event) bool {
+	existing, err := provider.List(events.Filter{
+		Type: events.ExecutionStepCompleted, Subject: want.Subject,
+	})
+	if err != nil {
+		// If the journal cannot be read, avoid generating duplicate recovery
+		// facts. A later reconciliation pass can safely retry.
+		return true
+	}
+	for _, event := range existing {
+		if event.RunID == want.RunID &&
+			event.SessionID == want.SessionID &&
+			event.StepID == want.StepID &&
+			sameTopology(event.DependsOnStepIDs, want.DependsOnStepIDs) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameTopology(left, right *[]string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if len(*left) != len(*right) {
+		return false
+	}
+	for i := range *left {
+		if (*left)[i] != (*right)[i] {
+			return false
+		}
+	}
+	return true
+}

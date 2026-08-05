@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
@@ -447,6 +448,14 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
+	// A controller can crash after the durable bead.closed journal append but
+	// before its best-effort lifecycle append. The normal watcher intentionally
+	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
+	// before tailing to repair that otherwise permanent gap. ReconcileCompleted
+	// reads exact facts from the same journal to make restart passes idempotent.
+	graphStore := cs.GraphBeadStore()
+	graphStore.Store = uncachedBeadStore(graphStore.Store)
+	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -496,6 +505,25 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// uncachedBeadStore peels the controller's policy/cache read layers so a
+// recovery projection can inspect closed authoritative rows. The normal active
+// cache prime need not include closed beads, and therefore cannot safely drive
+// lifecycle gap repair.
+func uncachedBeadStore(store beads.Store) beads.Store {
+	for range 8 {
+		if base, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = base
+			continue
+		}
+		cached, ok := store.(*beads.CachingStore)
+		if !ok || cached == nil || cached.Backing() == nil {
+			return store
+		}
+		store = cached.Backing()
+	}
+	return store
 }
 
 // startMaintenanceLoop launches the periodic Dolt store maintenance
@@ -577,6 +605,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
+		rec := events.Discard
+		cs.mu.RLock()
+		if cs.eventProv != nil {
+			rec = cs.eventProv
+		}
+		cs.mu.RUnlock()
+		executionevent.EmitCompletedFromClosedNotification(rec, cs.GraphBeadStore().Store, evt.Payload, evt.Actor)
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
 	}
 }

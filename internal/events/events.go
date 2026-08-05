@@ -40,6 +40,11 @@ const (
 	// occurrence. Subject carries the physical step bead, RunID the workflow
 	// root, and StepID/DependsOnStepIDs the semantic topology.
 	ExecutionStepDefined = "execution.step_defined"
+	// ExecutionStepStarted and ExecutionStepCompleted record the lifecycle of one
+	// physical graph.v2 native step attempt. Subject is the physical step bead;
+	// RunID, SessionID, StepID, and DependsOnStepIDs carry its durable identity.
+	ExecutionStepStarted   = "execution.step_started"
+	ExecutionStepCompleted = "execution.step_completed"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -266,7 +271,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
-	ExecutionWorkAssociated, ExecutionStepDefined,
+	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
