@@ -116,6 +116,10 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
+	// recentlyClosedUsageNextAt floors how often emitRecentlyClosedUsage may
+	// re-list closed session beads (IncludeClosed + AllowScan).
+	recentlyClosedUsageNextAt time.Time
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
@@ -2245,8 +2249,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// tick already loaded, rather than issuing a second redundant store scan. The
 	// boot pass covers the whole fleet at once on the readiness path, so it takes
 	// only the marker-gated terminal lane and leaves the fleet-proportional live
-	// lane to the first steady-state tick.
+	// lane to the first steady-state tick. Recently-closed recovers drain→close
+	// races that left the open set unswept; same boot skip as the live lane.
 	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
+	if !bootReconcile {
+		cr.emitRecentlyClosedUsage(ctx)
+	}
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
