@@ -115,6 +115,23 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
 		}
+		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
+		// both missed, so any entry that exists is older than
+		// statusResponseTTLFloor. buildStatusBody's fan-out (per-rig work
+		// counts, the session snapshot, StoreHealth's closed-history scan)
+		// measured ~3.65s on a 26-agent/1.2GB city — the same failure class
+		// that used to 503 the legacy runs/census endpoint at its internal
+		// budget. Rather than let a request pay that cost inline, serve the
+		// stale body immediately (CacheAgeS reports its real age, reusing the
+		// existing staleness signal `gc status` already renders a banner for
+		// above cacheAgeBannerThresholdSeconds) and refresh in the background
+		// so the next poll gets a fresh body. A genuine cold cache (nothing
+		// ever built) has nothing to serve here and falls through to the
+		// synchronous build below, same as before this change.
+		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: age.Seconds(), Body: body}, nil
+		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
@@ -123,6 +140,26 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+}
+
+// refreshStatusResponseInBackground kicks a detached rebuild of the /status
+// body for cacheKey and stores the result under the time bucket current at
+// completion, so the next poll (bucket or TTL-floor lookup) is served a
+// fresh body without any caller paying the rebuild cost inline (ra-4u2eqc).
+// Coalesced via beginResponseRefresh: a refresh already in flight for
+// cacheKey is not duplicated. Uses runBackground's detached context (bounded
+// by extmsgNotifyTimeout) rather than the triggering request's context,
+// since the refresh must outlive the request that happened to trigger it and
+// benefits every subsequent poller, not just this one.
+func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
+	if !s.beginResponseRefresh(cacheKey) {
+		return
+	}
+	s.runBackground(func(ctx context.Context) {
+		defer s.endResponseRefresh(cacheKey)
+		resp := s.buildStatusBody(ctx, lite)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+	})
 }
 
 // buildStatusBody constructs the status response body. ctx bounds the
