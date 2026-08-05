@@ -155,7 +155,7 @@ func TestInterruptProcessGroupRetryReachesLateJoiningMember(t *testing.T) {
 // os/exec_test.go), re-invoking this test binary as a plain subprocess. It
 // is a no-op unless HELPER_ROLE is set, so it does nothing under a normal
 // `go test` run.
-func TestSignalUnixHelperProcess(t *testing.T) {
+func TestSignalUnixHelperProcess(_ *testing.T) {
 	switch os.Getenv("HELPER_ROLE") {
 	case "leader":
 		// Ignore SIGINT forever so this process's group stays alive no
@@ -164,8 +164,13 @@ func TestSignalUnixHelperProcess(t *testing.T) {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT)
 		_ = os.WriteFile(os.Getenv("HELPER_READY_FILE"), []byte("ready\n"), 0o644)
-		for range ch {
-		}
+		// Block forever: signal.Notify above already changed SIGINT's
+		// disposition so the runtime won't terminate the process on
+		// delivery, whether or not anything ever reads ch (same "catch and
+		// park until externally SIGKILLed" idiom as
+		// TestIntegrationSupervisorStopHelperProcess in
+		// test/integration/integration_test.go).
+		select {}
 	case "late":
 		marker := os.Getenv("HELPER_MARKER_FILE")
 		joinPgid, _ := strconv.Atoi(os.Getenv("HELPER_JOIN_PGID"))
