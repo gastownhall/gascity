@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -17,9 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -108,6 +111,13 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
+	// resolved transcript path, whether discovery definitively found nothing, and
+	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
+	// process-lifetime cache is what keeps a per-tick live lane from repeating
+	// bounded discovery and transcript reads for every awake session.
+	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
@@ -149,9 +159,10 @@ const runtimeDemandSnapshotMaxAge = 30 * time.Second
 const scaleCheckDemandMinInterval = 1 * time.Second
 
 type runtimeDemandSnapshot struct {
-	createdAt          time.Time
-	sessionFingerprint string
-	result             DesiredStateResult
+	createdAt              time.Time
+	sessionFingerprint     string
+	readyDemandFingerprint string
+	result                 DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -1279,6 +1290,14 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
+	// Graph stores intentionally do not emit bead.closed. Reconcile their
+	// closed graph.v2 steps only at the authoritative patrol cadence, not on
+	// event-driven ticks, so lifecycle recovery remains bounded and idempotent.
+	if trigger == "patrol" && cr.cs != nil {
+		phaseStart = time.Now()
+		cr.cs.reconcileExecutionCompletions()
+		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, nil)
+	}
 
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention
@@ -1485,6 +1504,19 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
+// deletions. Configurable via GC_BACKUP_MAX_AGE_FOR_BULK_DELETE (integer
+// seconds); defaults to 86400 s (24 h).
+func bulkDeleteMaxAge(_ *config.City) time.Duration {
+	if s := os.Getenv("GC_BACKUP_MAX_AGE_FOR_BULK_DELETE"); s != "" {
+		var secs int
+		if _, err := fmt.Sscanf(s, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 24 * time.Hour
+}
+
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
@@ -1495,6 +1527,17 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
+
+	// The cityPath guard is a test affordance: real controllers always set it,
+	// so the backup-age check below always runs in production.
+	if cr.cityPath != "" {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+			if cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
 	defer closeOpened()
@@ -2182,7 +2225,9 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
 // candidate × store × status × identifier bd-read fan-out that, serialized on
 // the readiness path, can exceed the startup watchdog on a heavy-session city —
-// gastownhall/gascity#3288). The first steady-state tick performs the sweep.
+// gastownhall/gascity#3288) and the usage lane's live transcript sweep (bounded
+// per-session file discovery and reads across every awake session at once). The
+// first steady-state tick performs both.
 func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	desiredState := result.State
 	store := cr.cityBeadStore()
@@ -2208,8 +2253,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	}
 	// Emit any due compute usage facts by reusing the open-session snapshot this
-	// tick already loaded, rather than issuing a second redundant store scan.
-	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos())
+	// tick already loaded, rather than issuing a second redundant store scan. The
+	// boot pass covers the whole fleet at once on the readiness path, so it takes
+	// only the marker-gated terminal lane and leaves the fleet-proportional live
+	// lane to the first steady-state tick.
+	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
 	rigStores := cr.rigBeadStores()
 	assignedWorkBeads := result.AssignedWorkBeads
 	assignedWorkStoreRefs := result.AssignedWorkStoreRefs
@@ -3270,7 +3318,18 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
-	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+	readyDemandFingerprint := ""
+	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
+	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
+		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
+	}
+	if refresh {
+		if trigger == "patrol" && cr.demandSnapshotsEnabled() && readyDemandFingerprint == "" {
+			readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+		} else if cr.demandSnapshot != nil {
+			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
+		}
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -3290,9 +3349,10 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:          time.Now(),
-			sessionFingerprint: sessionFingerprint,
-			result:             result,
+			createdAt:              time.Now(),
+			sessionFingerprint:     sessionFingerprint,
+			readyDemandFingerprint: readyDemandFingerprint,
+			result:                 result,
 		}
 	}
 	if cr.demandSnapshot == nil {
@@ -3350,6 +3410,75 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	// bites sub-second patrol_intervals, where it stops the probe subprocess
 	// from running on every tick.
 	return scaleCheckDemandMinInterval
+}
+
+func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
+	stores := []struct {
+		ref   string
+		store beads.Store
+	}{{ref: cr.cityName, store: cr.cityBeadStore()}}
+	rigStores := cr.rigBeadStores()
+	refs := make([]string, 0, len(rigStores))
+	for ref := range rigStores {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	for _, ref := range refs {
+		stores = append(stores, struct {
+			ref   string
+			store beads.Store
+		}{ref: ref, store: rigStores[ref]})
+	}
+
+	h := fnv.New64a()
+	for _, entry := range stores {
+		_, _ = io.WriteString(h, entry.ref)
+		_, _ = io.WriteString(h, "\x00")
+		if entry.store == nil {
+			_, _ = io.WriteString(h, "<nil>")
+			_, _ = io.WriteString(h, "\x00")
+			continue
+		}
+		ready, err := beads.ReadyLive(entry.store, beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil {
+			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", entry.ref, err)
+			_, _ = io.WriteString(h, "error:")
+			_, _ = io.WriteString(h, err.Error())
+			_, _ = io.WriteString(h, "\x00")
+			continue
+		}
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].ID < ready[j].ID
+		})
+		for _, bead := range ready {
+			writeReadyDemandFingerprintBead(h, bead)
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum64())
+}
+
+func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {
+	_, _ = io.WriteString(w, bead.ID)
+	_, _ = io.WriteString(w, "\x00")
+	_, _ = io.WriteString(w, bead.Status)
+	_, _ = io.WriteString(w, "\x00")
+	_, _ = io.WriteString(w, bead.Type)
+	_, _ = io.WriteString(w, "\x00")
+	_, _ = io.WriteString(w, bead.Assignee)
+	_, _ = io.WriteString(w, "\x00")
+	_, _ = io.WriteString(w, bead.UpdatedAt.Format(time.RFC3339Nano))
+	_, _ = io.WriteString(w, "\x00")
+	for _, key := range []string{
+		beadmeta.RoutedToMetadataKey,
+		beadmeta.RunTargetMetadataKey,
+		beadmeta.KindMetadataKey,
+		beadmeta.FormulaContractMetadataKey,
+	} {
+		_, _ = io.WriteString(w, key)
+		_, _ = io.WriteString(w, "\x00")
+		_, _ = io.WriteString(w, bead.Metadata[key])
+		_, _ = io.WriteString(w, "\x00")
+	}
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {

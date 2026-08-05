@@ -1728,7 +1728,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(
-		context.Background(), CreateOptions{Alias: "mayor", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			"configured_named_session":  "true",
 			"configured_named_identity": "mayor",
 			"session_origin":            "named",
@@ -1755,6 +1755,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 		"GC_TEMPLATE":       "reviewer",
 		"GC_SESSION_ORIGIN": "named",
 		"GC_AGENT":          "mayor",
+		"BEADS_ACTOR":       "mayor",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
@@ -1849,10 +1850,11 @@ func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
 	for key, want := range map[string]string{
 		"GC_SESSION_ID":     info.ID,
 		"GC_SESSION_NAME":   "ant-adhoc-123",
-		"GC_ALIAS":          "demo/ant-adhoc-123",
+		"GC_ALIAS":          "",
 		"GC_TEMPLATE":       "demo/ant",
 		"GC_SESSION_ORIGIN": "manual",
-		"GC_AGENT":          "demo/ant-adhoc-123",
+		"GC_AGENT":          "ant-adhoc-123",
+		"BEADS_ACTOR":       "ant-adhoc-123",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
@@ -2573,12 +2575,14 @@ func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 		t.Fatalf("UpdatePresentation(alias): %v", err)
 	}
 
-	got, err := sp.GetMeta(info.SessionName, "GC_ALIAS")
-	if err != nil {
-		t.Fatalf("GetMeta(GC_ALIAS): %v", err)
-	}
-	if got != nextAlias {
-		t.Fatalf("GC_ALIAS = %q, want %q", got, nextAlias)
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "BEADS_ACTOR"} {
+		got, err := sp.GetMeta(info.SessionName, key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != nextAlias {
+			t.Fatalf("%s = %q, want %q", key, got, nextAlias)
+		}
 	}
 
 	bead, err := store.Get(info.ID)

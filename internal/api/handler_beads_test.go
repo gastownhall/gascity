@@ -1754,8 +1754,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 
 	listReq := httptest.NewRequest("GET", cityURL(state, "/beads?assignee=worker"), nil)
@@ -1865,8 +1865,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want session_name preserved as %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want session_name normalized to canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2000,8 +2000,8 @@ func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
 		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want repairable session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want repairable session alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
 	if gotSession.Type != session.BeadType {
@@ -2027,8 +2027,8 @@ func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
 		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2053,8 +2053,8 @@ func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("created %d beads, want 1", len(items))
 	}
-	if items[0].Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("created assignee = %q, want alias normalized to session_name %q", items[0].Assignee, sessionBead.Metadata["session_name"])
+	if items[0].Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("created assignee = %q, want canonical alias %q", items[0].Assignee, sessionBead.Metadata["alias"])
 	}
 }
 

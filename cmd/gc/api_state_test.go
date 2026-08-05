@@ -2053,6 +2053,147 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 }
 
+func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{ID: "gcg-retry-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session", "gc.native_step_dependencies.v1": `["prepare"]`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	step, err = store.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: store, eventProv: rec}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
+	var completed []events.Event
+	for _, event := range rec.Events {
+		if event.Type == events.ExecutionStepCompleted {
+			completed = append(completed, event)
+		}
+	}
+	if len(completed) != 1 || completed[0].Subject != step.ID || completed[0].RunID != root.ID || completed[0].SessionID != "gcs-session" || completed[0].StepID != "build" {
+		t.Fatalf("completed lifecycle events = %#v", completed)
+	}
+}
+
+func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *testing.T) {
+	backing := beads.NewMemStore()
+	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := backing.Create(beads.Bead{ID: "gcg-retry-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	step, err = backing.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The close is already in the authoritative journal when this controller
+	// starts. Its watcher cursor begins at that journal head, reproducing a
+	// process crash after bead.closed but before step_completed was recorded.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.startBeadEventWatcher(ctx)
+
+	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(got) != 1 {
+		t.Fatalf("reconciled completed events = %#v, want one", got)
+	}
+	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
+		t.Fatalf("reconciled completed event = %#v", got[0])
+	}
+}
+
+func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	root, err := rigStore.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := rigStore.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rigStore.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	cs := &controllerState{
+		cfg:           &config.City{Rigs: []config.Rig{{Name: "gascity"}}},
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"gascity": rigStore},
+		eventProv:     ep,
+	}
+	cs.reconcileExecutionCompletions()
+
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after rig reconciliation = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("reconciled completed event = %#v", got)
+	}
+
+	cs.reconcileExecutionCompletions()
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after repeated rig reconciliation = %#v, want exact-fact no-op", completed)
+	}
+}
+
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})

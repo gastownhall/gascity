@@ -218,6 +218,173 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	}
 }
 
+// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins strict validation
+// of the typed close that reproduces gc-e2xqk.
+func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = "gc-attempt1"
+	const validDeliverable = `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     retryEvalResult
+	}{
+		{
+			name: "valid deliverable close folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+				"gc.outcome.producer":                         "formula-step",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "valid deliverable close with passing verdict folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "consumed",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "passing verdict requires consumed review gate",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "pass",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "passing verdict requires published pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"review_verdict"}`,
+				"gc.review_gate": "consumed",
+				"review_verdict": "reject",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unsupported passing verdict stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"surprise"}`,
+				"gc.review_gate": "consumed",
+				"surprise":       "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "explicit gc.outcome takes precedence over typed close",
+			metadata: map[string]string{
+				"gc.outcome": "pass",
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "non-deliverable close stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"non-deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"obsolete"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with arbitrary producer folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"novel-writer-42"}`,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "deliverable absent producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":""}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty recorded_by stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty reason stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown envelope field stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","surprise":"x"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with trailing data stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"} {"junk":1}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "malformed json stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": "{not json",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "wrong contract_version stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "foreign work_id stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-someone-else","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown disposition stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"mystery","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name:     "no typed outcome stays missing_outcome",
+			metadata: map[string]string{},
+			want:     retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyRetryAttempt(beads.Bead{ID: attemptID, Metadata: tt.metadata})
+			if got != tt.want {
+				t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 	t.Parallel()
 

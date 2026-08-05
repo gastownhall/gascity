@@ -1259,6 +1259,47 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 	}
 }
 
+func TestCmdMailSendExactSessionIDStaysPinned(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{sessionBead.ID, "body"}, false, false, "human", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	stored := mailSendTestFindMessage(t, cityPath)
+	if stored.Assignee != sessionBead.ID {
+		t.Fatalf("stored assignee = %q, want typed session ID %q", stored.Assignee, sessionBead.ID)
+	}
+}
+
 func TestResolveMailRecipientIdentity_BareNamedSessionUsesConfiguredMailboxWithoutMaterializing(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 

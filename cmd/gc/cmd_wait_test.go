@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"golang.org/x/mod/semver"
 )
 
 type waitErrorStore struct {
@@ -701,7 +702,7 @@ func pinnedBeadsModuleVersion() (string, error) {
 	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
 }
 
-// TestBuildPinnedBDBinaryForTestsMatchesGoModVersion locks in the fix for
+// TestBuildPinnedBDBinaryForTestsUsesGoModSource locks in the fix for
 // ga-r9cvmi: a bd binary resolved by searching PATH/home-dir locations (the
 // old waitTestRealBDPath behavior, still used elsewhere via
 // findPreferredBinary) carries no guarantee of matching the schema/migration
@@ -713,7 +714,7 @@ func pinnedBeadsModuleVersion() (string, error) {
 // from that ambient drift. buildPinnedBDBinaryForTests must instead build bd
 // fresh from the pinned dependency, so its correctness never depends on
 // whatever happens to be installed on the host.
-func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
+func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// Load-bearing for the census even though waitTestRealBDPath calls it
 	// again: this is the cmd/gc+untagged slow_process_gate call site the
 	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
@@ -730,15 +731,40 @@ func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	wantVersion := strings.TrimPrefix(pinned, "v")
-
 	out, err := exec.Command(bdPath, "version").CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}
-	if !strings.Contains(string(out), wantVersion) {
-		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	versionLine := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "bd version ") {
+			versionLine = line
+			break
+		}
 	}
+	fields := strings.Fields(versionLine)
+	if len(fields) < 3 || !semver.IsValid("v"+fields[2]) {
+		t.Fatalf("%s version output %q does not report a declared Beads release version", bdPath, out)
+	}
+	metadata, err := exec.Command("go", "version", "-m", bdPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("go version -m %s: %v\n%s", bdPath, err, metadata)
+	}
+	foundPinnedModule := false
+	for _, line := range strings.Split(string(metadata), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "mod" && fields[1] == "github.com/steveyegge/beads" && fields[2] == pinned {
+			foundPinnedModule = true
+			break
+		}
+	}
+	if !foundPinnedModule {
+		t.Fatalf("%s build metadata %q does not retain pinned Beads module version %q", bdPath, metadata, pinned)
+	}
+	// `bd version` reports the release variable declared by Beads source
+	// (currently 1.1.0), not the Go module pseudo-version used to fetch that
+	// source. The exact source guarantee is therefore checked through the
+	// compiled binary's module metadata above.
 }
 
 func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {

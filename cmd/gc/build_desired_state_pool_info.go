@@ -402,7 +402,7 @@ func normalizeNonExpandingPoolSessionInfo(
 	}
 	if aliasNeedsUpdate {
 		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, canonical, info.ID); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(bp.beadStore, bp.city, canonical, info.ID, canonical); err != nil {
 				return err
 			}
 			return apply()

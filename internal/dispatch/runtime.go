@@ -841,8 +841,21 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
+	// Generated spec sidecars are topology records rather than executable
+	// members; preserve their established successful cleanup outcome before the
+	// remaining subtree is skipped.
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
+	}
+	// A terminal root makes every still-open generated member non-executable.
+	// Close the remainder as one ordered, idempotent batch before completing
+	// the finalizer. This also repairs partially materialized workflows whose
+	// unused steps were never reached by ordinary dependency progression.
+	if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	}); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {

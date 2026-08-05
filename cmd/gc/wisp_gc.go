@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -165,6 +166,13 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
 		}
 
+		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store)
+		if memberErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated members for terminal workflow roots: %w", memberErr))
+		} else if closedMembers > 0 {
+			log.Printf("wisp gc: closed %d generated members for terminal workflow roots", closedMembers)
+		}
+
 		// Close abandoned OPEN roots BEFORE the closed-root purge below so a
 		// root the sweep closes this tick can be collected by the purge in the
 		// same tick when it has already aged past m.ttl (the purge gates on
@@ -210,6 +218,30 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	}
 
 	return purged, deleteErr
+}
+
+// closeGeneratedMembersForClosedRoots repairs terminal workflow roots whose
+// finalizer, supersession, or partial materialization left generated members
+// open. Closed roots are the authority boundary: live roots are never listed
+// and therefore never touched. Each subtree close is ordered and idempotent.
+func closeGeneratedMembersForClosedRoots(store beads.Store) (int, error) {
+	roots, err := closedWispGCEntries(store)
+	if err != nil {
+		return 0, err
+	}
+	closed := 0
+	var closeErr error
+	for _, root := range roots {
+		n, err := molecule.CloseSubtreeWithMetadata(store, root.ID, map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+		})
+		closed += n
+		if err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("closing terminal workflow subtree %s: %w", root.ID, err))
+		}
+	}
+	return closed, closeErr
 }
 
 // wispGCRootSelector pairs a List selector with a short label used for error

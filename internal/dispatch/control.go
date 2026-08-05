@@ -463,6 +463,9 @@ func IsTransientControllerError(err error) bool {
 		"database is locked",
 		"database table is locked",
 		"sqlite_busy",
+		// A workflow root may remain blocked briefly while sibling work closes.
+		// Retrying preserves the open finalize bead for the next serve cycle.
+		"cannot close blocked issue",
 		// bd's client-side Dolt breaker fails fast while the server is down.
 		// These errors are recoverable, so a long-running control dispatcher
 		// must keep sweeping rather than exit permanently during the outage.

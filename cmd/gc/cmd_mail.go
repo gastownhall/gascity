@@ -1011,6 +1011,15 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return "human", nil
 	}
+	if store != nil {
+		sessionID, err := session.ResolveSessionIDByExactID(store, identifier)
+		if err == nil {
+			return sessionID, nil
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", err
+		}
+	}
 	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
 		return "", targetErr
 	} else if matched {

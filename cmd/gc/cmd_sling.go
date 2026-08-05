@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1797,6 +1798,17 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
 			}
+			// A graph.v2 formula attach routes more than the work bead: the
+			// cooked workflow root is also routed to the same agent. Without
+			// this line the preview shows only the plain-routing effect, so a
+			// reader cannot anticipate the second routed bead. Legacy (non-
+			// graph.v2) attach deliberately leaves the wisp root unrouted --
+			// see the design-intent comment on the finalize() call in
+			// slingFormula (internal/sling/sling_core.go, citing #2848 and
+			// TestOnFormulaAttachesAndRoutes) -- so this must not fire there.
+			if dryRunFormulaAttachIsGraphV2(opts, deps, a) {
+				w("  A wisp/workflow root is also cooked and routed to the agent.")
+			}
 		}
 		w("")
 	}
@@ -1808,6 +1820,28 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 
 	w("No side effects executed (--dry-run).")
 	return 0
+}
+
+// dryRunFormulaAttachIsGraphV2 reports whether the formula this sling would
+// attach (an explicit --on, or the target's default_sling_formula) is a
+// graph.v2 formula. Resolution failures (unknown formula, parse error) report
+// false rather than surfacing an error here -- a dry-run preview must not
+// fail on a formula-name typo the live attach path will report clearly on
+// its own, and understating the preview is the safe direction: it never
+// claims a second routed bead that legacy attach will not create.
+func dryRunFormulaAttachIsGraphV2(opts slingOpts, deps slingDeps, a config.Agent) bool {
+	formulaName := opts.OnFormula
+	if formulaName == "" {
+		if opts.NoFormula {
+			return false
+		}
+		formulaName = a.EffectiveDefaultSlingFormula()
+	}
+	if formulaName == "" {
+		return false
+	}
+	isGraph, _, err := graphv2.IsGraphV2Formula(formulaName, sling.SlingFormulaSearchPaths(deps, a))
+	return err == nil && isGraph
 }
 
 // dryRunBatch prints a step-by-step preview of what gc sling would do for a

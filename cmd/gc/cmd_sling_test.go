@@ -6384,6 +6384,73 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
 	}
+	// code-review (sharedTestFormulaDir) is version=1, not graph.v2: legacy
+	// attach deliberately leaves the wisp root unrouted (see the
+	// design-intent comment on the finalize() call in slingFormula,
+	// internal/sling/sling_core.go, citing #2848 and
+	// TestOnFormulaAttachesAndRoutes), so the preview must not claim a
+	// second routed bead here. See TestDryRunOnFormulaGraphV2 for the
+	// graph.v2 case where the line is expected.
+	if strings.Contains(out, "A wisp/workflow root is also cooked and routed to the agent.") {
+		t.Errorf("stdout has wisp-root disclosure for a legacy (non-graph.v2) formula attach: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// writeGraphV2FormulaForDryRunTest writes a minimal graph.v2-contract
+// formula file, mirroring internal/sling's writeNamedGraphV2ConvoyFormula
+// (unexported there, so duplicated here rather than reused across packages).
+func writeGraphV2FormulaForDryRunTest(t *testing.T, dir, name string) {
+	t.Helper()
+	content := fmt.Sprintf(`
+formula = %q
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`, name)
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunOnFormulaGraphV2(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Attach formula:") {
+		t.Errorf("stdout missing attach section: %s", out)
+	}
+	if !strings.Contains(out, "A wisp/workflow root is also cooked and routed to the agent.") {
+		t.Errorf("stdout missing wisp-root disclosure for a graph.v2 formula attach: %s", out)
+	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
 	}

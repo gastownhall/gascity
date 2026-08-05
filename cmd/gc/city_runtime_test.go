@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -843,6 +844,65 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
+	const template = "gascity/gc.gap-analyst"
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "gap-analyst",
+			BindingName:       "gc",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: cityPath,
+		cfg:      cfg,
+		sp:       runtime.NewFake(),
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityPath:      cityPath,
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	buildCalls := 0
+	cr.buildFnWithSessionBeads = func(cfg *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now(), cfg, sp, store, rigStores, sessionBeads, trace, io.Discard)
+	}
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	first := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if got := first.result.PoolDesiredCounts[template]; got != 0 {
+		t.Fatalf("initial PoolDesiredCounts[%s] = %d, want 0", template, got)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "gap analysis",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("Create routed work: %v", err)
+	}
+
+	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count = %d, want 2 after ready-demand change", buildCalls)
+	}
+	if got := second.result.PoolDesiredCounts[template]; got != 1 {
+		t.Fatalf("PoolDesiredCounts[%s] = %d, want 1 for newly-ready routed work", template, got)
+	}
+}
+
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1504,6 +1564,92 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	}
 }
 
+func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testing.T) {
+	backing := beads.NewMemStore()
+	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := backing.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepIDMetadataKey:     "build",
+		beadmeta.SessionIDMetadataKey:  "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: backing,
+		eventProv:     ep,
+	}
+	cs.startBeadEventWatcher(ctx)
+
+	if err := backing.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("completed events before patrol = %#v, want none without bead.closed", completed)
+	}
+
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg:      cs.cfg,
+		sp:       runtime.NewFake(),
+		cs:       cs,
+		buildFnWithSessionBeads: func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("completed events after poke = %#v, want no global reconciliation outside patrol", completed)
+	}
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after patrol = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("completed event = %#v", got)
+	}
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after second patrol = %#v, want exact-fact no-op", completed)
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	store := beads.NewMemStore()
 	od := &recordingOrderDispatcher{}
@@ -2153,23 +2299,89 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		cs: &controllerState{
 			eventProv: events.NewFake(),
 		},
-		demandSnapshot: &runtimeDemandSnapshot{
-			createdAt:          time.Now(),
-			sessionFingerprint: "",
-			result: DesiredStateResult{State: map[string]TemplateParams{
-				"headless-agent": {
-					SessionName: "headless-agent",
-					IsACP:       true,
-				},
-			}},
-		},
 		stderr: io.Discard,
+	}
+	cr.demandSnapshot = &runtimeDemandSnapshot{
+		createdAt:              time.Now(),
+		sessionFingerprint:     sessionBeadSnapshotFingerprint(nil),
+		readyDemandFingerprint: cr.readyDemandSnapshotFingerprint(),
+		result: DesiredStateResult{State: map[string]TemplateParams{
+			"headless-agent": {
+				SessionName: "headless-agent",
+				IsACP:       true,
+			},
+		}},
 	}
 
 	_ = cr.loadDemandSnapshot(nil, nil, "patrol", false)
 
 	if err := sp.Attach("headless-agent"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
 		t.Fatalf("Attach(headless-agent) error = %v, want ACP transport route", err)
+	}
+}
+
+func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
+	var logBuf bytes.Buffer
+	oldLogOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
+
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+
+	first := cr.readyDemandSnapshotFingerprint()
+	second := cr.readyDemandSnapshotFingerprint()
+
+	if first != second {
+		t.Fatalf("readyDemandSnapshotFingerprint changed across stable store errors: %q != %q", first, second)
+	}
+	if store.readyCalls != 2 {
+		t.Fatalf("Ready calls = %d, want 2", store.readyCalls)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "readyDemandSnapshotFingerprint: store test-city: backing ready should not be used") {
+		t.Fatalf("log output = %q, want readyDemandSnapshotFingerprint store error", got)
+	}
+}
+
+func TestCityRuntimeDemandSnapshotPokeDoesNotScanReadyFingerprint(t *testing.T) {
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	_ = cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "poke", false)
+
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls = %d, want 1", buildCalls)
+	}
+	if store.readyCalls != 0 {
+		t.Fatalf("Ready calls = %d, want 0 for forced non-patrol rebuild", store.readyCalls)
 	}
 }
 
@@ -6997,6 +7209,97 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 	cr.runOrderTrackingRetentionWatchdog(later)
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
+	}
+}
+
+// seedRetentionWatchdogCity builds a CityRuntime whose cityPath points at a
+// scratch city carrying one legacy backup_state.json stamped at backupAge, plus
+// a store holding minClosedOrderTrackingRetained+2 prunable beads. Every other
+// TestOrderTrackingRetentionWatchdog_* case leaves cityPath empty, which skips
+// the doctor.BulkDeleteSafe guard entirely; these two exercise it.
+func seedRetentionWatchdogCity(t *testing.T, now time.Time, backupAge time.Duration) (*CityRuntime, beads.Store, *bytes.Buffer) {
+	t.Helper()
+	cityDir := t.TempDir()
+	backupDir := filepath.Join(cityDir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", backupDir, err)
+	}
+	stateJSON := fmt.Sprintf(`{"timestamp":%q}`, now.Add(-backupAge).Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write backup_state.json: %v", err)
+	}
+
+	// Beads are 8 days old (> 7d default TTL); the 2 oldest exceed the retain-10 floor.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("guard-%02d", i),
+			Title:     "order:guard",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:guard", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            cityDir,
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+	}
+	return cr, store, &stderrBuf
+}
+
+func TestOrderTrackingRetentionWatchdog_SkipsBulkDeleteWhenBackupStale(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 48h since the last backup, past the 24h bulkDeleteMaxAge default.
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, 48*time.Hour)
+
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// Nothing may be deleted while the recovery point is stale.
+	for i := range minClosedOrderTrackingRetained + 2 {
+		id := fmt.Sprintf("guard-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved when the backup is stale: %v", id, err)
+		}
+	}
+	if got := stderrBuf.String(); !strings.Contains(got, "skipping bulk delete") {
+		t.Fatalf("stderr = %q, want 'skipping bulk delete' in output", got)
+	}
+	// The interval stamp is consumed even on the skip path, so a blocked
+	// watchdog does not re-scan on every tick.
+	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 1h since the last backup, well inside the 24h bulkDeleteMaxAge default.
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
+
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	if got := stderrBuf.String(); strings.Contains(got, "skipping bulk delete") {
+		t.Fatalf("stderr = %q, want no skip with a fresh backup", got)
+	}
+	for _, id := range []string{"guard-00", "guard-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (should be pruned)", id, err)
+		}
+	}
+	for i := 2; i < minClosedOrderTrackingRetained+2; i++ {
+		id := fmt.Sprintf("guard-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved at the retain floor: %v", id, err)
+		}
 	}
 }
 

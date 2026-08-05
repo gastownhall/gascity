@@ -7050,13 +7050,11 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 		t.Fatalf("continuation_epoch metadata = %q: %v", stored.Metadata["continuation_epoch"], err)
 	}
 
+	expectedInfo := sessiontest.SeedBead(t, stored)
+	expectedInfo.SessionName = tp.SessionName
 	expected := templateParamsToConfig(tp)
 	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithSessionContext(
-		stored.ID,
-		tp.SessionName,
-		tp.Alias,
-		stored.Metadata["template"],
-		stored.Metadata["session_origin"],
+		expectedInfo,
 		generation,
 		continuationEpoch,
 		stored.Metadata["instance_token"],

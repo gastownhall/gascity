@@ -4195,11 +4195,10 @@ func TestBdRuntimeEnvDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
 	}
 }
 
-// TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that session
-// contexts (template_resolve.go sets BEADS_ACTOR=<sessname>) and exec
-// orders (orderExecEnv sets BEADS_ACTOR=order:<name>) are not clobbered by
-// the neutral bd runtime env. The key is omitted so the inherited value
-// passes through mergeEnv unchanged.
+// TestBdRuntimeEnvPreservesInheritedBeadsActor verifies that the authoritative
+// session runtime context and exec orders can set BEADS_ACTOR without the
+// neutral bd runtime env clobbering it. The neutral map omits the key so the
+// inherited value passes through mergeEnv unchanged.
 func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")

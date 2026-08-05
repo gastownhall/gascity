@@ -246,6 +246,30 @@ func TestProjectEventExecutionFactsFailClosed(t *testing.T) {
 	}
 }
 
+func TestProjectEventExecutionLifecycleFactsRequireDurableIdentity(t *testing.T) {
+	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
+	deps := []string{"prepare"}
+	for _, typ := range []string{"execution.step_started", "execution.step_completed"} {
+		t.Run(typ, func(t *testing.T) {
+			event := TaggedEvent{Seq: 1, Type: typ, Ts: fixedTS, Actor: "worker", Subject: "gcg-attempt", RunID: "gcg-run", SessionID: "gcs-session", StepID: "build", DependsOnStepIDs: &deps}
+			got, ok := ProjectEvent(event, on)
+			if !ok || got.Ref != event.Subject || got.RunID != event.RunID || got.SessionID != event.SessionID || got.StepID != event.StepID || !reflect.DeepEqual(got.DependsOnStepIDs, &deps) {
+				t.Fatalf("ProjectEvent() = %#v, %v; want lifecycle fact", got, ok)
+			}
+			for _, remove := range []func(*TaggedEvent){
+				func(e *TaggedEvent) { e.Subject = "" }, func(e *TaggedEvent) { e.RunID = "" },
+				func(e *TaggedEvent) { e.SessionID = "" }, func(e *TaggedEvent) { e.StepID = "" },
+			} {
+				bad := event
+				remove(&bad)
+				if _, ok := ProjectEvent(bad, on); ok {
+					t.Fatalf("ProjectEvent accepted incomplete lifecycle event %#v", bad)
+				}
+			}
+		})
+	}
+}
+
 func TestProjectEventRejectsInvalidPresentNativeTopology(t *testing.T) {
 	deps := []string{"step-a", "step-a"}
 	if _, ok := ProjectEvent(TaggedEvent{

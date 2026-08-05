@@ -366,13 +366,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	agentForQuery := resolvedAgentName
 	sessionForQuery := ""
 	if sessionTemplateContext {
-		agentForQuery = os.Getenv("GC_ALIAS")
-		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_SESSION_NAME")
-		}
-		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_AGENT")
-		}
+		agentForQuery = hookSessionAgentForQuery()
 		sessionForQuery = os.Getenv("GC_SESSION_NAME")
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
@@ -445,7 +439,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
-		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
+		// Write the alias/agent form that read paths query through GC_AGENT.
+		// Session forms remain fallbacks for unaliased workers.
+		assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
@@ -686,6 +682,15 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 	return agentutil.RoutedToIdentity(a)
+}
+
+func hookSessionAgentForQuery() string {
+	return firstNonEmptyHookValue(
+		os.Getenv("GC_ALIAS"),
+		os.Getenv("BEADS_ACTOR"),
+		os.Getenv("GC_AGENT"),
+		os.Getenv("GC_SESSION_NAME"),
+	)
 }
 
 func firstNonEmptyHookValue(values ...string) string {
