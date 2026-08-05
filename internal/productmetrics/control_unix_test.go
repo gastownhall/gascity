@@ -1712,7 +1712,8 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		t.Fatal(err)
 	}
 
-	var armed, replaced atomic.Bool
+	var replaced atomic.Bool
+	armed := make(chan struct{})
 	var replacement persistedState
 	var replacementData []byte
 	var replaceErr error
@@ -1728,7 +1729,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		// beginDisable does not enumerate; the first enumerate is the clean-tree
 		// proof after the uploader lock. Wait for the test to arm so we never
 		// race past the injection point before replacementData is ready (#4653).
-		if !waitForTestArm(&armed) {
+		if !waitForTestArm(armed) {
 			return nil
 		}
 		if !replaced.CompareAndSwap(false, true) {
@@ -1754,7 +1755,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	armed.Store(true)
+	close(armed)
 	if err := barrier.Release(); err != nil {
 		t.Fatal(err)
 	}
@@ -2199,17 +2200,17 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 	return result
 }
 
-// waitForTestArm blocks until armed is true, or until GoroutineRaceTimeout, so a
+// waitForTestArm blocks until armed is closed, or until GoroutineRaceTimeout, so a
 // storage hook cannot inject before the test arms it under -p=N CPU starvation.
-func waitForTestArm(armed *atomic.Bool) bool {
-	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
-	for !armed.Load() {
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(time.Millisecond)
+func waitForTestArm(armed <-chan struct{}) bool {
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	select {
+	case <-armed:
+		return true
+	case <-timer.C:
+		return false
 	}
-	return true
 }
 
 func receivePurgeCall(t *testing.T, call <-chan purgeCallResult) purgeCallResult {
