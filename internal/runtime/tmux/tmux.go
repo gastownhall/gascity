@@ -148,10 +148,11 @@ var (
 	// but the agent's busy indicator was never observed within budget: the
 	// message may be sitting drafted-but-unsubmitted in the pane. Callers
 	// that can retry (the nudge queue dispatcher, the idle-claim backstop)
-	// must treat this the same as an undelivered nudge — do not ack the
-	// queue item or advance an attempt counter on it — because ga-bwm proved
-	// that treating an unconfirmed submit as a clean success is exactly what
-	// lets a stalled nudge go undetected for many minutes.
+	// must treat this the same as an undelivered nudge: the queue must not
+	// ack the item, so it requeues after the normal retry delay and consumes
+	// one of its bounded attempts, exactly like any other delivery failure.
+	// ga-bwm proved that treating an unconfirmed submit as a clean success is
+	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
@@ -1935,10 +1936,12 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		delivered = true
 		if !confirmed {
 			// Do NOT collapse this to nil: a caller that treats nil as "clean
-			// delivery" would ack a queued nudge (or advance a retry counter)
-			// for a message that may still be sitting drafted-but-unsubmitted
-			// in the pane. Surfacing this as an error lets retry-capable
-			// callers try again instead of silently losing the nudge.
+			// delivery" would ack a queued nudge for a message that may still
+			// be sitting drafted-but-unsubmitted in the pane. Surfacing this
+			// as an error leaves the item unacked, so it requeues after the
+			// normal retry delay and spends one of its bounded attempts —
+			// the same handling as any other delivery failure — instead of
+			// silently losing the nudge.
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
 		return nil
