@@ -83,6 +83,16 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 // Parent/child depth (deepest first) is used as the tie-breaker when no
 // blocks edge constrains the order.
 func CloseSubtree(store beads.Store, rootID string) (int, error) {
+	return CloseSubtreeWithMetadata(store, rootID, map[string]string{
+		"close_reason": SubtreeClosedReason,
+	})
+}
+
+// CloseSubtreeWithMetadata closes the root bead and every open descendant,
+// stamping metadata on each newly closed bead. It preserves CloseSubtree's
+// descendant-first, blocker-first ordering and is idempotent for an already
+// closed subtree.
+func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[string]string) (int, error) {
 	matched, err := ListSubtree(store, rootID)
 	if err != nil {
 		return 0, err
@@ -141,7 +151,5 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return store.CloseAll(ordered, map[string]string{
-		"close_reason": SubtreeClosedReason,
-	})
+	return store.CloseAll(ordered, metadata)
 }
