@@ -942,6 +942,75 @@ func TestFactorySweepSessionModelUsageKeylessCodexAmbiguousWorkdirTakesNone(t *t
 	}
 }
 
+// TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles pins the
+// shared-workdir pool case: without session_key, Claude TranscriptPath refuses
+// ambiguous workdir fallback (empty path). That miss is permanent — settle so
+// compute can commit instead of retrying forever (JSONL spam).
+func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	// Two open sessions, same workdir, no session_key → ambiguous workdir fallback.
+	for _, title := range []string{"one", "two"} {
+		h, err := factory.Session(SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    title,
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+		})
+		if err != nil {
+			t.Fatalf("Session(%s): %v", title, err)
+		}
+		if err := h.Start(context.Background()); err != nil {
+			t.Fatalf("Start(%s): %v", title, err)
+		}
+		// Clear any captured session_key so discovery is forced into workdir fallback.
+		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "latest.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+	})
+
+	sessions, err := store.List(beads.ListQuery{Label: sessionpkg.LabelSession})
+	if err != nil || len(sessions) < 2 {
+		t.Fatalf("List sessions: err=%v len=%d", err, len(sessions))
+	}
+	meta := sessions[0].Metadata
+	meta["session_key"] = ""
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessions[0].ID, meta, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("emitted = %d, want 0 (ambiguous keyless claude must mint nothing)", emitted)
+	}
+	if !settled {
+		t.Fatal("keyless claude ambiguous/empty transcript must settle (permanent miss)")
+	}
+}
+
 // TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries pins the P3 fix
 // at the sweep boundary: when the keyless-codex (cwd, wake-window) fallback misses
 // because a transient IO fault clouded the scan (here an unreadable day directory

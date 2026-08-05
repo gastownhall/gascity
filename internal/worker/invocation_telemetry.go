@@ -486,7 +486,9 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		return 0, true, nil
 	}
 	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
-	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	keyless := strings.TrimSpace(meta["session_key"]) == ""
+	keylessCodex := family == "codex" && keyless
+	keylessClaude := family == "claude" && keyless
 	if keylessCodex && !scanClean {
 		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
 		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
@@ -500,15 +502,15 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		return 0, false, nil
 	}
 	if path == "" {
-		if keylessCodex {
-			// Clean miss: a terminal session's rollout is written at codex start and is
-			// already on disk, so a clean zero/ambiguous match is ambiguity, an
-			// out-of-window filename timestamp, or a TZ-shifted filename — none of which
-			// a retry resolves. Settle so the whole recently-closed window is not
-			// re-swept every tick. (A keyed miss below stays transient: its keyed
-			// rollout may simply not be flushed yet.)
-			slog.Debug("model-usage sweep: keyless codex workdir fallback found no rollout; settling",
-				slog.String("session_id", id))
+		if keylessCodex || keylessClaude {
+			// Clean miss: keyless workdir fallback found nothing or refused ambiguity.
+			// Retries will not resolve shared-workdir ambiguity (claude) or
+			// out-of-window/ambiguous codex rollouts. Settle so compute can commit
+			// and the recently-closed window is not re-swept every tick. (A keyed
+			// miss below stays transient: its keyed transcript may simply not be
+			// flushed yet.)
+			slog.Debug("model-usage sweep: keyless transcript miss; settling",
+				slog.String("session_id", id), slog.String("provider", family))
 			return 0, true, nil
 		}
 		// Transient: the rollout may not be flushed yet at interval end, so leave the
@@ -543,12 +545,16 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 		return "", true
 	}
 	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
-	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	keyless := strings.TrimSpace(meta["session_key"]) == ""
+	keylessCodex := family == "codex" && keyless
+	keylessClaude := family == "claude" && keyless
 	if keylessCodex && !scanClean {
 		return "", false
 	}
 	if path == "" {
-		return "", keylessCodex
+		// Match SweepSessionModelUsage settle: clean keyless codex/claude misses
+		// are permanent (ambiguity / out-of-window), so memoize as settled.
+		return "", keylessCodex || keylessClaude
 	}
 	return path, true
 }
