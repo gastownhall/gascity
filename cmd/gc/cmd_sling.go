@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"math/rand"
 	"net"
@@ -775,6 +776,16 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	}
 	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
+	}
+	// Record WHEN the handoff happened so the reconciler can distinguish a
+	// just-slung bead (whose source session may still be mid-turn on it) from one
+	// the source has had time to finish with — the sr-wz8.3 route-away settle
+	// window in releaseOrphanedPoolAssignments. Stamped after routed_to so a
+	// failure here cannot leave a routed_at newer than the route it describes;
+	// best-effort by design, since an absent stamp reads as "settled" and simply
+	// restores the pre-window behavior rather than stalling the handoff.
+	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedAtMetadataKey, beadmeta.FormatRoutedAt(routeAwaySettleNow())); err != nil {
+		log.Printf("gc sling: setting %s on %s: %v (route stands; settle window will read as elapsed)", beadmeta.RoutedAtMetadataKey, req.BeadID, err)
 	}
 	return nil
 }

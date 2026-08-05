@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,11 +16,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 type getErrStore struct {
@@ -1186,5 +1189,44 @@ func TestApiVsAgentutilResolverParity(t *testing.T) {
 				t.Fatalf("agentutil.ResolveAgent QualifiedName = %q, want %q", utilAgent.QualifiedName(), tc.utilWantQName)
 			}
 		})
+	}
+}
+
+// TestAPIBeadRouterStampsRoutedAt mirrors the CLI router's stamp on the HTTP
+// path. gc sling and the API sling are the same handoff, so a bead escalated
+// through the API must carry the same gc.routed_at the sr-wz8.3 settle window
+// reads — otherwise the window always reads as elapsed for API-routed beads and
+// the liveness preserve silently does not apply to them.
+func TestAPIBeadRouterStampsRoutedAt(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	work, err := store.Create(beads.Bead{Title: "escalated via API", Status: "open"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	router := apiBeadRouter{server: &Server{state: state}, store: store}
+	before := time.Now().UTC().Truncate(time.Second)
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: work.ID,
+		Target: "worker",
+	}); err != nil {
+		t.Fatalf("route should succeed, got: %v", err)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	stamp := got.Metadata[beadmeta.RoutedAtMetadataKey]
+	if stamp == "" {
+		t.Fatalf("%s not stamped; metadata = %v", beadmeta.RoutedAtMetadataKey, got.Metadata)
+	}
+	parsed, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatalf("%s = %q, want an RFC3339 timestamp: %v", beadmeta.RoutedAtMetadataKey, stamp, err)
+	}
+	if parsed.Before(before) {
+		t.Errorf("%s = %q, want at or after %s", beadmeta.RoutedAtMetadataKey, stamp, before)
 	}
 }

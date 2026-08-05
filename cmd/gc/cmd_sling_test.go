@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -9056,5 +9057,57 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "empty entry") {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
+
+// TestCliBeadRouterStampsRoutedAt pins the write side of the sr-wz8.3 settle
+// window: a handoff records WHEN it routed, alongside where it routed to, so
+// releaseOrphanedPoolAssignments can tell a just-slung bead from one whose source
+// has had time to finish its turn. Without this stamp the window always reads as
+// elapsed and the release is as immediate as it was before.
+func TestCliBeadRouterStampsRoutedAt(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "l2-erp",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "ESC-1", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed ESC-1: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "city:test-city",
+	}
+
+	before := time.Now().UTC().Truncate(time.Second)
+	if err := (cliBeadRouter{deps: deps}).Route(context.Background(), sling.RouteRequest{
+		BeadID: "ESC-1",
+		Target: "l2-erp",
+	}); err != nil {
+		t.Fatalf("route should succeed, got: %v", err)
+	}
+	after := time.Now().UTC()
+
+	bead, err := store.Get("ESC-1")
+	if err != nil {
+		t.Fatalf("store.Get(ESC-1): %v", err)
+	}
+	stamp := bead.Metadata[beadmeta.RoutedAtMetadataKey]
+	if stamp == "" {
+		t.Fatalf("%s not stamped; metadata = %v", beadmeta.RoutedAtMetadataKey, bead.Metadata)
+	}
+	parsed, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatalf("%s = %q, want an RFC3339 timestamp: %v", beadmeta.RoutedAtMetadataKey, stamp, err)
+	}
+	if parsed.Before(before) || parsed.After(after.Add(time.Second)) {
+		t.Errorf("%s = %q, want a stamp within [%s, %s]", beadmeta.RoutedAtMetadataKey, stamp, before, after)
 	}
 }

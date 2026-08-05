@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -343,19 +344,25 @@ func TestReleaseOrphanedPoolAssignments_KeepsWhenTargetAgentOwnerSharesAliasHist
 	}
 }
 
-// TestReleaseOrphanedPoolAssignments_PreservesRoutedAwayWhileSourceMidTurn is the
-// sr-wz8.3 liveness guard end-to-end. gc sling stamps gc.routed_to WITHOUT
-// clearing the assignee or the source session's currently_processing_bead_id, so
-// on the reconciler tick right after a mid-turn escalation the source still reads
-// as processing the bead. Releasing then would let the l2 pool claim and start it
-// while L1 is still producing output on it (racing L1's non-CAS completion write).
-// The release must hold until the source has moved off the bead.
-func TestReleaseOrphanedPoolAssignments_PreservesRoutedAwayWhileSourceMidTurn(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_PreservesMidTurnSourceInsideSettleWindow is
+// sjarmak's liveness scenario end-to-end: gc sling stamps gc.routed_to WITHOUT
+// clearing the assignee, so on the tick right after a mid-turn escalation the
+// source may still be producing output on the bead, and releasing then would let
+// the l2 pool claim it under that live turn (racing L1's non-CAS completion
+// write). The preserve here comes from the freshly-stamped gc.routed_at, NOT from
+// the source's currently_processing_bead_id — that marker is set in this fixture
+// too, but it is never consulted (it can never be cleared, so gating on it
+// preserved forever; see the release-once-elapsed test for the same marker with
+// an elapsed stamp).
+func TestReleaseOrphanedPoolAssignments_PreservesMidTurnSourceInsideSettleWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
-		Title:    "escalated ticket (source mid-turn)",
+		Title:    "escalated ticket (source mid-turn, just routed)",
 		Assignee: "l1-live",
-		Metadata: map[string]string{"gc.routed_to": "l2-erp"},
+		Metadata: map[string]string{
+			"gc.routed_to": "l2-erp",
+			"gc.routed_at": time.Now().UTC().Format(time.RFC3339),
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create work bead: %v", err)
@@ -398,21 +405,22 @@ func TestReleaseOrphanedPoolAssignments_PreservesRoutedAwayWhileSourceMidTurn(t 
 		nil,
 	)
 	if len(released) != 0 {
-		t.Fatalf("released = %v, want none (source session is still mid-turn on the bead)", released)
+		t.Fatalf("released = %v, want none (still inside the settle window since gc.routed_at)", released)
 	}
 	got, err := store.Get(work.ID)
 	if err != nil {
 		t.Fatalf("Get work bead: %v", err)
 	}
 	if got.Assignee != "l1-live" {
-		t.Fatalf("assignee = %q, want l1-live (must not release while source is mid-turn)", got.Assignee)
+		t.Fatalf("assignee = %q, want l1-live held until the settle window elapses", got.Assignee)
 	}
 }
 
-// TestAssigneeRoutedAwayFromOwnAgent_PreservesWhileSourceMidTurn pins the liveness
-// gate directly, both directions: a source still processing THIS bead preserves it;
-// once the source has moved to a different bead the same route-away releases.
-func TestAssigneeRoutedAwayFromOwnAgent_PreservesWhileSourceMidTurn(t *testing.T) {
+// TestAssigneeRoutedAwayFromOwnAgent_SettleWindowGatesRelease pins the window at
+// its boundary, in both directions, with the clock held still. The owning session
+// names the escalated bead as its current work in every case: the marker is not a
+// signal here, so it must change nothing.
+func TestAssigneeRoutedAwayFromOwnAgent_SettleWindowGatesRelease(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "l1-support"},
 		{Name: "l2-erp"},
@@ -428,11 +436,98 @@ func TestAssigneeRoutedAwayFromOwnAgent_PreservesWhileSourceMidTurn(t *testing.T
 			"currently_processing_bead_id": "wb-9",
 		},
 	}})
-	if assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", "wb-9", false) {
-		t.Fatalf("source still mid-turn on wb-9 must preserve the bead")
+
+	routed := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	stamp := routed.Format(time.RFC3339)
+	restore := routeAwaySettleNow
+	defer func() { routeAwaySettleNow = restore }()
+
+	// One second short of the window: preserved.
+	routeAwaySettleNow = func() time.Time { return routed.Add(routeAwaySettleWindow - time.Second) }
+	if assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", stamp, false) {
+		t.Fatalf("inside the settle window the route-away must preserve the bead")
 	}
-	if !assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", "wb-other", false) {
-		t.Fatalf("source no longer processing this bead: route-away must release")
+
+	// Exactly at the window: released.
+	routeAwaySettleNow = func() time.Time { return routed.Add(routeAwaySettleWindow) }
+	if !assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", stamp, false) {
+		t.Fatalf("at the settle window the route-away must release, marker notwithstanding")
+	}
+}
+
+// TestAssigneeRoutedAwayFromOwnAgent_ReleasesWhenRoutedAtIsInTheFuture closes the
+// clock-skew corner of the same safety property. Rig stores are written from more
+// than one host (#3621 / #1544), so a stamp can legitimately arrive dated ahead of
+// the reconciler's clock — and a naive "has the window elapsed yet" comparison
+// would then hold the assignment for the whole skew, which for a badly-set clock
+// is indistinguishable from the permanent preserve this change exists to remove.
+// A route cannot have happened in the future, so such a stamp is unusable.
+func TestAssigneeRoutedAwayFromOwnAgent_ReleasesWhenRoutedAtIsInTheFuture(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "l1-support"},
+		{Name: "l2-erp"},
+	}}
+	source := sessionInfosFromBeads([]beads.Bead{{
+		ID:     "s-l1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": "l1-live",
+			"template":     "l1-support",
+			"agent_name":   "l1-support",
+		},
+	}})
+
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	restore := routeAwaySettleNow
+	defer func() { routeAwaySettleNow = restore }()
+	routeAwaySettleNow = func() time.Time { return now }
+
+	for _, tc := range []struct {
+		name string
+		skew time.Duration
+	}{
+		{"a second ahead", time.Second},
+		{"an hour ahead", time.Hour},
+		{"a day ahead", 24 * time.Hour},
+	} {
+		stamp := now.Add(tc.skew).Format(time.RFC3339)
+		if !assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", stamp, false) {
+			t.Errorf("routed_at %s (%s) must not hold the assignment; a future route stamp is unusable", tc.name, stamp)
+		}
+	}
+}
+
+// TestAssigneeRoutedAwayFromOwnAgent_ReleasesWhenRoutedAtUnusable covers the
+// fallback direction, which is a safety property rather than a convenience: the
+// bug being fixed is a permanent preserve, so no metadata state may hold a bead
+// forever. A bead routed before gc.routed_at existed carries no stamp, and a
+// corrupt value must not be stickier than a missing one.
+func TestAssigneeRoutedAwayFromOwnAgent_ReleasesWhenRoutedAtUnusable(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "l1-support"},
+		{Name: "l2-erp"},
+	}}
+	source := sessionInfosFromBeads([]beads.Bead{{
+		ID:     "s-l1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"session_name":                 "l1-live",
+			"template":                     "l1-support",
+			"agent_name":                   "l1-support",
+			"currently_processing_bead_id": "wb-9",
+		},
+	}})
+	for _, tc := range []struct{ name, routedAt string }{
+		{"absent (pre-existing routed bead)", ""},
+		{"whitespace only", "   "},
+		{"not a timestamp", "yesterday"},
+		{"wrong layout", "2026-08-05 12:00:00"},
+	} {
+		if !assigneeRoutedAwayFromOwnAgent(cfg, "", source, "l1-live", "l2-erp", "", tc.routedAt, false) {
+			t.Errorf("routedAt %s must count as settled and release, not preserve", tc.name)
+		}
 	}
 }
 
@@ -493,5 +588,144 @@ func TestAssigneeRoutedAwayFromOwnAgent_StoreRefAwareReleasesReachableSourceIgno
 	})
 	if !assigneeRoutedAwayFromOwnAgent(cfg, cityPath, sessions, "shared-id", "l2-erp", "riga", "wb-riga", true) {
 		t.Fatalf("reachable riga source (l1-support) is a genuine handoff; the rigb same-identity session is a different store and must not preserve the bead")
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesEscalatedBeadOncePastSettleWindow is
+// the case quad341's review (#4073) showed the currently_processing_bead_id gate
+// closed: L1 escalating the bead it is actively working IS marker == beadID, and
+// nothing ever clears that marker, so gating on it preserved the assignment
+// forever — the sr-wz8.3 deadlock with a gate in front of it. Once the settle
+// window since gc.routed_at has elapsed, the release must proceed even though the
+// source session still names the bead as its current work.
+func TestReleaseOrphanedPoolAssignments_ReleasesEscalatedBeadOncePastSettleWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "escalated ticket (settle window elapsed)",
+		Assignee: "l1-live",
+		Metadata: map[string]string{
+			"gc.routed_to": "l2-erp",
+			"gc.routed_at": time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	// The marker is pinned to the escalated bead and can never move: this is the
+	// primary escalation shape, not an edge case.
+	l1Session, err := store.Create(beads.Bead{
+		Title:  "l1 source (marker pinned to the escalated bead)",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":                 "l1-live",
+			"template":                     "l1-support",
+			"agent_name":                   "l1-support",
+			"currently_processing_bead_id": work.ID,
+			poolManagedMetadataKey:         boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create l1 session bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{
+			{Name: "l1-support", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+			{Name: "l2-erp", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+		}},
+		"",
+		sessionInfosFromBeads([]beads.Bead{l1Session}),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 {
+		t.Fatalf("released = %v, want the escalated bead (settle window elapsed)", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want cleared so the l2-erp pool gains demand", got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_PreservesInsideSettleWindow is the other
+// direction, and the reason the window exists at all (sjarmak's liveness point):
+// gc sling stamps gc.routed_to without clearing the assignee, so for a short
+// period after a mid-turn escalation the source may still be producing output on
+// the bead. Releasing immediately would let l2 claim it under a live turn, racing
+// the source's non-CAS completion write. A freshly-stamped gc.routed_at holds the
+// release back.
+func TestReleaseOrphanedPoolAssignments_PreservesInsideSettleWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "escalated ticket (just routed)",
+		Assignee: "l1-live",
+		Metadata: map[string]string{
+			"gc.routed_to": "l2-erp",
+			"gc.routed_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	// Marker deliberately unset: the preserve must come from the settle window,
+	// not from any marker-based signal.
+	l1Session, err := store.Create(beads.Bead{
+		Title:  "l1 source (woken on another bead)",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "l1-live",
+			"template":             "l1-support",
+			"agent_name":           "l1-support",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create l1 session bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{
+			{Name: "l1-support", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+			{Name: "l2-erp", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+		}},
+		"",
+		sessionInfosFromBeads([]beads.Bead{l1Session}),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none (still inside the settle window since gc.routed_at)", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Assignee != "l1-live" {
+		t.Fatalf("assignee = %q, want l1-live held until the settle window elapses", got.Assignee)
 	}
 }
