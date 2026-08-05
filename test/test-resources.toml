@@ -116,7 +116,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 255
 reported_files = 56
@@ -420,7 +420,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 300
 reported_files = 66

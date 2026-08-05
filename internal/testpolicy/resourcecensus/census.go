@@ -229,7 +229,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   317,
+			BaselineCalls:   318,
 			BaselineFiles:   66,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
@@ -529,7 +529,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   317,
+			BaselineCalls:   318,
 			BaselineFiles:   66,
 			ReportedCalls:   300,
 			ReportedFiles:   66,
