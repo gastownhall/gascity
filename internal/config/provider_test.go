@@ -70,6 +70,36 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersClaudePermissionModesMatchCurrentCLI(t *testing.T) {
+	p := BuiltinProviders()["claude"]
+	if got, want := p.PermissionModes["auto-edit"], "--permission-mode auto"; got != want {
+		t.Fatalf("PermissionModes[auto-edit] = %q, want %q", got, want)
+	}
+	if got, want := p.PermissionModes["full-auto"], "--permission-mode dontAsk"; got != want {
+		t.Fatalf("PermissionModes[full-auto] = %q, want %q", got, want)
+	}
+
+	var permission ProviderOption
+	for _, option := range p.OptionsSchema {
+		if option.Key == "permission_mode" {
+			permission = option
+			break
+		}
+	}
+	if permission.Key == "" {
+		t.Fatal("claude provider missing permission_mode option")
+	}
+	want := map[string][]string{
+		"auto-edit": {"--permission-mode", "auto"},
+		"full-auto": {"--permission-mode", "dontAsk"},
+	}
+	for _, choice := range permission.Choices {
+		if wantArgs, ok := want[choice.Value]; ok && !reflect.DeepEqual(choice.FlagArgs, wantArgs) {
+			t.Fatalf("permission choice %q FlagArgs = %v, want %v", choice.Value, choice.FlagArgs, wantArgs)
+		}
+	}
+}
+
 func TestBuiltinProvidersClaudeModelChoices(t *testing.T) {
 	p := BuiltinProviders()["claude"]
 	var model OptionChoice

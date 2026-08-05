@@ -44,8 +44,78 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		}
 		command = ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
 	}
+	if err := ValidateManagedLaunchPermissionPolicy(resolved, command); err != nil {
+		return ProviderLaunchCommand{}, err
+	}
 
 	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), command), nil
+}
+
+// ValidateManagedLaunchPermissionPolicy refuses prompt-capable providers whose
+// final managed command has no declared permission-policy flag. A provider
+// that can stop for an approval prompt must never fall back to its interactive
+// default inside an unattended session: that turns a configuration merge miss
+// into an immediate launch error instead of an invisible, unbounded wait.
+//
+// The accepted argv shapes come from the provider contract itself
+// (PermissionModes and the permission_mode option choices), keeping this guard
+// provider-neutral and compatible with inherited/custom provider names.
+func ValidateManagedLaunchPermissionPolicy(resolved *ResolvedProvider, command string) error {
+	if resolved == nil || !resolved.EmitsPermissionWarning {
+		return nil
+	}
+
+	var policies [][]string
+	for _, declared := range resolved.PermissionModes {
+		if argv := shellquote.Split(strings.TrimSpace(declared)); len(argv) > 0 {
+			policies = append(policies, argv)
+		}
+	}
+	for _, option := range resolved.OptionsSchema {
+		if option.Key != "permission_mode" {
+			continue
+		}
+		for _, choice := range option.Choices {
+			if len(choice.FlagArgs) > 0 {
+				policies = append(policies, choice.FlagArgs)
+			}
+			policies = append(policies, choice.FlagAliases...)
+		}
+	}
+
+	commandArgv := shellquote.Split(command)
+	for _, policy := range policies {
+		if containsArgvSequence(commandArgv, policy) {
+			return nil
+		}
+	}
+	name := strings.TrimSpace(resolved.Name)
+	if name == "" {
+		name = strings.TrimSpace(resolved.BuiltinAncestor)
+	}
+	if name == "" {
+		name = "provider"
+	}
+	return fmt.Errorf("managed provider %q launch has no explicit permission policy; preserve permission_mode when merging options_schema", name)
+}
+
+func containsArgvSequence(argv, sequence []string) bool {
+	if len(sequence) == 0 || len(sequence) > len(argv) {
+		return false
+	}
+	for start := 0; start <= len(argv)-len(sequence); start++ {
+		matched := true
+		for offset := range sequence {
+			if argv[start+offset] != sequence[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildProviderResumeCommand applies schema-managed option overrides to a

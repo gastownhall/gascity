@@ -128,8 +128,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PermissionModes: map[string]string{
 			"unrestricted": "--dangerously-skip-permissions",
 			"plan":         "--permission-mode plan",
-			"auto-edit":    "--permission-mode auto-edit",
-			"full-auto":    "--permission-mode full-auto",
+			"auto-edit":    "--permission-mode auto",
+			"full-auto":    "--permission-mode dontAsk",
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -138,8 +138,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:    "select",
 				Default: "auto-edit",
 				Choices: []BuiltinOptionChoice{
-					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "auto-edit"}},
-					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "full-auto"}},
+					{Value: "auto-edit", Label: "Attend approvals", FlagArgs: []string{"--permission-mode", "auto"}},
+					{Value: "full-auto", Label: "Fail instead of asking", FlagArgs: []string{"--permission-mode", "dontAsk"}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},

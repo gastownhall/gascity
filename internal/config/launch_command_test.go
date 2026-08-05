@@ -60,6 +60,25 @@ func TestBuildProviderLaunchCommandAppliesOptionOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildProviderLaunchCommandRefusesPromptCapableProviderWithoutPermissionPolicy(t *testing.T) {
+	rp := &ResolvedProvider{
+		Name:                   "claude-custom",
+		Command:                "claude",
+		EmitsPermissionWarning: true,
+		PermissionModes:        map[string]string{"attended": "--permission-mode auto"},
+		OptionsSchema:          []ProviderOption{{Key: "model", Choices: []OptionChoice{{Value: "opus", FlagArgs: []string{"--model", "claude-opus-5"}}}}},
+		EffectiveDefaults:      map[string]string{"model": "opus"},
+	}
+
+	_, err := BuildProviderLaunchCommand("", rp, nil, "")
+	if err == nil {
+		t.Fatal("BuildProviderLaunchCommand() error = nil, want missing permission-policy refusal")
+	}
+	if !strings.Contains(err.Error(), "permission policy") {
+		t.Fatalf("BuildProviderLaunchCommand() error = %q, want permission-policy diagnostic", err)
+	}
+}
+
 func TestBuildProviderLaunchCommandIgnoresInitialMessageOverride(t *testing.T) {
 	spec := BuiltinProviders()["claude"]
 	rp := specToResolved("claude", &spec)

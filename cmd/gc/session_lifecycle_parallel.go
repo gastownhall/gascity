@@ -952,6 +952,9 @@ func buildPreparedStartWithWorkDirResolver(
 	// schema flags.
 	sessionOverrides := parseSessionTemplateOverridesForLaunch(candidate.info)
 	applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, sessionOverrides)
+	if err := config.ValidateManagedLaunchPermissionPolicy(tp.ResolvedProvider, agentCfg.Command); err != nil {
+		return nil, candidate.info, fmt.Errorf("session %q: %w", candidate.name(), err)
+	}
 
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
@@ -978,6 +981,9 @@ func buildPreparedStartWithWorkDirResolver(
 			launchOverrides[k] = v
 		}
 		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, launchOverrides)
+		if err := config.ValidateManagedLaunchPermissionPolicy(tp.ResolvedProvider, agentCfg.Command); err != nil {
+			return nil, candidate.info, fmt.Errorf("session %q: %w", candidate.name(), err)
+		}
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
