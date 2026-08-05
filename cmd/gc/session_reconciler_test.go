@@ -6847,6 +6847,52 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicate
 	}
 }
 
+// TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp
+// is the end-to-end wiring proof for gascity#4373: a named session's
+// resolved template must not replay a trigger stamp whose target has since
+// been parked. Unit coverage for the clear logic itself lives in
+// bindNamedSessionTriggerBead's own tests
+// (build_desired_state_named_trigger_bind_test.go); this pins that the
+// reconciler actually calls it and uses the cleared Info, not the stale one.
+func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	work, err := env.store.Create(beads.Bead{Title: "parked work"})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	blocked := "blocked"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("block work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:           "true",
+		namedSessionIdentityMetadata:      "worker",
+		namedSessionModeMetadata:          "on_demand",
+		beadmeta.TriggerBeadIDMetadataKey: work.ID,
+	})
+	sessionInfo := env.sessionInfo(session.ID)
+
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+	if got := preservedTP.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
+		t.Errorf("GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a blocked target", got)
+	}
+}
+
 func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

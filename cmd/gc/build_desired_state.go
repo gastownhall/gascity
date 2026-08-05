@@ -3180,6 +3180,48 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	return boundInfo, nil
 }
 
+// bindNamedSessionTriggerBead clears a named session's trigger stamp when its
+// stamped target is no longer workable (absent, closed, or blocked),
+// mirroring bindPoolSessionTriggerBead's clear semantics for the pool path.
+// Unlike pool dispatch, the named path has no per-tick SessionRequest that
+// already reflects "no ready work" -- resolvePreservedConfiguredNamedSessionTemplate
+// only replays whatever is currently stamped -- so without this check a
+// parked target re-aims every subsequent seat indefinitely (gascity#4373).
+// A cross-store target (info.TriggerBeadStoreRef naming a store other than
+// `store`) is left untouched: this function can only see `store`, and
+// misjudging a bead it cannot reach is worse than leaving a stale stamp for
+// one more tick.
+func bindNamedSessionTriggerBead(store beads.Store, info session.Info) (session.Info, error) {
+	triggerID := strings.TrimSpace(info.TriggerBeadID)
+	if triggerID == "" || store == nil {
+		return info, nil
+	}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+		return info, nil
+	}
+	target, err := store.Get(triggerID)
+	stale := errors.Is(err, beads.ErrNotFound)
+	if err != nil && !stale {
+		// Lookup failed for a reason other than "gone" (e.g. a transient
+		// backend error): don't misjudge a bead we couldn't actually read.
+		return info, nil
+	}
+	if !stale {
+		stale = target.Status == "closed" || target.Status == "blocked"
+	}
+	if !stale {
+		return info, nil
+	}
+	patch := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}
+	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
+		patch[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
+	}
+	if strings.TrimSpace(info.BrainParentSID) != "" {
+		patch[beadmeta.BrainParentSIDMetadataKey] = ""
+	}
+	return sessionFrontDoor(store).UpdateMetadataInfo(info, patch)
+}
+
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
