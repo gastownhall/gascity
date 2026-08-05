@@ -2177,16 +2177,27 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
-	// 1. Send text in literal mode with retry on transient errors
+	// 1. Clear any pending input already sitting on the line before pasting,
+	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
+	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
+	// the input box, and this paste concatenates on top of it instead of
+	// replacing it: stacked injections merge into one draft that Claude's TUI
+	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
+	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
-	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
+	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
 
-	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
+	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
@@ -2196,11 +2207,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// 4. Wake detached panes before Enter. Some TUIs accept pasted input while
+	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
 
-	// 5. Send the provider's declared submit key sequence (see
+	// 6. Send the provider's declared submit key sequence (see
 	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
 	// a reliable busy indicator, confirm the draft actually submitted —
 	// re-sending the sequence only while the pane stays idle. A lost submit
@@ -2250,7 +2261,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			lastErr = err
 			continue
 		}
-		// 6. Wake again so the submitted turn is processed promptly.
+		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
 		return nil
