@@ -53,6 +53,37 @@ type Parser struct {
 
 	// resolvingChain tracks the order of formulas being resolved (for error messages).
 	resolvingChain []string
+
+	// warnings accumulates non-fatal cook-time advisories surfaced during
+	// Resolve — e.g. an extends override that drops a parent's required=true
+	// (dip-5hkepo: the whole-VarDef replacement footgun). They never gate
+	// resolution; cook/compile surface them so the drop is observable rather
+	// than silent. Deduplicated on append.
+	warnings []string
+}
+
+// Warnings returns the non-fatal advisories accumulated across Resolve calls
+// on this parser (see the warnings field). Callers (cook/compile) surface these
+// after a successful resolve; an empty slice means none were raised.
+func (p *Parser) Warnings() []string { return p.warnings }
+
+// addWarning appends msg to the parser's warnings, skipping exact duplicates so
+// a diamond extends graph that re-resolves a shared parent warns only once.
+func (p *Parser) addWarning(msg string) {
+	if slices.Contains(p.warnings, msg) {
+		return
+	}
+	p.warnings = append(p.warnings, msg)
+}
+
+// varDefDefaultForWarning renders a child var's default for a required-drop
+// warning: `""` for an explicit empty default, a quoted value for a set
+// default, or <none> when the child declared no default at all.
+func varDefDefaultForWarning(v *VarDef) string {
+	if v == nil || v.Default == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("%q", *v.Default)
 }
 
 // NewParser creates a new formula parser.
@@ -347,8 +378,23 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		merged.Compose = mergeComposeRules(merged.Compose, parent.Compose)
 	}
 
-	// Apply child overrides
+	// Apply child overrides. A child VarDef replaces the parent's whole
+	// object, so an override that omits required=true silently drops a
+	// parent's requiredness — the extends guard-neutralization footgun
+	// (dip-5hkepo): a child re-declaring a var with default="" erases a
+	// parent's required=true, and nothing downstream flags the now-optional
+	// empty. We keep the child-wins behavior (a child with a default is
+	// legitimately making the var optional, and required+default are mutually
+	// exclusive), but emit a cook-time warning so the drop is observable
+	// rather than silent.
 	for name, varDef := range formula.Vars {
+		if parentVar, ok := merged.Vars[name]; ok && parentVar != nil && varDef != nil &&
+			parentVar.Required && !varDef.Required {
+			p.addWarning(fmt.Sprintf(
+				"formula %q: var %q override drops the parent's required=true (child default=%s); "+
+					"the var is no longer required — confirm this is intended (dip-5hkepo)",
+				formula.Formula, name, varDefDefaultForWarning(varDef)))
+		}
 		merged.Vars[name] = varDef
 	}
 

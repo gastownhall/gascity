@@ -213,7 +213,14 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 
 	// Stage 13: Flatten to Recipe
-	return toRecipeWithGraph(resolved, graphWorkflow)
+	recipe, err := toRecipeWithGraph(resolved, graphWorkflow)
+	if err != nil {
+		return nil, err
+	}
+	// Surface non-fatal resolve advisories (e.g. an extends override dropping a
+	// parent's required flag, dip-5hkepo) so cook can print them.
+	recipe.Warnings = parser.Warnings()
+	return recipe, nil
 }
 
 func loadResolvedAspectFormula(parser *Parser, name string, collectRequirements formulaRequirementCollector) (*Formula, error) {
