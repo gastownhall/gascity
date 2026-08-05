@@ -354,7 +354,7 @@ func computePoolDesiredStatesAt(
 		}
 		effectiveDemand := max(scaleCount, len(protected))
 		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
-		recordNewDemandCapTrace(trace, template, agent, limits, usage, scaleCount, newCount)
+		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
 		inFlight := inFlightNewRequests[template]
 		protectedCount := minInt(len(protected), newCount)
 		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
