@@ -438,7 +438,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
-	if stamped {
+	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
 	publishHookClaimRunMap(bead, opts, ops, stderr)
@@ -619,6 +619,27 @@ func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		return beads.Bead{}, false
 	}
 	return readback, true
+}
+
+// hookClaimLifecycleCandidate reports whether a bead can be a session-owned
+// graph step whose started fact is safe to reconcile. EmitLifecycle performs the
+// authoritative graph-root validation; this cheaper gate avoids opening the
+// graph-store path for ordinary hook work.
+func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" ||
+		!strings.EqualFold(strings.TrimSpace(bead.Status), "in_progress") ||
+		beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) ||
+		strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]) == "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) == "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
+		return false
+	}
+	if sessionName := hookClaimSessionName(opts.Env); sessionName != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+		return false
+	}
+	return true
 }
 
 // hookClaimIdentityPatch builds the compare-and-skipped claim-time metadata patch.
