@@ -85,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly, naming `gc doctor --fix` (which performs the removal) so
   operators check pack compatibility before running it. (#3887)
 
+- **A named (on-demand) session no longer replays a trigger stamp for a work
+  bead that has since been parked.** The pool session path already clears
+  `gc.trigger_bead_id` when there is no ready work to route
+  (`bindPoolSessionTriggerBead`), but the named path only ever read and
+  replayed whatever was already stamped, with no equivalent check. A
+  singleton tier re-materializing after its dispatched bead went
+  `blocked`/closed/absent kept re-aiming every new seat at the same stale
+  target — one reported case produced 16 seats on a single parked bead over
+  ~19 hours, each re-deriving the same dead-end analysis. The named path now
+  checks the stamped target's live status before resolving its template and
+  clears the stamp (and its dependent `gc.brain_parent_sid`) when the target
+  is no longer workable, mirroring the pool path's clear semantics.
+  Cross-store targets are left untouched rather than risk misjudging a bead
+  this reconciler tick cannot reach. (gascity#4373)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
