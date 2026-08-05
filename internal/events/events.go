@@ -183,6 +183,16 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// BeadRedispatchCapHeld fires when the dispatch redispatch-cap guard
+	// (ra-3y4okc, enforceDrainAckAssignedWorkCycleCap) auto-holds a work bead
+	// that accumulated drainAckAssignedWorkCycleCap consecutive
+	// session.drain_acked_with_assigned_work cycles inside its window: a pool
+	// session claimed it, correctly refused to execute or close it,
+	// escalated, and drained — repeatedly, with nothing the dispatcher reads
+	// ever changing. The guard adds the hold:mayor label and clears the
+	// assignee (mirroring the manual fix pattern) so the bead stops looking
+	// dispatch-eligible without a human or lead needing to be awake to act.
+	BeadRedispatchCapHeld = "bead.redispatch_cap_held"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -241,10 +251,20 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// PoolSpawnChurnCoolingDown fires when the pool spawn-churn breaker
+	// (ra-co9epr, recordPoolSpawnChurn) suppresses further blind ("new" tier,
+	// no identified candidate work bead) spawns for a template after
+	// consecutive pool sessions spawned for scale_check-only demand closed
+	// having claimed no work. Measured overnight: 46 real sessions in 18.5
+	// minutes on the novices pool, 0% useful. Bound ("new" tier with an
+	// identified WorkBeadID) requests are unaffected — the breaker only
+	// withholds spawns that were never verified against actual claimable
+	// demand.
+	PoolSpawnChurnCoolingDown = "session.pool_spawn_churn_cooling_down"
+	ConvoyCreated             = "convoy.created"
+	ConvoyClosed              = "convoy.closed"
+	ControllerStarted         = "controller.started"
+	ControllerStopped         = "controller.stopped"
 	// ControlStalled fires once, when a control bead's bounded semantic-refusal
 	// retry budget expires and the control dispatcher quarantines it. Before
 	// this event the control plane had no control.* vocabulary at all, so a
@@ -464,6 +484,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	BeadRedispatchCapHeld,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
@@ -471,6 +492,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	PoolSpawnChurnCoolingDown,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
