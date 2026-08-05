@@ -287,6 +287,8 @@ func substituteResolvedStubVars(value string, vars map[string]string) string {
 // composition so a later expansion can protect it again.
 func substituteExpandedDescription(tmpl, target *Step, vars map[string]string) (string, string) {
 	const targetPathToken = "\x00gc-target-description-file-resolved-path\x00"
+	carriesResolvedTargetDescription := target.DescriptionFileResolvedPath != "" &&
+		strings.Contains(tmpl.Description, "{target.description}")
 
 	targetForSubstitution := *target
 	if target.DescriptionFileResolvedPath != "" {
@@ -302,7 +304,7 @@ func substituteExpandedDescription(tmpl, target *Step, vars map[string]string) (
 		tmpl.DescriptionFileResolvedPath,
 		func(value string) string {
 			value = substituteTargetPlaceholders(value, &targetForSubstitution)
-			if tmpl.DescriptionFileResolvedPath != "" {
+			if tmpl.DescriptionFileResolvedPath != "" || carriesResolvedTargetDescription {
 				return substituteResolvedStubVars(value, vars)
 			}
 			return substituteVars(value, vars)
@@ -311,8 +313,7 @@ func substituteExpandedDescription(tmpl, target *Step, vars map[string]string) (
 	description = strings.ReplaceAll(description, targetPathToken, target.DescriptionFileResolvedPath)
 
 	resolvedPath := tmpl.DescriptionFileResolvedPath
-	if resolvedPath == "" && target.DescriptionFileResolvedPath != "" &&
-		strings.Contains(tmpl.Description, "{target.description}") {
+	if resolvedPath == "" && carriesResolvedTargetDescription {
 		resolvedPath = target.DescriptionFileResolvedPath
 	}
 	return description, resolvedPath

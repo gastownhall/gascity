@@ -553,6 +553,38 @@ func TestExpandStepPreservesProtectedStubThroughTargetDescription(t *testing.T) 
 	}
 }
 
+func TestExpandStepPreservesFormulaVarsThroughTargetDescription(t *testing.T) {
+	resolvedPath := "/tmp/pack/assets/{audience}.md"
+	varDefs := map[string]*VarDef{"audience": {}}
+	target := &Step{
+		ID:                          "contract",
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, varDefs),
+		DescriptionFileResolvedPath: resolvedPath,
+	}
+
+	result, err := expandStep(target, []*Step{{
+		ID:          "{target}.wrapped",
+		Description: "Wrapper:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "security reviewers"})
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expandStep produced %d steps, want 1", len(result))
+	}
+
+	want := "Wrapper:\n\n" + descriptionFileReferenceDescription(
+		"../assets/security reviewers.md",
+		resolvedPath,
+		5000,
+		varDefs,
+	)
+	want = strings.ReplaceAll(want, "{{audience}}", "security reviewers")
+	if result[0].Description != want {
+		t.Fatalf("Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", result[0].Description, want)
+	}
+}
+
 func TestBuildStepMap(t *testing.T) {
 	steps := []*Step{
 		{
