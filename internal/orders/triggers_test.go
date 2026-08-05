@@ -344,11 +344,142 @@ func TestCronFieldMatches(t *testing.T) {
 		{"5", 3, false},
 		{"1,3,5", 3, true},
 		{"1,3,5", 2, false},
+
+		// "*/N" strides stay anchored at 0 (pre-existing gc semantics).
+		{"*/30", 0, true},
+		{"*/30", 30, true},
+		{"*/30", 15, false},
+
+		// Ranges. An hour field of "6-18" matched nothing before ranges were
+		// supported, so an order scheduled with one never fired.
+		{"6-18", 6, true},
+		{"6-18", 16, true},
+		{"6-18", 18, true},
+		{"6-18", 5, false},
+		{"6-18", 19, false},
+
+		// Stepped ranges, anchored at the range start. "8-20/2" is the hour
+		// field of orders/bs-logs-sso-freshness.toml — same silent failure.
+		{"8-20/2", 8, true},
+		{"8-20/2", 10, true},
+		{"8-20/2", 20, true},
+		{"8-20/2", 9, false},
+		{"8-20/2", 22, false},
+
+		// Ranges compose with comma lists.
+		{"1-3,10-12", 2, true},
+		{"1-3,10-12", 11, true},
+		{"1-3,10-12", 7, false},
+
+		// Terms the grammar does not express match nothing (and are rejected
+		// by ValidateCronSchedule, so they cannot reach a live order).
+		{"18-6", 20, false}, // inverted range
+		{"5/2", 5, false},   // step without a range
+		{"*/0", 4, false},   // non-positive step
+		{"abc", 4, false},   // garbage
 	}
 	for _, tt := range tests {
 		got := cronFieldMatches(tt.field, tt.value)
 		if got != tt.want {
 			t.Errorf("cronFieldMatches(%q, %d) = %v, want %v", tt.field, tt.value, got, tt.want)
+		}
+	}
+}
+
+// TestCheckCronFiresRangeSchedule is the end-to-end regression: an order
+// registered and enabled with a range in its hour field returned "schedule not
+// matched" at every minute of every day, so it accumulated zero history and
+// raised no error anywhere.
+//
+// Each case uses a warm lastRun a minute back rather than neverRan, for the
+// same reason TestCheckTriggerCronNotMatched does: a never-run order's bounded
+// catch-up window is a separate path that would legitimately report Due on an
+// off-schedule minute, confounding what this test is asserting.
+func TestCheckCronFiresRangeSchedule(t *testing.T) {
+	a := Order{Name: "sweep", Trigger: "cron", Schedule: "*/30 6-18 * * *"}
+	warm := func(now time.Time) LastRunFunc {
+		last := now.Add(-1 * time.Minute)
+		return func(_ string) (time.Time, error) { return last, nil }
+	}
+
+	inWindow := time.Date(2026, 8, 5, 16, 30, 0, 0, time.UTC)
+	if got := CheckTrigger(a, inWindow, warm(inWindow), nil, nil); !got.Due {
+		t.Errorf("16:30 Due = false (%s), want true", got.Reason)
+	}
+	offMinute := time.Date(2026, 8, 5, 16, 15, 0, 0, time.UTC)
+	if got := CheckTrigger(a, offMinute, warm(offMinute), nil, nil); got.Due {
+		t.Errorf("16:15 Due = true, want false")
+	}
+	outOfWindow := time.Date(2026, 8, 5, 3, 30, 0, 0, time.UTC)
+	if got := CheckTrigger(a, outOfWindow, warm(outOfWindow), nil, nil); got.Due {
+		t.Errorf("03:30 Due = true, want false (outside the 6-18 window)")
+	}
+}
+
+func TestValidateCronSchedule(t *testing.T) {
+	valid := []string{
+		"* * * * *",
+		"40 6 * * *",
+		"*/30 6-18 * * *",
+		"0 8-20/2 * * *",
+		"0,30 6,7,8 * * *",
+		"0 6 * * 1",
+		"0 */4 * * *",
+		"0 0 1-15,20 1-6 0-6",
+	}
+	for _, s := range valid {
+		if err := ValidateCronSchedule(s); err != nil {
+			t.Errorf("ValidateCronSchedule(%q) = %v, want nil", s, err)
+		}
+	}
+
+	invalid := []struct{ schedule, wantSubstr string }{
+		{"* * * *", "want 5 fields"},
+		{"0 25 * * *", "outside the valid range 0-23"},
+		{"60 * * * *", "outside the valid range 0-59"},
+		{"0 0 0 * *", "outside the valid range 1-31"},
+		{"0 0 * 13 *", "outside the valid range 1-12"},
+		{"0 0 * * 7", "outside the valid range 0-6"},
+		{"0 18-6 * * *", "ends before it starts"},
+		{"0 5/2 * * *", "step without a range"},
+		{"0 */0 * * *", "step that is not positive"},
+		{"0 */x * * *", "non-numeric step"},
+		{"0 abc * * *", "is not"},
+	}
+	for _, tt := range invalid {
+		err := ValidateCronSchedule(tt.schedule)
+		if err == nil {
+			t.Errorf("ValidateCronSchedule(%q) = nil, want error", tt.schedule)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.wantSubstr) {
+			t.Errorf("ValidateCronSchedule(%q) error = %q, want it to contain %q", tt.schedule, err, tt.wantSubstr)
+		}
+	}
+}
+
+// Every cron schedule shipped in a city order must be one the evaluator can
+// actually match; validation and matching are two readings of one grammar and
+// must not drift apart.
+func TestValidateCronScheduleAgreesWithMatcher(t *testing.T) {
+	for _, schedule := range []string{"*/30 6-18 * * *", "0 8-20/2 * * *", "40 6 * * *", "0 6 * * 1"} {
+		if err := ValidateCronSchedule(schedule); err != nil {
+			t.Fatalf("ValidateCronSchedule(%q) = %v", schedule, err)
+		}
+		a := Order{Name: "x", Trigger: "cron", Schedule: schedule}
+		var fired bool
+		for offset := 0; offset < 24*60 && !fired; offset++ {
+			at := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC).Add(time.Duration(offset) * time.Minute)
+			// A lastRun one minute back leaves the catch-up scan an empty
+			// interval, so only an exact match on `at` can report Due.
+			last := at.Add(-1 * time.Minute)
+			lastRunFn := func(_ string) (time.Time, error) { return last, nil }
+			if CheckTrigger(a, at, lastRunFn, nil, nil).Due {
+				fired = true
+			}
+		}
+		if !fired {
+			t.Errorf("schedule %q validated but matched no minute of a full day", schedule)
 		}
 	}
 }
