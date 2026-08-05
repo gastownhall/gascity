@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 )
@@ -2048,21 +2049,44 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 // hookRouteIdentitiesEqual reports whether two route/identity strings refer
 // to the same qualified agent, tolerating the tmux-safe session-name
 // encoding (/ -> --, . -> __) alongside the canonical slash-qualified form,
-// and case, since config-sourced and session-derived spellings of the same
-// agent are not guaranteed identical case (ga-lmy6yj). gc.routed_to is
-// always written in canonical form, but comparison candidates built from a
-// runtime session name (sessionForQuery) are dash-encoded, so the two
-// spellings must compare equal. This is the single route-spelling matcher
-// shared by the claim path (hookClaimMatchesRoute) and the display path
-// (hookCandidateVisible) per ga-1xaqgo.2 - do not fork a second one.
+// case (config-sourced and session-derived spellings of the same agent are
+// not guaranteed identical case - ga-lmy6yj), and the legacy bound-template
+// spelling ("dir/binding.name") a bound->unbound migration leaves behind
+// (legacyBoundTemplateMatchesUnboundAgent in session_reconcile.go). Every
+// normalization is applied identically to both sides, so it can only ever
+// make MORE things match - it can over-keep, never over-drop. This is the
+// single route-spelling matcher shared by the claim path
+// (hookClaimMatchesRoute) and the display path (hookCandidateVisible) per
+// ga-1xaqgo.2 - do not fork a second one.
 func hookRouteIdentitiesEqual(a, b string) bool {
 	if a == b {
 		return true
 	}
+	unsanitizedA := agent.UnsanitizeQualifiedNameFromSession(a)
+	unsanitizedB := agent.UnsanitizeQualifiedNameFromSession(b)
+	if strings.EqualFold(unsanitizedA, unsanitizedB) {
+		return true
+	}
 	return strings.EqualFold(
-		agent.UnsanitizeQualifiedNameFromSession(a),
-		agent.UnsanitizeQualifiedNameFromSession(b),
+		normalizeHookBoundTemplateSpelling(unsanitizedA),
+		normalizeHookBoundTemplateSpelling(unsanitizedB),
 	)
+}
+
+// normalizeHookBoundTemplateSpelling collapses the legacy bound-template
+// qualified-name spelling ("dir/binding.name") onto its current unbound form
+// ("dir/name"), mirroring legacyBoundTemplateMatchesUnboundAgent's own
+// dir/Cut(local, ".") logic so a route or identity recorded under either
+// spelling still resolves to the same agent.
+func normalizeHookBoundTemplateSpelling(qualified string) string {
+	dir, local := config.ParseQualifiedName(qualified)
+	if binding, unbound, ok := strings.Cut(local, "."); ok && binding != "" && unbound != "" {
+		local = unbound
+	}
+	if dir == "" {
+		return local
+	}
+	return dir + "/" + local
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
