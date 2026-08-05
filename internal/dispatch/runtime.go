@@ -841,6 +841,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
+	if outcome == beadmeta.OutcomePass {
+		stampWorkDirReleasedAt(store, rootID, opts)
+	}
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
@@ -1509,6 +1512,26 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
+}
+
+// stampWorkDirReleasedAt best-effort-marks a workflow root's work directory as
+// voluntarily released once its workflow finalizes with a Pass outcome. This
+// is a non-authoritative optimization hint only — the borrow-veto reaper scan
+// remains the authoritative check before any worktree is reclaimed — so a
+// read or write failure here is traced and swallowed rather than propagated;
+// it must never abort finalize.
+func stampWorkDirReleasedAt(store beads.Store, rootID string, opts ProcessOptions) {
+	root, err := store.Get(rootID)
+	if err != nil {
+		opts.tracef("workflow-finalize root=%s work-dir-released-at-get-err=%v", rootID, err)
+		return
+	}
+	if strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) == "" {
+		return
+	}
+	if err := store.SetMetadata(rootID, beadmeta.WorkDirReleasedAtMetadataKey, time.Now().Format(time.RFC3339)); err != nil {
+		opts.tracef("workflow-finalize root=%s work-dir-released-at-set-err=%v", rootID, err)
+	}
 }
 
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to

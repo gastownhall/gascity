@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -9846,6 +9847,212 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 	}
 	if !result.Processed {
 		t.Fatalf("result = %+v, want processed", result)
+	}
+}
+
+// TestProcessWorkflowFinalizeStampsWorkDirReleasedAtOnPass verifies FR-6
+// (ga-vzt5pq.2): on a Pass outcome, processWorkflowFinalize best-effort
+// stamps gc.work_dir_released_at (RFC3339) onto the workflow root bead that
+// carries gc.work_dir, signaling voluntary end-of-use for the (separately
+// owned) borrow-veto reaper scan to later consult as an optimization.
+func TestProcessWorkflowFinalizeStampsWorkDirReleasedAtOnPass(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.work_dir":         "/home/jaword/projects/gascity/worktrees/demo",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	stamp := rootAfter.Metadata["gc.work_dir_released_at"]
+	if stamp == "" {
+		t.Fatalf("gc.work_dir_released_at not stamped on root bead; metadata = %+v", rootAfter.Metadata)
+	}
+	released, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatalf("gc.work_dir_released_at = %q is not a valid RFC3339 timestamp: %v", stamp, err)
+	}
+	if age := time.Since(released); age < -2*time.Second || age > time.Minute {
+		t.Fatalf("gc.work_dir_released_at = %v is not a fresh timestamp (age = %v)", released, age)
+	}
+}
+
+// TestProcessWorkflowFinalizeDoesNotStampWorkDirReleasedAtOnFailure verifies
+// the FR-6 release hint is Pass-only: a workflow that finalizes with
+// outcome=fail must not stamp gc.work_dir_released_at, since a failed
+// workflow's worktree is not being voluntarily released -- a human or a
+// retry may still need it.
+func TestProcessWorkflowFinalizeDoesNotStampWorkDirReleasedAtOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.work_dir":         "/home/jaword/projects/gascity/worktrees/demo",
+		},
+	})
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "cleanup",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.outcome": "fail",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("result = %+v, want processed workflow-fail", result)
+	}
+
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if stamp, ok := rootAfter.Metadata["gc.work_dir_released_at"]; ok {
+		t.Fatalf("gc.work_dir_released_at = %q, want unset on a failed workflow", stamp)
+	}
+}
+
+// TestProcessWorkflowFinalizeSkipsWorkDirReleasedAtWhenNoWorkDir verifies
+// the FR-6 release hint is a no-op when the root bead carries no gc.work_dir:
+// there is nothing to release, so finalize must not invent a stamp (and must
+// not error).
+func TestProcessWorkflowFinalizeSkipsWorkDirReleasedAtWhenNoWorkDir(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if stamp, ok := rootAfter.Metadata["gc.work_dir_released_at"]; ok {
+		t.Fatalf("gc.work_dir_released_at = %q, want unset when root has no gc.work_dir", stamp)
+	}
+}
+
+// failWorkDirReleaseStore injects a metadata-write failure whenever the
+// FR-6 release-hint key is written, whether via a single SetMetadata call or
+// batched through SetMetadataBatch. It lets tests prove the stamp is
+// genuinely best-effort per its exit contract: never authoritative, so its
+// own failure must not propagate.
+type failWorkDirReleaseStore struct {
+	beads.Store
+}
+
+func (s *failWorkDirReleaseStore) SetMetadata(id, key, value string) error {
+	if key == "gc.work_dir_released_at" {
+		return errors.New("injected work_dir_released_at metadata failure")
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *failWorkDirReleaseStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs["gc.work_dir_released_at"]; ok {
+		return errors.New("injected work_dir_released_at metadata batch failure")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestProcessWorkflowFinalizeWorkDirReleaseStampFailureDoesNotAbortFinalize
+// verifies the FR-6 stamp is best-effort per its exit contract: a failure
+// writing gc.work_dir_released_at must not fail or abort the finalize step
+// itself -- the hint is an optimization, never authoritative (the borrow-veto
+// scan in the sibling FR-1/FR-2 bead remains the sole authoritative gate).
+func TestProcessWorkflowFinalizeWorkDirReleaseStampFailureDoesNotAbortFinalize(t *testing.T) {
+	t.Parallel()
+
+	store := &failWorkDirReleaseStore{Store: beads.NewMemStore()}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.work_dir":         "/home/jaword/projects/gascity/worktrees/demo",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v, want finalize to succeed despite injected release-hint failure", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if rootAfter.Status != "closed" {
+		t.Fatalf("workflow status = %q, want closed despite injected release-hint failure", rootAfter.Status)
 	}
 }
 

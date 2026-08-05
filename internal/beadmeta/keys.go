@@ -195,6 +195,7 @@ const (
 	WorkBranchMetadataKey          = "gc.work_branch"
 	WorkCommitMetadataKey          = "gc.work_commit"
 	WorkDirMetadataKey             = "gc.work_dir"
+	WorkDirReleasedAtMetadataKey   = "gc.work_dir_released_at"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
@@ -221,6 +222,12 @@ const (
 //
 // The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
 // commit on the branch" rule live with the close gate in cmd/gc.
+
+// WorkDirReleasedAtMetadataKey ("gc.work_dir_released_at") is a best-effort
+// RFC3339 timestamp stamped onto a workflow root by workflow-finalize when the
+// workflow's outcome is Pass and the root carries WorkDirMetadataKey. It is a
+// voluntary end-of-use hint for the borrow-veto reaper scan, never
+// authoritative on its own — a write failure here must not abort finalize.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -434,6 +441,7 @@ var KnownMetadataKeys = []string{
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,
+	WorkDirReleasedAtMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
