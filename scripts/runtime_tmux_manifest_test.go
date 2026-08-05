@@ -24,7 +24,7 @@ func TestRuntimeTmuxManifestMatchesCanonicalLinuxIntegrationInventory(t *testing
 	if drift := runtimeTmuxManifestDrift(manifest, declared); len(drift) != 0 {
 		t.Fatalf("runtime-tmux manifest drift:\n%s\nupdate %s", strings.Join(drift, "\n"), runtimeTmuxManifestRelativePath)
 	}
-	if got, want := len(manifest), 341; got != want {
+	if got, want := len(manifest), 342; got != want {
 		t.Fatalf("runtime-tmux manifest contains %d tests, want %d", got, want)
 	}
 
@@ -32,14 +32,14 @@ func TestRuntimeTmuxManifestMatchesCanonicalLinuxIntegrationInventory(t *testing
 	if got, want := len(untagged), 230; got != want {
 		t.Fatalf("runtime-tmux untagged inventory contains %d tests, want %d", got, want)
 	}
-	if got, want := len(declared)-len(untagged), 111; got != want {
+	if got, want := len(declared)-len(untagged), 112; got != want {
 		t.Fatalf("runtime-tmux integration-only inventory contains %d tests, want %d", got, want)
 	}
 }
 
 func TestRuntimeTmuxManifestSixShardsPartitionInventoryExactlyOnce(t *testing.T) {
 	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repoRoot(t), runtimeTmuxManifestRelativePath))
-	wantShardCounts := []int{57, 57, 57, 57, 57, 56}
+	wantShardCounts := []int{57, 57, 57, 57, 57, 57}
 	seen := make(map[string]int, len(manifest))
 
 	for shardIndex := 0; shardIndex < len(wantShardCounts); shardIndex++ {
