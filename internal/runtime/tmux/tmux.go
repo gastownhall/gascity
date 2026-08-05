@@ -144,6 +144,15 @@ var (
 	ErrSessionNotFound    = errors.New("session not found")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
+	// ErrNudgeSubmitUnconfirmed indicates the submit Enter was handed to tmux
+	// but the agent's busy indicator was never observed within budget: the
+	// message may be sitting drafted-but-unsubmitted in the pane. Callers
+	// that can retry (the nudge queue dispatcher, the idle-claim backstop)
+	// must treat this the same as an undelivered nudge — do not ack the
+	// queue item or advance an attempt counter on it — because ga-bwm proved
+	// that treating an unconfirmed submit as a clean success is exactly what
+	// lets a stalled nudge go undetected for many minutes.
+	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -1919,10 +1928,19 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
+		confirmed, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if err != nil {
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
 		delivered = true
+		if !confirmed {
+			// Do NOT collapse this to nil: a caller that treats nil as "clean
+			// delivery" would ack a queued nudge (or advance a retry counter)
+			// for a message that may still be sitting drafted-but-unsubmitted
+			// in the pane. Surfacing this as an error lets retry-capable
+			// callers try again instead of silently losing the nudge.
+			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
+		}
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).

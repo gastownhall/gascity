@@ -2451,7 +2451,14 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// The "claude" provider is submit-verify-eligible, so NudgeSession waits to
+	// observe a busy indicator before reporting success — but the fake command
+	// here is plain `cat -v`, which can never produce one. That makes
+	// ErrNudgeSubmitUnconfirmed the correct, expected outcome (see
+	// ra-3x46cy/finding 1: NudgeSession must no longer swallow this into a
+	// false "delivered" nil). This test only cares whether Escape was sent
+	// before the paste, which is unaffected by the confirm outcome.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
