@@ -65,16 +65,29 @@ type MaintenanceRun struct {
 	SnapshotPath string
 }
 
-// DoltOps is the minimal SQL surface the maintenance loop needs to run
-// CALL DOLT_GC() and the post-gc smoke test. Production wraps *sql.DB
-// via NewSQLDoltOps; tests supply fakes. Close must release the
-// underlying connection exactly once per cycle.
+// DoltOps is the minimal SQL surface the maintenance loop needs to sweep
+// CALL DOLT_GC() across every managed database and run the post-gc smoke
+// test. Each Dolt database is a separate repository with its own chunk
+// store, so reclaiming the whole store requires one GC per database — see
+// runDoltGC. Production wraps *sql.DB via NewSQLDoltOps; tests supply
+// fakes. Close must release the underlying connection exactly once per
+// cycle.
 type DoltOps interface {
-	// ExecGC runs CALL DOLT_GC() with the supplied context's deadline.
-	ExecGC(ctx context.Context) error
-	// SmokeCount runs SELECT COUNT(*) FROM issues against the current
-	// database and returns the scalar result.
-	SmokeCount(ctx context.Context) (int, error)
+	// ListDatabases returns the database names visible to the connection
+	// (SHOW DATABASES), including system schemas. The caller filters those
+	// out via gcTargetDatabases.
+	ListDatabases(ctx context.Context) ([]string, error)
+	// ExecGCFor runs CALL DOLT_GC() against database db with the supplied
+	// context's deadline. Implementations must pin the USE + CALL to a
+	// single connection so a pool cannot split them across sessions and
+	// GC the wrong database.
+	ExecGCFor(ctx context.Context, db string) error
+	// SmokeCountFor runs SELECT COUNT(*) FROM issues against database db
+	// and returns the scalar result. A SQL error means the store is not
+	// queryable after GC (the smoke-test failure signal); the count itself
+	// is informational — an empty database is a healthy post-gc state for a
+	// freshly-created rig, so a per-database zero is not a failure.
+	SmokeCountFor(ctx context.Context, db string) (int, error)
 	// Close releases the underlying connection.
 	Close() error
 }
@@ -156,6 +169,16 @@ type StoreMaintenanceLoopDeps struct {
 	// threshold (but is still above DiskMinFreeBytes) StoreDiskWarn is
 	// emitted and the GC proceeds.
 	DiskWarnFreeBytes int64
+
+	// StoreSizeBytes returns the current on-disk size of the managed Dolt
+	// store in bytes. It gates CALL DOLT_GC on Cfg.MinStoreMB: when the
+	// store is smaller than the floor the sweep is skipped (dolt_gc on a
+	// small store reclaims little and is not worth the maintenance lease).
+	// It also supplies the before/after byte deltas recorded on each run.
+	// Nil disables the size gate (GC always runs) and leaves
+	// BeforeBytes/AfterBytes zero. Production wires this to
+	// storehealth.WalkSize(storehealth.StorePath(cityPath)).
+	StoreSizeBytes func() int64
 }
 
 // StoreMaintenanceLoop runs periodic Dolt store maintenance inside the
@@ -178,6 +201,7 @@ type StoreMaintenanceLoop struct {
 	diskFreeBytes     func(path string) (int64, error)
 	diskMinFreeBytes  int64
 	diskWarnFreeBytes int64
+	storeSizeBytes    func() int64
 
 	// mu is the in-process maintenance lease. runOnce and TriggerNow hold
 	// it for the duration of a single maintenance cycle; each contends on
@@ -247,6 +271,7 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		diskFreeBytes:     deps.DiskFreeBytes,
 		diskMinFreeBytes:  deps.DiskMinFreeBytes,
 		diskWarnFreeBytes: deps.DiskWarnFreeBytes,
+		storeSizeBytes:    deps.StoreSizeBytes,
 		lastRunAt:         deps.LastRunAt,
 		history:           make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
@@ -399,25 +424,25 @@ func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) Maintenan
 
 	snapshotPath, err := m.runSnapshot(ctx)
 	if err != nil {
-		return m.finishCycleLocked(started, snapshotPath, err)
+		return m.finishCycleLocked(started, snapshotPath, gcSweepResult{}, err)
 	}
 	if m.checkDiskPreflight() {
 		// Disk is critically low — skip CALL DOLT_GC to avoid growing the
 		// store further. The StoreDiskCritical event informs operators.
 		// C1 (hold-on-store-unreachable) handles downstream safety.
-		return m.finishCycleLocked(started, snapshotPath, nil)
+		return m.finishCycleLocked(started, snapshotPath, gcSweepResult{}, nil)
 	}
-	if err := m.runDoltGC(ctx); err != nil {
-		return m.finishCycleLocked(started, snapshotPath, err)
-	}
-	return m.finishCycleLocked(started, snapshotPath, nil)
+	sweep, err := m.runDoltGC(ctx)
+	return m.finishCycleLocked(started, snapshotPath, sweep, err)
 }
 
-func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath string, err error) MaintenanceRun {
+func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath string, sweep gcSweepResult, err error) MaintenanceRun {
 	run := MaintenanceRun{
 		StartedAt:    started,
 		FinishedAt:   m.clock(),
 		SnapshotPath: snapshotPath,
+		BeforeBytes:  sweep.BeforeBytes,
+		AfterBytes:   sweep.AfterBytes,
 	}
 	if err != nil {
 		run.Stage = "maintenance"
@@ -593,46 +618,159 @@ func (m *StoreMaintenanceLoop) appendHistoryLocked(r MaintenanceRun) {
 	}
 }
 
-// runDoltGC runs CALL DOLT_GC() followed by the SELECT COUNT(*) smoke
-// test against the managed Dolt store. Design D4 + D5 from ga-d5y.
-//
-// Returns nil on success. A non-nil return is a *MaintenanceError
-// whose Stage classifies the failing phase:
-//
-//   - "gc": factory error, SQL error from CALL DOLT_GC(), or the
-//     configured GCTimeout elapsed.
-//   - "smoke-test": SQL error on SELECT COUNT(*), the 5 s smoke
-//     deadline elapsed, or the query returned 0 rows (which indicates
-//     either a corrupted schema or a wiped table and is never a
-//     healthy post-gc state for a running city).
-//
-// When openDoltOps is nil, runDoltGC returns nil.
-func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
-	if m.openDoltOps == nil {
-		return nil
+// gcSweepResult reports the measured outcome of a runDoltGC sweep so the
+// cycle can populate MaintenanceRun.BeforeBytes/AfterBytes. Skipped is
+// true when the store-size gate declined to run any GC because the store
+// was below the configured floor; in that case BeforeBytes == AfterBytes.
+type gcSweepResult struct {
+	BeforeBytes int64
+	AfterBytes  int64
+	Skipped     bool
+}
+
+// gcSystemDatabases are the Dolt/MySQL system schemas SHOW DATABASES
+// surfaces that must never be GC-swept: they hold no bead chunk data and
+// CALL DOLT_GC against them is meaningless. Mirrors the system-DB sets in
+// cmd/gc (dolt_sql_health.go, dolt_cleanup_drop_planner.go); kept as a
+// local copy because internal/supervisor must not import the cmd/gc top
+// layer. Keys are lowercase; gcTargetDatabases lowercases before lookup.
+var gcSystemDatabases = map[string]struct{}{
+	"information_schema": {},
+	"mysql":              {},
+	"performance_schema": {},
+	"sys":                {},
+	"dolt":               {},
+	"dolt_cluster":       {},
+	"__gc_probe":         {},
+}
+
+// gcTargetDatabases returns the subset of all that should be swept by
+// CALL DOLT_GC: every database minus the well-known system schemas and
+// blank entries. Input order is preserved and original casing is retained
+// so the names round-trip back into USE statements. Pure function; no I/O.
+func gcTargetDatabases(all []string) []string {
+	out := make([]string, 0, len(all))
+	for _, db := range all {
+		name := strings.TrimSpace(db)
+		if name == "" {
+			continue
+		}
+		if _, sys := gcSystemDatabases[strings.ToLower(name)]; sys {
+			continue
+		}
+		out = append(out, name)
 	}
+	return out
+}
+
+// measureStoreBytes returns the current on-disk store size, or 0 when no
+// StoreSizeBytes probe is wired. A negative reading is clamped to 0 so a
+// misbehaving probe cannot poison the size gate or the byte deltas.
+func (m *StoreMaintenanceLoop) measureStoreBytes() int64 {
+	if m.storeSizeBytes == nil {
+		return 0
+	}
+	if n := m.storeSizeBytes(); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// runDoltGC sweeps CALL DOLT_GC() across every managed database and runs
+// the per-database SELECT COUNT(*) smoke test. Design D4 + D5 from ga-d5y,
+// extended to a multi-database sweep for ga-uvq: each Dolt database is a
+// separate repository with its own chunk store, so reclaiming the whole
+// store requires one GC per database.
+//
+// The sweep is gated on store size: when StoreSizeBytes is wired and the
+// store is below Cfg.MinStoreBytesOrDefault(), GC is skipped (dolt_gc on a
+// small store reclaims little and is not worth the maintenance lease) and
+// the returned result has Skipped=true with BeforeBytes == AfterBytes.
+//
+// The returned gcSweepResult carries the before/after byte readings even
+// on failure (BeforeBytes is measured before any GC runs). A non-nil error
+// aggregates every per-database failure via errors.Join; finishCycleLocked
+// classifies the run Stage from the first *MaintenanceError in the chain:
+//
+//   - "gc": factory error, SHOW DATABASES error, a SQL error from CALL
+//     DOLT_GC(), or the configured GCTimeout elapsing for some database.
+//   - "smoke-test": a SQL error on a post-gc SELECT COUNT(*) or the 5 s
+//     smoke deadline elapsing for some database. A per-database zero count
+//     is healthy (an empty rig) and is not a failure.
+//
+// When openDoltOps is nil, runDoltGC returns a zero result and nil error.
+func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) (gcSweepResult, error) {
+	var res gcSweepResult
+	if m.openDoltOps == nil {
+		return res, nil
+	}
+
+	res.BeforeBytes = m.measureStoreBytes()
+	if floor := m.cfg.MinStoreBytesOrDefault(); floor > 0 && res.BeforeBytes > 0 && res.BeforeBytes < floor {
+		res.Skipped = true
+		res.AfterBytes = res.BeforeBytes
+		fmt.Fprintf(m.stderr, //nolint:errcheck // best-effort stderr
+			"store-maintenance: store %s below floor %s; skipping CALL DOLT_GC\n",
+			formatMiB(res.BeforeBytes), formatMiB(floor))
+		return res, nil
+	}
+
 	ops, err := m.openDoltOps(ctx)
 	if err != nil {
-		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("open dolt conn: %w", err)}
+		return res, &MaintenanceError{Stage: "gc", Err: fmt.Errorf("open dolt conn: %w", err)}
 	}
 	defer ops.Close() //nolint:errcheck // best-effort cleanup; underlying pool manages lifecycle
 
+	listCtx, cancelList := context.WithTimeout(ctx, maintenanceSmokeTimeout)
+	defer cancelList()
+	all, err := ops.ListDatabases(listCtx)
+	if err != nil {
+		return res, &MaintenanceError{Stage: "gc", Err: fmt.Errorf("list databases: %w", err)}
+	}
+	targets := gcTargetDatabases(all)
+	if len(targets) == 0 {
+		fmt.Fprintf(m.stderr, "store-maintenance: no user databases to GC (saw %d system schemas)\n", len(all)) //nolint:errcheck
+		res.AfterBytes = res.BeforeBytes
+		return res, nil
+	}
+
+	var errs []error
+	for _, db := range targets {
+		if err := m.gcOneDatabase(ctx, ops, db); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	res.AfterBytes = m.measureStoreBytes()
+	return res, errors.Join(errs...)
+}
+
+// gcOneDatabase runs CALL DOLT_GC() then the post-gc smoke test against a
+// single database, each under its own deadline (GCTimeoutOrDefault for the
+// GC, maintenanceSmokeTimeout for the smoke test). The returned error, when
+// non-nil, is a *MaintenanceError whose Stage names the failing phase and
+// whose cause is annotated with db so an aggregated sweep error identifies
+// which database failed.
+func (m *StoreMaintenanceLoop) gcOneDatabase(ctx context.Context, ops DoltOps, db string) error {
 	gcCtx, cancelGC := context.WithTimeout(ctx, m.cfg.GCTimeoutOrDefault())
 	defer cancelGC()
-	if err := ops.ExecGC(gcCtx); err != nil {
-		return &MaintenanceError{Stage: "gc", Err: err}
+	if err := ops.ExecGCFor(gcCtx, db); err != nil {
+		return &MaintenanceError{Stage: "gc", Err: fmt.Errorf("db %q: %w", db, err)}
 	}
 
 	smokeCtx, cancelSmoke := context.WithTimeout(ctx, maintenanceSmokeTimeout)
 	defer cancelSmoke()
-	count, err := ops.SmokeCount(smokeCtx)
-	if err != nil {
-		return &MaintenanceError{Stage: "smoke-test", Err: err}
-	}
-	if count == 0 {
-		return &MaintenanceError{Stage: "smoke-test", Err: errors.New("SELECT COUNT(*) returned 0 rows")}
+	// A SQL error means the database is not queryable after GC. The count
+	// itself is informational: an empty database is a healthy post-gc state.
+	if _, err := ops.SmokeCountFor(smokeCtx, db); err != nil {
+		return &MaintenanceError{Stage: "smoke-test", Err: fmt.Errorf("db %q: %w", db, err)}
 	}
 	return nil
+}
+
+// formatMiB renders a byte count as a whole-MiB string for operator log
+// lines (e.g. "896 MiB"). Used only for human-readable stderr output.
+func formatMiB(b int64) string {
+	return fmt.Sprintf("%d MiB", b>>20)
 }
 
 // NewSQLDoltOps adapts a *sql.DB opener to the DoltOps interface. The
@@ -651,24 +789,53 @@ func NewSQLDoltOps(open func(ctx context.Context) (*sql.DB, error)) DoltOpsFacto
 	}
 }
 
-// sqlDoltOps implements DoltOps against a *sql.DB pool. ExecGC and
-// SmokeCount each take one connection from the pool and return it;
-// Close closes the pool.
+// sqlDoltOps implements DoltOps against a *sql.DB pool. ExecGCFor pins its
+// USE + CALL DOLT_GC to a single connection so the pool cannot split them
+// across sessions; SmokeCountFor uses a qualified table name and so is
+// pool-safe without pinning. Close closes the pool.
 type sqlDoltOps struct {
 	db *sql.DB
 }
 
-func (s *sqlDoltOps) ExecGC(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_GC()")
+func (s *sqlDoltOps) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // read-only iteration; row error surfaced via rows.Err
+	var dbs []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		dbs = append(dbs, name)
+	}
+	return dbs, rows.Err()
+}
+
+func (s *sqlDoltOps) ExecGCFor(ctx context.Context, db string) error {
+	// USE sets per-session state, so it and CALL DOLT_GC must run on the
+	// same connection — a pooled *sql.DB could otherwise route them to
+	// different sessions and GC the wrong database.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck // returns the connection to the pool
+	if _, err := conn.ExecContext(ctx, "USE "+quoteDoltIdent(db)); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, "CALL DOLT_GC()")
 	return err
 }
 
-func (s *sqlDoltOps) SmokeCount(ctx context.Context) (int, error) {
+func (s *sqlDoltOps) SmokeCountFor(ctx context.Context, db string) (int, error) {
 	var n int
-	// LIMIT 1 is redundant on a COUNT(*) aggregate but matches the
-	// design-doc literal so the runbook and the code stay in lockstep.
-	row := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+maintenanceSmokeTable+"` LIMIT 1")
-	if err := row.Scan(&n); err != nil {
+	// Qualified table reference (db.issues) keeps this pool-safe — no USE,
+	// so it does not need a pinned connection.
+	q := "SELECT COUNT(*) FROM " + quoteDoltIdent(db) + "." + quoteDoltIdent(maintenanceSmokeTable)
+	if err := s.db.QueryRowContext(ctx, q).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -676,6 +843,14 @@ func (s *sqlDoltOps) SmokeCount(ctx context.Context) (int, error) {
 
 func (s *sqlDoltOps) Close() error {
 	return s.db.Close()
+}
+
+// quoteDoltIdent backtick-quotes a SQL identifier and escapes embedded
+// backticks by doubling them (MySQL convention). Dolt derives database
+// names from repository directory names, which may start with a digit or
+// contain characters that require quoting.
+func quoteDoltIdent(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
 // SeedLastRunAt returns the timestamp of the most recent

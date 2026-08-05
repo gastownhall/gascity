@@ -5,7 +5,8 @@
 #
 # Replaces whole-second 'date +%s' timing, which quantizes a sub-second probe
 # to 0s or 1s depending on whether it straddles a wall-clock second tick —
-# producing false latency WARNs (and MEDIUM advisory mail) at a 1s threshold.
+# producing false latency WARNs (and MEDIUM advisory mail) at a low (e.g. 1s)
+# warn threshold.
 
 # _now_ms_plausible VALUE — exit 0 when VALUE looks like an epoch-millisecond
 # reading: all digits, 13 or 14 of them (epoch-ms is 13 digits from 2001-09-09
@@ -34,7 +35,7 @@ _now_ms_plausible() {
 #
 # The cascade exists because a GNU-only implementation silently degrades to
 # whole seconds on BSD/macOS, where a sub-second probe that straddles a
-# wall-clock second tick measures 1000ms and false-trips the default 1000ms
+# wall-clock second tick measures 1000ms and false-trips a low (e.g. 1000ms)
 # warn threshold — the same advisory storm the millisecond rewrite was meant
 # to stop, in different units.
 now_ms() {
@@ -61,4 +62,22 @@ now_ms() {
 # '>=' semantics, now in milliseconds.
 latency_should_warn() {
   [ "${1:-0}" -ge "${2:-0}" ]
+}
+
+# latency_warn_threshold_ms — echo the latency-WARN threshold in milliseconds,
+# resolved from the environment. Precedence, first match wins:
+#   1. GC_DOCTOR_LATENCY_WARN_MS — explicit millisecond threshold.
+#   2. GC_DOCTOR_LATENCY_WARN_S  — legacy whole-second knob, scaled x1000.
+#   3. 3000ms (3s) default.
+#
+# The default is 3s, not 1s. A box hosting several rigs grazes 1-2s probe
+# latency routinely while the data plane stays healthy, so a 1s threshold
+# false-tripped the MEDIUM "Dolt health advisory" mail dozens of times a day
+# (gascity ga-w7u). 3s sits above that routine band and one tier below the
+# deacon patrol's 5s "server may be overloaded" line, so the informational
+# advisory still gives an early heads-up without the noise. Operators retune
+# it per city without editing this script via the mol-dog-doctor order's
+# [[orders.overrides]].env (set GC_DOCTOR_LATENCY_WARN_MS).
+latency_warn_threshold_ms() {
+  printf '%s\n' "${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-3} * 1000 ))}"
 }

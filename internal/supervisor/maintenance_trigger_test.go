@@ -69,7 +69,7 @@ func TestTriggerNow_RunsSnapshotThenGC(t *testing.T) {
 	if run.SnapshotPath == "" {
 		t.Fatal("run.SnapshotPath is empty; want snapshot path recorded")
 	}
-	wantCalls := []string{"backup.add", "backup.sync", "gc.exec", "gc.smoke"}
+	wantCalls := []string{"backup.add", "backup.sync", "gc.list", "gc.exec", "gc.smoke"}
 	if !slices.Equal(calls, wantCalls) {
 		t.Fatalf("calls = %v; want %v", calls, wantCalls)
 	}
@@ -184,7 +184,11 @@ type gatedDoltOps struct {
 	proceed chan struct{}
 }
 
-func (g *gatedDoltOps) ExecGC(ctx context.Context) error {
+func (g *gatedDoltOps) ListDatabases(context.Context) ([]string, error) {
+	return []string{"hq"}, nil
+}
+
+func (g *gatedDoltOps) ExecGCFor(ctx context.Context, _ string) error {
 	g.once.Do(func() { close(g.opened) })
 	select {
 	case <-g.proceed:
@@ -194,7 +198,7 @@ func (g *gatedDoltOps) ExecGC(ctx context.Context) error {
 	}
 }
 
-func (g *gatedDoltOps) SmokeCount(context.Context) (int, error) {
+func (g *gatedDoltOps) SmokeCountFor(context.Context, string) (int, error) {
 	return 1, nil
 }
 

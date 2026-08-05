@@ -12,6 +12,7 @@ enabled = true
 interval = "168h"
 alert_to = "gascity/mayor"
 gc_timeout = "10m"
+min_store_mb = 2048
 `
 	cfg, err := Parse([]byte(data))
 	if err != nil {
@@ -28,6 +29,9 @@ gc_timeout = "10m"
 	}
 	if cfg.Maintenance.Dolt.GCTimeout != "10m" {
 		t.Errorf("expected GCTimeout=10m, got %q", cfg.Maintenance.Dolt.GCTimeout)
+	}
+	if cfg.Maintenance.Dolt.MinStoreMB == nil || *cfg.Maintenance.Dolt.MinStoreMB != 2048 {
+		t.Errorf("expected MinStoreMB=2048, got %v", cfg.Maintenance.Dolt.MinStoreMB)
 	}
 }
 
@@ -51,6 +55,9 @@ name = "test"
 	}
 	if cfg.Maintenance.Dolt.GCTimeout != "" {
 		t.Errorf("expected GCTimeout empty, got %q", cfg.Maintenance.Dolt.GCTimeout)
+	}
+	if cfg.Maintenance.Dolt.MinStoreMB != nil {
+		t.Errorf("expected MinStoreMB nil (zero value), got %v", *cfg.Maintenance.Dolt.MinStoreMB)
 	}
 }
 
@@ -108,6 +115,31 @@ func TestDoltMaintenanceGCTimeoutOrDefault(t *testing.T) {
 			d := DoltMaintenance{GCTimeout: tc.timeout}
 			if got := d.GCTimeoutOrDefault(); got != tc.want {
 				t.Errorf("GCTimeoutOrDefault() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+func TestDoltMaintenanceMinStoreBytesOrDefault(t *testing.T) {
+	const mib = int64(1) << 20
+	cases := []struct {
+		name string
+		mb   *int
+		want int64
+	}{
+		{"nil uses ~1GiB default", nil, 1024 * mib},
+		{"explicit zero disables gate", intPtr(0), 0},
+		{"explicit negative disables gate", intPtr(-5), 0},
+		{"explicit 512 MiB", intPtr(512), 512 * mib},
+		{"explicit 4096 MiB", intPtr(4096), 4096 * mib},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DoltMaintenance{MinStoreMB: tc.mb}
+			if got := d.MinStoreBytesOrDefault(); got != tc.want {
+				t.Errorf("MinStoreBytesOrDefault() = %d, want %d", got, tc.want)
 			}
 		})
 	}

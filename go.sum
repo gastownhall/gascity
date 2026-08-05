@@ -959,6 +959,8 @@ github.com/spiffe/go-spiffe/v2 v2.6.0/go.mod h1:gm2SeUoMZEtpnzPNs2Csc0D/gX33k1xI
 github.com/spkg/bom v0.0.0-20160624110644-59b7046e48ad/go.mod h1:qLr4V1qq6nMqFKkMo8ZTx3f+BZEkzsRUY10Xsm2mwU0=
 github.com/steveyegge/beads v1.1.0 h1:OopHv7K5CWGRNiBinTsEU8pexzZPCPI02LqZ/cPiV5k=
 github.com/steveyegge/beads v1.1.0/go.mod h1:kGQMfFl+LvvOxQ8dAxUITxuTBeMbjv+eogStn+IiucE=
+github.com/steveyegge/beads v1.1.2 h1:cYfMv/2VjB4b0VMmkKlnsHwun5EvoqjFr2ldZUGLpRU=
+github.com/steveyegge/beads v1.1.2/go.mod h1:kGQMfFl+LvvOxQ8dAxUITxuTBeMbjv+eogStn+IiucE=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.1.1/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.2.0/go.mod h1:qt09Ya8vawLte6SNmTgCsAVtYtaKzEcn8ATUoHMkEqE=
