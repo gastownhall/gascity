@@ -921,12 +921,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
+		// ra-co9epr: withhold further blind ("new" tier, no identified
+		// candidate WorkBeadID) spawns for any template the spawn-churn
+		// breaker has recently seen repeatedly claim no work — see
+		// recordPoolSpawnChurnForClosedSession / poolSpawnChurnCooldownTemplates
+		// (pool_spawn_churn.go).
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandChurnTracedAt(
 			cfg,
 			poolWorkBeads,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
+			poolSpawnChurnCooldownTemplates(time.Now().UTC()),
 			poolDecisionTime,
 			trace,
 		)

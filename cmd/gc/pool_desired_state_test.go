@@ -526,7 +526,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -871,6 +871,7 @@ func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
 			},
 		},
 		nil,
+		nil,
 	)
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("result = %+v, want one new request", result)
@@ -878,6 +879,80 @@ func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
 	request := result[0].Requests[0]
 	if request.WorktreeSpec != spec || request.WorktreeError != "" {
 		t.Fatalf("request owner evidence = spec %+v error %q, want exact spec and no error", request.WorktreeSpec, request.WorktreeError)
+	}
+}
+
+// TestComputePoolDesiredStates_ChurnCooldownSuppressesBlindRequests is the
+// ra-co9epr regression check: scale_check demand (3) outran the identified
+// candidate WorkBeadIDs (1) for the template — exactly the shape that let
+// pool_desired_state.go's new-tier loop create WorkBeadID="" blind requests
+// the hook could never claim (46 real sessions in 18.5 minutes, 0% useful).
+// With the template in the spawn-churn breaker's cooldown set, only the
+// bound request (backed by an identified candidate) is materialized; the two
+// that would have been blind are withheld.
+func TestComputePoolDesiredStates_ChurnCooldownSuppressesBlindRequests(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("novices", "", intPtr(5), 0)},
+	}
+	scaleCheck := map[string]int{"novices": 3}
+	demand := map[string]scaleCheckDemand{
+		"novices": {WorkBeadIDs: []string{"ra-t49y6i"}},
+	}
+	cooldown := map[string]bool{"novices": true}
+
+	result := ComputePoolDesiredStatesWithDemandChurnTraced(cfg, nil, nil, scaleCheck, demand, cooldown, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 (blind requests withheld during cooldown), got %+v", len(reqs), reqs)
+	}
+	if reqs[0].WorkBeadID != "ra-t49y6i" {
+		t.Fatalf("requests[0].WorkBeadID = %q, want the one identified candidate (bound requests are unaffected by the breaker)", reqs[0].WorkBeadID)
+	}
+}
+
+// TestComputePoolDesiredStates_ChurnCooldownDoesNotAffectFullyBoundDemand
+// proves the breaker only withholds requests that would actually be blind: a
+// template whose scale_check count exactly matches its identified
+// WorkBeadIDs materializes every request even while "cooling down".
+func TestComputePoolDesiredStates_ChurnCooldownDoesNotAffectFullyBoundDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("novices", "", intPtr(5), 0)},
+	}
+	scaleCheck := map[string]int{"novices": 2}
+	demand := map[string]scaleCheckDemand{
+		"novices": {WorkBeadIDs: []string{"ra-aaa", "ra-bbb"}},
+	}
+	cooldown := map[string]bool{"novices": true}
+
+	result := ComputePoolDesiredStatesWithDemandChurnTraced(cfg, nil, nil, scaleCheck, demand, cooldown, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("requests = %+v, want 2 fully-bound requests unaffected by cooldown", result)
+	}
+}
+
+// TestComputePoolDesiredStates_NoCooldownStillAllowsBlindSpawn is the
+// pre-existing (pre-ra-co9epr-fix) behavior baseline: without a cooldown in
+// effect, scale_check demand outrunning identified WorkBeadIDs still spawns
+// blind requests exactly as before — the breaker only engages after
+// observed churn, never on the first unlucky mismatch.
+func TestComputePoolDesiredStates_NoCooldownStillAllowsBlindSpawn(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("novices", "", intPtr(5), 0)},
+	}
+	scaleCheck := map[string]int{"novices": 3}
+	demand := map[string]scaleCheckDemand{
+		"novices": {WorkBeadIDs: []string{"ra-t49y6i"}},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandChurnTraced(cfg, nil, nil, scaleCheck, demand, nil, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 3 {
+		t.Fatalf("requests = %+v, want 3 (no cooldown in effect, unchanged pre-fix behavior)", result)
 	}
 }
 
@@ -1088,7 +1163,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, nil, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1888,6 +1963,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionBindingPreservesScaleDeman
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 1},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -1923,6 +1999,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAdvancesDemandIndex(t *tes
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -1970,6 +2047,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerId
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -2027,6 +2105,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDe
 				sessionInfosFromBeads([]beads.Bead{protected}),
 				map[string]int{"claude": 2},
 				demand,
+				nil,
 				now,
 				nil,
 			)
@@ -2656,7 +2735,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -2689,7 +2768,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)

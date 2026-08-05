@@ -607,6 +607,15 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(info.ID)
 			}
 			recordStopped(true)
+			// ra-co9epr: this session drain-acked with NO assigned work at
+			// all — the "spawned blind, found nothing, self-drained"
+			// signature. Count it against the spawn-churn breaker so a
+			// misroute that keeps spawning unclaimable blind demand gets
+			// rate-limited instead of burning a real session every ~24s
+			// forever. See recordPoolSpawnChurnForClosedSession's doc
+			// comment for why TriggerBeadID is the churn/legitimate-idle
+			// distinguisher.
+			recordPoolSpawnChurnForClosedSession(template, info, clk, rec)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
