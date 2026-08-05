@@ -41,7 +41,10 @@ func beadPriority(b beads.Bead) int {
 	if b.Priority != nil {
 		return *b.Priority
 	}
-	return 0
+	// nil Priority round-trips through native_dolt_store as bd's documented
+	// mid default (P2), not "highest" — match that semantics here so an
+	// unset-priority bead cannot out-schedule an explicitly-labeled P1 bead.
+	return 2
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
