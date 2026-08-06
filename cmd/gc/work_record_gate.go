@@ -148,6 +148,19 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 // repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
 // that looks like a flag (leading "-") is rejected outright so a malformed
 // metadata value can never be parsed as a git option.
+//
+// branch is resolved against refs/remotes/origin/<branch> when that ref
+// exists, falling back to the bare name otherwise. gitrevisions precedence
+// puts a local refs/heads/<branch> ahead of any remote-tracking ref, but the
+// worktree gc.work_dir names is rarely the one whose local branch tip
+// actually moves — a refinery or polecat that merges/pushes from a different
+// worktree advances the remote-tracking ref, never the local one checked out
+// elsewhere. Resolving against the local ref alone reports a landed commit as
+// unreachable until something happens to fast-forward it, which in that
+// topology may be never (gastownhall/gascity#5037). The rev-parse probe is a
+// separate call rather than a fallback on the merge-base exit code so that a
+// genuinely-unreachable commit is never retried against the local ref and
+// allowed to pass.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
@@ -155,7 +168,11 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
 	}
-	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
+	ref := branch
+	if remote := "refs/remotes/origin/" + branch; exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", remote).Run() == nil {
+		ref = remote
+	}
+	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and

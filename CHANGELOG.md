@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish that projection is left stamped rather than risk a wrong clear, as
   are cross-store targets this reconciler tick cannot reach. (gascity#4373)
 
+- **The work-record close gate now resolves `gc.work_branch` against its
+  remote-tracking ref, not the local branch alone.** `gitCommitReachableOnBranch`
+  passed the bare branch name (e.g. `main`) straight to
+  `git merge-base --is-ancestor`; gitrevisions precedence resolves a bare name
+  to the local `refs/heads/<branch>` ahead of any remote-tracking ref. In a
+  refinery/polecat topology, merges land via a push from a *different*
+  worktree — advancing `refs/remotes/origin/<branch>` but never the local ref
+  checked out elsewhere — so a genuinely-landed commit read as unreachable
+  until something happened to fast-forward the local branch, which in that
+  topology may be never. The gate now prefers `refs/remotes/origin/<branch>`
+  when it resolves, falling back to the bare name for purely local repos with
+  no `origin` remote. (gascity#5037)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
