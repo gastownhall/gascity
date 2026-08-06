@@ -749,17 +749,21 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_DB"*)
-    if [ "$mode" = "absorbed_ws_db_hash_drift" ] || [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ]; then
-      # Standing uncommitted working-set state absorbed by the flatten's -Am:
-      # the committed root legitimately differs across the flatten while HEAD
-      # never moves and every per-table working-set hash stays stable.
-      if [ "$(current_head)" = "compactcommit" ]; then
-        print_cell hash-root-after-absorb
-      else
-        print_cell hash-root-before
-      fi
-      exit 0
-    fi
+    case "$mode" in
+      absorbed_ws_db_hash_drift|absorbed_ws_db_hash_drift_system_table|first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure|absorbed_ws_plus_first_commit_drift)
+        # Standing uncommitted working-set state absorbed by the flatten's -Am:
+        # the committed root legitimately differs across the flatten while HEAD
+        # never moves and every per-table working-set hash stays stable. The
+        # first_commit_* modes drift the same way because the flatten
+        # first-commits a never-committed table.
+        if [ "$(current_head)" = "compactcommit" ]; then
+          print_cell hash-root-after-absorb
+        else
+          print_cell hash-root-before
+        fi
+        exit 0
+        ;;
+    esac
     if [ "$mode" = "ignored_table_db_hash_drift" ]; then
       case "$query" in
         *"DOLT_HASHOF_DB('HEAD')"*)
@@ -863,6 +867,47 @@ case "$query" in
     esac
     exit 0
     ;;
+  *"FROM dolt_status WHERE table_name = 'dolt_ignore' AND staged = 1"*)
+    case "$mode" in
+      dirty_dolt_ignore_preflight|dirty_dolt_ignore_commit_failure)
+        print_cell 1
+        ;;
+      *)
+        print_cell 0
+        ;;
+    esac
+    exit 0
+    ;;
+  *"FROM dolt_status WHERE table_name = 'dolt_ignore'"*)
+    # dirty_dolt_ignore_preflight: gc's health probe registered its probe table
+    # in dolt_ignore and left the row uncommitted, so the flatten's -Am would
+    # first-commit dolt_ignore itself. The *_failure modes start from the same
+    # dirty state but break the preamble that versions it.
+    case "$mode" in
+      dirty_dolt_ignore_preflight|dirty_dolt_ignore_add_failure|dirty_dolt_ignore_commit_failure)
+        print_cell 1
+        ;;
+      *)
+        print_cell 0
+        ;;
+    esac
+    exit 0
+    ;;
+  *"DOLT_ADD('dolt_ignore')"*)
+    if [ "$mode" = "dirty_dolt_ignore_add_failure" ]; then
+      printf 'dolt_ignore staging refused\n' >&2
+      exit 56
+    fi
+    exit 0
+    ;;
+  *"DOLT_COMMIT('-m', 'compaction: version dolt_ignore')"*)
+    if [ "$mode" = "dirty_dolt_ignore_commit_failure" ]; then
+      printf 'dolt_ignore commit refused\n' >&2
+      exit 57
+    fi
+    set_head ignorecommit
+    exit 0
+    ;;
   *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
     # ignored_table_* modes model the production hq incident: "wisps" is a
     # dolt_ignore'd working-set-only table — visible in information_schema
@@ -886,6 +931,23 @@ case "$query" in
       print_cells beads wisps
       exit 0
     fi
+    # first_commit_* modes model the daa incident (2026-08-04): gc's read-only
+    # health probe creates __gc_read_only_probe in the working set and never
+    # commits it, so information_schema returns it but SHOW TABLES AS OF HEAD
+    # does not — and the flatten's -Am first-commits it.
+    case "$mode" in
+      first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure|absorbed_ws_plus_first_commit_drift)
+        case "$query" in
+          *"SHOW TABLES AS OF"*)
+            print_cell beads
+            ;;
+          *)
+            print_cells beads __gc_read_only_probe
+            ;;
+        esac
+        exit 0
+        ;;
+    esac
     if [ "$mode" = "table_discovery_failure" ]; then
       printf 'information_schema unavailable\n' >&2
       exit 43
@@ -971,6 +1033,27 @@ case "$query" in
     fi
     exit 0
     ;;
+  *"DOLT_DIFF("*"'__gc_read_only_probe')"*)
+    # Content diff of the table the flatten first-committed. A table absent
+    # from the pre-flatten committed root reports every row as added.
+    case "$mode" in
+      first_commit_probe_table_db_hash_drift|absorbed_ws_plus_first_commit_drift)
+        print_cell 0
+        ;;
+      first_commit_table_nonadditive_diff)
+        print_cell 1
+        ;;
+      first_commit_table_diff_probe_failure)
+        printf 'probe table diff unavailable\n' >&2
+        exit 55
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
+    exit 0
+    ;;
   *"DOLT_DIFF_STAT"*)
     if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
       print_cell beads
@@ -980,6 +1063,16 @@ case "$query" in
       print_cell dolt_schemas
       exit 0
     fi
+    case "$mode" in
+      first_commit_probe_table_db_hash_drift|first_commit_table_nonadditive_diff|first_commit_table_diff_probe_failure)
+        print_cell __gc_read_only_probe
+        exit 0
+        ;;
+      absorbed_ws_plus_first_commit_drift)
+        print_cells beads __gc_read_only_probe
+        exit 0
+        ;;
+    esac
     printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
     exit 64
     ;;
@@ -2675,6 +2768,232 @@ func TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables(t *testing
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("unexplained db root drift must block full GC:\n%s", string(data))
+	}
+}
+
+// Production incident (daa, 2026-08-04; hq, 2026-06): gc's read-only health
+// probe creates __gc_read_only_probe in every managed database and never
+// commits it. The flatten's -Am first-commits that table, so the committed
+// root drifts with a stable HEAD and DOLT_DIFF_STAT names a table the
+// preflight deliberately excluded — a systematic one-shot quarantine on the
+// first threshold-crossing flatten of every gc-managed database. A table
+// absent from the pre-flatten committed root cannot lose committed data by
+// being first-committed, so an added-only content diff proves the drift
+// benign: defer, exactly like the other absorbed-state paths.
+func TestCompactScriptDefersFirstCommittedProbeTableDbHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "first_commit_probe_table_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first-committed probe table drift must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "first-committed unversioned table(s) [__gc_read_only_probe]") ||
+		!strings.Contains(out, "absorbed working-set state") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing first-committed table defer message:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("first-committed probe table drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("first-committed table defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("first-committed table defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// The first-committed exemption is only as strong as its added-only proof: a
+// first-committed table whose content diff reports removed/modified rows is
+// unexplained and keeps the fail-closed quarantine.
+func TestCompactScriptQuarantinesFirstCommittedTableWithNonAdditiveDiff(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "first_commit_table_nonadditive_diff", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("non-additive first-commit diff must remain a blocking failure:\n%s", out)
+	}
+	if !strings.Contains(out, "committed-root drift includes unproven table(s)") ||
+		!strings.Contains(out, "__gc_read_only_probe") {
+		t.Fatalf("output must name the unproven first-committed table:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify db hash drift, got %q", reason)
+	}
+	if tables := compactMarkerValue(t, marker, "db_root_drift_stat_tables"); tables != "__gc_read_only_probe" {
+		t.Fatalf("quarantine marker should record the drift table list, got %q", tables)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unproven first-commit drift must block full GC:\n%s", string(data))
+	}
+}
+
+// A failed content-diff probe proves nothing, so it quarantines — and the
+// probe's own stderr must reach the operator, or the next incident of this
+// class is undiagnosable from the run log alone.
+func TestCompactScriptQuarantinesFirstCommittedTableWhenDiffProbeFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "first_commit_table_diff_probe_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first-commit diff probe failure must remain a blocking failure:\n%s", out)
+	}
+	if !strings.Contains(out, "probe table diff unavailable") {
+		t.Fatalf("output missing the diff probe's stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "committed-root drift includes unproven table(s)") {
+		t.Fatalf("output missing unproven-table diagnosis:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify db hash drift, got %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unprovable first-commit drift must block full GC:\n%s", string(data))
+	}
+}
+
+// The daa incident shape exactly: the committed-root drift covers both tables
+// whose working-set values the preflight verified AND the first-committed
+// probe table. Each table is proven independently, so the run defers.
+func TestCompactScriptDefersMixedVerifiedAndFirstCommittedDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_plus_first_commit_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("mixed verified + first-committed drift must defer, not fail: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "verified table(s) [beads]") ||
+		!strings.Contains(out, "first-committed unversioned table(s) [__gc_read_only_probe]") {
+		t.Fatalf("defer message must distinguish verified from first-committed tables:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("mixed proven drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("mixed proven drift should record pending-GC retry marker, got reason %q", reason)
+	}
+}
+
+// A dirty dolt_ignore is itself first-committed by the flatten's -Am, which
+// just moves the trap from the probe table onto dolt_ignore. Version it in its
+// own commit before the pre-flight snapshot so the flatten's diff stays
+// confined to real tables.
+func TestCompactScriptVersionsDirtyDoltIgnoreBeforeFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "dirty_dolt_ignore_preflight", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("dirty dolt_ignore must not fail compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "versioned dirty dolt_ignore before flatten") {
+		t.Fatalf("output missing dolt_ignore versioning notice:\n%s", out)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	log := string(data)
+	addAt := strings.Index(log, "DOLT_ADD('dolt_ignore')")
+	commitAt := strings.Index(log, "DOLT_COMMIT('-m', 'compaction: version dolt_ignore')")
+	resetAt := strings.Index(log, "DOLT_RESET")
+	if addAt < 0 || commitAt < 0 || resetAt < 0 {
+		t.Fatalf("dirty dolt_ignore must be staged and committed before the flatten:\n%s", log)
+	}
+	if addAt > commitAt || commitAt > resetAt {
+		t.Fatalf("dolt_ignore versioning must run before the flatten's reset:\n%s", log)
+	}
+	if !strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("compact must reach full GC after versioning dolt_ignore:\n%s", log)
+	}
+}
+
+// The dolt_ignore preamble is an optimization, not a gate: if staging the
+// dirty table fails the run must warn, surface the server's error, and flatten
+// anyway. Blocking the flatten here would strand GC on every database whose
+// dolt_status the server refuses to stage.
+func TestCompactScriptProceedsWhenDoltIgnoreStagingFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "dirty_dolt_ignore_add_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("failed dolt_ignore staging must not block compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "staging dirty dolt_ignore failed") {
+		t.Fatalf("output missing dolt_ignore staging warning:\n%s", out)
+	}
+	if !strings.Contains(out, "dolt_ignore staging refused") {
+		t.Fatalf("output missing the server error behind the staging failure:\n%s", out)
+	}
+	assertCompactReachedGCWithoutQuarantine(t, fixture)
+}
+
+// Same contract one step later: DOLT_ADD succeeded and staged the row, but the
+// targeted commit failed. Warn, surface the error, flatten anyway.
+func TestCompactScriptProceedsWhenDoltIgnoreCommitFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "dirty_dolt_ignore_commit_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("failed dolt_ignore commit must not block compaction: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "committing dirty dolt_ignore failed") {
+		t.Fatalf("output missing dolt_ignore commit warning:\n%s", out)
+	}
+	if !strings.Contains(out, "dolt_ignore commit refused") {
+		t.Fatalf("output missing the server error behind the commit failure:\n%s", out)
+	}
+	if strings.Contains(out, "versioned dirty dolt_ignore before flatten") {
+		t.Fatalf("a failed commit must not claim dolt_ignore was versioned:\n%s", out)
+	}
+	assertCompactReachedGCWithoutQuarantine(t, fixture)
+}
+
+// assertCompactReachedGCWithoutQuarantine pins the shared tail of the
+// dolt_ignore preamble failure cases: the flatten and full GC still ran, and
+// nothing wrote a quarantine marker.
+func assertCompactReachedGCWithoutQuarantine(t *testing.T, fixture compactScriptFixture) {
+	t.Helper()
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	log := string(data)
+	if !strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("compact must still flatten and GC after a failed dolt_ignore preamble:\n%s", log)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("a failed dolt_ignore preamble must NOT quarantine the database; stat=%v", statErr)
+	}
+}
+
+// Dry-run must stay read-only: the dolt_ignore versioning preamble is a
+// mutation and is skipped along with the flatten.
+func TestCompactScriptDryRunSkipsDoltIgnoreVersioning(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "dirty_dolt_ignore_preflight",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("dry-run must succeed: %v\n%s", err, out)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	log := string(data)
+	if strings.Contains(log, "DOLT_ADD") || strings.Contains(log, "DOLT_COMMIT") {
+		t.Fatalf("dry-run must not stage or commit dolt_ignore:\n%s", log)
 	}
 }
 

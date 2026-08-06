@@ -31,8 +31,9 @@ func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
 			assertNoManagedDoltProbeDrop(t, "probe stmts for "+db, q)
 		}
 		wantTable := "`" + db + "`.`" + managedDoltProbeTable + "`"
+		wantIgnoreTable := "`" + db + "`.`dolt_ignore`"
 		for _, q := range stmts {
-			if !strings.Contains(q, wantTable) {
+			if !strings.Contains(q, wantTable) && !strings.Contains(q, wantIgnoreTable) {
 				t.Fatalf("probe stmt for %s missing %q: %s", db, wantTable, q)
 			}
 			if strings.Contains(q, "`.`__probe`") {
@@ -41,6 +42,42 @@ func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
 		}
 		if !strings.Contains(joined, "REPLACE INTO "+wantTable+" VALUES (1)") {
 			t.Fatalf("probe SQL for %s must write to %s: %s", db, wantTable, joined)
+		}
+	}
+}
+
+// TestManagedDoltReadOnlyProbeRegistersIgnoreRuleLast pins the fix for the daa
+// 2026-08-04 incident class: an unregistered probe table gets first-committed by
+// the compaction flatten's `DOLT_COMMIT -Am`, which drifts the database hash and
+// quarantines GC for the database. The rule registration must stay LAST so a
+// read-only server still fails on CREATE/REPLACE, which is what the read-only
+// classification keys on.
+func TestManagedDoltReadOnlyProbeRegistersIgnoreRuleLast(t *testing.T) {
+	for _, db := range []string{"gascity", "003", "name-with-hyphen", "with`backtick"} {
+		stmts := managedDoltReadOnlyProbeStatementsFor(db)
+		if len(stmts) != 3 {
+			t.Fatalf("probe stmts for %s = %v, want 3 statements", db, stmts)
+		}
+		wantIgnore := "INSERT IGNORE INTO " + managedDoltQuoteIdent(db) + ".`dolt_ignore` (pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1)"
+		if stmts[2] != wantIgnore {
+			t.Fatalf("probe stmts for %s last statement = %q, want %q", db, stmts[2], wantIgnore)
+		}
+		// Prefix pins alone would accept a CREATE/REPLACE aimed at dolt_ignore,
+		// which the relaxed legacy-target loop above also lets through; pin the
+		// quoted probe-table target the same way the ignore rule is pinned.
+		wantTarget := managedDoltQuoteIdent(db) + "." + managedDoltQuoteIdent(managedDoltProbeTable)
+		if !strings.HasPrefix(stmts[0], "CREATE TABLE IF NOT EXISTS ") || !strings.Contains(stmts[0], wantTarget) {
+			t.Fatalf("probe stmts for %s must create %s first: %q", db, wantTarget, stmts[0])
+		}
+		if !strings.HasPrefix(stmts[1], "REPLACE INTO ") || !strings.Contains(stmts[1], wantTarget) {
+			t.Fatalf("probe stmts for %s must write the probe row into %s second: %q", db, wantTarget, stmts[1])
+		}
+		if strings.Contains(stmts[2], "REPLACE INTO") {
+			t.Fatalf("probe stmts for %s must not REPLACE the ignore rule (an operator ignored=0 override has to survive): %q", db, stmts[2])
+		}
+		joined := managedDoltReadOnlyProbeSQLFor(db)
+		if !strings.HasSuffix(joined, wantIgnore+";") {
+			t.Fatalf("probe SQL for %s = %q, want it to end with %q", db, joined, wantIgnore+";")
 		}
 	}
 }
