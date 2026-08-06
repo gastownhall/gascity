@@ -249,6 +249,76 @@ func TestBuiltinAntigravityEffortChoices(t *testing.T) {
 	}
 }
 
+func TestBuiltinAntigravityModelChoices(t *testing.T) {
+	agy, ok := BuiltinProviders()["antigravity"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing antigravity")
+	}
+
+	var modelOption BuiltinProviderOption
+	for _, option := range agy.OptionsSchema {
+		if option.Key == "model" {
+			modelOption = option
+			break
+		}
+	}
+	if modelOption.Key == "" {
+		t.Fatal("antigravity provider missing model option")
+	}
+
+	// agy < 1.1.10 silently ignores --model on the --prompt-interactive
+	// launch path, so the option must never fire by default.
+	if modelOption.Default != "" {
+		t.Errorf("model Default = %q, want empty (agy <1.1.10 drops the flag silently)", modelOption.Default)
+	}
+	if _, ok := agy.OptionDefaults["model"]; ok {
+		t.Errorf("OptionDefaults[model] = %q, want absent (agy <1.1.10 drops the flag silently)", agy.OptionDefaults["model"])
+	}
+
+	if len(modelOption.Choices) == 0 || modelOption.Choices[0].Value != "" || len(modelOption.Choices[0].FlagArgs) != 0 {
+		t.Fatalf("model choices must lead with the empty no-flag sentinel, got %v", modelOption.Choices)
+	}
+
+	byValue := make(map[string]BuiltinOptionChoice, len(modelOption.Choices))
+	for _, choice := range modelOption.Choices {
+		byValue[choice.Value] = choice
+	}
+
+	// Stable slugs + display names as enumerated by `agy models` (agy 1.1.5+).
+	wantLabels := map[string]string{
+		"gemini-3.6-flash-high":    "Gemini 3.6 Flash (High)",
+		"gemini-3.6-flash-medium":  "Gemini 3.6 Flash (Medium)",
+		"gemini-3.6-flash-low":     "Gemini 3.6 Flash (Low)",
+		"gemini-3.5-flash-high":    "Gemini 3.5 Flash (High)",
+		"gemini-3.5-flash-medium":  "Gemini 3.5 Flash (Medium)",
+		"gemini-3.5-flash-low":     "Gemini 3.5 Flash (Low)",
+		"gemini-3.1-pro-high":      "Gemini 3.1 Pro (High)",
+		"gemini-3.1-pro-low":       "Gemini 3.1 Pro (Low)",
+		"claude-sonnet-4-6":        "Claude Sonnet 4.6 (Thinking)",
+		"claude-opus-4-6-thinking": "Claude Opus 4.6 (Thinking)",
+		"gpt-oss-120b-medium":      "GPT-OSS 120B (Medium)",
+	}
+	if len(modelOption.Choices) != len(wantLabels)+1 {
+		t.Errorf("model choice count = %d, want %d (sentinel + %d slugs)", len(modelOption.Choices), len(wantLabels)+1, len(wantLabels))
+	}
+	for slug, wantLabel := range wantLabels {
+		choice, ok := byValue[slug]
+		if !ok {
+			t.Fatalf("model choices missing %q", slug)
+		}
+		if choice.Label != wantLabel {
+			t.Errorf("%s label = %q, want %q", slug, choice.Label, wantLabel)
+		}
+		if len(choice.FlagArgs) != 2 || choice.FlagArgs[0] != "--model" || choice.FlagArgs[1] != slug {
+			t.Errorf("%s FlagArgs = %v, want [--model %s]", slug, choice.FlagArgs, slug)
+		}
+		// agy has no -m short alias (unlike claude/codex) — keep aliases empty.
+		if len(choice.FlagAliases) != 0 {
+			t.Errorf("%s FlagAliases = %v, want none (agy --help defines no -m)", slug, choice.FlagAliases)
+		}
+	}
+}
+
 func TestBuiltinCodexModelChoicesIncludeGPT56Variants(t *testing.T) {
 	codex, ok := BuiltinProviders()["codex"]
 	if !ok {

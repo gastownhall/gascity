@@ -768,6 +768,28 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
 				},
 			},
+			// Stable slugs + display names as enumerated by `agy models`; agy
+			// defines no -m short alias, so no FlagAliases. Same no-default
+			// rule as effort (agy < 1.1.10 drops --model silently at launch).
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "gemini-3.6-flash-high", Label: "Gemini 3.6 Flash (High)", FlagArgs: []string{"--model", "gemini-3.6-flash-high"}},
+					{Value: "gemini-3.6-flash-medium", Label: "Gemini 3.6 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.6-flash-medium"}},
+					{Value: "gemini-3.6-flash-low", Label: "Gemini 3.6 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.6-flash-low"}},
+					{Value: "gemini-3.5-flash-high", Label: "Gemini 3.5 Flash (High)", FlagArgs: []string{"--model", "gemini-3.5-flash-high"}},
+					{Value: "gemini-3.5-flash-medium", Label: "Gemini 3.5 Flash (Medium)", FlagArgs: []string{"--model", "gemini-3.5-flash-medium"}},
+					{Value: "gemini-3.5-flash-low", Label: "Gemini 3.5 Flash (Low)", FlagArgs: []string{"--model", "gemini-3.5-flash-low"}},
+					{Value: "gemini-3.1-pro-high", Label: "Gemini 3.1 Pro (High)", FlagArgs: []string{"--model", "gemini-3.1-pro-high"}},
+					{Value: "gemini-3.1-pro-low", Label: "Gemini 3.1 Pro (Low)", FlagArgs: []string{"--model", "gemini-3.1-pro-low"}},
+					{Value: "claude-sonnet-4-6", Label: "Claude Sonnet 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
+					{Value: "claude-opus-4-6-thinking", Label: "Claude Opus 4.6 (Thinking)", FlagArgs: []string{"--model", "claude-opus-4-6-thinking"}},
+					{Value: "gpt-oss-120b-medium", Label: "GPT-OSS 120B (Medium)", FlagArgs: []string{"--model", "gpt-oss-120b-medium"}},
+				},
+			},
 			{
 				Key:   "sandbox",
 				Label: "Sandbox",
