@@ -728,6 +728,16 @@ func openWorkflowSQLDB(user, password, host string, port int, database string) (
 	return db, nil
 }
 
+// workflowSQLScanBead decodes the workflow-graph projection, which is
+// deliberately narrower than the store-level scan: it selects the nine columns
+// the graph renders and nothing else. bd's plain columns (await_type,
+// await_id, created_by, owner, notes) are therefore NOT carried here even
+// though beads.Bead models them, so a gate bead reached through this path
+// still reports no condition. Widening it means adding unguarded column
+// references to a query against a remote bd-managed Dolt schema, where a
+// column an older deployment lacks fails the whole workflow read rather than
+// omitting one field; this file has no schema-presence probe, so that is its
+// own change rather than a line in this one.
 func workflowSQLScanBead(scan func(dest ...any) error) (beads.Bead, bool, error) {
 	var b beads.Bead
 	var assignee, description sql.NullString

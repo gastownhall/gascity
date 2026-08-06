@@ -264,7 +264,10 @@ export type AsyncAcceptedResponse = {
 
 export type Bead = {
     assignee?: string;
+    await_id?: string;
+    await_type?: string;
     created_at: string;
+    created_by?: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
@@ -279,6 +282,8 @@ export type Bead = {
     };
     needs?: Array<string> | null;
     no_history?: boolean;
+    notes?: string;
+    owner?: string;
     parent?: string;
     priority?: number;
     ref?: string;

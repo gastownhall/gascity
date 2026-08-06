@@ -648,6 +648,20 @@ type bdIssue struct {
 	NoHistory    bool         `json:"no_history,omitempty"`
 	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
+	// AwaitType and AwaitID are bd's gate condition. Every bd JSON projection
+	// that hydrates a full issue emits them (they are members of beads'
+	// canonical IssueSelectColumns and types.Issue carries no custom
+	// MarshalJSON), so `bd show`, `bd gate list` and `bd list` alike carry them
+	// — but all are omitempty and both are empty for every non-gate bead. `bd
+	// list` additionally hides gate-type rows from its default result set
+	// (--include-gates opts back in), which is a ROW filter, not a key
+	// omission: a sample drawn from a gate-free result set shows no await_*
+	// key and says nothing about whether bd would emit one.
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
@@ -809,6 +823,11 @@ func (b *bdIssue) toBead() Bead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
 		IsBlocked:    b.IsBlocked.ptr(),
+		AwaitType:    b.AwaitType,
+		AwaitID:      b.AwaitID,
+		CreatedBy:    b.CreatedBy,
+		Owner:        b.Owner,
+		Notes:        b.Notes,
 		Revision:     b.Revision,
 	}
 }

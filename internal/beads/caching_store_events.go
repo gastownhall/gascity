@@ -450,6 +450,21 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "description") {
 		merged.Description = patch.Description
 	}
+	if hasCacheEventField(fields, "await_type") {
+		merged.AwaitType = patch.AwaitType
+	}
+	if hasCacheEventField(fields, "await_id") {
+		merged.AwaitID = patch.AwaitID
+	}
+	if hasCacheEventField(fields, "created_by") {
+		merged.CreatedBy = patch.CreatedBy
+	}
+	if hasCacheEventField(fields, "owner") {
+		merged.Owner = patch.Owner
+	}
+	if hasCacheEventField(fields, "notes") {
+		merged.Notes = patch.Notes
+	}
 	if hasCacheEventField(fields, "labels") {
 		merged.Labels = slices.Clone(patch.Labels)
 	}
@@ -493,6 +508,21 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "description") && current.Description != patch.Description {
+		return true
+	}
+	if hasCacheEventField(fields, "await_type") && current.AwaitType != patch.AwaitType {
+		return true
+	}
+	if hasCacheEventField(fields, "await_id") && current.AwaitID != patch.AwaitID {
+		return true
+	}
+	if hasCacheEventField(fields, "created_by") && current.CreatedBy != patch.CreatedBy {
+		return true
+	}
+	if hasCacheEventField(fields, "owner") && current.Owner != patch.Owner {
+		return true
+	}
+	if hasCacheEventField(fields, "notes") && current.Notes != patch.Notes {
 		return true
 	}
 	if hasCacheEventField(fields, "parent") && current.ParentID != patch.ParentID {
@@ -730,6 +760,11 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.ParentID != fresh.ParentID ||
 		old.Ref != fresh.Ref ||
 		old.Description != fresh.Description ||
+		old.AwaitType != fresh.AwaitType ||
+		old.AwaitID != fresh.AwaitID ||
+		old.CreatedBy != fresh.CreatedBy ||
+		old.Owner != fresh.Owner ||
+		old.Notes != fresh.Notes ||
 		old.Ephemeral != fresh.Ephemeral ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
 		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {

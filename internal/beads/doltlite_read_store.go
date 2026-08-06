@@ -1332,7 +1332,8 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	parentColumn := doltliteQualifiedDependsOnExpr("pc")
 	sqlText := `SELECT i.id, COALESCE(i.title, ''), COALESCE(i.status, ''), COALESCE(i.issue_type, ''), i.priority, i.created_at,
 		COALESCE(i.updated_at, ''), COALESCE(i.assignee, ''), COALESCE(i.description, ''), COALESCE(i.metadata, '{}'),
-		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `
+		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `,
+		` + tq.flags.awaitType + `, ` + tq.flags.awaitID + `, ` + tq.flags.createdBy + `, ` + tq.flags.owner + `, ` + tq.flags.notes + `
 		FROM ` + tables.issues + ` i` + tq.parentJoin
 	if len(tq.where) > 0 {
 		sqlText += " WHERE " + strings.Join(tq.where, " AND ")
@@ -1383,8 +1384,21 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 type doltliteStorageFlagExprs struct {
 	ephemeral string
 	noHistory string
+	// awaitType, awaitID, createdBy, owner and notes yield bd's plain-column
+	// fields, falling back to the empty-string literal on snapshots whose
+	// schema predates them. They are resolved by the same presence probe as the
+	// storage flags because they land in the MAIN list SELECT: referencing a
+	// column an older snapshot lacks would fail every list read rather than
+	// just omitting one field.
+	awaitType string
+	awaitID   string
+	createdBy string
+	owner     string
+	notes     string
 	// hasColumns reports whether the table carries at least one storage-flag
-	// column, i.e. whether per-row tier classification is possible.
+	// column, i.e. whether per-row tier classification is possible. The
+	// plain-column probes deliberately do not set it: they say nothing about
+	// whether per-row tier classification is possible.
 	hasColumns bool
 }
 
@@ -1395,7 +1409,15 @@ type doltliteStorageFlagExprs struct {
 // failure is propagated rather than treated as an absent column, so a
 // transient DB error cannot silently downgrade tier classification.
 func (s *DoltliteReadStore) storageFlagExprsFor(tables doltliteTableSet) (doltliteStorageFlagExprs, error) {
-	flags := doltliteStorageFlagExprs{ephemeral: "0", noHistory: "0"}
+	flags := doltliteStorageFlagExprs{
+		ephemeral: "0",
+		noHistory: "0",
+		awaitType: "''",
+		awaitID:   "''",
+		createdBy: "''",
+		owner:     "''",
+		notes:     "''",
+	}
 	if tables.wisps {
 		flags.ephemeral = "1"
 	}
@@ -1414,6 +1436,24 @@ func (s *DoltliteReadStore) storageFlagExprsFor(tables doltliteTableSet) (doltli
 	if hasNoHistory {
 		flags.noHistory = "COALESCE(i.no_history, 0)"
 		flags.hasColumns = true
+	}
+	for _, col := range []struct {
+		name string
+		expr *string
+	}{
+		{"await_type", &flags.awaitType},
+		{"await_id", &flags.awaitID},
+		{"created_by", &flags.createdBy},
+		{"owner", &flags.owner},
+		{"notes", &flags.notes},
+	} {
+		has, err := s.tableHasColumn(tables.issues, col.name)
+		if err != nil {
+			return doltliteStorageFlagExprs{}, err
+		}
+		if has {
+			*col.expr = "COALESCE(i." + col.name + ", '')"
+		}
 	}
 	return flags, nil
 }
@@ -1482,7 +1522,7 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		ephemeral   int64
 		noHistory   int64
 	)
-	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory); err != nil {
+	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory, &b.AwaitType, &b.AwaitID, &b.CreatedBy, &b.Owner, &b.Notes); err != nil {
 		return b, err
 	}
 	if priority.Valid {
