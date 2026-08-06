@@ -67,8 +67,31 @@ func TestClassifyGoldenTable(t *testing.T) {
 		// ---- ORDERS (order-dispatch tracking) ----
 		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking"}, NoHistory: true}, ClassOrders},
 
-		// ---- NUDGES (nudge-queue durability mirror) ----
-		{"nudge bead (type=chore + label)", beads.Bead{Type: "chore", Labels: []string{"gc:nudge"}}, ClassNudges},
+		// ---- NUDGES (nudge-queue durability mirror + the durable queue itself) ----
+		{"nudge shadow bead (type=chore + label)", beads.Bead{Type: "chore", Labels: []string{"gc:nudge"}}, ClassNudges},
+		// The queue's own family. gc:nudge-queue is a DIFFERENT label from
+		// gc:nudge, and the exact-match nudge arm alone routed it to work — a
+		// bead the nudges class store physically holds, answering to work. See
+		// labelNudgeQueue for the defect this row pins closed.
+		{"nudge queue bead (type=chore + queue label)", beads.Bead{Type: "chore", Labels: []string{"gc:nudge-queue", "agent:worker-1"}}, ClassNudges},
+		{"terminal nudge queue bead", beads.Bead{Type: "chore", Status: "closed", Labels: []string{"gc:nudge-queue"}, Metadata: map[string]string{"queue_state": "terminal"}}, ClassNudges},
+
+		// ---- PRECEDENCE: order-tracking wins over the WISP arm ----
+		// The wisp arm is checked first for everything EXCEPT an order-tracking
+		// bead, and that exclusion is the one deliberate divergence from
+		// policyNameForBead. orders.RunOutcomeWisp / WispFailed / WispCanceled
+		// stamp the BARE "wisp" label on the tracking bead as an OUTCOME marker: it
+		// says the run dispatched a wisp, not that the bead IS one. The dispatched
+		// wisp is a separate bead and still classifies as graph.
+		//
+		// Before the exclusion these two rows returned ClassGraph, and the
+		// consequence was live: ListTracking and RecentRunsAll read the orders leg
+		// only, so on a class-split city a wisp-outcome run was invisible to them.
+		{"order run with a wisp outcome classifies as orders", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking", "wisp"}, NoHistory: true}, ClassOrders},
+		{"order run with a wisp-failed outcome classifies as orders", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking", "wisp", "wisp-failed"}, NoHistory: true}, ClassOrders},
+		{"a real wisp bead is still graph", beads.Bead{Type: "task", Labels: []string{"gc:wisp"}}, ClassGraph},
+		{"a bare-wisp bead without order-tracking is still graph", beads.Bead{Type: "task", Labels: []string{"wisp"}}, ClassGraph},
+		{"order run with an exec outcome stays orders", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking", "exec-failed"}, NoHistory: true}, ClassOrders},
 
 		// ---- PRECEDENCE (tracker/session arms win over the broad workflow arm) ----
 		{"order-tracking with stray root_bead_id stays orders", beads.Bead{Type: "task", Labels: []string{"order-tracking"}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassOrders},

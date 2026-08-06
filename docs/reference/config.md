@@ -25,6 +25,7 @@ City is the top-level configuration for a Gas City instance.
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
+| `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
@@ -823,6 +824,38 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StorageBindingConfig
+
+StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; SQLite accepts `path` (default `.gc/store`), while other providers accept an opaque `config_ref` resolved by that provider.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the exact ID of a provider compiled into this gc binary. |
+| `path` | string |  | `.gc/store` | Path is the SQLite binding root. Empty defaults to ".gc/store". |
+| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by a non-built-in provider. |
+
+## StorageClasses
+
+StorageClasses is the closed set of semantic storage assignments; when `[storage]` is authored, all six fields are required after fragment layering, while omission assigns every class to `work`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `work` | string | **yes** |  | Work selects the binding for the shareable work ledger. |
+| `graph` | string | **yes** |  | Graph selects the binding for formula graph state. |
+| `sessions` | string | **yes** |  | Sessions selects the binding for session lifecycle and durable waits. |
+| `messaging` | string | **yes** |  | Messaging selects the binding for mail and external-message state. |
+| `orders` | string | **yes** |  | Orders selects the binding for order-run state. |
+| `nudges` | string | **yes** |  | Nudges selects the binding for the durable nudge queue. |
+
+## StorageConfig
+
+StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
+| `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
 
 ## Tier
 

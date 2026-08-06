@@ -80,9 +80,10 @@ const (
 	// + the order-dispatch path.
 	ClassOrders
 
-	// ClassNudges is the durability mirror of the nudge queue (type=chore +
-	// gc:nudge). Owner: the nudge queue subsystem. The live queue is a
-	// flock-guarded file; these beads are its persistent shadow.
+	// ClassNudges is the nudge queue: the durable queue's own records
+	// (type=chore + gc:nudge-queue) and the shadow beads that mirror them
+	// (type=chore + gc:nudge). Owner: the nudge queue subsystem. The two are
+	// disjoint families over the same store, and both belong to this class.
 	ClassNudges
 )
 

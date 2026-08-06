@@ -24,6 +24,22 @@ const (
 	// labelNudge marks queued-nudge beads.
 	// Canonical: cmd/gc/nudge_beads.go (nudgeBeadLabel).
 	labelNudge = "gc:nudge"
+	// labelNudgeQueue marks the DURABLE QUEUE's own beads, a family disjoint
+	// from the gc:nudge shadow beads above.
+	// Canonical: internal/storebinding/beads_nudge_queue.go (nudgeQueueLabel);
+	// pinned behaviorally against it by classify_nudge_queue_test.go, which
+	// lives in the external test package because storebinding imports this one.
+	//
+	// It needs its own arm because the nudge arm matches EXACTLY: "gc:nudge-queue"
+	// is not "gc:nudge", so a queue bead classified as ClassWork — a bead
+	// NewBeadsNudgeQueue physically writes into the nudges-class store, answering
+	// to the class that never holds it. That mismatch is not cosmetic: the
+	// infra-class migration selects its snapshot with a not-Work filter
+	// (cmd/gc/infra_class_migrate.go readInfraSnapshot), so queue beads were
+	// excluded from the copy and left behind in the work store. Fixing the arm
+	// makes that migration carry them, and makes an already-converged city's
+	// containment re-check name the ones it stranded — which is the true report.
+	labelNudgeQueue = "gc:nudge-queue"
 	// typeMessage is the mail bead type.
 	// Canonical: internal/mail/beadmail/beadmail.go (Type: "message").
 	typeMessage = "message"
@@ -63,6 +79,10 @@ const (
 //     they glue, while user convoys remain ClassWork.
 //   - ClassGraph for convergence roots (type=convergence), folding the
 //     convergence engine's state in with the graph it pours.
+//
+// The nudge arm additionally matches the durable queue's own family
+// (gc:nudge-queue) beside the shadow family (gc:nudge). That was a defect
+// rather than a design choice — see labelNudgeQueue.
 //
 // These are net-new routing decisions and carry real behavior risk. Note that
 // Class (which backend) is orthogonal to beads.StorageClass (which tier): during
@@ -114,7 +134,22 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 // the storage-tier policyNameForGraphPlan classifier.
 func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
 	switch {
-	case isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp"):
+	// The order-tracking exclusion is the one deliberate divergence from
+	// cmd/gc's policyNameForBead, and it fixes a real collision rather than
+	// introducing one. orders.RunOutcomeWisp / WispFailed / WispCanceled stamp
+	// the BARE "wisp" label on the tracking bead as an OUTCOME marker — it
+	// records that the run dispatched a wisp, not that the bead IS one. The
+	// dispatched wisp is its own bead, carrying gc:wisp or the wisp kind and no
+	// order-tracking label, so it still classifies as graph here.
+	//
+	// Without the exclusion the wisp arm ran first and took the tracking bead,
+	// so a wisp-dispatched run answered to the graph class while ListTracking
+	// and RecentRunsAll read the orders leg only — on a class-split city those
+	// runs were invisible to them. Excluding order-tracking is narrower than
+	// reordering the arms: every other bead the wisp arm claims still reaches it
+	// first.
+	case !hasLabel(labels, labelOrderTracking) &&
+		(isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp")):
 		return ClassGraph
 	case beadType == typeMessage || hasLabelPrefix(labels, labelExtmsgPrefix):
 		return ClassMessaging
@@ -124,7 +159,7 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
-	case hasLabel(labels, labelNudge):
+	case hasLabel(labels, labelNudge) || hasLabel(labels, labelNudgeQueue):
 		return ClassNudges
 	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
 		return ClassGraph
