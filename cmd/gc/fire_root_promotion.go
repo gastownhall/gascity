@@ -151,6 +151,18 @@ func (cr *CityRuntime) promoteReadyFireRoots() {
 	}
 }
 
+// firedRootIdempotencyKey derives the fire-root's cook idempotency key from its
+// bead ID. cookFireRoot passes it as molecule.Options.IdempotencyKey, which
+// molecule.Cook stamps onto the cooked root ATOMICALLY with the root's creation
+// (internal/molecule records it under the literal "idempotency_key" metadata —
+// distinct from the gc.-prefixed beadmeta.IdempotencyKeyMetadataKey the Attach
+// path uses). Because it is written in the same create as the root, it survives a
+// linkFiredRoot forward-pointer stamp that fails AFTER the cook — the exact hole
+// this hardening closes.
+func firedRootIdempotencyKey(fireRootID string) string {
+	return "fire-root:" + fireRootID
+}
+
 // cookFireRoot is the controller's real fire-root cook: it materializes the
 // declared formula in-process via molecule.Cook — the same molecule layer the
 // order dispatcher instantiates through, never a `gc sling` shell-out — passing
@@ -158,10 +170,34 @@ func (cr *CityRuntime) promoteReadyFireRoots() {
 // materialized root 1:1 (gc.var.<name>). It then links the cooked root to the
 // fire-root so the promotion is idempotent, and the controller's own graph-dispatch
 // reconcile advances the cooked workflow exactly as it does an order wisp.
+//
+// Idempotency does NOT rest solely on that post-hoc linkFiredRoot stamp.
+// promoteReadyFireRoots' HasMoleculeChildren probe reads the workflow_id/
+// molecule_id forward pointer linkFiredRoot writes after the cook; if that
+// best-effort SetMetadata fails, the probe goes blind, and because this promotion
+// re-runs on EVERY patrol tick (unlike the one-shot manual sling it replaces) the
+// fire-root would re-cook every tick — amplifying into repeated duplicate convoys.
+// So before cooking, cookFireRoot re-detects an already-cooked LIVE convoy by the
+// idempotency key molecule.Cook stamps on its root in the create itself (immune to
+// the post-hoc stamp). If found, it re-asserts the linkage the earlier tick failed
+// to write and does NOT re-cook.
 func (cr *CityRuntime) cookFireRoot(store beads.Store, storeRef, rigName string, fireRoot beads.Bead, formulaName string, vars map[string]string) error {
+	idempotencyKey := firedRootIdempotencyKey(fireRoot.ID)
+	if existing, found, err := findLiveFiredRoot(store, idempotencyKey); err != nil {
+		return fmt.Errorf("fire-root %s: probing idempotency key: %w", fireRoot.ID, err)
+	} else if found {
+		// Already cooked on a prior tick; the post-hoc stamp evidently failed
+		// (else HasMoleculeChildren would have short-circuited us). Re-assert the
+		// forward pointer so the cheaper probe resumes, and skip the cook.
+		return linkFiredRoot(store, storeRef, fireRoot.ID, &molecule.Result{
+			RootID:        existing.ID,
+			GraphWorkflow: strings.TrimSpace(existing.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow,
+		})
+	}
 	res, err := molecule.Cook(context.Background(), store, formulaName, cr.fireFormulaSearchPaths(rigName), molecule.Options{
-		Vars:     vars,
-		ParentID: fireRoot.ID,
+		Vars:           vars,
+		ParentID:       fireRoot.ID,
+		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
 		return err
@@ -170,6 +206,34 @@ func (cr *CityRuntime) cookFireRoot(store beads.Store, storeRef, rigName string,
 		return fmt.Errorf("cook of %q produced no root", formulaName)
 	}
 	return linkFiredRoot(store, storeRef, fireRoot.ID, res)
+}
+
+// findLiveFiredRoot returns the live (non-closed) bead already stamped with the
+// fire-root's cook idempotency key, if any — the stamp-independent idempotency
+// guard cookFireRoot consults before cooking. It reads BOTH storage tiers because
+// a cooked graph.v2 workflow root can land on the wisp tier the default
+// (issues-tier) list filters out, and it is live-aware: a CLOSED convoy is skipped
+// so a fire-root whose prior convoy has completed stays eligible, matching the
+// HasMoleculeChildren live-aware idempotency this backstops. The exact-key re-check
+// guards against backends that treat the metadata filter as a superset.
+func findLiveFiredRoot(store beads.Store, idempotencyKey string) (beads.Bead, bool, error) {
+	if store == nil || idempotencyKey == "" {
+		return beads.Bead{}, false, nil
+	}
+	matches, err := store.ListByMetadata(map[string]string{"idempotency_key": idempotencyKey}, 0, beads.WithBothTiers, beads.IncludeClosed)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("listing beads with idempotency key %q: %w", idempotencyKey, err)
+	}
+	for _, b := range matches {
+		if b.Metadata["idempotency_key"] != idempotencyKey {
+			continue
+		}
+		if b.Status == "closed" {
+			continue
+		}
+		return b, true, nil
+	}
+	return beads.Bead{}, false, nil
 }
 
 // linkFiredRoot records the fire-root ⇄ cooked-root linkage that makes the

@@ -1,11 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -267,7 +272,7 @@ func TestCityRuntimePromoteReadyFireRoots(t *testing.T) {
 		standaloneCityStore: cityStore,
 		standaloneRigStores: map[string]beads.Store{"dip": rigStore},
 		stderr:              io.Discard,
-		fireRootCook: func(store beads.Store, storeRef, rigName string, fireRoot beads.Bead, formulaName string, vars map[string]string) error {
+		fireRootCook: func(_ beads.Store, storeRef, rigName string, fireRoot beads.Bead, formulaName string, _ map[string]string) error {
 			swept = append(swept, sweptFire{storeRef: storeRef, rigName: rigName, fireRootID: fireRoot.ID, formula: formulaName})
 			return nil
 		},
@@ -386,5 +391,142 @@ func TestLinkFiredRootLegacyMolecule(t *testing.T) {
 	}
 	if !has {
 		t.Fatal("HasMoleculeChildren(FR-1) = false after legacy link, want true")
+	}
+}
+
+// linkStampFailingStore fails linkFiredRoot's forward/back-pointer SetMetadata
+// writes while fail is set, simulating a best-effort stamp that does not land
+// after a successful molecule.Cook. molecule.Cook stamps beads (including the
+// root's idempotency_key) at CREATE time, not through these keys, so the cook
+// itself is unaffected — only the post-hoc linkage fails, exactly the caveat the
+// hardening closes.
+type linkStampFailingStore struct {
+	*beads.MemStore
+	fail bool
+}
+
+func (s *linkStampFailingStore) SetMetadata(id, key, value string) error {
+	if s.fail {
+		switch key {
+		case "workflow_id", beadmeta.MoleculeIDMetadataKey, beadmeta.SourceBeadIDMetadataKey, beadmeta.SourceStoreRefMetadataKey:
+			return fmt.Errorf("simulated stamp failure setting %s on %s", key, id)
+		}
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+// firedRootsByKey returns every bead carrying the given cook idempotency key,
+// across both tiers and including closed, so the test counts the real convoy
+// population regardless of the cooked root's tier or lifecycle.
+func firedRootsByKey(t *testing.T, store beads.Store, key string) []beads.Bead {
+	t.Helper()
+	matches, err := store.ListByMetadata(map[string]string{"idempotency_key": key}, 0, beads.WithBothTiers, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata(%q): %v", key, err)
+	}
+	var out []beads.Bead
+	for _, b := range matches {
+		if b.Metadata["idempotency_key"] == key {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func enableFormulaV2ForTest(t *testing.T) {
+	t.Helper()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+}
+
+// TestPromoteReadyFireRootsKeyedIdempotencySurvivesLinkStampFailure is the
+// Fix-1 hardening regression. Because promoteReadyFireRoots re-runs on EVERY
+// patrol tick, a linkFiredRoot forward-pointer stamp that fails right after a
+// successful molecule.Cook would blind the HasMoleculeChildren probe and re-cook
+// the fire-root every subsequent tick — an every-tick duplicate-convoy
+// amplification unique to Fix-1 (the one-shot manual sling it replaces could not
+// re-fire). The keyed idempotency molecule.Cook stamps on the cooked root
+// (atomically with creation, independent of the post-hoc stamp) stops it: the
+// next tick re-detects the already-cooked live convoy by that key, re-asserts the
+// missing linkage, and does NOT cook a duplicate.
+func TestPromoteReadyFireRootsKeyedIdempotencySurvivesLinkStampFailure(t *testing.T) {
+	enableFormulaV2ForTest(t)
+
+	// A minimal graph.v2 workflow formula: its root is a gc.kind=workflow bead
+	// molecule.Cook does NOT parent on the fire-root, so the ONLY idempotency link
+	// is the workflow_id forward pointer linkFiredRoot stamps afterward — the
+	// best-effort stamp this test fails. This is the graph.v2-specific shape the
+	// caveat calls out.
+	const fireFormula = "graph-demo"
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-demo.toml"), []byte(`
+formula = "graph-demo"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "setup"
+title = "Setup"
+
+[[steps]]
+id = "work"
+title = "Work"
+needs = ["setup"]
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	base := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "FR-1", Title: "build fire-root", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.FireFormulaMetadataKey: fireFormula,
+		}},
+	}, nil)
+	store := &linkStampFailingStore{MemStore: base, fail: true}
+
+	cr := &CityRuntime{
+		cityName:            "city",
+		standaloneCityStore: store,
+		stderr:              io.Discard,
+		cfg:                 &config.City{FormulaLayers: config.FormulaLayers{City: []string{formulaDir}}},
+	}
+	key := firedRootIdempotencyKey("FR-1")
+
+	// Tick 1: the fire-root cooks, but the forward-pointer stamp fails (transient).
+	cr.promoteReadyFireRoots()
+	roots := firedRootsByKey(t, base, key)
+	if len(roots) != 1 {
+		t.Fatalf("after tick 1: %d cooked roots with key %q, want 1 (molecule.Cook must stamp the key it was passed)", len(roots), key)
+	}
+	wfRootID := roots[0].ID
+	if fr, _ := base.Get("FR-1"); fr.Metadata["workflow_id"] != "" {
+		t.Fatalf("after tick 1: FR-1 workflow_id = %q, want empty (the stamp failed)", fr.Metadata["workflow_id"])
+	}
+	// Bug precondition: with the forward pointer missing and the graph.v2 root
+	// unparented, HasMoleculeChildren is blind, so the next tick re-enters the cook
+	// — this is exactly where the old code amplified.
+	if has, err := sling.HasMoleculeChildren(base, "FR-1", base); err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	} else if has {
+		t.Fatal("HasMoleculeChildren(FR-1) = true after failed stamp, want false (the test would not exercise the keyed guard otherwise)")
+	}
+
+	// The stamp failure clears (it was transient). Tick 2: the probe is still
+	// blind, but keyed idempotency finds the live convoy and re-links instead of
+	// cooking a duplicate.
+	store.fail = false
+	cr.promoteReadyFireRoots()
+	if roots := firedRootsByKey(t, base, key); len(roots) != 1 {
+		t.Fatalf("after tick 2: %d cooked roots with key %q, want 1 (every-tick amplification!)", len(roots), key)
+	}
+	if fr, _ := base.Get("FR-1"); fr.Metadata["workflow_id"] != wfRootID {
+		t.Fatalf("after tick 2: FR-1 workflow_id = %q, want %q (re-link must heal the pointer)", fr.Metadata["workflow_id"], wfRootID)
+	}
+
+	// Tick 3: the healed forward pointer lets HasMoleculeChildren short-circuit at
+	// the cheaper probe before cookFireRoot — still exactly one convoy.
+	cr.promoteReadyFireRoots()
+	if roots := firedRootsByKey(t, base, key); len(roots) != 1 {
+		t.Fatalf("after tick 3: %d cooked roots with key %q, want 1", len(roots), key)
 	}
 }
