@@ -27,23 +27,39 @@ func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *c
 }
 
 // isWarmFloorCandidate reports whether a session Info currently occupies a warm
-// min_active_sessions floor slot: an open, live pool instance (anything not
-// closed and not asleep/draining/suspended). It deliberately EXCLUDES asleep
-// sessions so a dormant low-id bead — e.g. a max-session-age-slept floor
-// session awaiting min-fill recreation — can never mask a live higher-id
-// session out of the deterministic exempt set and get that warm session
-// idle-killed. Creating and freshly-stamped (empty-state) sessions count: they
-// are legitimate floor occupants on their way to active, matching
-// countMinActiveCovered's "covered" notion.
+// min_active_sessions floor slot: an open session in a genuinely-live runtime
+// state (on its way to, or currently, active). It is an explicit ALLOW-LIST —
+// only StateNone (freshly stamped, not yet transitioned), StateActive and
+// StateAwake (running; Awake is the reconciler healState alias for Active —
+// session_reconcile.go / lifecycle_projection.go RuntimeProjectionAlive),
+// StateCreating, and StateStartPending count. This mirrors countMinActiveCovered's
+// covering-states convention (compute_awake_set.go) rather than diverging into a
+// deny-list.
+//
+// Why an allow-list (Doc adversarial re-review, sc-sabwwn): every other state —
+// Asleep, Suspended, Draining, Drained, Archived, FailedCreate, Quarantined,
+// Closed — is a dormant, terminal, or non-runnable bead that can persist with
+// Closed==false yet is NOT a warm occupant. Counting any such stale low-id bead
+// would inflate the floor rank in isMinFloorExemptIdleSession and mask the ACTUAL
+// live low-id floor session out of the deterministic exempt set, getting that
+// warm session idle-killed and cold-recreated — the exact 0<->1 oscillation this
+// fix (sc-5mtyhy) exists to eliminate. A deny-list silently reopened that gap for
+// every state it forgot (Quarantined/FailedCreate/Drained/Archived did leak); the
+// allow-list fails closed — an unknown or newly-added state is excluded, never a
+// spurious floor occupant. The info.Closed guard stays first: a closed bead has
+// State=="" (StateNone), which the allow-list admits, so occupancy must be
+// rejected on Closed before the state switch.
 func isWarmFloorCandidate(info sessionpkg.Info) bool {
 	if info.Closed {
 		return false
 	}
 	switch info.State {
-	case sessionpkg.StateAsleep, sessionpkg.StateDraining, sessionpkg.StateSuspended, sessionpkg.StateClosed:
+	case sessionpkg.StateNone, sessionpkg.StateActive, sessionpkg.StateAwake,
+		sessionpkg.StateCreating, sessionpkg.StateStartPending:
+		return true
+	default:
 		return false
 	}
-	return true
 }
 
 // isMinFloorExemptIdleSession reports whether sessionID is one of the

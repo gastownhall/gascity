@@ -110,6 +110,45 @@ func TestIsMinFloorExemptIdleSession(t *testing.T) {
 		}
 	})
 
+	t.Run("a stale low-id session in a non-live state does not mask a live higher-id floor member", func(t *testing.T) {
+		// Doc adversarial re-review (sc-sabwwn): the prior isWarmFloorCandidate
+		// deny-list excluded only Asleep/Draining/Suspended/Closed, so a stale
+		// low-id bead in any of these four non-terminal, non-live states (all
+		// persist with Closed==false) inflated the floor rank and masked the live
+		// floor member out of the exempt set — reproducing the kill->cold-recreate
+		// oscillation the fix eliminates. The allow-list excludes each of them, so
+		// the live s-b stays exempt — the same guarantee the Asleep guard proves.
+		staleStates := []sessionpkg.State{
+			sessionpkg.StateQuarantined,
+			sessionpkg.StateFailedCreate,
+			sessionpkg.StateDrained,
+			sessionpkg.StateArchived,
+		}
+		for _, st := range staleStates {
+			stale := sessionpkg.Info{ID: "s-a", Template: "worker", State: st}
+			infoByID := map[string]sessionpkg.Info{"s-a": stale, "s-b": warm("s-b")}
+			if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-b") {
+				t.Errorf("state %q: the live s-b must be exempt; a stale low-id s-a in %q must not mask it", st, st)
+			}
+		}
+	})
+
+	t.Run("an awake low-id session IS a live floor member and stays exempt", func(t *testing.T) {
+		// Guards the allow-list's inclusion of StateAwake (the healState alive
+		// alias): a healed-to-awake floor session is genuinely warm, so at min=1
+		// the lowest-id awake session must be the exempt member — omitting Awake
+		// would idle-kill the most common warm state and reproduce the oscillation
+		// in the opposite (under-exemption) direction.
+		awake := sessionpkg.Info{ID: "s-a", Template: "worker", State: sessionpkg.StateAwake}
+		infoByID := map[string]sessionpkg.Info{"s-a": awake, "s-b": warm("s-b")}
+		if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-a") {
+			t.Fatal("the awake low-id s-a is a live floor member and must be exempt")
+		}
+		if isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-b") {
+			t.Fatal("s-b is above the floor (s-a is a live awake occupant) and must NOT be exempt")
+		}
+	})
+
 	t.Run("other-template and closed sessions are excluded from the count", func(t *testing.T) {
 		infoByID := map[string]sessionpkg.Info{
 			"s-a": {ID: "s-a", Template: "scout", State: sessionpkg.StateActive},                // other template
@@ -140,21 +179,37 @@ func TestIsMinFloorExemptIdleSession(t *testing.T) {
 	})
 }
 
-// TestIsWarmFloorCandidate pins which session states occupy a warm floor slot:
-// live sessions (active/creating/fresh) count; closed and asleep/draining/
-// suspended sessions do not.
+// TestIsWarmFloorCandidate pins the explicit ALLOW-LIST of states that occupy a
+// warm floor slot: only genuinely-live sessions count — StateNone (fresh),
+// Active, Awake (the healState alive alias), Creating, StartPending. Every other
+// state, including the four Doc's adversarial re-review flagged as leaking under
+// the prior deny-list (Quarantined, FailedCreate, Drained, Archived) plus
+// Asleep/Draining/Suspended/Closed, is NOT a warm occupant (sc-sabwwn). An
+// allow-list fails closed: a state absent from the table is excluded by default.
 func TestIsWarmFloorCandidate(t *testing.T) {
 	cases := []struct {
 		state sessionpkg.State
 		want  bool
 	}{
+		// Live — count toward the warm floor.
 		{sessionpkg.StateActive, true},
+		{sessionpkg.StateAwake, true}, // healState alias for Active — must count, else healed-alive floor sessions get idle-killed
 		{sessionpkg.StateCreating, true},
-		{"", true}, // freshly stamped, not yet active
+		{sessionpkg.StateStartPending, true},
+		{sessionpkg.StateNone, true}, // freshly stamped, not yet active
+		{"", true},                   // StateNone spelled literally — same admit
+		// Dormant / non-runnable — must NOT count.
 		{sessionpkg.StateAsleep, false},
 		{sessionpkg.StateDraining, false},
 		{sessionpkg.StateSuspended, false},
 		{sessionpkg.StateClosed, false},
+		// The four states the prior deny-list forgot (Doc HOLD, sc-sabwwn): each
+		// persists with Closed==false but is stale/non-live, so counting it would
+		// mask the live floor member and reproduce the kill->recreate oscillation.
+		{sessionpkg.StateQuarantined, false},
+		{sessionpkg.StateFailedCreate, false},
+		{sessionpkg.StateDrained, false},
+		{sessionpkg.StateArchived, false},
 	}
 	for _, tc := range cases {
 		if got := isWarmFloorCandidate(sessionpkg.Info{State: tc.state}); got != tc.want {
@@ -163,6 +218,11 @@ func TestIsWarmFloorCandidate(t *testing.T) {
 	}
 	if isWarmFloorCandidate(sessionpkg.Info{State: sessionpkg.StateActive, Closed: true}) {
 		t.Error("a Closed session is never a warm floor candidate")
+	}
+	// The Closed guard must reject even when State=="" (StateNone) — a closed
+	// bead's state is blanked to "", which the allow-list would otherwise admit.
+	if isWarmFloorCandidate(sessionpkg.Info{State: sessionpkg.StateNone, Closed: true}) {
+		t.Error("a Closed session with a blanked (StateNone) state must still be rejected by the Closed guard")
 	}
 }
 
