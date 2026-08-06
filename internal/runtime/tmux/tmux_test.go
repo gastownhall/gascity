@@ -32,6 +32,19 @@ func hasTmux() bool {
 	return err == nil
 }
 
+// privateSocketName returns a short, unique, gctest-prefixed socket name for a
+// test that needs its own tmux SERVER — one forked from THIS process, so the
+// server's global environment is the test's own. The package socket hands back a
+// server started by whichever test ran first, which never saw the test's env.
+//
+// Short on purpose: the full socket path must fit a unix sun_path (~107 bytes),
+// and suffixing testSocketName (already ~34 chars under a per-run temp root)
+// overflows it — which tmux reports as the thoroughly misleading "no server
+// running" from new-session.
+func privateSocketName(tag string) string {
+	return fmt.Sprintf("gctest-%d-%s%d", os.Getpid(), tag, time.Now().UnixNano()%1e9)
+}
+
 // testTmux returns a Tmux instance that uses an isolated test socket.
 func testTmux() *Tmux {
 	cfg := DefaultConfig()
@@ -3376,4 +3389,56 @@ func processAlive(pid string) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil || err == syscall.EPERM
+}
+
+// TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild is the
+// child-level proof behind convergence.ScrubTokenEnv and
+// processenv.ControllerOnlyEnvKeys: the controller token is withheld from agent
+// panes by an EMPTY value, not by dropping the key.
+//
+// A pane's shell inherits the tmux SERVER's global environment, which holds
+// whatever the controller exported when the server started. A key merely absent
+// from the -e set therefore arrives in the child carrying the controller's real
+// value — asserting on the env map alone cannot see that. Only the empty value
+// produces the `env -u` prefix that makes the var genuinely absent from the
+// child process.
+func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the server it starts forks from THIS
+	// process and its global environment carries the token. The package socket
+	// would hand back a server started by an earlier test, which never saw it.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("tp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "child-token")
+	sessionName := "gc-test-token-pin"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	command := fmt.Sprintf(`sh -c 'printf %%s "[${%s-ABSENT}]" > %s; sleep 30'`, tokenVar, report)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, command, map[string]string{tokenVar: ""}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	// Bounded poll on the pane's own report — the condition this test is about —
+	// rather than elapsed wall time. A leak shows up as a timeout whose message
+	// carries what the pane actually saw.
+	waitForMarker(t, report, "[ABSENT]")
+
+	got, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("reading pane report: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("pane child received the controller token: %s", got)
+	}
 }
