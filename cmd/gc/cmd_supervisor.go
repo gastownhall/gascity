@@ -1448,6 +1448,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
+	// External event forwarders consume the typed supervisor stream without
+	// configuring [events.export]. Allow that long-lived supervisor unit to arm
+	// the same transcript correlation sidecars independently.
+	armSupervisorTranscriptMetaFromEnv(stderr)
+
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
 	if supCfg.Events.Export.Enabled() {

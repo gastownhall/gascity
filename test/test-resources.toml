@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 550
-baseline_files = 166
+baseline_calls = 551
+baseline_files = 167
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 409
-baseline_files = 115
+baseline_calls = 410
+baseline_files = 116
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -228,6 +228,17 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
+resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
+migration_target = "P0.4b"
 expires = "2026-10-01"
 
 [[medium]]

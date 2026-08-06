@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -70,6 +72,33 @@ func TestPassthroughEnvOmitsUnset(t *testing.T) {
 	got := passthroughEnv()
 	if _, ok := got["GC_DOLT"]; ok {
 		t.Error("passthroughEnv() should omit empty GC_DOLT")
+	}
+}
+
+// The controller token is GC_-prefixed, so the sweep above would otherwise read
+// the controller's real token out of os.Environ() and write it straight back
+// over the empty value providerProcessPassthroughEnv() pinned.
+//
+// Withholding means PRESENT AND EMPTY, not absent: this map is an overlay on an
+// environment the session already inherits, so an absent key leaves the
+// controller's value showing through from the tmux server env or from
+// os.Environ() on the subprocess/ACP paths. The neighboring GC_ key proves the
+// exclusion is by exact name — a prefix match would strand the identity anchors
+// and the Dolt vars agents need.
+func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+	t.Setenv("GC_BEADS", "file")
+
+	got := passthroughEnv()
+
+	val, ok := got[convergence.TokenEnvVar]
+	if !ok {
+		t.Errorf("passthroughEnv() omits %s; want present and empty so the session cannot inherit the controller's value", convergence.TokenEnvVar)
+	} else if val != "" {
+		t.Errorf("passthroughEnv()[%s] = %q, want empty", convergence.TokenEnvVar, val)
+	}
+	if got["GC_BEADS"] != "file" {
+		t.Errorf("passthroughEnv()[GC_BEADS] = %q, want %q (the exclusion must be by exact name)", got["GC_BEADS"], "file")
 	}
 }
 
@@ -2000,5 +2029,37 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Restarting supervisor") {
 		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
+	}
+}
+
+// The map-level guards above are necessary but were never sufficient: the
+// session env is an OVERLAY, and every runtime lays it over an environment the
+// child already has. internal/runtime/subprocess and internal/runtime/acp build
+// exactly this — os.Environ() with the overlay appended — so this test spawns a
+// real child that way and asks it what it actually sees. Deleting the key
+// instead of pinning it empty passes every assertion on the map and fails here,
+// which is how the leak shipped.
+func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
+	const token = "super-secret-controller-token"
+	t.Setenv(convergence.TokenEnvVar, token)
+
+	overlay := passthroughEnv()
+	env := os.Environ()
+	for k, v := range overlay {
+		env = append(env, k+"="+v)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", `printf %s "[${`+convergence.TokenEnvVar+`-ABSENT}]"`)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("running child: %v", err)
+	}
+
+	if got := string(out); got != "[]" {
+		t.Errorf("child process saw %s = %s, want [] (present and empty); it inherited the controller's value", convergence.TokenEnvVar, got)
+	}
+	if strings.Contains(string(out), token) {
+		t.Errorf("child process received the controller token: %s", out)
 	}
 }
