@@ -737,6 +737,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"--print"},
 		PermissionModes: map[string]string{
 			"unrestricted": "--dangerously-skip-permissions",
+			"accept-edits": "--mode accept-edits",
+			"plan":         "--mode plan",
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -747,6 +749,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 					{Value: "standard", Label: "Standard (prompt for permissions)", FlagArgs: []string{}},
+					{Value: "accept-edits", Label: "Accept edits", FlagArgs: []string{"--mode", "accept-edits"}},
+					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--mode", "plan"}},
+				},
+			},
+			// effort intentionally has no Default and no OptionDefaults entry:
+			// agy < 1.1.10 silently ignores --effort (and --model) on the
+			// --prompt-interactive launch path, so the flag must only ever be
+			// sent when a user opts in explicitly.
+			{
+				Key:   "effort",
+				Label: "Effort",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
+					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
 				},
 			},
 			{

@@ -266,8 +266,22 @@ upstream env. Set `provider` and run their normal `login` once on the box; no
 provider = "pi"          # Pi Coding Agent     — has a model option (ollama-cloud-gpt-oss-20b)
 # provider = "auggie"    # Augment Auggie CLI
 # provider = "omp"       # Oh My Pi
-# provider = "antigravity"   # Antigravity (agy)
+# provider = "antigravity"   # Antigravity (agy) — effort + plan/accept-edits modes
 ```
+
+Antigravity also takes an `effort` option (`low` · `medium` · `high`) and
+`plan` / `accept-edits` permission modes, mapped to agy's `--effort` and
+`--mode` flags:
+
+```toml
+provider        = "antigravity"
+option_defaults = { effort = "high", permission_mode = "plan" }
+```
+
+<Note>
+`effort` needs agy **1.1.10 or newer** — older versions silently ignore
+`--effort` at launch and run at the model's default.
+</Note>
 
 If one of these later needs a custom endpoint, give it a raw upstream `env` block
 with whatever vars its CLI documents — the same escape hatch shown for Grok

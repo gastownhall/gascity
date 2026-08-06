@@ -130,6 +130,125 @@ func TestBuiltinCodexModelChoicesUseAvailable53CodexAlias(t *testing.T) {
 	}
 }
 
+func TestBuiltinAntigravityPermissionModeChoices(t *testing.T) {
+	agy, ok := BuiltinProviders()["antigravity"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing antigravity")
+	}
+
+	var permissionOption BuiltinProviderOption
+	for _, option := range agy.OptionsSchema {
+		if option.Key == "permission_mode" {
+			permissionOption = option
+			break
+		}
+	}
+	if permissionOption.Key == "" {
+		t.Fatal("antigravity provider missing permission_mode option")
+	}
+	if permissionOption.Default != "unrestricted" {
+		t.Errorf("permission_mode Default = %q, want %q", permissionOption.Default, "unrestricted")
+	}
+	if agy.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want %q", agy.OptionDefaults["permission_mode"], "unrestricted")
+	}
+
+	byValue := make(map[string]BuiltinOptionChoice, len(permissionOption.Choices))
+	for _, choice := range permissionOption.Choices {
+		byValue[choice.Value] = choice
+	}
+	wantFlagArgs := map[string][]string{
+		"unrestricted": {"--dangerously-skip-permissions"},
+		"standard":     {},
+		"accept-edits": {"--mode", "accept-edits"},
+		"plan":         {"--mode", "plan"},
+	}
+	if len(permissionOption.Choices) != len(wantFlagArgs) {
+		t.Errorf("permission_mode choice count = %d, want %d", len(permissionOption.Choices), len(wantFlagArgs))
+	}
+	for value, want := range wantFlagArgs {
+		choice, ok := byValue[value]
+		if !ok {
+			t.Fatalf("permission_mode choices missing %q", value)
+		}
+		if len(choice.FlagArgs) != len(want) {
+			t.Fatalf("%s FlagArgs = %v, want %v", value, choice.FlagArgs, want)
+		}
+		for i := range want {
+			if choice.FlagArgs[i] != want[i] {
+				t.Fatalf("%s FlagArgs = %v, want %v", value, choice.FlagArgs, want)
+			}
+		}
+	}
+
+	// PermissionModes is the config-only display table; it mirrors the
+	// flag-bearing schema choices (the no-flag "standard" mode stays unmapped).
+	wantModes := map[string]string{
+		"unrestricted": "--dangerously-skip-permissions",
+		"accept-edits": "--mode accept-edits",
+		"plan":         "--mode plan",
+	}
+	if len(agy.PermissionModes) != len(wantModes) {
+		t.Errorf("PermissionModes = %v, want %v", agy.PermissionModes, wantModes)
+	}
+	for mode, want := range wantModes {
+		if agy.PermissionModes[mode] != want {
+			t.Errorf("PermissionModes[%s] = %q, want %q", mode, agy.PermissionModes[mode], want)
+		}
+	}
+}
+
+func TestBuiltinAntigravityEffortChoices(t *testing.T) {
+	agy, ok := BuiltinProviders()["antigravity"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing antigravity")
+	}
+
+	var effortOption BuiltinProviderOption
+	for _, option := range agy.OptionsSchema {
+		if option.Key == "effort" {
+			effortOption = option
+			break
+		}
+	}
+	if effortOption.Key == "" {
+		t.Fatal("antigravity provider missing effort option")
+	}
+
+	// agy < 1.1.10 silently ignores --effort on the --prompt-interactive
+	// launch path, so the option must never fire by default: no schema
+	// Default and no OptionDefaults entry.
+	if effortOption.Default != "" {
+		t.Errorf("effort Default = %q, want empty (agy <1.1.10 drops the flag silently)", effortOption.Default)
+	}
+	if _, ok := agy.OptionDefaults["effort"]; ok {
+		t.Errorf("OptionDefaults[effort] = %q, want absent (agy <1.1.10 drops the flag silently)", agy.OptionDefaults["effort"])
+	}
+
+	if len(effortOption.Choices) == 0 || effortOption.Choices[0].Value != "" || len(effortOption.Choices[0].FlagArgs) != 0 {
+		t.Fatalf("effort choices must lead with the empty no-flag sentinel, got %v", effortOption.Choices)
+	}
+
+	byValue := make(map[string]BuiltinOptionChoice, len(effortOption.Choices))
+	for _, choice := range effortOption.Choices {
+		byValue[choice.Value] = choice
+	}
+	// agy exposes exactly three effort levels (agy --help: --effort low|medium|high).
+	wantValues := []string{"low", "medium", "high"}
+	if len(effortOption.Choices) != len(wantValues)+1 {
+		t.Errorf("effort choice count = %d, want %d (sentinel + %v)", len(effortOption.Choices), len(wantValues)+1, wantValues)
+	}
+	for _, value := range wantValues {
+		choice, ok := byValue[value]
+		if !ok {
+			t.Fatalf("effort choices missing %q", value)
+		}
+		if len(choice.FlagArgs) != 2 || choice.FlagArgs[0] != "--effort" || choice.FlagArgs[1] != value {
+			t.Errorf("%s FlagArgs = %v, want [--effort %s]", value, choice.FlagArgs, value)
+		}
+	}
+}
+
 func TestBuiltinCodexModelChoicesIncludeGPT56Variants(t *testing.T) {
 	codex, ok := BuiltinProviders()["codex"]
 	if !ok {
