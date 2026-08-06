@@ -79,6 +79,7 @@ gc [flags]
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
+| [gc storage](#gc-storage) | Inspect and migrate this city's storage-class layout |
 | [gc supervisor](#gc-supervisor) | Manage the machine-wide supervisor |
 | [gc suspend](#gc-suspend) | Suspend the city (all agents effectively suspended) |
 | [gc trace](#gc-trace) | Inspect and control session reconciler tracing |
@@ -4358,6 +4359,65 @@ gc stop [path|name] [flags]
 | `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
 | `--json` | bool |  | emit JSONL summary |
 | `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
+
+## gc storage
+
+Move this city's storage-class layout, and report on it.
+
+These are operator commands. Nothing here runs on boot: a city whose
+[storage.classes] name a binding it has not converged on refuses to start and
+names the migrate command, because the source's writer set is something an
+operator arranges rather than something a program can observe.
+
+```
+gc storage
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
+
+## gc storage migrate
+
+Copy this city's infrastructure-class beads out of the work store and into
+the binding [storage.classes] assigns them to.
+
+Every bead is copied with its id and its within-class dependency topology
+preserved, proven field-equal against a closed and reopened destination, and
+then recorded in a proven-copy manifest and a convergence marker. The source is
+RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
+rollback before cutover is a config edit with no data recovery step.
+
+The move refuses while a writer can reach the source. This binary can prove the
+absence of a controller and cannot prove the absence of anything else, so that
+half is an explicit operator attestation.
+
+```
+gc storage migrate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage status
+
+Report which binding serves each storage class, whether this city has
+converged onto it, and what the retained source and the binding each hold.
+
+This path is read-only against a LIVE city: it creates no directory, database,
+write-ahead log, shared-memory index, schema, marker or manifest. It does not
+open the binding's engine unless that database already exists, because opening
+it would create the very database the report is being asked about.
+
+It exits non-zero when the city is configured for a binding it has not
+converged on, so a deployment script can gate on it.
+
+```
+gc storage status
+```
 
 ## gc supervisor
 

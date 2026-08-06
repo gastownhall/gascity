@@ -18,7 +18,7 @@ import (
 // today's behavior where these paths emit no bead events. Threading a recorder
 // so relocated CLI writes emit bead.* is a separate follow-up.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	return resolveSessionStore(store, cfg, cityPath, nil)
+	return resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 }
 
 // cliSessionFrontDoor builds the typed session write front door over the

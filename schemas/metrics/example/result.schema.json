@@ -207,7 +207,9 @@
               "whoami",
               "runtime-heartbeat",
               "pack-registry-requests",
-              "events-reemit-execution"
+              "events-reemit-execution",
+              "storage-migrate",
+              "storage-status"
             ]
           },
           "event_id": {

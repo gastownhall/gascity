@@ -169,6 +169,10 @@ func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options 
 }
 
 func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
+	// Whatever this invocation opened for one-shot storage routing closes here,
+	// after the command has run and before the process reports its code.
+	defer func() { _ = closeCLIStorageRoutes() }()
+
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
@@ -319,6 +323,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),
+		newStorageCmd(stdout, stderr),
 		newServiceCmd(stdout, stderr),
 		newSuspendCmd(stdout, stderr),
 		newResumeCmd(stdout, stderr),

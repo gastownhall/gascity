@@ -103,6 +103,13 @@ type CityRuntime struct {
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
 	standaloneRigStores map[string]beads.Store
 
+	// storageRoutes is the opened non-work storage binding this process
+	// resolved once at boot, or nil for every city that authors no [storage]
+	// section. It is immutable for the life of the process: a reload that would
+	// change [storage] is refused by the StorageReloadRequiresRestart check in
+	// reloadConfigTraced rather than swapping a live handle.
+	storageRoutes *storageRoutes
+
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
 	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
@@ -229,7 +236,14 @@ const postCreateProtectionTimeout = 2 * time.Minute
 // newCityRuntime creates a CityRuntime, building internal components
 // (crash tracker, idle tracker, wisp GC, order dispatcher) from the
 // provided parameters.
-func newCityRuntime(p CityRuntimeParams) *CityRuntime {
+//
+// It returns an error when this city must not start. Today there is exactly one
+// such condition and it is deliberate: a city whose [storage.classes] name a
+// binding it has not provably converged on would otherwise serve infrastructure
+// reads AND writes from a store nothing proved holds its state. The gate that
+// decides is storage_boot.go; every caller here does is print the error and
+// stop this one city.
+func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	configName := lockedConfigName(p.Cfg, p.CityPath)
 	applyRuntimeCityIdentity(p.Cfg, p.CityName)
 
@@ -268,6 +282,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
 
+	// Storage-class routing, resolved once and before any store below is opened
+	// for use. A city that authors no [storage] short-circuits inside the gate
+	// without constructing a registry or a plan; a city whose config and data
+	// disagree stops here rather than serving from the wrong side of a cutover.
+	routes, err := storageBootGate(p.CityPath, p.Cfg, logPrefix, p.Rec, p.Stderr)
+	if err != nil {
+		return nil, err
+	}
+
 	// Sweep orphaned order-tracking beads on startup only (not config reload).
 	// A previous controller instance may have left tracking beads open
 	// (goroutines killed on restart, or silent Close failures).
@@ -293,6 +316,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
 	cr := &CityRuntime{
+		storageRoutes:           routes,
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -356,7 +380,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
-	return cr
+	return cr, nil
 }
 
 // setControllerState sets the API state for this city. The controller
@@ -364,6 +388,12 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 // before run starts, and never replaced afterward.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	// The API projection reads the same classes through the same routes. This
+	// is the one place the pair is composed, so it is the one place the routes
+	// cross — a second resolution would be a second plan.
+	if cs != nil {
+		cs.storageRoutes = cr.storageRoutes
+	}
 }
 
 // crashTracker returns the crash tracker for API server wiring.
@@ -1886,6 +1916,27 @@ func (cr *CityRuntime) reloadConfigTraced(
 	oldRevision := cr.configRev
 	nextCfg := result.Cfg
 	applyRuntimeCityIdentity(nextCfg, cr.cityName)
+
+	// [storage] is decided once, at boot, and the engine it selected is open for
+	// the life of the process (storage_boot.go). Applying a config that names a
+	// different arrangement would leave every class resolver pointing at a
+	// binding this process never opened, so the whole reload is refused here —
+	// before a provider is rebuilt or a bead lifecycle is started — and the
+	// booted configuration stays in force until an operator restarts the city.
+	if config.StorageReloadRequiresRestart(cr.cfg, nextCfg) {
+		err := fmt.Errorf("config reload: [storage] changed, and live storage handles cannot be swapped; restart this city to apply it (keeping old config)")
+		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
@@ -3625,6 +3676,24 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		// The storage binding's engine is opened once per process and closed
+		// once, at the very end of this one — deferred first so it runs last.
+		//
+		// Everything below still writes: the order drain, the city-stop sleep
+		// reason, and the two-pass session stop all go through the session and
+		// order classes, which on a split city are served from this binding.
+		// Closing it any earlier turns those writes into errors against a closed
+		// store, and the sleep reason an operator reads after `gc stop` is the
+		// one that never lands. The defer is also what makes the close reach
+		// BOTH exits: a shutdown that hands its sessions to the next supervisor
+		// returns early, and it still has to hand over the database file — a
+		// process that exits holding it leaves the successor's open racing this
+		// one's.
+		defer func() {
+			if err := cr.storageRoutes.close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+		}()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

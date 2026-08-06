@@ -273,7 +273,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	if result.Processed {
 		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 		if rootID != "" {
-			graphStore := resolveGraphStore(store, cfg, cityPath, nil)
+			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 			recorder := openCityRecorderAt(cityPath, stderr)
 			emitErr := executionevent.EmitCurrent(recorder, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}, rootID, "control-dispatch")
 			var closeErr error

@@ -251,6 +251,20 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// Storage-class binding outcomes. Emitted once per controller boot by the
+	// storage gate, and once per run by `gc storage migrate`, for a city whose
+	// [storage.classes] relocate the infrastructure classes to a binding.
+	//
+	// Converged and Genesis are the two serving outcomes: the first opened a
+	// binding a proven copy already populated, the second created one for a
+	// city that had nothing to move. Unconverged and Uncheckable are the two
+	// refusals: config and data disagree, or the check that would decide could
+	// not run. A city with no [storage] section emits none of them.
+	StorageBindingConverged   = "storage.binding.converged"
+	StorageBindingGenesis     = "storage.binding.genesis"
+	StorageBindingUnconverged = "storage.binding.unconverged"
+	StorageBindingUncheckable = "storage.binding.uncheckable"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -297,6 +311,8 @@ var KnownEventTypes = []string{
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	StorageBindingConverged, StorageBindingGenesis,
+	StorageBindingUnconverged, StorageBindingUncheckable,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

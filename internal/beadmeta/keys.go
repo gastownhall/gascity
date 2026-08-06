@@ -173,23 +173,28 @@ const (
 	SessionNameMetadataKey    = "gc.session_name"
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
-	SessionNameCamelMetadataKey    = "gc.sessionName"
-	SourceBeadIDMetadataKey        = "gc.source_bead_id"
-	SourceStepSpecMetadataKey      = "gc.source_step_spec"
-	SourceStoreRefMetadataKey      = "gc.source_store_ref"
-	SpawnedCountMetadataKey        = "gc.spawned_count"
-	SpecForMetadataKey             = "gc.spec_for"
-	SpecForRefMetadataKey          = "gc.spec_for_ref"
-	StderrMetadataKey              = "gc.stderr"
-	StdoutMetadataKey              = "gc.stdout"
-	StepIDMetadataKey              = "gc.step_id"
-	StepRefMetadataKey             = "gc.step_ref"
-	StepTimeoutMetadataKey         = "gc.step_timeout"
-	SyntheticKindMetadataKey       = "gc.synthetic_kind"
-	SyntheticMetadataKey           = "gc.synthetic"
-	TemplateMetadataKey            = "gc.template"
-	TerminalMetadataKey            = "gc.terminal"
-	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
+	SessionNameCamelMetadataKey = "gc.sessionName"
+	SourceBeadIDMetadataKey     = "gc.source_bead_id"
+	SourceStepSpecMetadataKey   = "gc.source_step_spec"
+	SourceStoreRefMetadataKey   = "gc.source_store_ref"
+	SpawnedCountMetadataKey     = "gc.spawned_count"
+	SpecForMetadataKey          = "gc.spec_for"
+	SpecForRefMetadataKey       = "gc.spec_for_ref"
+	StderrMetadataKey           = "gc.stderr"
+	StdoutMetadataKey           = "gc.stdout"
+	StepIDMetadataKey           = "gc.step_id"
+	StepRefMetadataKey          = "gc.step_ref"
+	StepTimeoutMetadataKey      = "gc.step_timeout"
+	SyntheticKindMetadataKey    = "gc.synthetic_kind"
+	SyntheticMetadataKey        = "gc.synthetic"
+	TemplateMetadataKey         = "gc.template"
+	TerminalMetadataKey         = "gc.terminal"
+	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
+	// copied into a binding with the name of the binding it came from, so a
+	// resumed attempt can tell a row it wrote from content the destination
+	// already owned.
+	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -429,6 +434,7 @@ var KnownMetadataKeys = []string{
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
+	InfraMigratedFromMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

@@ -453,7 +453,10 @@ func stubManagedDoltStoreOpeners(t *testing.T) {
 func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
 	t.Helper()
 
-	cr := newCityRuntime(params)
+	cr, err := newCityRuntime(params)
+	if err != nil {
+		t.Fatalf("building the city runtime: %v", err)
+	}
 	t.Cleanup(func() {
 		// Tests pass context.Background to cr.tick, so dispatched orders
 		// cannot be canceled via tick ctx propagation. Type-assert to the
@@ -1238,7 +1241,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 	cityPath := t.TempDir()
 	cleanupManagedDoltTestCity(t, cityPath)
 	sp := runtime.NewFake()
-	_ = newCityRuntime(CityRuntimeParams{
+	if _, err := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		Cfg:      &config.City{},
@@ -1263,7 +1266,9 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 		Rec:    events.Discard,
 		Stdout: io.Discard,
 		Stderr: io.Discard,
-	})
+	}); err != nil {
+		t.Fatalf("building the city runtime: %v", err)
+	}
 
 	if healthCalls != 1 {
 		t.Fatalf("healthCalls = %d, want 1", healthCalls)
@@ -1278,7 +1283,7 @@ func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.
 	cityPath := t.TempDir()
 	writeReachableProviderManagedDoltState(t, cityPath)
 	sp := runtime.NewFake()
-	_ = newCityRuntime(CityRuntimeParams{
+	if _, err := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		Cfg:      &config.City{},
@@ -1297,7 +1302,9 @@ func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.
 		Rec:    events.Discard,
 		Stdout: io.Discard,
 		Stderr: io.Discard,
-	})
+	}); err != nil {
+		t.Fatalf("building the city runtime: %v", err)
+	}
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
@@ -1730,7 +1737,7 @@ func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
 	defer cancel()
 
 	var started atomic.Bool
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -1751,6 +1758,9 @@ func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
 	cr.od = od
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
@@ -1788,7 +1798,7 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 
 	var stderr bytes.Buffer
 	var started atomic.Bool
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -1806,6 +1816,9 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: &stderr,
 	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
 	cr.od = od
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
@@ -5212,7 +5225,7 @@ name = "fresh-agent"
 	t.Cleanup(cancel)
 
 	var sawFreshAgent atomic.Bool
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -5233,6 +5246,9 @@ name = "fresh-agent"
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
@@ -6831,7 +6847,7 @@ func TestCityRuntimeRunEmitsStartupPhaseTimingLogs(t *testing.T) {
 	defer cancel()
 
 	stderr := &lockedWriter{w: &bytes.Buffer{}}
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -6846,6 +6862,9 @@ func TestCityRuntimeRunEmitsStartupPhaseTimingLogs(t *testing.T) {
 		Stdout:    io.Discard,
 		Stderr:    stderr,
 	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
@@ -6884,7 +6903,7 @@ func TestCityRuntimeStartupWatchdogDumpsGoroutinesOnSlowStartup(t *testing.T) {
 
 	stderr := &lockedWriter{w: &bytes.Buffer{}}
 	var sleepOnce sync.Once
-	cr := newCityRuntime(CityRuntimeParams{
+	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -6907,6 +6926,9 @@ func TestCityRuntimeStartupWatchdogDumpsGoroutinesOnSlowStartup(t *testing.T) {
 		Stdout:    io.Discard,
 		Stderr:    stderr,
 	})
+	if runtimeErr != nil {
+		t.Fatalf("building the city runtime: %v", runtimeErr)
+	}
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()

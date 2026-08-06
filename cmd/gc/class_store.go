@@ -43,7 +43,7 @@ func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
 func (cs *controllerState) mailBeadStore() beads.MailStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.MailStore{Store: resolveMailMessagesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.MailStore{Store: resolveMailMessagesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // nudgesBeadStore returns the store that owns nudge beads. It delegates to the
@@ -67,7 +67,7 @@ func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
 func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.OrdersStore{Store: resolveOrderStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
@@ -98,7 +98,7 @@ func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
 // Returned as the strongly-typed beads.GraphStore so the graph class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: resolveGraphStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.GraphStore{Store: resolveGraphStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
@@ -108,7 +108,7 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: resolveSessionStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.SessionStore{Store: resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // mailBeadStore returns the runtime's mail (message) bead store: the configured
@@ -117,7 +117,7 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 // Returned as the strongly-typed beads.MailStore so the messaging class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) mailBeadStore() beads.MailStore {
-	return beads.MailStore{Store: resolveMailMessagesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.MailStore{Store: resolveMailMessagesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // nudgesBeadStore returns the runtime's nudge bead store: the configured nudges
@@ -126,7 +126,7 @@ func (cr *CityRuntime) mailBeadStore() beads.MailStore {
 // strongly-typed beads.NudgesStore so the nudges class stays statically visible;
 // the wrapper carries the same underlying store value.
 func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: resolveNudgesStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // ordersBeadStore returns the runtime's order-tracking bead store for the given
@@ -138,7 +138,7 @@ func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
 // simple case; per-order scope resolution flows through resolveOrderStoreTarget
 // in the federated dispatch/sweep paths.
 func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
-	return beads.OrdersStore{Store: resolveOrderStore(cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+	return beads.OrdersStore{Store: resolveOrderStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
@@ -217,23 +217,45 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 }
 
 // resolveClassStore returns the beads.Store backing a coordination class. It is
-// the single dispatch point for per-class backend selection. Upstream Gas City
-// is single-store: every coordination class collapses to the same Provider/Dolt
-// work store, so this is the identity resolver today — it returns workStore
-// unchanged for every class.
+// the single dispatch point for per-class backend selection, and the one place
+// a resolved storage plan reaches the running city.
 //
-// The signature carries cfg, cityPath, class, and rec so the per-class /
-// relocated backend dispatch (open the class's own embedded store when
-// [beads.classes.<class>].backend selects one, emitting bead.* events via rec,
-// falling back to the work store on miss) plugs in HERE as the documented
-// fast-follow without a call-site change. Until then the parameters are accepted
-// for forward-compatibility and ignored.
-func resolveClassStore(workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
+// routes is the opened non-work binding this process resolved at boot
+// (storage_boot.go). A nil routes value — every city that authors no [storage]
+// section, and every one-shot CLI caller — takes the identity branch and
+// returns the exact workStore value it was handed, so the optional-capability
+// assertions this file's header names keep working on the value they already
+// worked on.
+//
+// A class the routes do not relocate also returns workStore unchanged. That is
+// how work stays on the work ledger in a split city: the routes carry only the
+// classes the plan assigned to a non-work binding, so "not relocated" and "no
+// routes at all" are the same instruction rather than two branches that have to
+// agree.
+//
+// cfg, cityPath and rec stay in the signature for the per-scope work routing
+// that resolves elsewhere; they are not read here.
+func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = cityPath
-	_ = class
 	_ = rec
+	if store, relocated := routes.storeFor(coordclassFor(class)); relocated {
+		return store
+	}
 	return workStore
+}
+
+// coordclassFor maps a config class name to its coordination class. An
+// unrecognized name resolves to work, which is the residual class and the one
+// the routes never relocate — so a name this build does not know cannot be
+// silently routed at a binding.
+func coordclassFor(class string) coordclass.Class {
+	for _, candidate := range coordclass.Classes() {
+		if candidate.String() == class {
+			return candidate
+		}
+	}
+	return coordclass.ClassWork
 }
 
 // resolveMailMessagesStore returns the message-persistence store for mail
@@ -241,8 +263,8 @@ func resolveClassStore(workStore beads.Store, cfg *config.City, cityPath, class 
 // relocates, this is the seam that diverges from session reads (which stay on
 // the work store until sessions relocate); the divergence plugs in at
 // resolveClassStore.
-func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassMessaging, rec)
+func resolveMailMessagesStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassMessaging, rec)
 }
 
 // resolveOrderStore returns the order-tracking store. Identity today: the work
@@ -250,24 +272,24 @@ func resolveMailMessagesStore(workStore beads.Store, cfg *config.City, cityPath 
 // resolveClassStore; returned as a beads.Store so the dispatch path can use it
 // both as the order-tracking seam and, when distinct from the work store, as an
 // extra gate-read store.
-func resolveOrderStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassOrders, rec)
+func resolveOrderStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassOrders, rec)
 }
 
 // resolveNudgesStore returns the nudge-shadow store. Identity today: the work
 // store. When nudges relocate, the class store plugs in at resolveClassStore;
 // returned as a beads.Store, which satisfies the nudge-store seam for free, so
 // only the leaf nudge-bead operations route here.
-func resolveNudgesStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassNudges, rec)
+func resolveNudgesStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassNudges, rec)
 }
 
 // resolveSessionStore returns the session-lifecycle store. Identity today: the
 // work store. Session-class beads are session lifecycle beads and durable
 // session waits; only those bead ops route here. When sessions relocate, the
 // class store plugs in at resolveClassStore.
-func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassSessions, rec)
+func resolveSessionStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassSessions, rec)
 }
 
 // resolveGraphStore returns the beads.Store backing the GRAPH coordination
@@ -275,8 +297,8 @@ func resolveSessionStore(workStore beads.Store, cfg *config.City, cityPath strin
 // graph-store dispatch plugs in at resolveClassStore (graph uses its own legacy
 // .gc/ location and is event-silent by design, so rec is accepted for signature
 // parity with the other resolve*Store helpers and ignored here).
-func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
-	return resolveClassStore(workStore, cfg, cityPath, config.BeadClassGraph, rec)
+func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
+	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail
@@ -285,8 +307,8 @@ func resolveGraphStore(workStore beads.Store, cfg *config.City, cityPath string,
 // store. Both resolve to the work store at the single-store bd backend, so this is
 // byte-identical to newMailProvider(workStore) today and diverges only once
 // [beads.classes.messaging] or [beads.classes.sessions] relocates a class.
-func newCityMailProvider(workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
-	msgStore := resolveMailMessagesStore(workStore, cfg, cityPath, rec)
-	sessStore := resolveSessionStore(workStore, cfg, cityPath, rec)
+func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
+	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
+	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
 	return newMailProviderWithSessionStore(msgStore, sessStore)
 }

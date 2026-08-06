@@ -504,7 +504,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		SP:         sp,
 		Runner:     runner,
 		Store:      store,
-		GraphStore: resolveGraphStore(store, cfg, cityPath, eventRecorder),
+		GraphStore: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
 		Events:     eventRecorder,
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {

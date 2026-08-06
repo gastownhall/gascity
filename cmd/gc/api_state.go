@@ -62,11 +62,16 @@ type controllerState struct {
 	// re-parsing city.toml per request. Refreshed on every cfg swap; left
 	// at its prior value if a refresh load fails so the read never falls
 	// back to a nil-raw heuristic on a transient error.
-	rawCfg                 *config.City
-	sp                     runtime.Provider
-	cacheCtx               context.Context
-	beadStores             map[string]beads.Store
-	cityBeadStore          beads.Store // city-level store for session beads
+	rawCfg        *config.City
+	sp            runtime.Provider
+	cacheCtx      context.Context
+	beadStores    map[string]beads.Store
+	cityBeadStore beads.Store // city-level store for session beads
+	// storageRoutes is the opened non-work storage binding the city runtime
+	// resolved at boot, installed by CityRuntime.setControllerState. Nil for
+	// every city that authors no [storage] section, and for an API state built
+	// without a runtime — both of which route every class at the work store.
+	storageRoutes          *storageRoutes
 	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
@@ -213,7 +218,7 @@ func newControllerState(
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
-		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
+		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
@@ -521,7 +526,7 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 	// are not scanned more than once.
 	cs.mu.RLock()
 	stores := []beads.Store{
-		resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
 	}
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
@@ -814,7 +819,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
-		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath, cs.eventProv)
+		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
 	}
@@ -1508,7 +1513,7 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.NudgesStore{Store: resolveNudgesStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // SessionsBeadStore returns the store backing session-class beads. At the default
@@ -1522,7 +1527,7 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.SessionStore{Store: resolveSessionStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.SessionStore{Store: resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // GraphBeadStore returns the store backing graph-class beads. At the default backend
@@ -1537,7 +1542,7 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return beads.GraphStore{Store: resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return beads.GraphStore{Store: resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
