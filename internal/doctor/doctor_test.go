@@ -636,6 +636,43 @@ func TestRunCheckTimeoutFlushesCompletedCheckOutput(t *testing.T) {
 	}
 }
 
+func TestRunCheckPanicBecomesReportedError(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			d := &Doctor{CheckTimeout: timeout}
+			d.Register(&panickingCheck{name: "panicking"})
+
+			report := d.RunCollect(&CheckContext{}, false)
+
+			if len(report.Results) != 1 {
+				t.Fatalf("Results = %d, want 1", len(report.Results))
+			}
+			result := report.Results[0]
+			if result.Name != "panicking" || result.Status != StatusError || result.Severity != SeverityBlocking {
+				t.Fatalf("panic result = %+v, want named blocking error", result)
+			}
+			if !strings.Contains(result.Message, "panic: check exploded") {
+				t.Fatalf("panic message = %q, want recovered panic detail", result.Message)
+			}
+			if report.Failed != 1 || report.BlockingFailed != 1 {
+				t.Fatalf("report = %+v, want one blocking failure", report)
+			}
+		})
+	}
+}
+
+type panickingCheck struct {
+	name string
+}
+
+func (c *panickingCheck) Name() string { return c.name }
+func (c *panickingCheck) Run(_ *CheckContext) *CheckResult {
+	panic("check exploded")
+}
+func (c *panickingCheck) CanFix() bool              { return false }
+func (c *panickingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *panickingCheck) WarmupEligible() bool      { return false }
+
 // outputWritingCheck writes to ctx.Output during Run, like checks that
 // surface fix-time diagnostics.
 type outputWritingCheck struct{ mockCheck }
@@ -825,6 +862,43 @@ func TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras(t *testing.T) {
 	if check.renderExtrasCalled.Load() {
 		t.Fatalf("RenderExtras was invoked for a timed-out check; it must be skipped")
 	}
+}
+
+func TestDoctorWaitKeepsTimedOutCheckOwnedUntilCompletion(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingCheck{
+		name:      "owned-after-timeout",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	runDone := make(chan *Report, 1)
+	go func() { runDone <- d.RunCollect(&CheckContext{}, false) }()
+	<-check.started
+	report := <-runDone
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want one timed-out result", report.Results)
+	}
+
+	waitStarted := make(chan struct{})
+	waitDone := make(chan struct{})
+	go func() {
+		close(waitStarted)
+		d.Wait()
+		close(waitDone)
+	}()
+	<-waitStarted
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while the timed-out check was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(check.release)
+	<-check.wroteLate
+	<-waitDone
 }
 
 // lateWritingCheck blocks inside Run until released, then writes to
