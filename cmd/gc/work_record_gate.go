@@ -142,25 +142,36 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	return violations
 }
 
+// preferredReachabilityRef decides which ref gitCommitReachableOnBranch should
+// check commit-reachability against: refs/remotes/origin/<branch> when it
+// resolves, otherwise the bare branch name. gitrevisions precedence puts a
+// local refs/heads/<branch> ahead of any remote-tracking ref, but the
+// worktree named by gc.work_dir is rarely the one whose local branch tip
+// actually moves — a refinery or polecat that merges/pushes from a different
+// worktree advances the remote-tracking ref, never the local one checked out
+// elsewhere. Resolving against the local ref alone reports a landed commit as
+// unreachable until something happens to fast-forward it, which in that
+// topology may be never (gastownhall/gascity#5037).
+//
+// remoteRefResolves is injected so the decision is unit-testable without a
+// real git repository; the only production caller runs
+// `git rev-parse --verify --quiet <ref>`. Kept as a separate probe rather
+// than a fallback on the merge-base exit code so that a genuinely-unreachable
+// commit is never retried against the local ref and allowed to pass.
+func preferredReachabilityRef(branch string, remoteRefResolves func(ref string) bool) string {
+	if remote := "refs/remotes/origin/" + branch; remoteRefResolves(remote) {
+		return remote
+	}
+	return branch
+}
+
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
 // the git repository at repoDir (worktrees share one object store, so any
 // worktree dir resolves refs across the repo). A non-nil error from git — bad
 // repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
 // that looks like a flag (leading "-") is rejected outright so a malformed
-// metadata value can never be parsed as a git option.
-//
-// branch is resolved against refs/remotes/origin/<branch> when that ref
-// exists, falling back to the bare name otherwise. gitrevisions precedence
-// puts a local refs/heads/<branch> ahead of any remote-tracking ref, but the
-// worktree gc.work_dir names is rarely the one whose local branch tip
-// actually moves — a refinery or polecat that merges/pushes from a different
-// worktree advances the remote-tracking ref, never the local one checked out
-// elsewhere. Resolving against the local ref alone reports a landed commit as
-// unreachable until something happens to fast-forward it, which in that
-// topology may be never (gastownhall/gascity#5037). The rev-parse probe is a
-// separate call rather than a fallback on the merge-base exit code so that a
-// genuinely-unreachable commit is never retried against the local ref and
-// allowed to pass.
+// metadata value can never be parsed as a git option. See
+// preferredReachabilityRef for how branch is resolved to a ref.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
@@ -168,10 +179,9 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
 	}
-	ref := branch
-	if remote := "refs/remotes/origin/" + branch; exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", remote).Run() == nil {
-		ref = remote
-	}
+	ref := preferredReachabilityRef(branch, func(candidate string) bool {
+		return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
+	})
 	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
 }
 
