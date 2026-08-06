@@ -1103,6 +1103,14 @@ case "$query" in
         exit 0
         ;;
     esac
+    if [ "$mode" = "quarantine_autoclear_confined" ]; then
+      print_cell beads
+      exit 0
+    fi
+    if [ "$mode" = "quarantine_autoclear_outside_known_tables" ]; then
+      print_cell ghost_table
+      exit 0
+    fi
     printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
     exit 64
     ;;
@@ -3732,6 +3740,200 @@ func TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles(t *
 	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
 	if len(eventLines) != 3 {
 		t.Fatalf("each compact cycle should still emit a dolt.compact.quarantine event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
+	}
+}
+
+// TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables
+// covers all four known-false-positive race-class reasons (table/database x
+// gain/no-gain). Cycle 1 runs a genuine fake-dolt scenario that reaches
+// verify_counts and writes a real quarantine marker with authentic
+// flatten_preflight_head/flatten_head fields. Cycle 2 drives the auto-clear
+// gate's DOLT_DIFF_STAT proof to a confined, known-table result: the drift
+// is proven to touch only tables verify_counts already checked, so the
+// marker must be auto-cleared and the same cycle must proceed through a
+// full flatten+GC.
+func TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables(t *testing.T) {
+	cases := []struct {
+		name       string
+		createMode string
+	}{
+		{"database_no_gain", "same_count_db_hash_drift"},
+		{"database_gain", "row_count_gain_with_db_hash_drift"},
+		{"table_gain", "same_table_replacement_with_row_gain"},
+		{"table_no_gain", "same_count_hash_drift_then_probe_failure"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			firstOut, err := fixture.run(t, tc.createMode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("cycle 1 (%s) should have quarantined, but compact succeeded:\n%s", tc.createMode, firstOut)
+			}
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+			if _, statErr := os.Stat(marker); statErr != nil {
+				t.Fatalf("cycle 1 should have written quarantine marker: %v", statErr)
+			}
+			reasonBefore := compactMarkerValue(t, marker, "reason")
+
+			secondOut, err := fixture.run(t, "quarantine_autoclear_confined", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err != nil {
+				t.Fatalf("cycle 2 should auto-clear a quarantine proven confined to known tables (reason=%q): %v\n%s", reasonBefore, err, secondOut)
+			}
+			if !strings.Contains(secondOut, "quarantine marker auto-cleared") {
+				t.Fatalf("output missing auto-clear notice:\n%s", secondOut)
+			}
+			if strings.Contains(secondOut, "integrity quarantine marker exists") {
+				t.Fatalf("auto-clear success must not also print the hard-block existing-quarantine notice:\n%s", secondOut)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("auto-clear should remove the quarantine marker; stat err=%v", statErr)
+			}
+			doltLogData, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			if !strings.Contains(string(doltLogData), "DOLT_GC") {
+				t.Fatalf("auto-cleared quarantine should let flatten+GC proceed in the same cycle:\n%s", doltLogData)
+			}
+
+			// Creation (cycle 1) and auto-clear (cycle 2) each send exactly
+			// one alert: neither is deduped against the other because the
+			// marker's dedup state is fresh at creation and the marker is
+			// deleted (not re-checked) on auto-clear.
+			gcLog := readCompactGCLog(t, fixture)
+			mailLines := compactGCLogLinesWithPrefix(gcLog, "gc mail send ")
+			if len(mailLines) != 2 {
+				t.Fatalf("expected 2 cumulative quarantine mail alerts (create + auto-clear), got %d\nlog:\n%s", len(mailLines), gcLog)
+			}
+			eventLines := compactGCLogLinesWithPrefix(gcLog, "gc event emit dolt.compact.quarantine")
+			if len(eventLines) != 2 {
+				t.Fatalf("expected 2 cumulative quarantine events (create + auto-clear), got %d\nlog:\n%s", len(eventLines), gcLog)
+			}
+		})
+	}
+}
+
+// TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear covers exit
+// point 4 of the auto-clear contract: when the preservation probe itself
+// cannot run (table discovery fails), the marker must NOT be cleared, the
+// function must fail closed, and the existing-quarantine hard-block notice
+// must still be reported.
+func TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 1 should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("cycle 1 should have written quarantine marker: %v", statErr)
+	}
+	reasonBefore := compactMarkerValue(t, marker, "reason")
+
+	secondOut, err := fixture.run(t, "table_discovery_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 2 should not auto-clear when the preservation probe cannot run:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "cannot auto-clear") {
+		t.Fatalf("output missing probe-failure explanation:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("probe failure must still report the existing quarantine:\n%s", secondOut)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("probe failure must not remove the quarantine marker: %v", statErr)
+	}
+	if reasonAfter := compactMarkerValue(t, marker, "reason"); reasonAfter != reasonBefore {
+		t.Fatalf("probe failure must not alter the quarantine reason: before=%q after=%q", reasonBefore, reasonAfter)
+	}
+	doltLogData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLogData), "DOLT_GC") {
+		t.Fatalf("a quarantine that failed its auto-clear probe must not run full GC:\n%s", doltLogData)
+	}
+}
+
+// TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear
+// covers the case where the preservation probe RUNS successfully but proves
+// the wrong thing: DOLT_DIFF_STAT reports drift in a table outside the set
+// verify_counts already checked. A probe that runs but does not prove
+// confinement must hard-block exactly like a probe that fails to run.
+func TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 1 should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("cycle 1 should have written quarantine marker: %v", statErr)
+	}
+
+	secondOut, err := fixture.run(t, "quarantine_autoclear_outside_known_tables", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 2 should not auto-clear when drift is proven outside the known table set:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "cannot auto-clear") {
+		t.Fatalf("output missing drift-outside-known-tables explanation:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("drift outside known tables must still report the existing quarantine:\n%s", secondOut)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("drift outside known tables must not remove the quarantine marker: %v", statErr)
+	}
+	doltLogData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLogData), "DOLT_GC") {
+		t.Fatalf("a quarantine with drift outside the known tables must not run full GC:\n%s", doltLogData)
+	}
+}
+
+// TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear covers exit
+// point 6 of the auto-clear contract: reasons outside the four known
+// race-class strings must keep hard-blocking via the existing default case,
+// even when the DOLT_DIFF_STAT proof would otherwise succeed. Cycle 2
+// deliberately uses the mode that proves confinement (from the success
+// test above) to demonstrate the reason-string gate, not the proof itself,
+// is what keeps these quarantines blocked.
+func TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("cycle 1 should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	reasonBefore := compactMarkerValue(t, marker, "reason")
+	if reasonBefore != "post-flatten row count decreased" {
+		t.Fatalf("expected a non-race-class reason, got %q", reasonBefore)
+	}
+
+	secondOut, err := fixture.run(t, "quarantine_autoclear_confined", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("non-race-class quarantine must never auto-clear, even when drift would prove confined:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
+		t.Fatalf("non-race-class quarantine must report the existing quarantine hard-block:\n%s", secondOut)
+	}
+	if strings.Contains(secondOut, "quarantine marker auto-cleared") {
+		t.Fatalf("non-race-class quarantine must never print the auto-clear notice:\n%s", secondOut)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("non-race-class quarantine must not remove the marker: %v", statErr)
+	}
+	if reasonAfter := compactMarkerValue(t, marker, "reason"); reasonAfter != reasonBefore {
+		t.Fatalf("non-race-class quarantine reason must be unchanged: before=%q after=%q", reasonBefore, reasonAfter)
+	}
+	doltLogData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLogData), "DOLT_GC") {
+		t.Fatalf("a non-race-class quarantine must not run full GC:\n%s", doltLogData)
 	}
 }
 
