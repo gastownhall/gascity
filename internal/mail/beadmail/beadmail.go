@@ -438,8 +438,19 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 	return candidates, results, nil
 }
 
-// ArchiveInjectedAutoHandoffs archives auto-handoff messages after they have
-// been injected into a provider hook. Ordinary user mail is left untouched.
+// ArchiveInjectedAutoHandoffs retires auto-handoff messages after they have been
+// injected into a provider hook. Ordinary user mail is left untouched.
+//
+// It MARKS-READ + CLOSES each handoff (retain-addressable) rather than hard
+// store.Delete. The former Delete permanently lost an injected-but-unconsumed
+// handoff (dip-6ov51a): "injected" only means gc-prime's stdout write returned
+// nil — it says nothing about whether the recycled agent consumed the GO the
+// handoff carries before a crash/race/re-cycle. Marking read stops re-injection
+// (CheckAutoHandoffs fetches only unread); closing with RetentionSweepCloseReason
+// keeps the bead addressable (isRemovedMessageBead treats it as system-aged, not
+// user-removed) so an unconsumed handoff stays recoverable, and the already-correct
+// read-gated TTL sweep (PurgeReadMessageWisps) reclaims it later — one unified
+// retention path, no special-case delete, no permanent data loss.
 func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 	var errs []error
 	for _, id := range ids {
@@ -460,7 +471,23 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
 			continue
 		}
-		if err := p.store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		// Mark read (label + metadata) so a later SessionStart does not re-inject
+		// it and the read-gated TTL sweep can later reclaim it.
+		if err := p.store.Update(id, beads.UpdateOpts{
+			Labels:   []string{"read"},
+			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+		}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("marking %s read: %w", id, err))
+			continue
+		}
+		// Stamp the retention marker then close, mirroring SweepReadMessagesBefore
+		// so isRemovedMessageBead keeps the closed handoff addressable (recoverable)
+		// until PurgeReadMessageWisps reclaims it — never a hard delete here.
+		if err := p.store.SetMetadata(id, "close_reason", RetentionSweepCloseReason); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("stamping %s close_reason: %w", id, err))
+			continue
+		}
+		if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
 		}
 	}

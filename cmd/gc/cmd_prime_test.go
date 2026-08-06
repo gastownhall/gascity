@@ -877,9 +877,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
 				t.Fatalf("additionalContext = %q, want no ordinary mail %q from the exec: provider at SessionStart", context, ordinary.ID)
 			}
-			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
-			}
+			assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 			if _, err := store.Get(ordinary.ID); err != nil {
 				t.Fatalf("ordinary mail should remain for UserPromptSubmit: %v", err)
 			}
@@ -1086,9 +1084,7 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(hookStdout.String(), auto.ID) {
 		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestDoPrimeWithHookFormat_GatesDefaultFallbackWithoutManagedSession(t *testing.T) {
