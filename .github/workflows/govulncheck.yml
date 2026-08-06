@@ -158,9 +158,15 @@ jobs:
               echo
               echo "Any findings below are imported-but-not-called or required-but-not-imported."
               echo "They are informational and do not fail this job."
-            else
+            elif [ "$status" -eq 3 ]; then
               echo "A reachable vulnerability was found: the build calls a vulnerable symbol."
               echo "The trace under \`Symbol Results\` shows the call path."
+            else
+              echo "govulncheck did not complete: exit status $status."
+              echo
+              echo "Only exit status 3 means a vulnerable symbol is reachable. Other nonzero"
+              echo "statuses are scanner or analysis failures -- the scan did not produce a"
+              echo "verdict, so treat this as an infrastructure failure, not a security finding."
             fi
             echo
             echo '```'
