@@ -162,6 +162,31 @@ func TestConfiguredSessionTransportUsesProviderACPDefaultForAgentTemplates(t *te
 	}
 }
 
+func TestConfiguredSessionTransportUsesT3RuntimeTransport(t *testing.T) {
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "t3bridge"},
+		Workspace: config.Workspace{
+			Name:     "test-city",
+			Provider: "custom",
+		},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Dir:      "myrig",
+			Provider: "custom",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"custom": {
+				Command:   "/bin/echo",
+				PathCheck: "true",
+			},
+		},
+	}
+
+	if got := configuredSessionTransport(cfg, "myrig/worker", ""); got != "t3" {
+		t.Fatalf("configuredSessionTransport() = %q, want %q", got, "t3")
+	}
+}
+
 func TestBuildSessionResumeDoesNotInferProviderACPDefaultForStoppedLegacyTemplateSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	supportsACP := true

@@ -289,6 +289,13 @@ func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *tes
 	if err := store.SetMetadata(info.ID, "mc_session_kind", "provider"); err != nil {
 		t.Fatalf("SetMetadata(mc_session_kind): %v", err)
 	}
+	// This case is about a LEGACY bead: one created before session creation
+	// stamped "transport" for every effective transport. Fresh creates now record the
+	// transport explicitly and (correctly) never reach the resolver, so strip
+	// the key to reconstruct the legacy shape this test pins.
+	if err := store.SetMetadata(info.ID, "transport", ""); err != nil {
+		t.Fatalf("SetMetadata(transport): %v", err)
+	}
 
 	var gotTemplate, gotProvider string
 	factory, err := NewFactory(FactoryConfig{

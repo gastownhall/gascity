@@ -148,14 +148,7 @@ func newSessionProviderForCityByName(cfg *config.City, name string, sc config.Se
 // seam (where per-spec Transport honoring would land when runtime↔transport are
 // genuinely decoupled).
 func transportForRuntimeName(name string) string {
-	switch {
-	case name == "acp":
-		return config.SessionTransportACP
-	case name == "t3bridge" || (strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:"))):
-		return "t3"
-	default:
-		return config.SessionTransportTmux
-	}
+	return runtime.TransportForRuntimeName(name)
 }
 
 // resolveWorkerSpec resolves a [runtime.WorkerSpec] to a session provider. It is
@@ -172,7 +165,7 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {
-	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
+	return runtime.TransportForRuntimeName("exec:"+strings.TrimSpace(script)) == "t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
@@ -422,6 +415,8 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 // beadUsesACPTransport is the raw-bead form retained as the byte-identical
 // oracle for infoUsesACPTransport (TestSessionClassifierInfoEquivalence). No
 // production caller reads it — observedACPSessionNames consumes the Info form.
+//
+//nolint:unparam // cfg keeps the raw/Info classifier twins identical; tests are currently the raw form's only callers.
 func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	transport := strings.TrimSpace(bead.Metadata["transport"])
 	if transport != "" {
