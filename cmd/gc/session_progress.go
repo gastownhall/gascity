@@ -26,6 +26,71 @@ func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *c
 	return open
 }
 
+// isWarmFloorCandidate reports whether a session Info currently occupies a warm
+// min_active_sessions floor slot: an open, live pool instance (anything not
+// closed and not asleep/draining/suspended). It deliberately EXCLUDES asleep
+// sessions so a dormant low-id bead — e.g. a max-session-age-slept floor
+// session awaiting min-fill recreation — can never mask a live higher-id
+// session out of the deterministic exempt set and get that warm session
+// idle-killed. Creating and freshly-stamped (empty-state) sessions count: they
+// are legitimate floor occupants on their way to active, matching
+// countMinActiveCovered's "covered" notion.
+func isWarmFloorCandidate(info sessionpkg.Info) bool {
+	if info.Closed {
+		return false
+	}
+	switch info.State {
+	case sessionpkg.StateAsleep, sessionpkg.StateDraining, sessionpkg.StateSuspended, sessionpkg.StateClosed:
+		return false
+	}
+	return true
+}
+
+// isMinFloorExemptIdleSession reports whether sessionID is one of the
+// deterministic min_active_sessions floor members for template — the minSess
+// lowest-bead-id warm pool sessions — which the idle-timeout path keeps WARM
+// (exempt from the idle kill) instead of killing and cold-recreating it every
+// tick (sc-5mtyhy). This is the per-session, deterministic complement to the
+// count-based isMinFloorIdleWorker the progress-stall recycler uses.
+//
+// Determinism (spec acceptance 4): the exempt set is the minSess lowest-id warm
+// same-template pool sessions, mirroring cityStopPoolBeads' bead-ID ordering, so
+// the same concrete sessions stay warm tick over tick with no flapping over
+// which one is exempt. sessionID is exempt exactly when it is itself a warm
+// same-template pool session AND fewer than minSess such sessions sort below its
+// ID. Elastic sessions ABOVE the floor are never exempt and idle-reclaim
+// normally (acceptance 2); max_active_sessions still caps the total because this
+// only defers idle kills for the bottom minSess sessions — it never creates any.
+//
+// Selection reads the coherent infoByID snapshot and cfg in memory; no I/O.
+func isMinFloorExemptIdleSession(infoByID map[string]sessionpkg.Info, cfg *config.City, template, sessionID string) bool {
+	if cfg == nil || sessionID == "" {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return false
+	}
+	minFloor := cfgAgent.EffectiveMinActiveSessions()
+	if minFloor <= 0 {
+		return false
+	}
+	self := false
+	lower := 0
+	for sid, info := range infoByID {
+		if !isWarmFloorCandidate(info) || normalizedSessionTemplateInfo(info, cfg) != template {
+			continue
+		}
+		switch {
+		case sid == sessionID:
+			self = true
+		case sid < sessionID:
+			lower++
+		}
+	}
+	return self && lower < minFloor
+}
+
 // isMinFloorIdleWorker reports whether a session is a legitimate pool floor
 // worker that should be exempt from the progress-stall recycler.
 //

@@ -30,6 +30,142 @@ func TestOpenPoolSessionCountForTemplateExcludesClosed(t *testing.T) {
 	}
 }
 
+// floorCfg builds a one-agent city whose pool has the given min_active_sessions
+// floor, matching the shape findAgentByTemplate/EffectiveMinActiveSessions read.
+func floorCfg(minFloor int) *config.City {
+	agent := config.Agent{Name: "worker"}
+	if minFloor > 0 {
+		agent.MinActiveSessions = intPtr(minFloor)
+	}
+	return &config.City{Agents: []config.Agent{agent}}
+}
+
+// warm builds an open, active same-template session Info for the floor-exempt
+// selection tests, keyed by its bead ID (the deterministic ordering key).
+func warm(id string) sessionpkg.Info {
+	return sessionpkg.Info{ID: id, Template: "worker", State: sessionpkg.StateActive}
+}
+
+// TestIsMinFloorExemptIdleSession pins the deterministic per-session floor
+// selection that keeps min_active_sessions sessions warm across idle timeout
+// (sc-5mtyhy). It is the acceptance-2/4 core: the minSess lowest-bead-id warm
+// sessions are exempt and stay exempt tick over tick; above-floor elastic
+// sessions are never exempt and idle-reclaim normally.
+func TestIsMinFloorExemptIdleSession(t *testing.T) {
+	t.Run("at floor: the single warm session is exempt", func(t *testing.T) {
+		infoByID := map[string]sessionpkg.Info{"s-a": warm("s-a")}
+		if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-a") {
+			t.Fatal("min=1, one warm session: it must be the exempt floor member")
+		}
+	})
+
+	t.Run("above floor: only the minSess lowest-id sessions are exempt", func(t *testing.T) {
+		// min=1, three warm sessions: only the lowest-id (s-a) stays warm; the
+		// two above-floor elastic sessions (s-b, s-c) idle-reclaim (acceptance 2).
+		infoByID := map[string]sessionpkg.Info{
+			"s-a": warm("s-a"), "s-b": warm("s-b"), "s-c": warm("s-c"),
+		}
+		cfg := floorCfg(1)
+		if !isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-a") {
+			t.Error("s-a (lowest id) must be exempt")
+		}
+		if isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-b") {
+			t.Error("s-b is above the floor and must NOT be exempt")
+		}
+		if isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-c") {
+			t.Error("s-c is above the floor and must NOT be exempt")
+		}
+	})
+
+	t.Run("min=2 exempts the two lowest-id, not the third", func(t *testing.T) {
+		infoByID := map[string]sessionpkg.Info{
+			"s-a": warm("s-a"), "s-b": warm("s-b"), "s-c": warm("s-c"),
+		}
+		cfg := floorCfg(2)
+		if !isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-a") ||
+			!isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-b") {
+			t.Error("the two lowest-id sessions (s-a, s-b) must both be exempt at min=2")
+		}
+		if isMinFloorExemptIdleSession(infoByID, cfg, "worker", "s-c") {
+			t.Error("s-c is the third session, above a floor of 2, and must NOT be exempt")
+		}
+	})
+
+	t.Run("no floor: nothing is exempt", func(t *testing.T) {
+		infoByID := map[string]sessionpkg.Info{"s-a": warm("s-a")}
+		if isMinFloorExemptIdleSession(infoByID, floorCfg(0), "worker", "s-a") {
+			t.Fatal("min=0 (no floor): no session may be exempt")
+		}
+	})
+
+	t.Run("asleep low-id session does not mask a live higher-id one", func(t *testing.T) {
+		// s-a is asleep (e.g. max-age-slept awaiting min-fill); the live floor
+		// member is s-b. Counting s-a would push s-b above the floor and get the
+		// only WARM session idle-killed — the exact regression the state filter
+		// prevents. s-b must be exempt.
+		asleep := sessionpkg.Info{ID: "s-a", Template: "worker", State: sessionpkg.StateAsleep}
+		infoByID := map[string]sessionpkg.Info{"s-a": asleep, "s-b": warm("s-b")}
+		if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-b") {
+			t.Fatal("the live session s-b must be exempt; the asleep low-id s-a must not mask it")
+		}
+	})
+
+	t.Run("other-template and closed sessions are excluded from the count", func(t *testing.T) {
+		infoByID := map[string]sessionpkg.Info{
+			"s-a": {ID: "s-a", Template: "scout", State: sessionpkg.StateActive},                // other template
+			"s-b": {ID: "s-b", Template: "worker", State: sessionpkg.StateActive, Closed: true}, // closed
+			"s-c": warm("s-c"),                                                                  // the sole open worker
+		}
+		if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-c") {
+			t.Fatal("s-c is the only open worker; the scout and the closed worker must not count against it")
+		}
+	})
+
+	t.Run("deterministic and stable across ticks: elastic reclaim leaves the floor set unchanged", func(t *testing.T) {
+		cfg := floorCfg(2)
+		// Tick 1: demand spike — 4 warm sessions. Bottom 2 (s-a, s-b) exempt.
+		tick1 := map[string]sessionpkg.Info{
+			"s-a": warm("s-a"), "s-b": warm("s-b"), "s-c": warm("s-c"), "s-d": warm("s-d"),
+		}
+		// Tick 2: demand gone — the two above-floor elastic sessions reclaimed.
+		tick2 := map[string]sessionpkg.Info{"s-a": warm("s-a"), "s-b": warm("s-b")}
+		for _, id := range []string{"s-a", "s-b"} {
+			if !isMinFloorExemptIdleSession(tick1, cfg, "worker", id) {
+				t.Errorf("tick1: %s must be exempt", id)
+			}
+			if !isMinFloorExemptIdleSession(tick2, cfg, "worker", id) {
+				t.Errorf("tick2: %s must STILL be exempt — the warm floor identity is stable, no oscillation", id)
+			}
+		}
+	})
+}
+
+// TestIsWarmFloorCandidate pins which session states occupy a warm floor slot:
+// live sessions (active/creating/fresh) count; closed and asleep/draining/
+// suspended sessions do not.
+func TestIsWarmFloorCandidate(t *testing.T) {
+	cases := []struct {
+		state sessionpkg.State
+		want  bool
+	}{
+		{sessionpkg.StateActive, true},
+		{sessionpkg.StateCreating, true},
+		{"", true}, // freshly stamped, not yet active
+		{sessionpkg.StateAsleep, false},
+		{sessionpkg.StateDraining, false},
+		{sessionpkg.StateSuspended, false},
+		{sessionpkg.StateClosed, false},
+	}
+	for _, tc := range cases {
+		if got := isWarmFloorCandidate(sessionpkg.Info{State: tc.state}); got != tc.want {
+			t.Errorf("isWarmFloorCandidate(state=%q) = %v, want %v", tc.state, got, tc.want)
+		}
+	}
+	if isWarmFloorCandidate(sessionpkg.Info{State: sessionpkg.StateActive, Closed: true}) {
+		t.Error("a Closed session is never a warm floor candidate")
+	}
+}
+
 func TestSessionProgressStalled(t *testing.T) {
 	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-time.Hour)    // well past any sane threshold

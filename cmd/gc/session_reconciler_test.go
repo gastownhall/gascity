@@ -9369,6 +9369,90 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm is the sc-5mtyhy
+// acceptance-1 end-to-end proof: a pool session within the min_active_sessions
+// floor, idle past its timeout with no assigned work, is NOT idle-killed — it
+// stays alive/warm rather than being killed and cold-recreated next tick.
+func TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("min-floor session must stay warm across idle timeout, not be killed+cold-recreated")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("sleep_reason = %q, a kept-warm floor session must not be idle-slept", b.Metadata["sleep_reason"])
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic is the
+// acceptance-2 end-to-end proof: with a min_active_sessions=1 floor and two
+// idle sessions, the deterministic lowest-bead-id session stays warm while the
+// above-floor elastic session is idle-reclaimed exactly as before the fix — the
+// floor exemption is bounded to minSess and does not leak the pool warm.
+func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("w1", "worker", true)
+	env.addDesired("w2", "worker", true)
+	s1 := env.createSessionBead("w1", "worker")
+	s2 := env.createSessionBead("w2", "worker")
+	env.markSessionActive(&s1)
+	env.markSessionActive(&s2)
+	if err := env.sp.SetMeta("w1", "GC_SESSION_ID", s1.ID); err != nil {
+		t.Fatalf("SetMeta(w1): %v", err)
+	}
+	if err := env.sp.SetMeta("w2", "GC_SESSION_ID", s2.ID); err != nil {
+		t.Fatalf("SetMeta(w2): %v", err)
+	}
+
+	// The floor member is the lowest-bead-id session; the other is elastic.
+	warmName, warmID, reclaimName := "w1", s1.ID, "w2"
+	if s2.ID < s1.ID {
+		warmName, warmID, reclaimName = "w2", s2.ID, "w1"
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["w1"] = true
+	it.idle["w2"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{s1, s2}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning(warmName) {
+		t.Errorf("lowest-id floor member %q must stay warm across idle timeout", warmName)
+	}
+	if env.sp.IsRunning(reclaimName) {
+		t.Errorf("above-floor elastic session %q must idle-reclaim as before the fix", reclaimName)
+	}
+	// The kept-warm session is never idle-slept; the reclaimed one is.
+	if wb, err := env.store.Get(warmID); err == nil && wb.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("floor member %q sleep_reason = idle-timeout, want kept warm", warmName)
+	}
+}
+
 func TestReconcileSessionBeads_IdleTimeoutUsesTemplateFallbackForPoolSession(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
