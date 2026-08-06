@@ -3790,3 +3790,153 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestRunDiscoveredCommand_ProjectsCityDoltSettings pins the fix for the
+// silent-config-drift bug: a pack command invoked from an operator shell used to
+// inherit NONE of the city's [dolt] block, so `gc dolt restart` regenerated
+// dolt-config.yaml from the pack script's own defaults (auto-GC on,
+// read_timeout 15000) and silently reverted the city's configured values. The
+// provider-lifecycle path has always projected these; the directly-invoked path
+// must agree with it, or a shell restart writes a different server config than
+// the supervisor would.
+func TestRunDiscoveredCommand_ProjectsCityDoltSettings(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "restart")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	script := `#!/bin/sh
+echo "autogc=$GC_DOLT_AUTO_GC_ENABLED"
+echo "readtimeout=$GC_DOLT_READ_TIMEOUT_MILLIS"
+echo "writetimeout=$GC_DOLT_WRITE_TIMEOUT_MILLIS"
+echo "maxconns=$GC_DOLT_MAX_CONNECTIONS"
+echo "archive=$GC_DOLT_ARCHIVE_LEVEL"
+echo "waittimeout=$GC_DOLT_WAIT_TIMEOUT"
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	clearInheritedBeadsEnv(t)
+	tomlPath := filepath.Join(dir, "city.toml")
+	cityTOML := `[workspace]
+name = "doltcity"
+
+[beads]
+provider = "file"
+
+[dolt]
+auto_gc_enabled = false
+read_timeout_millis = 120000
+write_timeout_millis = 250000
+max_connections = 128
+archive_level = 1
+wait_timeout_seconds = 120
+`
+	if err := os.WriteFile(tomlPath, []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := config.DiscoveredCommand{
+		BindingName: "dolt",
+		PackName:    "dolt",
+		Command:     []string{"restart"},
+		RunScript:   scriptPath,
+		PackDir:     packDir,
+		SourceDir:   sourceDir,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, dir, "doltcity", nil, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"autogc=false",
+		"readtimeout=120000",
+		"writetimeout=250000",
+		"maxconns=128",
+		"archive=1",
+		"waittimeout=120",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pack command env missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestApplyCityDoltSettingsEnv_CityConfigBeatsAmbient covers the precedence half
+// directly on the projection, without mutating the process environment: the
+// cmd/gc environment debt ratchet forbids growing t.Setenv usage (TESTING.md),
+// and applyCityDoltSettingsEnv already takes the environment as a value.
+//
+// city.toml must win where it speaks, because the point of the projection is
+// that a shell-invoked restart reproduces the config the supervisor writes, and
+// the supervisor resolves through resolveManagedDoltConfigForStart, which
+// consults GC_DOLT_* only for fields the city leaves unset.
+func TestApplyCityDoltSettingsEnv_CityConfigBeatsAmbient(t *testing.T) {
+	dir := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	cityTOML := `[workspace]
+name = "doltcity"
+
+[beads]
+provider = "file"
+
+[dolt]
+auto_gc_enabled = false
+read_timeout_millis = 120000
+wait_timeout_seconds = 120
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ambient := []string{
+		"GC_DOLT_AUTO_GC_ENABLED=true",
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_WAIT_TIMEOUT=30",
+		"UNRELATED=keep-me",
+	}
+	got := applyCityDoltSettingsEnv(ambient, dir)
+
+	resolved := map[string]string{}
+	for _, entry := range got {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			resolved[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"GC_DOLT_AUTO_GC_ENABLED":     "false",
+		"GC_DOLT_READ_TIMEOUT_MILLIS": "120000",
+		"GC_DOLT_WAIT_TIMEOUT":        "120",
+		"UNRELATED":                   "keep-me",
+	} {
+		if resolved[key] != want {
+			t.Errorf("%s = %q, want %q", key, resolved[key], want)
+		}
+	}
+	// A field the city leaves unset must not be invented, so the ambient value
+	// (or the start path's own default) still applies.
+	if _, ok := resolved["GC_DOLT_MAX_CONNECTIONS"]; ok {
+		t.Errorf("GC_DOLT_MAX_CONNECTIONS was projected despite the city not setting it: %q", resolved["GC_DOLT_MAX_CONNECTIONS"])
+	}
+	// Each key must appear exactly once: a duplicate would leave the shell
+	// script reading whichever copy os.Environ ordering happened to surface.
+	counts := map[string]int{}
+	for _, entry := range got {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			counts[key]++
+		}
+	}
+	for key, n := range counts {
+		if n != 1 {
+			t.Errorf("env key %s appears %d times, want 1", key, n)
+		}
+	}
+}

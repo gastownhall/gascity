@@ -2474,13 +2474,27 @@ func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfi
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
-	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+	if waitTimeout := managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig); waitTimeout > 0 {
 		values = append(values, DoltConfigExpectedValue{
 			Path:  "system_variables.wait_timeout",
 			Value: strconv.Itoa(waitTimeout),
 		})
 	}
 	return values
+}
+
+// managedDoltConfigExpectedWaitTimeoutForConfig mirrors the renderer's
+// resolution order so the drift check compares against what a start would
+// actually write. Reading only the env made the check report drift on any city
+// that configures wait_timeout while doctor runs from a shell that does not
+// export GC_DOLT_WAIT_TIMEOUT — and its remediation hint ("stop dolt and
+// restart to regenerate managed config") then pointed at the one action that
+// would really have introduced drift.
+func managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig config.DoltConfig) int {
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		return doltConfig.WaitTimeoutSeconds
+	}
+	return managedDoltConfigExpectedWaitTimeout()
 }
 
 func managedDoltConfigExpectedWaitTimeout() int {

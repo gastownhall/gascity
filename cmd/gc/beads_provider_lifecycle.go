@@ -2231,6 +2231,7 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_MAX_CONNECTIONS",
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
+		"GC_DOLT_WAIT_TIMEOUT",
 		"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
 	} {
 		env = removeEnvKey(env, key)
@@ -2273,6 +2274,9 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if dc.WriteTimeoutMillis > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_WRITE_TIMEOUT_MILLIS=%d", dc.WriteTimeoutMillis))
+		}
+		if dc.WaitTimeoutSeconds > 0 {
+			env = append(env, fmt.Sprintf("GC_DOLT_WAIT_TIMEOUT=%d", dc.WaitTimeoutSeconds))
 		}
 		// An explicit "0s" is meaningful (probe once, no wait), so gate on
 		// field presence rather than a non-zero duration.
