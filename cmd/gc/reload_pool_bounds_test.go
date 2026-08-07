@@ -260,6 +260,60 @@ func TestPoolBaseIdentity(t *testing.T) {
 	}
 }
 
+// TestCountActiveSessionsByTemplate_ProviderFallback covers the provider-list
+// attribution path when no session-bead store is available: direct identity,
+// last-segment city-prefixed names, and pool slot suffixes.
+func TestCountActiveSessionsByTemplate_ProviderFallback(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		// SessionTemplate deliberately empty: last-segment fallback must not
+		// depend on it (prefix stripping was dead code).
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "planner", MaxActiveSessions: reloadPoolIntPtr(4)},
+			{Name: "executor", MaxActiveSessions: reloadPoolIntPtr(6)},
+		},
+	}
+
+	sp := runtime.NewFake()
+	for _, name := range []string{
+		"planner-1",            // pool slot → planner
+		"gc-test-city-planner", // city-prefixed process name → last segment
+		"executor-2",
+		"unrelated-session", // no matching agent
+	} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+	}
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: t.TempDir(),
+		CityName: "test-city",
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	counts := cr.countActiveSessionsByTemplate(cfg)
+	if got := counts["planner"]; got != 2 {
+		t.Fatalf("counts[planner] = %d, want 2 (slot + city-prefixed); full=%v", got, counts)
+	}
+	if got := counts["executor"]; got != 1 {
+		t.Fatalf("counts[executor] = %d, want 1; full=%v", got, counts)
+	}
+	if _, ok := counts["unrelated-session"]; ok {
+		t.Fatalf("unexpected count for unresolved name: %v", counts)
+	}
+}
+
 func TestReloadConfigTracedReportsPoolMaxBoundChanges(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

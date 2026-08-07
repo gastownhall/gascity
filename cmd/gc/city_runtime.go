@@ -2245,9 +2245,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}
 
-	// FR-PM.3: diff pool max_active_sessions before the in-memory swap so the
-	// reload reply surfaces old → new bounds. Active counts use the still-
-	// current config for template attribution.
+	// Diff pool bounds and count active sessions against the still-current
+	// config before the swap below (#2897 FR-PM.3).
 	poolBoundChanges := poolMaxActiveSessionChanges(cr.cfg, nextCfg)
 	poolActiveCounts := cr.countActiveSessionsByTemplate(cr.cfg)
 

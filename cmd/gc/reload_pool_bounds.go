@@ -156,16 +156,13 @@ func (cr *CityRuntime) countActiveSessionsByTemplate(cfg *config.City) map[strin
 		}
 		template := resolvedTemplateForIdentity(name, cfg)
 		if template == "" {
-			// Strip city session-template prefix if present.
-			if st := strings.TrimSpace(cfg.Workspace.SessionTemplate); st != "" {
-				prefix := strings.ReplaceAll(st, "{name}", "")
-				// Common shape: "gc-{city}-{name}" — try suffix identity match.
-				if idx := strings.LastIndex(name, "-"); idx >= 0 {
-					if resolved := resolvedTemplateForIdentity(name[idx+1:], cfg); resolved != "" {
-						template = resolved
-					}
+			// Provider process names are sometimes city-prefixed
+			// (e.g. "gc-city-planner"). Try the final dash-separated
+			// segment as an agent identity before giving up.
+			if idx := strings.LastIndex(name, "-"); idx >= 0 {
+				if resolved := resolvedTemplateForIdentity(name[idx+1:], cfg); resolved != "" {
+					template = resolved
 				}
-				_ = prefix
 			}
 		}
 		if template == "" {
