@@ -60,20 +60,35 @@ var managedDoltSystemDatabases = map[string]struct{}{
 
 // managedDoltReadOnlyProbeStatementsFor returns the read-only probe statements
 // for db. Each invocation creates the persistent GC-owned probe table inside db
-// (idempotent) and rewrites a single row to test writability. db must be a real
-// user database; the empty string returns nil so the caller can skip the probe
-// entirely. The database identifier is backtick-quoted because Dolt derives DB
-// names from repository directory names, which can start with a digit or contain
-// other characters that need quoting.
+// (idempotent), rewrites a single row to test writability, and registers the
+// table in dolt_ignore so history flattening can never first-commit it: a
+// non-ignored table that lives only in the working set is committed by the
+// compaction flatten's `DOLT_COMMIT -Am`, which drifts the database hash and
+// quarantines GC for that database (hq June 2026, daa 2026-08-04). The
+// registration is last so a read-only server still fails on the CREATE or
+// REPLACE, which is what the read-only classification keys on, and it uses
+// INSERT IGNORE so an operator's explicit `ignored = 0` override survives.
+// The probe opens with USE because dolt_ignore is a session-root-backed system
+// table: both probe paths (the dolt CLI over --host and the direct driver)
+// connect with no default schema, and writing dolt_ignore through a qualified
+// name on such a session fails with "no root value found in session" — USE is
+// read-only, so the read-only classification still keys on the CREATE/REPLACE.
+// db must be a real user database; the empty string returns nil so the caller
+// can skip the probe entirely. The database identifier is backtick-quoted
+// because Dolt derives DB names from repository directory names, which can start
+// with a digit or contain other characters that need quoting.
 func managedDoltReadOnlyProbeStatementsFor(db string) []string {
 	db = strings.TrimSpace(db)
 	if db == "" {
 		return nil
 	}
-	target := managedDoltQuoteIdent(db) + "." + managedDoltQuoteIdent(managedDoltProbeTable)
+	quotedDB := managedDoltQuoteIdent(db)
+	target := quotedDB + "." + managedDoltQuoteIdent(managedDoltProbeTable)
 	return []string{
+		"USE " + quotedDB,
 		"CREATE TABLE IF NOT EXISTS " + target + " (k INT PRIMARY KEY)",
 		"REPLACE INTO " + target + " VALUES (1)",
+		"INSERT IGNORE INTO " + quotedDB + ".`dolt_ignore` (pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1)",
 	}
 }
 

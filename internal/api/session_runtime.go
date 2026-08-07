@@ -32,6 +32,9 @@ import (
 // session resolves to this binary rather than a colliding one, and
 // GC_CONTROLLER_TOKEN is scrubbed so the controller-only token never reaches a
 // managed session even when a workspace/provider env entry expands to it.
+// Scrubbed means PINNED EMPTY, not absent: a managed session inherits the
+// controller's environment, so an omitted key is an inherited key
+// (processenv.ControllerOnlyEnvKeys).
 //
 // Without these anchors, sessions spawned or restarted via the API code
 // paths cannot locate their city. Rig-scoped env remains a separate
@@ -57,10 +60,10 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 		out[k] = v
 	}
 	for k, v := range workspaceEnv {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	for k, v := range providerEnv {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	for k, v := range anchors {
 		out[k] = v
