@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,34 +35,39 @@ type casBackingStore struct {
 
 type atomicConditionalCloseBacking struct {
 	Store
-	closeCalls  int
-	closeErr    error
-	hideClosed  bool
-	failNextGet bool
+	closeCalls int
+	getCalls   int
+	closeErr   error
+	afterClose func()
 }
 
 func (s *atomicConditionalCloseBacking) Get(id string) (Bead, error) {
-	if s.failNextGet {
-		s.failNextGet = false
-		return Bead{}, errors.New("injected atomic-close refresh failure")
-	}
-	b, err := s.Store.Get(id)
-	if err == nil && s.hideClosed && b.Status == "closed" {
-		return Bead{}, ErrNotFound
-	}
-	return b, err
+	s.getCalls++
+	return s.Store.Get(id)
 }
 
-func (s *atomicConditionalCloseBacking) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error {
+func (s *atomicConditionalCloseBacking) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
 	s.closeCalls++
 	if s.closeErr != nil {
-		return s.closeErr
+		return Bead{}, s.closeErr
 	}
 	closer, ok := AtomicConditionalCloserFor(s.Store)
 	if !ok {
-		return ErrConditionalWriteUnsupported
+		return Bead{}, ErrConditionalWriteUnsupported
 	}
-	return closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+	if err == nil && s.afterClose != nil {
+		s.afterClose()
+	}
+	return closed, err
+}
+
+func closeWithCacheHandle(cache *CachingStore, id string, revision int64, metadata map[string]string) (Bead, error) {
+	closer, ok := AtomicConditionalCloserFor(cache)
+	if !ok {
+		return Bead{}, ErrConditionalWriteUnsupported
+	}
+	return closer.CloseWithMetadataIfMatch(id, revision, metadata)
 }
 
 func (s *casBackingStore) List(query ListQuery) ([]Bead, error) {
@@ -632,9 +638,9 @@ func TestCachingStoreCloseIfMatchClearsDependentReadyProjection(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCloseWithMetadataIfMatchDelegatesAndEmitsOnlyClosed(t *testing.T) {
+func TestCachingAtomicConditionalCloserReturnsExactRowWithoutPostCloseRead(t *testing.T) {
 	var notes []cacheWriteNotification
-	backing := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	backing := &atomicConditionalCloseBacking{Store: newNativeDoltStoreForTest(newNativeDoltMemStorage())}
 	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
 		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
 	})
@@ -651,8 +657,16 @@ func TestCachingStoreCloseWithMetadataIfMatchDelegatesAndEmitsOnlyClosed(t *test
 	}
 
 	notes = nil
-	if err := cache.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
+	backing.getCalls = 0
+	closed, err := closeWithCacheHandle(cache, created.ID, got.Revision, map[string]string{"state": "drained"})
+	if err != nil {
 		t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+	}
+	if closed.Status != "closed" || closed.Metadata["sibling"] != "kept" || closed.Metadata["state"] != "drained" {
+		t.Fatalf("returned bead = %#v, want exact terminal backing row", closed)
+	}
+	if backing.getCalls != 0 {
+		t.Fatalf("post-close backing Get calls = %d, want 0", backing.getCalls)
 	}
 	if len(notes) != 1 || notes[0].eventType != "bead.closed" || notes[0].beadID != created.ID {
 		t.Fatalf("notifications = %+v, want exactly one bead.closed for %s", notes, created.ID)
@@ -663,6 +677,60 @@ func TestCachingStoreCloseWithMetadataIfMatchDelegatesAndEmitsOnlyClosed(t *test
 	}
 	if fresh.Status != "closed" || fresh.Metadata["sibling"] != "kept" || fresh.Metadata["state"] != "drained" {
 		t.Fatalf("post-close bead = %#v, want closed with merged metadata", fresh)
+	}
+}
+
+func TestCachingAtomicConditionalCloserEmitsReturnedClosedRowAfterLaterReopen(t *testing.T) {
+	var notes []cacheWriteNotification
+	backing := &atomicConditionalCloseBacking{Store: newNativeDoltStoreForTest(newNativeDoltMemStorage())}
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	created, err := cache.Create(Bead{Title: "reopen after close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	current, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	backing.afterClose = func() {
+		if err := backing.Reopen(created.ID); err != nil {
+			t.Fatalf("deterministic reopen: %v", err)
+		}
+	}
+
+	notes = nil
+	backing.getCalls = 0
+	closed, err := closeWithCacheHandle(cache, created.ID, current.Revision, map[string]string{"state": "drained"})
+	if err != nil {
+		t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("returned bead status = %q, want closed", closed.Status)
+	}
+	if backing.getCalls != 0 {
+		t.Fatalf("post-close backing Get calls = %d, want 0", backing.getCalls)
+	}
+	if len(notes) != 1 || notes[0].eventType != "bead.closed" {
+		t.Fatalf("notifications = %+v, want exactly one bead.closed", notes)
+	}
+	var emitted Bead
+	if err := json.Unmarshal(notes[0].payload, &emitted); err != nil {
+		t.Fatalf("decode closed payload: %v", err)
+	}
+	if emitted.ID != closed.ID || emitted.Title != closed.Title || emitted.Status != closed.Status || !reflect.DeepEqual(emitted.Metadata, closed.Metadata) {
+		t.Fatalf("emitted bead = %#v, want wire-equivalent returned bead %#v", emitted, closed)
+	}
+	fresh, err := backing.Store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("backing Get after reopen: %v", err)
+	}
+	if fresh.Status != "open" {
+		t.Fatalf("backing status after reopen = %q, want open", fresh.Status)
 	}
 }
 
@@ -685,7 +753,7 @@ func TestCachingStoreCloseWithMetadataIfMatchUnsupportedBackingDoesNotMutateOrNo
 	}
 
 	notes = nil
-	err = cache.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"})
+	_, err = closeWithCacheHandle(cache, created.ID, got.Revision, map[string]string{"state": "drained"})
 	if !IsConditionalWriteUnsupported(err) {
 		t.Fatalf("CloseWithMetadataIfMatch error = %v, want unsupported", err)
 	}
@@ -724,7 +792,7 @@ func TestCachingStoreCloseWithMetadataIfMatchBackingFailureMarksDirtyWithoutNoti
 	}
 
 	notes = nil
-	err = cache.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"})
+	_, err = closeWithCacheHandle(cache, created.ID, got.Revision, map[string]string{"state": "drained"})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("CloseWithMetadataIfMatch error = %v, want injected failure", err)
 	}
@@ -743,73 +811,6 @@ func TestCachingStoreCloseWithMetadataIfMatchBackingFailureMarksDirtyWithoutNoti
 	}
 }
 
-func TestCachingStoreCloseWithMetadataIfMatchNotifiesWhenClosedRowsAreHidden(t *testing.T) {
-	var notes []cacheWriteNotification
-	backing := &atomicConditionalCloseBacking{
-		Store:      newNativeDoltStoreForTest(newNativeDoltMemStorage()),
-		hideClosed: true,
-	}
-	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
-		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
-	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	created, err := cache.Create(Bead{Title: "hidden atomic close"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	got, err := cache.Get(created.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	notes = nil
-	if err := cache.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
-		t.Fatalf("CloseWithMetadataIfMatch: %v", err)
-	}
-	if len(notes) != 1 || notes[0].eventType != "bead.closed" || notes[0].beadID != created.ID {
-		t.Fatalf("notifications = %+v, want exactly one closed notification", notes)
-	}
-	var payload Bead
-	if err := json.Unmarshal(notes[0].payload, &payload); err != nil {
-		t.Fatalf("closed notification payload: %v", err)
-	}
-	if payload.ID != created.ID || payload.Status != "closed" {
-		t.Fatalf("closed notification payload = %#v, want confirmed ID and closed status", payload)
-	}
-	assertConditionalEvicted(t, cache, created.ID)
-}
-
-func TestCachingStoreCloseWithMetadataIfMatchNotifiesWhenRefreshFails(t *testing.T) {
-	var notes []cacheWriteNotification
-	backing := &atomicConditionalCloseBacking{Store: newNativeDoltStoreForTest(newNativeDoltMemStorage())}
-	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
-		notes = append(notes, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
-	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	created, err := cache.Create(Bead{Title: "refresh-failing atomic close"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	got, err := cache.Get(created.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	notes = nil
-	backing.failNextGet = true
-	if err := cache.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
-		t.Fatalf("CloseWithMetadataIfMatch: %v", err)
-	}
-	if len(notes) != 1 || notes[0].eventType != "bead.closed" || notes[0].beadID != created.ID {
-		t.Fatalf("notifications = %+v, want exactly one closed notification after refresh failure", notes)
-	}
-	assertConditionalEvicted(t, cache, created.ID)
-}
-
 func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly(t *testing.T) {
 	t.Run("supported cache exposes its resolved native closer", func(t *testing.T) {
 		var notes []cacheWriteNotification
@@ -824,8 +825,11 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 		if !ok {
 			t.Fatal("AtomicConditionalCloserFor(cache) = unavailable, want native-backed capability")
 		}
-		if got, ok := closer.(*CachingStore); !ok || got != cache {
-			t.Fatalf("cache closer = %T, want CachingStore forwarding handle", closer)
+		if _, ok := any(cache).(AtomicConditionalCloser); ok {
+			t.Fatal("CachingStore directly implements AtomicConditionalCloser")
+		}
+		if _, ok := closer.(*cachingAtomicConditionalCloser); !ok {
+			t.Fatalf("cache closer = %T, want private cache forwarding handle", closer)
 		}
 		created, err := cache.Create(Bead{Title: "handle cache close"})
 		if err != nil {
@@ -836,7 +840,7 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 			t.Fatalf("Get: %v", err)
 		}
 		notes = nil
-		if err := closer.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
+		if _, err := closer.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
 			t.Fatalf("handle CloseWithMetadataIfMatch: %v", err)
 		}
 		if len(notes) != 1 || notes[0].eventType != "bead.closed" {
@@ -847,6 +851,9 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 
 	t.Run("unsupported cache does not claim a deferred failure", func(t *testing.T) {
 		cache := NewCachingStoreForTest(NewMemStore(), nil)
+		if _, ok := any(cache).(AtomicConditionalCloser); ok {
+			t.Fatal("unsupported cache directly implements AtomicConditionalCloser")
+		}
 		if closer, ok := AtomicConditionalCloserFor(cache); ok || closer != nil {
 			t.Fatalf("AtomicConditionalCloserFor(unsupported cache) = (%T, %v), want (nil, false)", closer, ok)
 		}
@@ -855,6 +862,10 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 	t.Run("target-declaring wrapper reaches native backing", func(t *testing.T) {
 		backing := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 		wrapped := &resolveTargetWrapper{Store: backing, target: backing}
+		direct, ok := AtomicConditionalCloserFor(wrapped)
+		if !ok || direct != backing {
+			t.Fatalf("AtomicConditionalCloserFor(target wrapper) = (%T, %v), want direct native closer", direct, ok)
+		}
 		cache := NewCachingStoreForTest(wrapped, nil)
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("Prime: %v", err)
@@ -871,7 +882,7 @@ func TestAtomicConditionalCloserForCachingStoreResolvesBackingCapabilityHonestly
 		if !ok {
 			t.Fatal("AtomicConditionalCloserFor(target-wrapper cache) = unavailable")
 		}
-		if err := closer.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
+		if _, err := closer.CloseWithMetadataIfMatch(created.ID, got.Revision, map[string]string{"state": "drained"}); err != nil {
 			t.Fatalf("CloseWithMetadataIfMatch through target wrapper: %v", err)
 		}
 		fresh, err := backing.Get(created.ID)

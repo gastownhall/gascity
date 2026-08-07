@@ -221,7 +221,7 @@ type ConditionalWriter interface {
 // terminal-state writers that cannot tolerate a metadata/close split, and is
 // exposed only by stores that can prove both operations share one transaction.
 type AtomicConditionalCloser interface {
-	CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error
+	CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error)
 }
 
 // AtomicConditionalCloserHandleProvider lets a wrapper expose the atomic
@@ -239,6 +239,7 @@ func AtomicConditionalCloserFor(store Store) (AtomicConditionalCloser, bool) {
 	if store == nil {
 		return nil, false
 	}
+	store = followConditionalWritesResolveTarget(store)
 	if provider, ok := store.(AtomicConditionalCloserHandleProvider); ok {
 		return provider.AtomicConditionalCloserHandle()
 	}

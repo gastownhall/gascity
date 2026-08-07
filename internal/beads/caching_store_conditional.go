@@ -31,42 +31,27 @@ import (
 // succeeds, feeds the change notification verbatim and nothing else.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)
-	_ AtomicConditionalCloser          = (*CachingStore)(nil)
 	_ conditionalWritesModeCarrier     = (*CachingStore)(nil)
 	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
 )
 
-// CloseWithMetadataIfMatch delegates the indivisible terminal write only when
-// its resolved backing exposes that capability. The cache always evicts after
-// a proven success: no returned row can be attributed to this write, so
-// retaining one would invent a revisioned snapshot. The closed notification is
-// emitted exactly once even when a backing hides closed beads from Get.
-func (c *CachingStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error {
-	closer, ok := AtomicConditionalCloserFor(c.conditionalBacking())
-	if !ok {
-		return ErrConditionalWriteUnsupported
-	}
-	if err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata); err != nil {
-		c.applyConditionalWriteFailure(id, err)
-		return err
-	}
+// cachingAtomicConditionalCloser preserves cache eviction and notification
+// while exposing the capability only for a backing that actually supports it.
+type cachingAtomicConditionalCloser struct{ cache *CachingStore }
 
-	fresh, err := c.backing.Get(id)
-	c.evictForConditionalWrite(id)
-	if err == nil {
-		// The successful capability call proves the terminal status. Do not
-		// install this best-effort reread into the cache.
-		fresh.Status = "closed"
-		c.notifyChange("bead.closed", fresh)
-		return nil
+func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	closer, ok := AtomicConditionalCloserFor(h.cache.conditionalBacking())
+	if !ok {
+		return Bead{}, ErrConditionalWriteUnsupported
 	}
-	if !errors.Is(err, ErrNotFound) {
-		c.recordProblem("refresh bead after atomic conditional close", fmt.Errorf("%s: %w", id, err))
+	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+	if err != nil {
+		h.cache.applyConditionalWriteFailure(id, err)
+		return Bead{}, err
 	}
-	// The capability call is the proof of closure; ID and terminal status are
-	// the only facts safe to publish when the reread is unavailable.
-	c.notifyChange("bead.closed", Bead{ID: id, Status: "closed"})
-	return nil
+	h.cache.evictForConditionalWrite(id)
+	h.cache.notifyChange("bead.closed", closed)
+	return closed, nil
 }
 
 // AtomicConditionalCloserHandle exposes the cache forwarding surface only when
@@ -77,7 +62,7 @@ func (c *CachingStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser,
 	if _, ok := AtomicConditionalCloserFor(c.conditionalBacking()); !ok {
 		return nil, false
 	}
-	return c, true
+	return &cachingAtomicConditionalCloser{cache: c}, true
 }
 
 // The cache is a wrapper, not a second store, so it carries no

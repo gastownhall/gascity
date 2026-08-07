@@ -1525,6 +1525,7 @@ func isNativeDoltSerializationConflict(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "error 1213") ||
+		strings.Contains(msg, "error 1205") ||
 		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
 		strings.Contains(msg, "(40001)") ||
 		strings.Contains(msg, "this transaction conflicts with a committed transaction")

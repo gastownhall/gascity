@@ -386,3 +386,104 @@ func TestNativeDoltStoreMetadataCASContentionAcrossIndependentHandles(t *testing
 		}
 	}
 }
+
+// TestNativeDoltStoreAtomicConditionalCloseAcrossIndependentHandles proves
+// the atomic terminal-write fence against the actual OpenBestAvailable
+// backend. The fast native fixture owns retry branch coverage; this test owns
+// the database isolation and rollback boundary shared by independent handles.
+func TestNativeDoltStoreAtomicConditionalCloseAcrossIndependentHandles(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), ".beads")
+	openHandle := func(actor string) *NativeDoltStore {
+		t.Helper()
+		storage, err := beadslib.OpenBestAvailable(ctx, dir)
+		if err != nil {
+			t.Fatalf("open upstream native beads storage (%s): %v", actor, err)
+		}
+		t.Cleanup(func() {
+			if err := storage.Close(); err != nil {
+				t.Errorf("close upstream storage (%s): %v", actor, err)
+			}
+		})
+		if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+			t.Fatalf("set issue prefix (%s): %v", actor, err)
+		}
+		return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+	}
+
+	writerA := openHandle("atomic-close-A")
+	writerB := openHandle("atomic-close-B")
+	created, err := writerA.Create(Bead{Title: "real atomic conditional close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	snapshot, err := writerA.Get(created.ID)
+	if err != nil {
+		t.Fatalf("writerA Get: %v", err)
+	}
+	if peer, err := writerB.Get(created.ID); err != nil || peer.Revision != snapshot.Revision {
+		t.Fatalf("writerB snapshot = (%#v, %v), want revision %d", peer, err, snapshot.Revision)
+	}
+
+	type result struct {
+		bead Bead
+		err  error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for _, writer := range []*NativeDoltStore{writerA, writerB} {
+		go func(store *NativeDoltStore) {
+			<-start
+			bead, err := store.CloseWithMetadataIfMatch(created.ID, snapshot.Revision, map[string]string{"winner": store.actor})
+			results <- result{bead: bead, err: err}
+		}(writer)
+	}
+	close(start)
+
+	var winner Bead
+	for range 2 {
+		result := <-results
+		switch {
+		case result.err == nil:
+			if winner.ID != "" {
+				t.Fatalf("multiple successful terminal writes: %#v and %#v", winner, result.bead)
+			}
+			winner = result.bead
+		case IsPreconditionFailed(result.err):
+			if result.bead.ID != "" {
+				t.Fatalf("losing close returned %#v, want zero bead", result.bead)
+			}
+		default:
+			t.Fatalf("contending close error = %v, want precondition failure", result.err)
+		}
+	}
+	if winner.ID == "" || winner.Status != "closed" || winner.Metadata["winner"] == "" {
+		t.Fatalf("winner = %#v, want exact closed row", winner)
+	}
+
+	staleCreated, err := writerA.Create(Bead{Title: "real atomic close stale rollback", Metadata: map[string]string{"before": "keep"}})
+	if err != nil {
+		t.Fatalf("Create stale bead: %v", err)
+	}
+	if err := writerB.SetMetadata(staleCreated.ID, "intervening", "write"); err != nil {
+		t.Fatalf("intervening SetMetadata: %v", err)
+	}
+	before, err := writerA.Get(staleCreated.ID)
+	if err != nil {
+		t.Fatalf("Get before stale close: %v", err)
+	}
+	closed, err := writerA.CloseWithMetadataIfMatch(staleCreated.ID, staleCreated.Revision, map[string]string{"state": "drained"})
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("stale CloseWithMetadataIfMatch error = %v, want precondition failure", err)
+	}
+	if closed.ID != "" {
+		t.Fatalf("stale close returned %#v, want zero bead", closed)
+	}
+	after, err := writerB.Get(staleCreated.ID)
+	if err != nil {
+		t.Fatalf("Get after stale close: %v", err)
+	}
+	if after.Status != before.Status || after.Metadata["before"] != "keep" || after.Metadata["intervening"] != "write" || after.Metadata["state"] != "" {
+		t.Fatalf("stale close mutated real row: before=%#v after=%#v", before, after)
+	}
+}

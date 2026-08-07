@@ -18,60 +18,75 @@ var (
 
 // CloseWithMetadataIfMatch merges metadata and closes id inside one native
 // transaction, but only while the exact opaque row version still matches.
-// A close error rolls back the preceding metadata write with the transaction.
-func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error {
+// It returns the final in-transaction row only after the transaction commits.
+func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
-		return err
+		return Bead{}, err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
 
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced metadata close bead %s", id), func(tx beadslib.Transaction) error {
-		issue, err := tx.GetIssue(ctx, id)
-		if err != nil {
-			return nativeStoreError(id, err)
-		}
-		if issue == nil {
-			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-		}
-		if issue.RowVersion != expectedRevision {
-			return &PreconditionFailedError{
-				ID:       id,
-				Expected: expectedRevision,
-				Current:  issue.RowVersion,
-				Raw:      "native row-version mismatch",
+	var closed Bead
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		closed = Bead{}
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced metadata close bead %s", id), func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
 			}
-		}
-		merged, err := metadataMapFromNative(issue.Metadata)
-		if err != nil {
-			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-		}
-		if merged == nil {
-			merged = make(map[string]string, len(metadata))
-		}
-		for key, value := range metadata {
-			merged[key] = value
-		}
-		raw, err := metadataRawFromMap(merged)
-		if err != nil {
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			if issue.RowVersion != expectedRevision {
+				return &PreconditionFailedError{
+					ID:       id,
+					Expected: expectedRevision,
+					Current:  issue.RowVersion,
+					Raw:      "native row-version mismatch",
+				}
+			}
+			merged, err := metadataMapFromNative(issue.Metadata)
+			if err != nil {
+				return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+			}
+			if merged == nil {
+				merged = make(map[string]string, len(metadata))
+			}
+			for key, value := range metadata {
+				merged[key] = value
+			}
+			raw, err := metadataRawFromMap(merged)
+			if err != nil {
+				return err
+			}
+			if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
+				return nativeStoreError(id, err)
+			}
+			issueWithMergedMetadata := *issue
+			issueWithMergedMetadata.Metadata = raw
+			if err := tx.CloseIssue(ctx, id, nativeCloseReasonFromIssue(&issueWithMergedMetadata), s.actor, ""); err != nil {
+				return nativeStoreError(id, err)
+			}
+			finalIssue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
+			}
+			if finalIssue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			if finalIssue.Status != beadslib.StatusClosed {
+				return fmt.Errorf("closing bead %q atomically: transaction returned status %q", id, finalIssue.Status)
+			}
+			closed, err = beadFromNativeIssue(finalIssue)
 			return err
-		}
-		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
-			return nativeStoreError(id, err)
-		}
-		// Close uses close_reason for its history event. Read it from the
-		// merged blob, exactly as a sequential SetMetadataBatch followed by
-		// Close would, without splitting their commit boundary.
-		issueWithMergedMetadata := *issue
-		issueWithMergedMetadata.Metadata = raw
-		if err := tx.CloseIssue(ctx, id, nativeCloseReasonFromIssue(&issueWithMergedMetadata), s.actor, ""); err != nil {
-			return nativeStoreError(id, err)
-		}
-		return nil
+		})
 	})
-	return nativeStoreError(id, err)
+	if err != nil {
+		return Bead{}, nativeStoreError(id, err)
+	}
+	return closed, nil
 }
 
 func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
