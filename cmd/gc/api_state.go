@@ -55,6 +55,13 @@ import (
 type controllerState struct {
 	mu  sync.RWMutex
 	cfg *config.City
+	// reconcileCache remembers terminally reconciled graph.v2 roots across
+	// reconcileExecutionCompletions passes so patrol ticks stop rescanning
+	// history that cannot change (sc-yf1wpo: the uncached full scan cost
+	// ~460s/tick on a mature store). Guarded by reconcileCacheMu, not mu:
+	// the pass runs outside the state lock by design.
+	reconcileCacheMu sync.Mutex
+	reconcileCache   *executionevent.ReconcileCache
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -589,7 +596,13 @@ func (cs *controllerState) reconcileExecutionCompletions() {
 		}
 		graphStores = append(graphStores, beads.GraphStore{Store: store})
 	}
-	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
+	cs.reconcileCacheMu.Lock()
+	if cs.reconcileCache == nil {
+		cs.reconcileCache = executionevent.NewReconcileCache()
+	}
+	cache := cs.reconcileCache
+	executionevent.ReconcileCompletedStoresCached(ep, graphStores, "execution-reconcile", cache)
+	cs.reconcileCacheMu.Unlock()
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a

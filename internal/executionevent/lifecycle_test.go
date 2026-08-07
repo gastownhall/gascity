@@ -346,3 +346,87 @@ func TestLifecycleEventRetainsUnknownAndRejectsNonNativeOrInvalidFacts(t *testin
 }
 
 func lifecycleStrings(v []string) *[]string { return &v }
+
+// stepQueryCountingStore counts the per-root step enumerations
+// (ListByMetadata filtered by root_bead_id) that dominate reconcile cost on a
+// mature store (sc-yf1wpo). It proves the terminal-root cache actually skips
+// the per-root work rather than merely suppressing emissions.
+type stepQueryCountingStore struct {
+	beads.Store
+	stepQueries *int
+}
+
+func (s stepQueryCountingStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if _, ok := filters[beadmeta.RootBeadIDMetadataKey]; ok {
+		*s.stepQueries++
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestReconcileCompletedStoresCachedSkipsTerminalRootsAndEvictsOnReopen(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	step := mustCreateProjectionStep(t, graph, "gcg-attempt", root.ID, "build", `["prepare"]`)
+	closed := "closed"
+	if err := graph.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.Update(root.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := events.NewFake()
+	cache := NewReconcileCache()
+	stepQueries := 0
+	counting := beads.GraphStore{Store: stepQueryCountingStore{Store: graph, stepQueries: &stepQueries}}
+
+	// Pass 1 emits the stranded fact; the root must NOT be cached yet because
+	// Record is best-effort and done-status requires reading the fact back.
+	if got := ReconcileCompletedStoresCached(recorder, []beads.GraphStore{counting}, "execution-reconcile", cache); got != 1 {
+		t.Fatalf("pass 1 = %d, want 1 emission", got)
+	}
+	if cache.isDone(root.ID) {
+		t.Fatal("root cached on the emitting pass; done-status must wait for journal read-back")
+	}
+	// Pass 2 observes the fact in the journal and caches the terminal root.
+	if got := ReconcileCompletedStoresCached(recorder, []beads.GraphStore{counting}, "execution-reconcile", cache); got != 0 {
+		t.Fatalf("pass 2 = %d, want 0", got)
+	}
+	if !cache.isDone(root.ID) {
+		t.Fatal("terminal root not cached after clean pass")
+	}
+	// Pass 3 must skip the per-root step enumeration entirely.
+	stepQueries = 0
+	if got := ReconcileCompletedStoresCached(recorder, []beads.GraphStore{counting}, "execution-reconcile", cache); got != 0 {
+		t.Fatalf("pass 3 = %d, want 0", got)
+	}
+	if stepQueries != 0 {
+		t.Fatalf("pass 3 ran %d step enumerations for a cached terminal root, want 0", stepQueries)
+	}
+
+	// Reopening the root must evict it and rescan (a reopened root can close
+	// steps again and strand new facts).
+	open := "open"
+	if err := graph.Update(root.ID, beads.UpdateOpts{Status: &open}); err != nil {
+		t.Fatal(err)
+	}
+	stepQueries = 0
+	if got := ReconcileCompletedStoresCached(recorder, []beads.GraphStore{counting}, "execution-reconcile", cache); got != 0 {
+		t.Fatalf("reopen pass = %d, want 0 new emissions", got)
+	}
+	if stepQueries == 0 {
+		t.Fatal("reopened root was not rescanned")
+	}
+	if cache.isDone(root.ID) {
+		t.Fatal("reopened root still cached")
+	}
+
+	// Nil cache must reproduce the uncached full scan (upstream behavior).
+	stepQueries = 0
+	if got := ReconcileCompletedStoresCached(recorder, []beads.GraphStore{counting}, "execution-reconcile", nil); got != 0 {
+		t.Fatalf("nil-cache pass = %d, want 0", got)
+	}
+	if stepQueries == 0 {
+		t.Fatal("nil cache skipped the scan")
+	}
+}
