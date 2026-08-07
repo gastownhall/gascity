@@ -1492,7 +1492,7 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // runner keeps the logical command name as "bd" so its timeout, telemetry,
 // and backup policy still apply while executing that pin.
 func requireBdBinaryForCity(cityPath string) error {
-	_, err := resolveBdBinaryForCity(cityPath)
+	_, err := resolveBdBinaryForScope(cityPath, cityPath)
 	if errors.Is(err, errBdNotOnPath) {
 		return fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 	}

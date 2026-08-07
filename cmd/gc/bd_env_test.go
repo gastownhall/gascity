@@ -6352,3 +6352,109 @@ func TestProjectGitHubTokenExecEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveBdBinaryForScope pins which scope decides the bd binary. The
+// scope the command targets owns the decision: it is the scope whose store
+// the command reads and writes, and only its binding says which build speaks
+// the backend. A scope that never reads the city's binding must not be taken
+// offline by a fault in it.
+func TestResolveBdBinaryForScope(t *testing.T) {
+	const complete = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`
+	const partial = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432"}`
+
+	// newPinnedCity stages a city pinning its own bd on the workspace PATH,
+	// with a different bd on the ambient PATH, and returns the two paths.
+	newPinnedCity := func(t *testing.T, cityMetadata string) (cityDir, pinned, ambient string) {
+		t.Helper()
+		cityDir = t.TempDir()
+		pinDir := t.TempDir()
+		pinned = filepath.Join(pinDir, "bd")
+		writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+		ambientDir := t.TempDir()
+		ambient = filepath.Join(ambientDir, "bd")
+		writeExecutable(t, ambient, "#!/bin/sh\nexit 0\n")
+		t.Setenv("PATH", ambientDir)
+		cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = " + strconv.Quote(pinDir) + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if cityMetadata != "" {
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(cityMetadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return cityDir, pinned, ambient
+	}
+	writeRig := func(t *testing.T, cityDir, name, metadata string) string {
+		t.Helper()
+		rigDir := filepath.Join(cityDir, "rigs", name)
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.WriteFile(scopeMetadataJSONPath(rigDir), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rigDir
+	}
+
+	t.Run("city scope surfaces its own partial binding", func(t *testing.T) {
+		cityDir, _, _ := newPinnedCity(t, partial)
+		got, err := resolveBdBinaryForScope(cityDir, cityDir)
+		if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+			t.Fatalf("resolveBdBinaryForScope(city, city) = (%q, %v), want the partial-binding error", got, err)
+		}
+	})
+
+	t.Run("rig overriding the city backend survives a partial city binding", func(t *testing.T) {
+		cityDir, _, ambient := newPinnedCity(t, partial)
+		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v, want the ambient bd", err)
+		}
+		if got != ambient {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q", got, ambient)
+		}
+	})
+
+	t.Run("rig carrying its own binding resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		rigDir := writeRig(t, cityDir, "frontend", complete)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig inheriting the city binding resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, complete)
+		rigDir := writeRig(t, cityDir, "inherit", "")
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig overriding the city backend keeps the ambient bd", func(t *testing.T) {
+		cityDir, _, ambient := newPinnedCity(t, complete)
+		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != ambient {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN", got, ambient)
+		}
+	})
+}

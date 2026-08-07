@@ -122,18 +122,19 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 // lookup produced a bd executable. Callers phrase their own remediation.
 var errBdNotOnPath = errors.New("bd not found in PATH")
 
-// resolveBdBinaryForCity resolves the bd executable a city runs. A scope
-// carrying a complete storage binding runs the binary its workspace PATH
-// pins, because only that build speaks the bound backend; every other scope
-// keeps the ambient lookup. An ambient miss is errBdNotOnPath so callers can
-// phrase their own remediation; a pin that is configured but unresolvable is
-// returned verbatim rather than masked as a missing binary.
-func resolveBdBinaryForCity(cityPath string) (string, error) {
-	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+// resolveBdBinaryForScope resolves the bd executable a scope's commands run.
+// A scope bound to a complete storage binding runs the binary its workspace
+// PATH pins, because only that build speaks the bound backend; every other
+// scope keeps the ambient lookup. An ambient miss is errBdNotOnPath so
+// callers can phrase their own remediation; a pin that is configured but
+// unresolvable for a scope that needs it is returned verbatim rather than
+// masked as a missing binary.
+func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
+	bound, err := scopeBindsPinnedBdBinary(cityPath, scopeRoot)
 	if err != nil {
 		return "", err
 	}
-	if completeBinding {
+	if bound {
 		pinned, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return "", err
@@ -147,6 +148,25 @@ func resolveBdBinaryForCity(cityPath string) (string, error) {
 		return "", errBdNotOnPath
 	}
 	return bdPath, nil
+}
+
+// scopeBindsPinnedBdBinary reports whether a scope's bd commands must run the
+// workspace-pinned build: the scope carries a complete storage binding of its
+// own, or it inherits the city's the way applyCanonicalScopeBackendEnv does.
+// A scope that overrides the city backend never reads the city binding, so a
+// fault in it is not that scope's fault and degrades to the ambient lookup
+// instead of taking the scope's bd offline. Only the scope's own binding
+// surfaces an error.
+func scopeBindsPinnedBdBinary(cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || completeBinding {
+		return completeBinding, err
+	}
+	if samePath(cityPath, scopeRoot) || scopeOverridesCityBackend(cityPath, scopeRoot) {
+		return false, nil
+	}
+	inherited, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	return err == nil && inherited, nil
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {

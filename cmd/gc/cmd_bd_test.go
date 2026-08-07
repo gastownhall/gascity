@@ -2486,7 +2486,7 @@ prefix = "fe"
 // nor a pin keeps the ambient lookup.
 func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 	t.Run("complete binding runs the workspace-pinned bd", func(t *testing.T) {
-		cityDir := newGcBdBinaryProbeCity(t, "ambient-bd")
+		cityDir := newGcBdBinaryProbeCity(t)
 
 		pinDir := t.TempDir()
 		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
@@ -2510,7 +2510,7 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 	})
 
 	t.Run("no binding falls back to ambient bd", func(t *testing.T) {
-		cityDir := newGcBdBinaryProbeCity(t, "ambient-bd")
+		cityDir := newGcBdBinaryProbeCity(t)
 		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -2523,12 +2523,148 @@ func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
 			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
 		}
 	})
+
+	// A city-scoped command reads the city's own binding, so a half-written
+	// one is that command's fault and must stay fatal — the rig-scope
+	// tolerance below it must not soften the scope that owns the binding.
+	t.Run("partial city binding still fails the city scope", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		writeGcBdProbeCityTOML(t, cityDir, t.TempDir())
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(partialStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"list"}, &stdout, &stderr); got != 1 {
+			t.Fatalf("doBd() = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if want := "partial beads storage binding"; !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to name the %q", stderr.String(), want)
+		}
+	})
 }
 
+// TestGcBdPassthroughResolvesBdBinaryForRigScope pins the binary the
+// passthrough execs for `gc bd --rig`, a form the command's own help
+// documents. The scope the command targets decides the binary, because that
+// is the scope whose store the command reads and writes: a rig carrying its
+// own complete binding runs the pinned build that speaks it, and a rig that
+// overrides the city backend keeps the ambient lookup even when the city is
+// bound — its store is not the bound one, and its runtime env carries no
+// BD_BIN.
+func TestGcBdPassthroughResolvesBdBinaryForRigScope(t *testing.T) {
+	t.Run("rig carrying its own complete binding runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "frontend")
+		writeGcBdProbeRig(t, cityDir, "frontend", completeStorageBindingJSON)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "frontend", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig frontend) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
+	t.Run("doltlite rig survives a partial city binding", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "dl")
+		// Half-written city provisioning state: storage_database never
+		// landed. scopeHasCompleteStorageBinding rejects it, but the rig
+		// below never reads that binding.
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(partialStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeGcBdProbeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig dl) = %d, want 0; a city-level binding fault must not take a doltlite rig offline; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
+		}
+	})
+
+	t.Run("doltlite rig in a bound city keeps the ambient bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "dl")
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(completeStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeGcBdProbeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig dl) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN, so the passthrough must not exec the city's pin", got, "ambient-bd")
+		}
+	})
+}
+
+// completeStorageBindingJSON and partialStorageBindingJSON are the two
+// storage-binding shapes scopeHasCompleteStorageBinding distinguishes: all
+// three fields non-empty, and the half-written state it fails closed on.
+const (
+	completeStorageBindingJSON = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`
+	partialStorageBindingJSON  = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432"}`
+)
+
+// writeGcBdProbeCityTOML writes a city.toml pinning pinDir ahead of the
+// ambient PATH and declaring the named rigs, plus the .gc/site.toml bindings
+// that give them their paths under rigs/<name>.
+func writeGcBdProbeCityTOML(t *testing.T, cityDir, pinDir string, rigNames ...string) {
+	t.Helper()
+	cityTOML := "[workspace.env]\nPATH = " +
+		strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+	siteTOML := "workspace_name = \"demo\"\n"
+	for _, name := range rigNames {
+		cityTOML += "\n[[rigs]]\nname = " + strconv.Quote(name) +
+			"\nprefix = " + strconv.Quote(name) + "\n"
+		siteTOML += "\n[[rig]]\nname = " + strconv.Quote(name) +
+			"\npath = " + strconv.Quote(filepath.Join(cityDir, "rigs", name)) + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(siteTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeGcBdProbeRig stages rigs/<name> carrying the given
+// .beads/metadata.json.
+func writeGcBdProbeRig(t *testing.T, cityDir, name, metadata string) {
+	t.Helper()
+	rigDir := filepath.Join(cityDir, "rigs", name)
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(rigDir), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gcBdAmbientProbeIdentity is what the bd on the ambient PATH prints, so a
+// passthrough test can tell it apart from a workspace-pinned build.
+const gcBdAmbientProbeIdentity = "ambient-bd"
+
 // newGcBdBinaryProbeCity returns a city whose only bd on the ambient PATH
-// reports the given identity, so a passthrough test can tell which binary
-// actually ran. The caller writes city.toml.
-func newGcBdBinaryProbeCity(t *testing.T, ambientIdentity string) string {
+// announces gcBdAmbientProbeIdentity, so a passthrough test can tell which
+// binary actually ran. The caller writes city.toml.
+func newGcBdBinaryProbeCity(t *testing.T) string {
 	t.Helper()
 	disableManagedDoltRecoveryForTest(t)
 
@@ -2551,7 +2687,7 @@ func newGcBdBinaryProbeCity(t *testing.T, ambientIdentity string) string {
 	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
 
 	ambientDir := t.TempDir()
-	writeGcBdProbeScript(t, filepath.Join(ambientDir, "bd"), ambientIdentity)
+	writeGcBdProbeScript(t, filepath.Join(ambientDir, "bd"), gcBdAmbientProbeIdentity)
 	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
