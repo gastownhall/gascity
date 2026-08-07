@@ -130,11 +130,19 @@ func TestSQLiteLegacySnapshotSIGKILLAtBoundaries(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading private legacy snapshot root: %v", err)
 			}
-			if len(entries) != 0 {
-				names := make([]string, 0, len(entries))
-				for _, entry := range entries {
-					names = append(names, entry.Name())
+			var names []string
+			for _, entry := range entries {
+				// Under -cover the re-exec'd child's coverage runtime keeps
+				// its scratch directory beneath TMPDIR (= privateRoot), and a
+				// SIGKILLed child cannot remove it. That is cover-runtime
+				// residue, not snapshot-machinery residue, which is what this
+				// assertion guards.
+				if strings.HasPrefix(entry.Name(), "gocoverdir") {
+					continue
 				}
+				names = append(names, entry.Name())
+			}
+			if len(names) != 0 {
 				t.Fatalf("private legacy snapshot residue after recovery from SIGKILL at %q: %v", boundary, names)
 			}
 			outcome = runSQLiteFenceChild(t,
