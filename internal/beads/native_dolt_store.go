@@ -652,7 +652,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	if err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
-	if err := validateNativeGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan); err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
@@ -1758,53 +1758,6 @@ func nativeBeadIDPrefix(id string) string {
 		return ""
 	}
 	return normalizeIDPrefix(before)
-}
-
-func validateNativeGraphApplyPlan(plan *GraphApplyPlan) error {
-	if len(plan.Nodes) == 0 {
-		return fmt.Errorf("plan has no nodes")
-	}
-	knownKeys := make(map[string]bool, len(plan.Nodes))
-	for i, node := range plan.Nodes {
-		if strings.TrimSpace(node.Key) == "" {
-			return fmt.Errorf("node %d has empty key", i)
-		}
-		if knownKeys[node.Key] {
-			return fmt.Errorf("duplicate node key %q", node.Key)
-		}
-		knownKeys[node.Key] = true
-		if strings.TrimSpace(node.Title) == "" {
-			return fmt.Errorf("node %q has empty title", node.Key)
-		}
-	}
-	for _, node := range plan.Nodes {
-		for metaKey, refKey := range node.MetadataRefs {
-			if !knownKeys[refKey] {
-				return fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
-			}
-		}
-		if node.ParentKey != "" && !knownKeys[node.ParentKey] {
-			return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
-		}
-	}
-	for i, edge := range plan.Edges {
-		if edge.FromKey != "" && !knownKeys[edge.FromKey] {
-			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
-		}
-		if edge.ToKey != "" && !knownKeys[edge.ToKey] {
-			return fmt.Errorf("edge %d: to key %q not found in plan", i, edge.ToKey)
-		}
-		if edge.FromKey == "" && edge.FromID == "" {
-			return fmt.Errorf("edge %d: must specify from_key or from_id", i)
-		}
-		if edge.ToKey == "" && edge.ToID == "" {
-			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
-		}
-		if depType := nativeGraphApplyDependencyType(edge.Type); !depType.IsValid() {
-			return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
-		}
-	}
-	return nil
 }
 
 func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {
