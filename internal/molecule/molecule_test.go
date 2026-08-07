@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -2701,6 +2702,113 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 }
 
+func TestInstantiateRejectsResidualRoutingMetadataVars(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "residual-routing-check",
+		Steps: []formula.RecipeStep{
+			{ID: "residual-routing-check", Title: "Root", Type: "molecule", IsRoot: true},
+			{
+				ID:    "residual-routing-check.review",
+				Title: "Review: {{topic}}",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.RunTargetMetadataKey: "{{review_target}}",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "residual-routing-check.review", DependsOnID: "residual-routing-check", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"topic":         {Description: "Work topic"},
+			"review_target": {Description: "Reviewer role"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved routing var", func(t *testing.T) {
+		_, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+			Vars: map[string]string{"topic": "widgets"},
+		})
+		if err == nil {
+			t.Fatal("Instantiate should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("sequential path allows resolved routing var", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), beads.NewMemStore(), recipe, Options{
+			Vars: map[string]string{"topic": "widgets", "review_target": "gc.review-synthesizer"},
+		})
+		if err != nil {
+			t.Fatalf("Instantiate should succeed: %v", err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created = %d, want 2", result.Created)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved routing var", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
+			Vars: map[string]string{"topic": "widgets"},
+		})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved gc.routed_to", func(t *testing.T) {
+		routedToRecipe := &formula.Recipe{
+			Name: "residual-routed-to-check",
+			Steps: []formula.RecipeStep{
+				{ID: "residual-routed-to-check", Title: "Root", Type: "molecule", IsRoot: true},
+				{
+					ID:    "residual-routed-to-check.review",
+					Title: "Review",
+					Type:  "task",
+					Metadata: map[string]string{
+						beadmeta.RoutedToMetadataKey: "{{review_target}}",
+					},
+				},
+			},
+			Deps: []formula.RecipeDep{
+				{StepID: "residual-routed-to-check.review", DependsOnID: "residual-routed-to-check", Type: "parent-child"},
+			},
+			Vars: map[string]*formula.VarDef{
+				"review_target": {Description: "Reviewer role"},
+			},
+		}
+
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err := Instantiate(context.Background(), gaStore, routedToRecipe, Options{})
+		if err == nil {
+			t.Fatal("graph-apply Instantiate should reject unresolved {{review_target}} in gc.routed_to")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RoutedToMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RoutedToMetadataKey, err)
+		}
+	})
+}
+
 func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 	store := beads.NewMemStore()
 	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task", Status: "open"})
@@ -2926,6 +3034,69 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "unresolved variable") {
 			t.Errorf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestInstantiateFragmentRejectsResidualRoutingMetadataVars(t *testing.T) {
+	fragment := &formula.FragmentRecipe{
+		Name: "frag-residual-routing",
+		Steps: []formula.RecipeStep{
+			{
+				ID:    "frag-residual-routing.step-a",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.RunTargetMetadataKey: "{{review_target}}",
+				},
+			},
+		},
+		Vars: map[string]*formula.VarDef{
+			"review_target": {Description: "Reviewer role"},
+		},
+	}
+
+	t.Run("sequential path rejects unresolved routing var", func(t *testing.T) {
+		store := beads.NewMemStore()
+		root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(false)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
+			RootID: root.ID,
+		})
+		if err == nil {
+			t.Fatal("InstantiateFragment should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
+		}
+	})
+
+	t.Run("graph-apply path rejects unresolved routing var", func(t *testing.T) {
+		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		root, err := gaStore.Create(beads.Bead{Title: "root", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
+			RootID: root.ID,
+		})
+		if err == nil {
+			t.Fatal("graph-apply InstantiateFragment should reject unresolved {{review_target}} in gc.run_target")
+		}
+		if !strings.Contains(err.Error(), beadmeta.RunTargetMetadataKey) || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should mention %s and review_target: %v", beadmeta.RunTargetMetadataKey, err)
 		}
 	})
 }

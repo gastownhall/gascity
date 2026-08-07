@@ -127,6 +127,28 @@ func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, ap
 	}, nil
 }
 
+// Routing fields the title-only guard below (#618) never covered — #5060.
+var residualVarRoutingMetadataKeys = []string{
+	beadmeta.RunTargetMetadataKey,
+	beadmeta.RoutedToMetadataKey,
+	beadmeta.ExecutionRoutedToMetadataKey,
+	DeferredRoutedToMetadataKey,
+	DeferredExecutionRoutedToMetadataKey,
+}
+
+func validateResidualRoutingVars(stepID string, metadata map[string]string) error {
+	for _, key := range residualVarRoutingMetadataKeys {
+		value := metadata[key]
+		if !strings.Contains(value, "{{") {
+			continue
+		}
+		if residual := formula.CheckResidualVars(value); len(residual) > 0 {
+			return fmt.Errorf("step %q: metadata %s contains unresolved variable(s) %s — missing or misspelled --var(s)?", stepID, key, strings.Join(residual, ", "))
+		}
+	}
+	return nil
+}
+
 func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApplyPlan, bool, string, error) {
 	if recipe == nil {
 		return nil, false, "", fmt.Errorf("recipe is nil")
@@ -254,6 +276,10 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, false, "", fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, false, "", err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, false, "", err
@@ -477,6 +503,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, err
