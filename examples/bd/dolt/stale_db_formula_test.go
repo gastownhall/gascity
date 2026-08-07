@@ -36,7 +36,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required`,
+		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_WORK_BEAD_ID:?no work bead id in env}}"`,
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
@@ -83,7 +83,7 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required`,
+		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_WORK_BEAD_ID:?no work bead id in env}}"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("rendered script missing %q", want)
@@ -94,6 +94,24 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n failed: %v\n%s", err, out)
+	}
+}
+
+func TestStaleDBFormulaAbortsWithoutAnyWorkBeadID(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = staleDBFilteredEnv("GC_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("rendered script exited successfully with no work bead id in env\noutput:\n%s", out)
+	}
+	if !strings.Contains(string(out), "no work bead id in env") {
+		t.Fatalf("abort output missing work-bead-id guard message\noutput:\n%s", out)
 	}
 }
 
@@ -428,6 +446,81 @@ esac
 	}
 	if strings.Contains(log, "mol-dog-stale-db.escalate") {
 		t.Fatalf("rendered script escalated at dropped.count == max_orphans_for_sql; want apply because threshold is >\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+func TestStaleDBFormulaFallsBackToTriggerWorkBeadID(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "commands.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "dolt-cleanup "*)
+    cat "$GC_TEST_SCAN_JSON"
+    ;;
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+	writeTestFile(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  update|close)
+    echo "bd $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON"),
+		"GC_TRIGGER_WORK_BEAD_ID=bead-trigger",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+	)
+	out, err := cmd.CombinedOutput()
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	log := string(logData)
+	if err != nil {
+		t.Fatalf("rendered script failed with only GC_TRIGGER_WORK_BEAD_ID set: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	for _, want := range []string{
+		"gc event emit mol-dog-stale-db.scan",
+		"bd close bead-trigger",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
 	}
 }
 

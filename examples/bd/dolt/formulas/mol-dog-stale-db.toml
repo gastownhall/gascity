@@ -85,7 +85,7 @@ Run this as one shell script so every derived value remains in the same process:
 ```bash
 set -euo pipefail
 
-WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook); aborting}"
+WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_WORK_BEAD_ID:?no work bead id in env}}"
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
 
