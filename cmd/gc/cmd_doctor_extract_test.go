@@ -19,9 +19,7 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
 
-	// Zero-rig golden: force a healthy preflight so ambient bd/dolt state
-	// cannot change the registration set. Rig-populated outage/healthy
-	// name-sets are locked in TestBuildDoctorChecks_RigStoreNameSetPreflight.
+	// Force healthy preflight so ambient bd/dolt cannot change the name-set.
 	old := doctorBeadStorePreflight
 	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error { return nil }
 	t.Cleanup(func() { doctorBeadStorePreflight = old })

@@ -277,9 +277,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	storeFactory := openStoreForCity(cityPath)
 
-	// One store preflight gates every store-dependent check (city multi-scope
-	// + per-rig) so an unreachable store is not re-opened dozens of times
-	// (#5064). buildDoctorChecks also runs at gc start warmup construction.
+	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
 	var storePreflightErr error
 	var activeRigs []config.Rig
@@ -298,8 +296,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if err := doctorBeadStorePreflight(cityPath, storeFactory); isBeadStoreUnreachable(err) {
 			storeOK = false
 			storePreflightErr = err
-			// Register early so the preflight error precedes omitted store checks
-			// in doctor output (city multi-scope gates + per-rig fan-out).
+			// Register early so the preflight error precedes omitted store checks.
 			skipCount := beadStorePreflightSkipCount(len(activeRigs))
 			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
 		}

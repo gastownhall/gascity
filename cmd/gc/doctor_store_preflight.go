@@ -9,21 +9,16 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// doctorBeadStorePreflightTimeout bounds the single store probe that gates
-// store-dependent doctor checks (gastownhall/gascity#5064).
+// Bounds the single store probe that gates store-dependent doctor checks (#5064).
 const doctorBeadStorePreflightTimeout = 5 * time.Second
 
-// City + per-rig store-dependent checks skipped on outage-shaped preflight
-// failure. Keep these in sync with the register sites in buildDoctorChecks.
+// City + per-rig store checks skipped on outage-shaped preflight; keep in sync with buildDoctorChecks.
 const (
 	doctorCityStoreCheckCount   = 11
 	doctorPerRigStoreCheckCount = 3
 )
 
-// doctorBeadStorePreflight probes CITY bead-store reachability once before
-// store-dependent checks are registered. The probe uses city runtime env
-// (bd list --limit 1); per-rig endpoints may differ. Tests override this hook.
-// Also runs when buildDoctorChecks builds the gc start warmup check set.
+// City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight
 
 func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Store, error)) error {
@@ -32,8 +27,7 @@ func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Stor
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// NoRecovery + context-bound runner: O(1) list, no managed-dolt recovery,
-	// and process-group kill on timeout (ga-cdmx6x / #5064).
+	// NoRecovery + context-bound runner (O(1) list; process-group kill on timeout).
 	env, err := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, false)
 	if err != nil {
 		return err
@@ -42,9 +36,7 @@ func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Stor
 	return err
 }
 
-// isBeadStoreUnreachable reports whether err looks like a live store outage
-// (circuit breaker, connection failure, pool exhaustion, timeout) rather
-// than a missing/uninitialized store that individual checks should still report.
+// True for live store outages (breaker/conn/timeout), not missing/uninitialized stores.
 func isBeadStoreUnreachable(err error) bool {
 	if err == nil {
 		return false
@@ -82,9 +74,7 @@ func beadStorePreflightSkipCount(activeRigCount int) int {
 }
 
 func beadStorePreflightSkipMessage(skipCount, rigCount int, probeErr error) string {
-	// Probe is city-scoped (bd list under city runtime env). Per-rig checks may
-	// resolve different endpoints (explicit rig Dolt, doltlite serverless); this
-	// skip is therefore a city-outage gate, not a guarantee every rig endpoint is down.
+	// City-scoped probe: skip is a city-outage gate (per-rig endpoints may differ).
 	base := fmt.Sprintf(
 		"bead store unreachable — skipped %d store checks (%d city, %d rigs); city store was probed (per-rig endpoints, including doltlite, may differ)",
 		skipCount, doctorCityStoreCheckCount, rigCount,
