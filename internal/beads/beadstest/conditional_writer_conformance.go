@@ -19,6 +19,14 @@ type ConditionalWriterOptions struct {
 	// preserve every unconditional flavor leave this false.
 	RowBackedMutationFlavors bool
 
+	// RestrictedUpdateFields declares that this store persists parent and
+	// labels through writes it cannot fold into a revision-guarded update, so
+	// UpdateIfMatch must reject those options with
+	// *beads.ConditionalUpdateFieldUnsupportedError instead of applying them.
+	// bd-backed and Dolt-backed stores do; a store that keeps the whole bead in
+	// one row can apply them and leaves this false.
+	RestrictedUpdateFields bool
+
 	// OpenDisabled returns a fresh store of the same kind whose conditional
 	// writes are turned off at the instance level (e.g. MemStore/FileStore with
 	// DisableConditionalWrites=true). When non-nil, the disable_toggle subtest
@@ -103,53 +111,55 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 	})
 
-	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
-		s := open(t)
-		w := writerFor(t, s)
-		parentBefore, err := s.Create(beads.Bead{Title: "restricted-update-parent"})
-		if err != nil {
-			t.Fatalf("Create parent fixture: %v", err)
-		}
-		parent := "parent-after"
-		tests := []struct {
-			name string
-			opts beads.UpdateOpts
-		}{
-			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
-			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
-			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
-		}
+	if opts.RestrictedUpdateFields {
+		t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
+			s := open(t)
+			w := writerFor(t, s)
+			parentBefore, err := s.Create(beads.Bead{Title: "restricted-update-parent"})
+			if err != nil {
+				t.Fatalf("Create parent fixture: %v", err)
+			}
+			parent := "parent-after"
+			tests := []struct {
+				name string
+				opts beads.UpdateOpts
+			}{
+				{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
+				{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
+				{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+			}
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				created, err := s.Create(beads.Bead{
-					Title:    "restricted-update",
-					ParentID: parentBefore.ID,
-					Labels:   []string{"keep", "remove"},
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					created, err := s.Create(beads.Bead{
+						Title:    "restricted-update",
+						ParentID: parentBefore.ID,
+						Labels:   []string{"keep", "remove"},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					before, err := s.Get(created.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					err = w.UpdateIfMatch(created.ID, before.Revision, tt.opts)
+					var unsupported *beads.ConditionalUpdateFieldUnsupportedError
+					if !errors.As(err, &unsupported) {
+						t.Fatalf("UpdateIfMatch(%s) = %v, want *ConditionalUpdateFieldUnsupportedError", tt.name, err)
+					}
+					after, err := s.Get(created.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(after, before) {
+						t.Fatalf("restricted conditional update mutated bead: before=%#v after=%#v", before, after)
+					}
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				err = w.UpdateIfMatch(created.ID, before.Revision, tt.opts)
-				var unsupported *beads.ConditionalUpdateFieldUnsupportedError
-				if !errors.As(err, &unsupported) {
-					t.Fatalf("UpdateIfMatch(%s) = %v, want *ConditionalUpdateFieldUnsupportedError", tt.name, err)
-				}
-				after, err := s.Get(created.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !reflect.DeepEqual(after, before) {
-					t.Fatalf("restricted conditional update mutated bead: before=%#v after=%#v", before, after)
-				}
-			})
-		}
-	})
+			}
+		})
+	}
 
 	t.Run(name+"/reads_never_bump", func(t *testing.T) {
 		s := open(t)
@@ -190,11 +200,13 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 		id := b.ID
 
+		// A never-mutated bead may legitimately carry the zero token on a
+		// counter-backed store, so seed the seen set only from a real token.
 		last := revOf(t, s, id)
-		if last == 0 {
-			t.Fatal("created bead has zero revision")
+		seen := map[int64]struct{}{}
+		if last != 0 {
+			seen[last] = struct{}{}
 		}
-		seen := map[int64]struct{}{last: {}}
 		for i := 0; i < 8; i++ {
 			if err := s.SetMetadata(id, "counter", string(rune('a'+i))); err != nil {
 				t.Fatal(err)

@@ -162,10 +162,12 @@ type ConditionalAssignmentReleaser interface {
 // table against every implementing store, including real bd under the
 // integration build tag):
 //
-//   - Every bead carries a nonzero opaque int64 revision. Callers may test it
-//     only for equality; arithmetic, ordering across beads, and gap inference
-//     are undefined. A token is never intentionally reused during one bead's
-//     observed lifetime.
+//   - Every mutated bead carries a nonzero opaque int64 revision. Callers may
+//     test it only for equality; arithmetic, ordering across beads, and gap
+//     inference are undefined. A token is never intentionally reused during one
+//     bead's observed lifetime. A never-mutated bead may read back as zero on a
+//     counter-backed store, so zero means "no usable token", not "revisions
+//     unsupported".
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;
@@ -192,10 +194,12 @@ type ConditionalAssignmentReleaser interface {
 // assumptions on top of it.
 type ConditionalWriter interface {
 	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
-	// expectedRevision; otherwise it returns *PreconditionFailedError. ParentID,
-	// Labels, and RemoveLabels are rejected with
-	// *ConditionalUpdateFieldUnsupportedError: bd persists those fields through
-	// separate writes, so they cannot share this guarded-update contract.
+	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
+	// that persists ParentID, Labels, or RemoveLabels through separate writes
+	// cannot fold them into the guarded update and rejects them with
+	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
+	// do. Callers must therefore handle that error rather than assume the
+	// fields applied.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.

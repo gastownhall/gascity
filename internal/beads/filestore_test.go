@@ -106,6 +106,7 @@ func TestFileStoreConditionalWriterConformance(t *testing.T) {
 	beadstest.RunConditionalWriterConformanceWithOptions(t, "FileStore", open,
 		beadstest.ConditionalWriterOptions{
 			RowBackedMutationFlavors: true,
+			RestrictedUpdateFields:   true,
 			SuppliesCurrent:          true,
 			OpenDisabled: func(st *testing.T) beads.Store {
 				s := open(st)

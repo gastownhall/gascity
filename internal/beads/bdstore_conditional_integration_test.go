@@ -84,6 +84,7 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 			},
 			beadstest.ConditionalWriterOptions{
 				RowBackedMutationFlavors: true,
+				RestrictedUpdateFields:   true,
 				// bd's precondition body carries current_revision (#4682);
 				// asserting Current here is part of the wire-key guard.
 				SuppliesCurrent: true,
