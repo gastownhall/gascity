@@ -23,14 +23,21 @@ func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
 	var capturedActor string
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(_ context.Context, id string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{ID: id, Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2}, nil
+			if captured == nil {
+				t.Fatal("Create did not use CreateIssue before loading the created issue")
+			}
+			return cloneNativeIssueForTest(captured), nil
 		},
 		createIssue: func(_ context.Context, issue *beadslib.Issue, actor string) error {
-			captured = cloneNativeIssueForTest(issue)
 			capturedActor = actor
 			issue.ID = "gc-native"
 			issue.CreatedAt = createdAt
 			issue.UpdatedAt = createdAt
+			captured = cloneNativeIssueForTest(issue)
+			return nil
+		},
+		addDependency: func(_ context.Context, dependency *beadslib.Dependency, _ string) error {
+			captured.Dependencies = append(captured.Dependencies, cloneNativeDependencies([]*beadslib.Dependency{dependency})...)
 			return nil
 		},
 	}
@@ -181,6 +188,166 @@ func TestNativeDoltStoreCreatePropagatesUpstreamError(t *testing.T) {
 
 	if _, err := store.Create(Bead{Title: "native create"}); !errors.Is(err, wantErr) {
 		t.Fatalf("Create error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestNativeDoltStoreUpdateMapsOptionsToIssueOperationsPatch(t *testing.T) {
+	title := "updated title"
+	status := "in_progress"
+	issueType := "bug"
+	priority := 1
+	description := "updated description"
+	assignee := "native-test"
+	parentID := "gc-parent"
+	var updates map[string]interface{}
+	var addedLabels, removedLabels []string
+	var addedParent *beadslib.Dependency
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-child", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2}, nil
+		},
+		updateIssue: func(_ context.Context, id string, got map[string]interface{}, actor string) error {
+			if id != "gc-child" || actor != "native-test" {
+				t.Fatalf("UpdateIssue(%q, actor=%q), want gc-child and native-test", id, actor)
+			}
+			updates = maps.Clone(got)
+			return nil
+		},
+		addLabel: func(_ context.Context, id, label, actor string) error {
+			if id != "gc-child" || actor != "native-test" {
+				t.Fatalf("AddLabel(%q, actor=%q), want gc-child and native-test", id, actor)
+			}
+			addedLabels = append(addedLabels, label)
+			return nil
+		},
+		removeLabel: func(_ context.Context, id, label, actor string) error {
+			if id != "gc-child" || actor != "native-test" {
+				t.Fatalf("RemoveLabel(%q, actor=%q), want gc-child and native-test", id, actor)
+			}
+			removedLabels = append(removedLabels, label)
+			return nil
+		},
+		addDependency: func(_ context.Context, dependency *beadslib.Dependency, actor string) error {
+			if actor != "native-test" {
+				t.Fatalf("AddDependency actor = %q, want native-test", actor)
+			}
+			addedParent = cloneNativeDependencies([]*beadslib.Dependency{dependency})[0]
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	err := store.Update("gc-child", UpdateOpts{
+		Title:        &title,
+		Status:       &status,
+		Type:         &issueType,
+		Priority:     &priority,
+		Description:  &description,
+		Assignee:     &assignee,
+		ParentID:     &parentID,
+		Labels:       []string{"add"},
+		RemoveLabels: []string{"remove"},
+		Metadata:     map[string]string{"gc.step_ref": "build"},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updates["title"] != title || updates["status"] != status || updates["issue_type"] != issueType || updates["priority"] != priority || updates["description"] != description || updates["assignee"] != assignee {
+		t.Fatalf("facade updates = %#v, want scalar fields", updates)
+	}
+	if _, ok := updates["metadata"]; ok {
+		t.Fatalf("facade updates included raw metadata replacement: %#v", updates)
+	}
+	raw, ok := updates["_merge_metadata"].(json.RawMessage)
+	if !ok {
+		t.Fatalf("facade metadata merge = %T, want json.RawMessage", updates["_merge_metadata"])
+	}
+	if string(raw) != `{"gc.step_ref":"build"}` {
+		t.Fatalf("facade metadata merge = %s, want JSON string value", raw)
+	}
+	if !slices.Equal(addedLabels, []string{"add"}) || !slices.Equal(removedLabels, []string{"remove"}) {
+		t.Fatalf("label patch = add:%#v remove:%#v", addedLabels, removedLabels)
+	}
+	if addedParent == nil || addedParent.IssueID != "gc-child" || addedParent.DependsOnID != parentID || addedParent.Type != beadslib.DepParentChild {
+		t.Fatalf("parent patch dependency = %#v, want gc-child parent-child gc-parent", addedParent)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchMapsStringsToFacadeJSONValues(t *testing.T) {
+	var updates map[string]interface{}
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-metadata", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2}, nil
+		},
+		updateIssue: func(_ context.Context, id string, got map[string]interface{}, actor string) error {
+			if id != "gc-metadata" || actor != "native-test" {
+				t.Fatalf("UpdateIssue(%q, actor=%q), want gc-metadata and native-test", id, actor)
+			}
+			updates = maps.Clone(got)
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.SetMetadataBatch("gc-metadata", map[string]string{"count": "3", "enabled": "true"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	if _, ok := updates["metadata"]; ok {
+		t.Fatalf("facade updates included raw metadata replacement: %#v", updates)
+	}
+	raw, ok := updates["_merge_metadata"].(json.RawMessage)
+	if !ok {
+		t.Fatalf("facade metadata merge = %T, want json.RawMessage", updates["_merge_metadata"])
+	}
+	if string(raw) != `{"count":"3","enabled":"true"}` {
+		t.Fatalf("facade metadata merge = %s, want JSON string values", raw)
+	}
+}
+
+func TestNativeDoltStoreCloseDelegatesToIssueOperations(t *testing.T) {
+	closed := false
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-close", Status: beadslib.StatusOpen, Metadata: json.RawMessage(`{"close_reason":"done"}`)}, nil
+		},
+		closeIssueChecked: func(_ context.Context, id, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+			if id != "gc-close" || actor != "native-test" || opts.Reason != "done" || !opts.Force {
+				t.Fatalf("CloseIssueChecked(%q, actor=%q, reason=%q, force=%t), want gc-close/native-test/done/true", id, actor, opts.Reason, opts.Force)
+			}
+			closed = true
+			return beadslib.CloseIssueResult{}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.Close("gc-close"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !closed {
+		t.Fatal("Close did not call CloseIssueChecked through issue operations")
+	}
+}
+
+func TestNativeDoltStoreUpdateAllowsClaimTransfer(t *testing.T) {
+	assignee := "new-worker"
+	issue := &beadslib.Issue{ID: "gc-claimed", Status: beadslib.StatusInProgress, Assignee: "other-worker"}
+	updated := false
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) { return issue, nil },
+		updateIssue: func(_ context.Context, _ string, fields map[string]interface{}, _ string) error {
+			if got := fields["assignee"]; got != assignee {
+				t.Fatalf("assignee update = %#v, want %q", got, assignee)
+			}
+			issue.Assignee = assignee
+			updated = true
+			return nil
+		},
+	}
+	if err := newNativeDoltStoreForTest(storage).Update("gc-claimed", UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("Update claim transfer: %v", err)
+	}
+	if !updated {
+		t.Fatal("Update did not transfer the in-progress claim")
 	}
 }
 
@@ -768,24 +935,41 @@ func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreReopenAlreadyOpenSkipsUpstreamCall(t *testing.T) {
+func TestNativeDoltStoreReopenAlreadyOpenIsNoop(t *testing.T) {
 	var reopened bool
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
-		reopenIssue: func(context.Context, string, string, string) error {
-			reopened = true
-			return errors.New("unexpected reopen")
-		},
+		reopenIssue: func(context.Context, string, string, string) error { reopened = true; return nil },
 	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.Reopen("gc-open"); err != nil {
-		t.Fatalf("Reopen(open): %v", err)
+	if err := newNativeDoltStoreForTest(storage).Reopen("gc-open"); err != nil {
+		t.Fatalf("Reopen open: %v", err)
 	}
 	if reopened {
-		t.Fatal("Reopen(open) called upstream ReopenIssue")
+		t.Fatal("Reopen open called upstream ReopenIssue")
+	}
+}
+
+func TestNativeDoltStoreReopenMissingReturnsNotFound(t *testing.T) {
+	storage := &nativeDoltStorageSpy{getIssue: func(context.Context, string) (*beadslib.Issue, error) { return nil, nil }}
+	err := newNativeDoltStoreForTest(storage).Reopen("gc-missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Reopen missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestNativeDoltStoreReopenClosedUsesAtomicFacadeCapability(t *testing.T) {
+	issue := &beadslib.Issue{ID: "gc-closed", Status: beadslib.StatusClosed}
+	storage := &nativeDoltStorageSpy{
+		getIssue:    func(context.Context, string) (*beadslib.Issue, error) { return issue, nil },
+		reopenIssue: func(context.Context, string, string, string) error { issue.Status = beadslib.StatusOpen; return nil },
+	}
+	if err := newNativeDoltStoreForTest(storage).Reopen("gc-closed"); err != nil {
+		t.Fatalf("Reopen closed: %v", err)
+	}
+	if issue.Status != beadslib.StatusOpen {
+		t.Fatalf("status = %q, want open", issue.Status)
 	}
 }
 
@@ -1006,162 +1190,6 @@ func TestNativeDoltStoreListTierWispsIncludesNoHistoryAndEphemeralRows(t *testin
 	}
 }
 
-func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
-	updateCalled := false
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{
-				ID:        "gc-corrupt",
-				Title:     "corrupt metadata",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  json.RawMessage(`{"existing":`),
-			}, nil
-		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-corrupt", map[string]string{"gc.step_ref": "build"}); err == nil {
-		t.Fatal("SetMetadataBatch error = nil, want invalid metadata error")
-	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
-		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
-	}
-	if updateCalled {
-		t.Fatal("UpdateIssue was called after invalid metadata")
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
-	getCalls := 0
-	updateCalls := 0
-	var writtenMetadata json.RawMessage
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			metadata := json.RawMessage(`{"existing":"before-conflict"}`)
-			if getCalls > 1 {
-				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
-			}
-			return &beadslib.Issue{
-				ID:        "gc-conflict",
-				Title:     "metadata conflict",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  metadata,
-			}, nil
-		},
-		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
-			updateCalls++
-			if updateCalls == 1 {
-				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
-			}
-			raw, ok := updates["metadata"].(json.RawMessage)
-			if !ok {
-				t.Fatalf("metadata update type = %T, want json.RawMessage", updates["metadata"])
-			}
-			writtenMetadata = slices.Clone(raw)
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-conflict", map[string]string{"requested": "written"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if getCalls != 2 {
-		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
-	}
-	if updateCalls != 2 {
-		t.Fatalf("UpdateIssue calls = %d, want 2", updateCalls)
-	}
-	var got map[string]string
-	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
-		t.Fatalf("unmarshal written metadata: %v", err)
-	}
-	want := map[string]string{"concurrent": "preserved", "requested": "written"}
-	if !maps.Equal(got, want) {
-		t.Fatalf("written metadata = %#v, want %#v", got, want)
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testing.T) {
-	wantErr := errors.New("metadata write denied")
-	getCalls := 0
-	updateCalls := 0
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
-		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
-			updateCalls++
-			return wantErr
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	err := store.SetMetadataBatch("gc-permanent", map[string]string{"requested": "written"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
-	}
-	if getCalls != 1 || updateCalls != 1 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t *testing.T) {
-	wantErr := errors.New("commit failed (SQLSTATE 40001): serialization failure")
-	getCalls := 0
-	updateCalls := 0
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
-		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
-			updateCalls++
-			return wantErr
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	err := store.SetMetadataBatch("gc-persistent-conflict", map[string]string{"requested": "written"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
-	}
-	if getCalls != 3 || updateCalls != 3 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 3 each", getCalls, updateCalls)
-	}
-}
-
-func TestNativeDoltSerializationConflictClassification(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "mysql error and SQLSTATE", err: errors.New("Error 1213 (40001): serialization failure"), want: true},
-		{name: "SQLSTATE", err: errors.New("commit failed (SQLSTATE 40001)"), want: true},
-		{name: "Dolt conflict wording", err: errors.New("this transaction conflicts with a committed transaction"), want: true},
-		{name: "unrelated serialization wording", err: errors.New("serialization failed while encoding metadata"), want: false},
-		{name: "permanent error", err: errors.New("permission denied"), want: false},
-		{name: "nil", err: nil, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isNativeDoltSerializationConflict(tt.err); got != tt.want {
-				t.Fatalf("isNativeDoltSerializationConflict(%v) = %v, want %v", tt.err, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestNativeDoltStoreReadyFiltersGasCityExcludedTypesBeforeLimit(t *testing.T) {
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -1367,6 +1395,7 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	child, err := store.Create(Bead{
 		Title:    "create child",
 		ParentID: parent.ID,
+		Labels:   []string{"created", "hydrated"},
 		Dependencies: []Dep{{
 			DependsOnID: blocker.ID,
 			Type:        "blocks",
@@ -1378,6 +1407,9 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	}
 	if child.ParentID != parent.ID {
 		t.Fatalf("created ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+	if !slices.Equal(child.Labels, []string{"created", "hydrated"}) {
+		t.Fatalf("created labels = %v, want hydrated labels", child.Labels)
 	}
 
 	got, err := store.Get(child.ID)
@@ -1632,7 +1664,7 @@ func TestNativeDoltStoreCreateDependencyFailureDeletesPartialIssue(t *testing.T)
 	}
 }
 
-func TestNativeDoltStoreCreateDependencyTimeoutCleansUpWithFreshContext(t *testing.T) {
+func TestNativeDoltStoreCreateDependencyTimeoutRollsBackFacadeTransaction(t *testing.T) {
 	oldTimeout := bdCommandTimeout
 	bdCommandTimeout = time.Millisecond
 	t.Cleanup(func() {
@@ -2037,6 +2069,9 @@ type nativeDoltTransactionTestStorage interface {
 	CreateIssue(context.Context, *beadslib.Issue, string) error
 	CreateIssues(context.Context, []*beadslib.Issue, string) error
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
+	ReopenIssue(context.Context, string, string, string) error
+	GetConfig(context.Context, string) (string, error)
+	GetLabels(context.Context, string) ([]string, error)
 	UpdateIssue(context.Context, string, map[string]interface{}, string) error
 	CloseIssue(context.Context, string, string, string, string) error
 	AddLabel(context.Context, string, string, string) error
@@ -2065,6 +2100,25 @@ func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reaso
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
 	return tx.storage.GetIssue(ctx, id)
+}
+
+func (tx nativeDoltTransactionForTest) ReopenIssueWithResult(ctx context.Context, id, reason, actor string) (bool, error) {
+	issue, err := tx.storage.GetIssue(ctx, id)
+	if err != nil || issue == nil || issue.Status == beadslib.StatusOpen {
+		return false, err
+	}
+	if err := tx.storage.ReopenIssue(ctx, id, reason, actor); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (tx nativeDoltTransactionForTest) GetConfig(ctx context.Context, key string) (string, error) {
+	return tx.storage.GetConfig(ctx, key)
+}
+
+func (tx nativeDoltTransactionForTest) GetLabels(ctx context.Context, id string) ([]string, error) {
+	return tx.storage.GetLabels(ctx, id)
 }
 
 func (tx nativeDoltTransactionForTest) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
@@ -2100,6 +2154,7 @@ type nativeDoltStorageSpy struct {
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
 	reopenIssue                 func(context.Context, string, string, string) error
 	closeIssue                  func(context.Context, string, string, string, string) error
+	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
 	deleteIssue                 func(context.Context, string) error
 	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
 	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
@@ -2112,6 +2167,7 @@ type nativeDoltStorageSpy struct {
 	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getConfig                   func(context.Context, string) (string, error)
+	getLabels                   func(context.Context, string) ([]string, error)
 	close                       func() error
 }
 
@@ -2141,6 +2197,17 @@ func (s *nativeDoltStorageSpy) GetIssue(ctx context.Context, id string) (*beadsl
 	return s.getIssue(ctx, id)
 }
 
+func (s *nativeDoltStorageSpy) GetLabels(ctx context.Context, id string) ([]string, error) {
+	if s.getLabels != nil {
+		return s.getLabels(ctx, id)
+	}
+	issue, err := s.GetIssue(ctx, id)
+	if err != nil || issue == nil {
+		return nil, err
+	}
+	return append([]string(nil), issue.Labels...), nil
+}
+
 func (s *nativeDoltStorageSpy) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	if s.updateIssue == nil {
 		return nil
@@ -2167,6 +2234,16 @@ func (s *nativeDoltStorageSpy) CloseIssue(ctx context.Context, id string, reason
 		return nil
 	}
 	return s.closeIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltStorageSpy) CloseIssueChecked(ctx context.Context, id, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	if s.closeIssueChecked != nil {
+		return s.closeIssueChecked(ctx, id, actor, opts)
+	}
+	if err := s.CloseIssue(ctx, id, opts.Reason, actor, opts.Session); err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	return beadslib.CloseIssueResult{}, nil
 }
 
 func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error {
@@ -2314,9 +2391,27 @@ func (s *nativeDoltMemStorage) CreateIssue(_ context.Context, issue *beadslib.Is
 }
 
 func (s *nativeDoltMemStorage) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
+	dependencies := make([][]*beadslib.Dependency, len(issues))
+	for i, issue := range issues {
+		dependencies[i] = cloneNativeDependencies(issue.Dependencies)
+	}
 	for _, issue := range issues {
 		if err := s.CreateIssue(ctx, issue, actor); err != nil {
 			return err
+		}
+	}
+	for i, issue := range issues {
+		for _, dependency := range dependencies[i] {
+			if dependency == nil {
+				continue
+			}
+			persisted := *dependency
+			if persisted.IssueID == "" {
+				persisted.IssueID = issue.ID
+			}
+			if err := s.AddDependency(ctx, &persisted, actor); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2327,7 +2422,7 @@ func (s *nativeDoltMemStorage) GetIssue(_ context.Context, id string) (*beadslib
 	if err != nil {
 		return nil, err
 	}
-	return nativeIssueFromBead(bead)
+	return s.nativeIssueWithStoredDependencies(bead)
 }
 
 func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
@@ -2344,6 +2439,20 @@ func (s *nativeDoltMemStorage) ReopenIssue(_ context.Context, id string, _ strin
 
 func (s *nativeDoltMemStorage) CloseIssue(_ context.Context, id string, _ string, _ string, _ string) error {
 	return s.store.Close(id)
+}
+
+func (s *nativeDoltMemStorage) CloseIssueChecked(ctx context.Context, id, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	issue, err := s.GetIssue(ctx, id)
+	if err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	if issue.Status == beadslib.StatusClosed {
+		return beadslib.CloseIssueResult{Unchanged: true}, nil
+	}
+	if err := s.CloseIssue(ctx, id, opts.Reason, actor, opts.Session); err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	return beadslib.CloseIssueResult{}, nil
 }
 
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
@@ -2428,7 +2537,21 @@ func (s *nativeDoltMemStorage) RemoveLabel(_ context.Context, issueID, label, _ 
 	return s.store.Update(issueID, UpdateOpts{RemoveLabels: []string{label}})
 }
 
+func (s *nativeDoltMemStorage) GetLabels(_ context.Context, issueID string) ([]string, error) {
+	bead, err := s.store.Get(issueID)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), bead.Labels...), nil
+}
+
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {
+	if _, err := s.store.Get(dep.IssueID); err != nil {
+		return err
+	}
+	if _, err := s.store.Get(dep.DependsOnID); err != nil {
+		return err
+	}
 	return s.store.DepAdd(dep.IssueID, dep.DependsOnID, string(dep.Type))
 }
 
@@ -2510,6 +2633,20 @@ func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id str
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
 }
 
+func (s *nativeDoltCloseCapturingStorage) CloseIssueChecked(ctx context.Context, id, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	issue, err := s.GetIssue(ctx, id)
+	if err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	if issue.Status == beadslib.StatusClosed {
+		return beadslib.CloseIssueResult{Unchanged: true}, nil
+	}
+	if err := s.CloseIssue(ctx, id, opts.Reason, actor, opts.Session); err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	return beadslib.CloseIssueResult{}, nil
+}
+
 func (s *nativeDoltMemStorage) issueForDependency(id string) *beadslib.Issue {
 	bead, err := s.store.Get(id)
 	if err != nil {
@@ -2551,6 +2688,33 @@ func (s *nativeDoltFailingDependencyStorage) RunInTransaction(_ context.Context,
 	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
 		return fn(nativeDoltTransactionForTest{storage: s})
 	})
+}
+
+func (s *nativeDoltFailingDependencyStorage) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
+	dependencies := make([][]*beadslib.Dependency, len(issues))
+	for i, issue := range issues {
+		dependencies[i] = cloneNativeDependencies(issue.Dependencies)
+	}
+	for _, issue := range issues {
+		if err := s.CreateIssue(ctx, issue, actor); err != nil {
+			return err
+		}
+	}
+	for i, issue := range issues {
+		for _, dependency := range dependencies[i] {
+			if dependency == nil {
+				continue
+			}
+			persisted := *dependency
+			if persisted.IssueID == "" {
+				persisted.IssueID = issue.ID
+			}
+			if err := s.AddDependency(ctx, &persisted, actor); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *nativeDoltFailingDependencyStorage) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
@@ -2630,6 +2794,23 @@ func nativeDoltMemUpdateOpts(updates map[string]interface{}) (UpdateOpts, error)
 				return UpdateOpts{}, err
 			}
 			opts.Metadata = metadata
+		case "_merge_metadata":
+			raw, ok := value.(json.RawMessage)
+			if !ok {
+				return UpdateOpts{}, fmt.Errorf("metadata merge has type %T, want json.RawMessage", value)
+			}
+			var rawMetadata map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawMetadata); err != nil {
+				return UpdateOpts{}, err
+			}
+			opts.Metadata = make(map[string]string, len(rawMetadata))
+			for metadataKey, metadataValue := range rawMetadata {
+				var metadataText string
+				if err := json.Unmarshal(metadataValue, &metadataText); err != nil {
+					return UpdateOpts{}, fmt.Errorf("metadata %q: %w", metadataKey, err)
+				}
+				opts.Metadata[metadataKey] = metadataText
+			}
 		default:
 			return UpdateOpts{}, fmt.Errorf("unsupported native update field %q", key)
 		}

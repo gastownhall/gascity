@@ -46,12 +46,20 @@ func storeWithReopen(dead beadslib.Storage, fresh beadslib.Storage, reopens *int
 }
 
 func TestNativeDoltStoreGetReconnectsAndInstallsFreshStorage(t *testing.T) {
+	var createdIssue *beadslib.Issue
 	fresh := healthySearchStorage(&beadslib.Issue{
 		ID: "gc-existing", Title: "recovered", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
 	})
 	fresh.createIssue = func(_ context.Context, issue *beadslib.Issue, _ string) error {
 		issue.ID = "gc-created"
+		createdIssue = cloneNativeIssueForTest(issue)
 		return nil
+	}
+	fresh.getIssue = func(_ context.Context, id string) (*beadslib.Issue, error) {
+		if createdIssue != nil && id == createdIssue.ID {
+			return cloneNativeIssueForTest(createdIssue), nil
+		}
+		return nil, nil
 	}
 	errDeadCreate := errors.New("create reached dead storage")
 	dead := deadSearchStorage(errors.New("begin read tx: dial tcp 127.0.0.1:58216: i/o timeout"))

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const nativeDoltStoreActor = "gascity"
@@ -79,10 +80,6 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 	}
 	const perItem = 2 * time.Second
 	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
-}
-
-func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), bdCommandTimeout)
 }
 
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
@@ -810,7 +807,7 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 	return true
 }
 
-// Create persists a new bead through the upstream beads storage layer.
+// Create persists a new bead through the upstream issue-operations facade.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
@@ -823,25 +820,18 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	pendingDependencies := cloneNativeDependencies(issue.Dependencies)
-	if err := s.validateCreatedDependencies(ctx, storage, issue.ID, pendingDependencies); err != nil {
-		return Bead{}, err
-	}
-	if err := storage.CreateIssue(ctx, issue, s.actor); err != nil {
-		return Bead{}, err
-	}
-	createdDependencies, err := s.persistCreatedDependencies(ctx, storage, issue.ID, pendingDependencies)
+	ops, err := storage.IssueLifecycle()
 	if err != nil {
-		cleanupCtx, cleanupCancel := nativeDoltCleanupContext()
-		cleanupErr := s.compensateFailedCreate(cleanupCtx, storage, issue.ID, createdDependencies)
-		cleanupCancel()
-		if cleanupErr != nil {
-			return Bead{}, errors.Join(err, cleanupErr)
-		}
-		return Bead{}, err
+		return Bead{}, nativeStoreError(issue.ID, err)
 	}
-	issue.Dependencies = createdDependencies
-	return beadFromNativeIssue(issue)
+	result, err := ops.Create(ctx, issueops.CreateRequest{
+		Actor: s.actor,
+		Issue: issue,
+	})
+	if err != nil {
+		return Bead{}, nativeStoreError(issue.ID, err)
+	}
+	return beadFromNativeIssue(result.Issue)
 }
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
@@ -870,7 +860,7 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	return out, err
 }
 
-// Update modifies an existing bead through the upstream beads storage layer.
+// Update modifies an existing bead through the upstream issue-operations facade.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -879,8 +869,19 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		return s.applyUpdateInTx(ctx, tx, id, opts)
+	patch, err := nativeIssuePatchFromUpdateOpts(opts)
+	if err != nil {
+		return err
+	}
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	_, err = ops.Update(ctx, issueops.UpdateRequest{
+		Actor:                 s.actor,
+		IssueID:               id,
+		Patch:                 patch,
+		ForceAssigneeTransfer: true,
 	})
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -888,9 +889,46 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
-// applyUpdateInTx applies an Update against an open beadslib transaction. It is
-// shared by the standalone Update (one op, one commit) and the multi-write
-// Store.Tx path (many ops, one commit) so both routes have identical semantics.
+func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error) {
+	var patch issueops.IssuePatch
+	if opts.Title != nil {
+		patch.Title = issueops.Field[string]{Set: true, Value: *opts.Title}
+	}
+	if opts.Status != nil {
+		patch.Status = issueops.Field[issueops.Status]{Set: true, Value: issueops.Status(*opts.Status)}
+	}
+	if opts.Type != nil {
+		patch.IssueType = issueops.Field[issueops.IssueType]{Set: true, Value: issueops.IssueType(*opts.Type)}
+	}
+	if opts.Priority != nil {
+		patch.Priority = issueops.Field[int]{Set: true, Value: *opts.Priority}
+	}
+	if opts.Description != nil {
+		patch.Description = issueops.Field[string]{Set: true, Value: *opts.Description}
+	}
+	if opts.Assignee != nil {
+		patch.Assignee = issueops.Field[string]{Set: true, Value: *opts.Assignee}
+	}
+	if opts.ParentID != nil {
+		patch.ParentID = issueops.Field[string]{Set: true, Value: *opts.ParentID}
+	}
+	patch.Labels.Add = append([]string(nil), opts.Labels...)
+	patch.Labels.Remove = append([]string(nil), opts.RemoveLabels...)
+	if len(opts.Metadata) > 0 {
+		patch.Metadata.Set = make(map[string]json.RawMessage, len(opts.Metadata))
+		for key, value := range opts.Metadata {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return issueops.IssuePatch{}, fmt.Errorf("marshaling metadata value for %q: %w", key, err)
+			}
+			patch.Metadata.Set[key] = raw
+		}
+	}
+	return patch, nil
+}
+
+// applyUpdateInTx applies an Update against an open beadslib transaction for
+// the multi-write Store.Tx path.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, *opts.ParentID); err != nil {
@@ -1039,7 +1077,7 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return released, nil
 }
 
-// Close sets a bead's status to closed through the upstream beads storage layer.
+// Close sets a bead's status to closed through the upstream issue-operations facade.
 func (s *NativeDoltStore) Close(id string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -1055,17 +1093,23 @@ func (s *NativeDoltStore) Close(id string) error {
 	if current == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	if current.Status == beadslib.StatusClosed {
-		return nil
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
 	}
 	reason := nativeCloseReasonFromIssue(current)
-	if err := storage.CloseIssue(ctx, id, reason, s.actor, ""); err != nil {
+	if _, err := ops.Close(ctx, issueops.CloseRequest{
+		Actor:   s.actor,
+		IssueID: id,
+		Reason:  reason,
+		Force:   true,
+	}); err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil
 }
 
-// Reopen sets a closed bead's status back to open.
+// Reopen sets a closed bead's status back to open through the upstream issue-operations facade.
 func (s *NativeDoltStore) Reopen(id string) error {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -1084,7 +1128,15 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	if current.Status == beadslib.StatusOpen {
 		return nil
 	}
-	return nativeStoreError(id, storage.ReopenIssue(ctx, id, "", s.actor))
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	_, err = ops.Reopen(ctx, issueops.ReopenRequest{
+		Actor:   s.actor,
+		IssueID: id,
+	})
+	return nativeStoreError(id, err)
 }
 
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
@@ -1311,11 +1363,6 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
-const (
-	nativeMetadataWriteAttempts     = 3
-	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
-)
-
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
@@ -1323,59 +1370,31 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	defer release()
-
-	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
-		cancel()
-		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
-			return err
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	metadata := make(map[string]json.RawMessage, len(kvs))
+	for key, value := range kvs {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("marshaling metadata value for %q: %w", key, err)
 		}
-		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
+		metadata[key] = raw
 	}
-	return err
-}
-
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
-// A retry must call this whole operation again so metadata committed by the
-// competing transaction is included rather than overwritten from a stale read.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
-	issue, err := storage.GetIssue(ctx, id)
+	ops, err := storage.IssueLifecycle()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if issue == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	_, err = ops.Update(ctx, issueops.UpdateRequest{
+		Actor:   s.actor,
+		IssueID: id,
+		Patch: issueops.IssuePatch{
+			Metadata: issueops.MetadataPatch{Set: metadata},
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+		return nativeStoreError(id, err)
 	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
-	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
-}
-
-// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
-// serialization conflicts, which are known not to have committed and are safe
-// to retry. Ambiguous connection failures intentionally remain fail-fast.
-func isNativeDoltSerializationConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "error 1213") ||
-		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
-		strings.Contains(msg, "(40001)") ||
-		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+	return nil
 }
 
 // SetLocalString sets a clone-local string value for a bead. See
@@ -1662,73 +1681,6 @@ func (s *NativeDoltStore) updateParentInTransaction(ctx context.Context, tx bead
 	return nil
 }
 
-func (s *NativeDoltStore) persistCreatedDependencies(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) ([]*beadslib.Dependency, error) {
-	if len(deps) == 0 {
-		return nil, nil
-	}
-	if strings.TrimSpace(issueID) == "" {
-		return nil, fmt.Errorf("persisting native create dependencies: upstream create did not assign an issue ID")
-	}
-	created := make([]*beadslib.Dependency, 0, len(deps))
-	for _, dep := range deps {
-		if dep == nil {
-			continue
-		}
-		persisted := *dep
-		if strings.TrimSpace(persisted.IssueID) == "" {
-			persisted.IssueID = issueID
-		}
-		if err := storage.AddDependency(ctx, &persisted, s.actor); err != nil {
-			return created, fmt.Errorf("persisting native create dependency %q -> %q: %w", persisted.IssueID, persisted.DependsOnID, nativeStoreError(persisted.IssueID, err))
-		}
-		depCopy := persisted
-		created = append(created, &depCopy)
-	}
-	return created, nil
-}
-
-func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
-	for _, dep := range deps {
-		if dep == nil {
-			continue
-		}
-		targetID := strings.TrimSpace(dep.DependsOnID)
-		if targetID == "" {
-			return fmt.Errorf("validating native create dependency for %q: depends_on_id is empty", issueID)
-		}
-		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
-			continue
-		}
-		issue, err := storage.GetIssue(ctx, targetID)
-		if err != nil {
-			return fmt.Errorf("validating native create dependency %q -> %q: %w", issueID, targetID, nativeStoreError(targetID, err))
-		}
-		if issue == nil {
-			return fmt.Errorf("validating native create dependency %q -> %q: bead %q: %w", issueID, targetID, targetID, ErrNotFound)
-		}
-	}
-	return nil
-}
-
-func (s *NativeDoltStore) compensateFailedCreate(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
-	if strings.TrimSpace(issueID) == "" {
-		return nil
-	}
-	var errs []error
-	for _, dep := range deps {
-		if dep == nil {
-			continue
-		}
-		if err := storage.RemoveDependency(ctx, issueID, dep.DependsOnID, s.actor); err != nil {
-			errs = append(errs, fmt.Errorf("removing partial native dependency %q -> %q: %w", issueID, dep.DependsOnID, nativeStoreError(issueID, err)))
-		}
-	}
-	if err := storage.DeleteIssue(ctx, issueID); err != nil {
-		errs = append(errs, fmt.Errorf("deleting partial native issue %q: %w", issueID, nativeStoreError(issueID, err)))
-	}
-	return errors.Join(errs...)
-}
-
 func nativeCloseReasonFromIssue(issue *beadslib.Issue) string {
 	if issue == nil {
 		return ""
@@ -1738,26 +1690,6 @@ func nativeCloseReasonFromIssue(issue *beadslib.Issue) string {
 		return ""
 	}
 	return strings.TrimSpace(metadata["close_reason"])
-}
-
-func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bool {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
-		return false
-	}
-	sourcePrefix := nativeBeadIDPrefix(issueID)
-	if sourcePrefix == "" {
-		sourcePrefix = normalizeIDPrefix(storePrefix)
-	}
-	targetPrefix := nativeBeadIDPrefix(targetID)
-	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
-}
-
-func nativeBeadIDPrefix(id string) string {
-	before, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(id)), "-")
-	if !ok {
-		return ""
-	}
-	return normalizeIDPrefix(before)
 }
 
 func validateNativeGraphApplyPlan(plan *GraphApplyPlan) error {
