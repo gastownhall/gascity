@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -843,6 +844,65 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork(t *testing.T) {
+	const template = "gascity/gc.gap-analyst"
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "gap-analyst",
+			BindingName:       "gc",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: cityPath,
+		cfg:      cfg,
+		sp:       runtime.NewFake(),
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityPath:      cityPath,
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	buildCalls := 0
+	cr.buildFnWithSessionBeads = func(cfg *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now(), cfg, sp, store, rigStores, sessionBeads, trace, io.Discard)
+	}
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	first := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if got := first.result.PoolDesiredCounts[template]; got != 0 {
+		t.Fatalf("initial PoolDesiredCounts[%s] = %d, want 0", template, got)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "gap analysis",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("Create routed work: %v", err)
+	}
+
+	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count = %d, want 2 after ready-demand change", buildCalls)
+	}
+	if got := second.result.PoolDesiredCounts[template]; got != 1 {
+		t.Fatalf("PoolDesiredCounts[%s] = %d, want 1 for newly-ready routed work", template, got)
+	}
+}
+
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1504,6 +1564,92 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	}
 }
 
+func TestCityRuntimePatrolReconcilesGraphStepClosedAfterWatcherStartup(t *testing.T) {
+	backing := beads.NewMemStore()
+	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := backing.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepIDMetadataKey:     "build",
+		beadmeta.SessionIDMetadataKey:  "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: backing,
+		eventProv:     ep,
+	}
+	cs.startBeadEventWatcher(ctx)
+
+	if err := backing.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("completed events before patrol = %#v, want none without bead.closed", completed)
+	}
+
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg:      cs.cfg,
+		sp:       runtime.NewFake(),
+		cs:       cs,
+		buildFnWithSessionBeads: func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("completed events after poke = %#v, want no global reconciliation outside patrol", completed)
+	}
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after patrol = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("completed event = %#v", got)
+	}
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after second patrol = %#v, want exact-fact no-op", completed)
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	store := beads.NewMemStore()
 	od := &recordingOrderDispatcher{}
@@ -2153,23 +2299,89 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		cs: &controllerState{
 			eventProv: events.NewFake(),
 		},
-		demandSnapshot: &runtimeDemandSnapshot{
-			createdAt:          time.Now(),
-			sessionFingerprint: "",
-			result: DesiredStateResult{State: map[string]TemplateParams{
-				"headless-agent": {
-					SessionName: "headless-agent",
-					IsACP:       true,
-				},
-			}},
-		},
 		stderr: io.Discard,
+	}
+	cr.demandSnapshot = &runtimeDemandSnapshot{
+		createdAt:              time.Now(),
+		sessionFingerprint:     sessionBeadSnapshotFingerprint(nil),
+		readyDemandFingerprint: cr.readyDemandSnapshotFingerprint(),
+		result: DesiredStateResult{State: map[string]TemplateParams{
+			"headless-agent": {
+				SessionName: "headless-agent",
+				IsACP:       true,
+			},
+		}},
 	}
 
 	_ = cr.loadDemandSnapshot(nil, nil, "patrol", false)
 
 	if err := sp.Attach("headless-agent"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
 		t.Fatalf("Attach(headless-agent) error = %v, want ACP transport route", err)
+	}
+}
+
+func TestCityRuntimeReadyDemandFingerprintLogsStableStoreError(t *testing.T) {
+	var logBuf bytes.Buffer
+	oldLogOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
+
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+
+	first := cr.readyDemandSnapshotFingerprint()
+	second := cr.readyDemandSnapshotFingerprint()
+
+	if first != second {
+		t.Fatalf("readyDemandSnapshotFingerprint changed across stable store errors: %q != %q", first, second)
+	}
+	if store.readyCalls != 2 {
+		t.Fatalf("Ready calls = %d, want 2", store.readyCalls)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "readyDemandSnapshotFingerprint: store test-city: backing ready should not be used") {
+		t.Fatalf("log output = %q, want readyDemandSnapshotFingerprint store error", got)
+	}
+}
+
+func TestCityRuntimeDemandSnapshotPokeDoesNotScanReadyFingerprint(t *testing.T) {
+	store := &readyFailStore{Store: beads.NewMemStore()}
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			cityName:      "test-city",
+			cityBeadStore: store,
+			eventProv:     events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	_ = cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "poke", false)
+
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState calls = %d, want 1", buildCalls)
+	}
+	if store.readyCalls != 0 {
+		t.Fatalf("Ready calls = %d, want 0 for forced non-patrol rebuild", store.readyCalls)
 	}
 }
 

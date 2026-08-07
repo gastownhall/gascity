@@ -102,7 +102,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	// whether the sidecar should be written, and the Message/Nudge callers expect
 	// the write on every successful turn. Best-effort and a no-op unless
 	// correlation is armed; it uses its own guard, not invTelemetryMu.
-	defer h.writeTranscriptSessionMeta()
+	defer h.recordTranscriptSessionMetaAfterTurn()
 
 	if operationEventsSuppressed(ctx) {
 		return

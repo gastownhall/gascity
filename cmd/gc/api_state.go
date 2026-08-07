@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -451,11 +452,8 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	// A controller can crash after the durable bead.closed journal append but
 	// before its best-effort lifecycle append. The normal watcher intentionally
 	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
-	// before tailing to repair that otherwise permanent gap. ReconcileCompleted
-	// reads exact facts from the same journal to make restart passes idempotent.
-	graphStore := cs.GraphBeadStore()
-	graphStore.Store = uncachedBeadStore(graphStore.Store)
-	executionevent.ReconcileCompleted(ep, graphStore, "execution-reconcile")
+	// before tailing to repair that otherwise permanent gap.
+	cs.reconcileExecutionCompletions()
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
@@ -505,6 +503,58 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// reconcileExecutionCompletions repairs graph.v2 completion facts from the
+// authoritative graph store. It is safe to call at startup and on patrol ticks:
+// ReconcileCompleted uses the event journal's exact fact as its idempotency
+// record, so repeated passes do not duplicate lifecycle events.
+func (cs *controllerState) reconcileExecutionCompletions() {
+	ep := cs.EventProvider()
+	if ep == nil {
+		return
+	}
+
+	// Graph coordination may be relocated from the city work store, while
+	// graph.v2 executions normally live in the individual rig work stores.
+	// Scan both surfaces in stable order, collapsing wrappers first so aliases
+	// are not scanned more than once.
+	cs.mu.RLock()
+	stores := []beads.Store{
+		resolveGraphStore(cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
+		cs.cityBeadStore,
+	}
+	rigStores := make(map[string]beads.Store, len(cs.beadStores))
+	for name, store := range cs.beadStores {
+		rigStores[name] = store
+	}
+	cs.mu.RUnlock()
+
+	rigNames := make([]string, 0, len(rigStores))
+	for name := range rigStores {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		stores = append(stores, rigStores[name])
+	}
+
+	seen := make(map[uintptr]struct{}, len(stores))
+	graphStores := make([]beads.GraphStore, 0, len(stores))
+	for _, store := range stores {
+		store = uncachedBeadStore(store)
+		if store == nil {
+			continue
+		}
+		if key, ok := storePointerKey(store); ok {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		graphStores = append(graphStores, beads.GraphStore{Store: store})
+	}
+	executionevent.ReconcileCompletedStores(ep, graphStores, "execution-reconcile")
 }
 
 // uncachedBeadStore peels the controller's policy/cache read layers so a
