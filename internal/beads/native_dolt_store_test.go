@@ -2040,6 +2040,7 @@ type nativeDoltTransactionTestStorage interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 	UpdateIssue(context.Context, string, map[string]interface{}, string) error
 	CloseIssue(context.Context, string, string, string, string) error
+	DeleteIssue(context.Context, string) error
 	AddLabel(context.Context, string, string, string) error
 	RemoveLabel(context.Context, string, string, string) error
 	AddDependency(context.Context, *beadslib.Dependency, string) error
@@ -2062,6 +2063,10 @@ func (tx nativeDoltTransactionForTest) CreateIssues(ctx context.Context, issues 
 
 func (tx nativeDoltTransactionForTest) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
 	return tx.storage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+func (tx nativeDoltTransactionForTest) DeleteIssue(ctx context.Context, id string) error {
+	return tx.storage.DeleteIssue(ctx, id)
 }
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
@@ -2390,10 +2395,6 @@ func (s *nativeDoltMemStorage) CloseIssueChecked(
 
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
 	return s.store.Delete(id)
-}
-
-func (s *nativeDoltMemStorage) DeleteIssueChecked(_ context.Context, id string, expectedVersion int64) error {
-	return nativeDoltMemCheckedError(s.store.DeleteIfMatch(id, expectedVersion))
 }
 
 func nativeDoltMemCheckedError(err error) error {

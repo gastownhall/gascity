@@ -91,7 +91,7 @@ func assertMixedMetadataCASResult(t *testing.T, raw json.RawMessage, wantLargeNu
 	}
 }
 
-func TestNativeDoltStoreDeclaresConditionalWriterAndProbesBackendGuard(t *testing.T) {
+func TestNativeDoltStoreDeclaresConditionalWriterAndProbesPinnedStorageContract(t *testing.T) {
 	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 
 	if _, ok := ConditionalWriterFor(store); !ok {
@@ -101,55 +101,31 @@ func TestNativeDoltStoreDeclaresConditionalWriterAndProbesBackendGuard(t *testin
 		t.Fatal("NativeDoltStore does not resolve a MetadataCASWriter")
 	}
 	if capable, reason := store.probeConditionalWriteCapability(); !capable {
-		t.Fatalf("guarded backend capability = false (%s), want true", reason)
+		t.Fatalf("pinned backend capability = false (%s), want true", reason)
 	}
 
-	incapable := newNativeDoltStoreForTest(&nativeDoltStorageSpy{})
-	if capable, reason := incapable.probeConditionalWriteCapability(); capable || reason == "" {
-		t.Fatalf("unguarded backend capability = (%t, %q), want false with reason", capable, reason)
+	compiledStorage := newNativeDoltStoreForTest(&nativeDoltStorageSpy{})
+	if capable, reason := compiledStorage.probeConditionalWriteCapability(); !capable {
+		t.Fatalf("compiled Storage capability = false (%s), want true", reason)
 	}
 }
 
-// TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade pins the seam
-// behavior the condWritesStamp comment in native_dolt_store.go guarantees:
-// capable native stores resolve, while an older unguarded backend still
-// refuses under require and degrades loudly under auto.
-func TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade(t *testing.T) {
-	t.Run("require_resolves_capable_backend", func(t *testing.T) {
-		store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
-		store.stampConditionalWritesMode(gate.Require, false)
+// TestNativeDoltStoreConditionalWritesResolveForPinnedStorageModes pins the
+// mode seam over the compile-time Storage contract. The pinned upstream
+// interface requires checked update/close and transactions, so there is no
+// runtime "older backend" shape hidden behind the same interface.
+func TestNativeDoltStoreConditionalWritesResolveForPinnedStorageModes(t *testing.T) {
+	for _, mode := range []gate.Mode{gate.Require, gate.Auto} {
+		t.Run(string(mode), func(t *testing.T) {
+			store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+			store.stampConditionalWritesMode(mode, false)
 
-		writer, diag, err := ResolveConditionalWriter(store)
-		if writer == nil || diag != nil || err != nil {
-			t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want writer, nil, nil", writer, diag, err)
-		}
-	})
-
-	t.Run("require_refuses_unguarded_backend", func(t *testing.T) {
-		store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{})
-		store.stampConditionalWritesMode(gate.Require, false)
-
-		writer, diag, err := ResolveConditionalWriter(store)
-		if writer != nil || diag == nil || !IsConditionalWritesRequired(err) {
-			t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want nil, diagnostic, required error", writer, diag, err)
-		}
-	})
-
-	t.Run("auto_degrades_unguarded_backend", func(t *testing.T) {
-		store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{})
-		store.stampConditionalWritesMode(gate.Auto, false)
-
-		writer, diag, err := ResolveConditionalWriter(store)
-		if writer != nil {
-			t.Fatalf("writer = %T, want nil (auto must take the legacy path)", writer)
-		}
-		if err != nil {
-			t.Fatalf("err = %v, want nil (auto degrades, it does not refuse)", err)
-		}
-		if diag == nil {
-			t.Fatal("diagnostic = nil, want a loud-degrade diagnostic")
-		}
-	})
+			writer, diag, err := ResolveConditionalWriter(store)
+			if writer == nil || diag != nil || err != nil {
+				t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want writer, nil, nil", writer, diag, err)
+			}
+		})
+	}
 }
 
 // TestCachingStoreOverNativeDoltStoreForwardsConditionalWrites covers the

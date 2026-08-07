@@ -5,11 +5,13 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -95,7 +97,7 @@ func openRealNativeDoltStoreForCAS(t *testing.T, actor string) *NativeDoltStore 
 	ctx := context.Background()
 	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
 	if err != nil {
-		t.Skipf("upstream native beads storage unavailable: %v", err)
+		t.Fatalf("open upstream native beads storage: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := storage.Close(); err != nil {
@@ -106,6 +108,66 @@ func openRealNativeDoltStoreForCAS(t *testing.T, actor string) *NativeDoltStore 
 		t.Fatalf("set issue prefix: %v", err)
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+}
+
+// TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable
+// proves that the exact upstream production constructor resolves the required
+// conditional-write capability and executes all three revision-fenced verbs.
+func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-writer-require")
+	store.stampConditionalWritesMode(gate.Require, false)
+
+	writer, diagnostic, err := ResolveConditionalWriter(store)
+	if err != nil || diagnostic != nil || writer == nil {
+		t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want writer, nil, nil", writer, diagnostic, err)
+	}
+
+	created, err := store.Create(Bead{Title: "conditional-writer-real"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	created, err = store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after create: %v", err)
+	}
+	if created.Revision == 0 {
+		t.Fatal("revision after create = 0, want a live token")
+	}
+	title := "conditional-writer-updated"
+	if err := writer.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("UpdateIfMatch: %v", err)
+	}
+	updated, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if updated.Title != title {
+		t.Fatalf("title after update = %q, want %q", updated.Title, title)
+	}
+	if updated.Revision == created.Revision {
+		t.Fatalf("revision after update = %d, want a fresh token", updated.Revision)
+	}
+
+	if err := writer.CloseIfMatch(updated.ID, updated.Revision); err != nil {
+		t.Fatalf("CloseIfMatch: %v", err)
+	}
+	closed, err := store.Get(updated.ID)
+	if err != nil {
+		t.Fatalf("Get after close: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status after CloseIfMatch = %q, want closed", closed.Status)
+	}
+	if closed.Revision == updated.Revision {
+		t.Fatalf("revision after close = %d, want a fresh token", closed.Revision)
+	}
+
+	if err := writer.DeleteIfMatch(closed.ID, closed.Revision); err != nil {
+		t.Fatalf("DeleteIfMatch: %v", err)
+	}
+	if _, err := store.Get(closed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
+	}
 }
 
 // TestNativeDoltStoreMetadataCASSequentialAgainstRealDolt exercises the

@@ -9,14 +9,6 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
-// nativeGuardedIssueDeleter is the optional upstream capability that completes
-// the row-version guarded mutation set. Its presence is also the version-safe
-// capability marker: older beads libraries expose neither this method nor the
-// complete family-transition fencing required by ConditionalWriter.
-type nativeGuardedIssueDeleter interface {
-	DeleteIssueChecked(context.Context, string, int64) error
-}
-
 var (
 	_ ConditionalWriter                = (*NativeDoltStore)(nil)
 	_ MetadataCASWriter                = (*NativeDoltStore)(nil)
@@ -24,28 +16,12 @@ var (
 )
 
 func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
-	storage, release, err := s.acquireStorage()
+	_, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err.Error()
 	}
 	defer release()
-	if _, ok := storage.(nativeGuardedIssueDeleter); !ok {
-		return false, "native beads backend does not expose guarded issue deletion"
-	}
-	return true, "native beads backend exposes row-version guarded mutations"
-}
-
-func (s *NativeDoltStore) guardedStorage() (beadslib.Storage, nativeGuardedIssueDeleter, func(), error) {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	deleter, ok := storage.(nativeGuardedIssueDeleter)
-	if !ok {
-		release()
-		return nil, nil, nil, ErrConditionalWriteUnsupported
-	}
-	return storage, deleter, release, nil
+	return true, "native beads backend exposes row-version checked writes and transactions"
 }
 
 // UpdateIfMatch applies row-backed opts only while id still has
@@ -54,7 +30,7 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
-	storage, _, release, err := s.guardedStorage()
+	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
 	}
@@ -74,7 +50,7 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 
 // CloseIfMatch closes id only while it still has expectedRevision.
 func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error {
-	storage, _, release, err := s.guardedStorage()
+	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
 	}
@@ -98,7 +74,7 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 
 // DeleteIfMatch deletes id only while it still has expectedRevision.
 func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error {
-	storage, deleter, release, err := s.guardedStorage()
+	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
 	}
@@ -106,8 +82,29 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
 
-	if err := s.conditionalWriteError(ctx, storage, id, expectedRevision,
-		deleter.DeleteIssueChecked(ctx, id, expectedRevision)); err != nil {
+	commitMsg := fmt.Sprintf("gc: delete bead %s at revision %d", id, expectedRevision)
+	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		issue, err := tx.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if issue == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+		if issue.RowVersion != expectedRevision {
+			return &PreconditionFailedError{
+				ID:       id,
+				Expected: expectedRevision,
+				Current:  issue.RowVersion,
+				Raw:      "native row-version mismatch",
+			}
+		}
+		if err := tx.DeleteIssue(ctx, id); err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	if err := s.localStrings.DeleteBead(id); err != nil {
