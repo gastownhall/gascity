@@ -132,6 +132,21 @@ func TestBuildPreparedStart_AntigravityDispatchEffortOptionPresent(t *testing.T)
 	}
 }
 
+func TestBuildPreparedStart_AntigravityPermissionModePlan(t *testing.T) {
+	candidate, cfg, store := newOptionSessionWithWork(t, antigravityEffortResolvedProvider(), "agy", map[string]string{"permission_mode": "plan"})
+
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--mode plan") {
+		t.Fatalf("command %q should contain agy --mode plan", prepared.cfg.Command)
+	}
+	if strings.Contains(prepared.cfg.Command, "--dangerously-skip-permissions") {
+		t.Fatalf("command %q should not also carry the unrestricted default", prepared.cfg.Command)
+	}
+}
+
 func TestBuildPreparedStart_ExplicitEffortOverrideWinsOverDispatchOption(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", map[string]string{"effort": "high"})
 	// Set an explicit effort override on the typed twin the executor reads

@@ -276,7 +276,7 @@ slugs (`agy models` lists them):
 
 ```toml
 provider        = "antigravity"
-option_defaults = { model = "gemini-3.1-pro-high", permission_mode = "plan" }
+option_defaults = { model = "gemini-3.1-pro-high" }
 # also: gemini-3.6-flash-high/-medium/-low · gemini-3.5-flash-high/-medium/-low
 #       gemini-3.1-pro-low · claude-sonnet-4-6 · claude-opus-4-6-thinking
 #       gpt-oss-120b-medium
