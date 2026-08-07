@@ -298,6 +298,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if err := doctorBeadStorePreflight(cityPath, storeFactory); isBeadStoreUnreachable(err) {
 			storeOK = false
 			storePreflightErr = err
+			// Register early so the preflight error precedes omitted store checks
+			// in doctor output (city multi-scope gates + per-rig fan-out).
+			skipCount := beadStorePreflightSkipCount(len(activeRigs))
+			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
 		}
 	}
 
@@ -367,10 +371,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil && cfg != nil {
-		if !storeOK {
-			skipCount := beadStorePreflightSkipCount(len(activeRigs))
-			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
-		}
+		// bead-store-preflight already registered early (near city data gates) when storeOK is false.
 		for _, rig := range activeRigs {
 			register(doctor.NewRigPathCheck(rig))
 			register(doctor.NewRigGitCheck(rig))

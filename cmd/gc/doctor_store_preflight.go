@@ -20,8 +20,9 @@ const (
 	doctorPerRigStoreCheckCount = 3
 )
 
-// doctorBeadStorePreflight probes city bead-store reachability once before
-// store-dependent checks are registered. Tests override this hook.
+// doctorBeadStorePreflight probes CITY bead-store reachability once before
+// store-dependent checks are registered. The probe uses city runtime env
+// (bd list --limit 1); per-rig endpoints may differ. Tests override this hook.
 // Also runs when buildDoctorChecks builds the gc start warmup check set.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight
 
@@ -81,8 +82,11 @@ func beadStorePreflightSkipCount(activeRigCount int) int {
 }
 
 func beadStorePreflightSkipMessage(skipCount, rigCount int, probeErr error) string {
+	// Probe is city-scoped (bd list under city runtime env). Per-rig checks may
+	// resolve different endpoints (explicit rig Dolt, doltlite serverless); this
+	// skip is therefore a city-outage gate, not a guarantee every rig endpoint is down.
 	base := fmt.Sprintf(
-		"bead store unreachable — skipped %d store checks (%d city, %d rigs)",
+		"bead store unreachable — skipped %d store checks (%d city, %d rigs); city store was probed (per-rig endpoints, including doltlite, may differ)",
 		skipCount, doctorCityStoreCheckCount, rigCount,
 	)
 	if probeErr == nil {

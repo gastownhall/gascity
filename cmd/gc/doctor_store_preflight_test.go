@@ -99,6 +99,12 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	if !strings.Contains(res.Message, "bead store unreachable") {
 		t.Fatalf("preflight message = %q, want unreachable wording", res.Message)
 	}
+	if !strings.Contains(res.Message, "city store was probed") {
+		t.Fatalf("preflight message = %q, want city-scope disclosure", res.Message)
+	}
+	if !strings.Contains(res.Message, "doltlite") {
+		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
+	}
 	// Eleven city checks plus three per active rig, two rigs active.
 	if !strings.Contains(res.Message, "skipped 17 store checks") {
 		t.Fatalf("preflight message = %q, want skip count 17", res.Message)
@@ -284,6 +290,14 @@ func TestBuildDoctorChecks_RigStoreNameSetPreflight(t *testing.T) {
 			t.Errorf("outage name-set still has store check %q", name)
 		}
 	}
+	// Constant-drift lock: omit N store checks and add one preflight entry.
+	// A silent 12th city store check would make this delta diverge without
+	// updating doctorCityStoreCheckCount / beadStorePreflightSkipCount.
+	wantDelta := beadStorePreflightSkipCount(2) - 1 // -1 for bead-store-preflight
+	if got := len(healthy) - len(outage); got != wantDelta {
+		t.Fatalf("healthy-outage name delta = %d, want %d (skipCount-1=%d); healthy=%d outage=%d",
+			got, wantDelta, beadStorePreflightSkipCount(2)-1, len(healthy), len(outage))
+	}
 }
 
 func TestBeadStorePreflightSkipMessage(t *testing.T) {
@@ -297,6 +311,12 @@ func TestBeadStorePreflightSkipMessage(t *testing.T) {
 	}
 	if !strings.Contains(got, "connection refused") {
 		t.Fatalf("message = %q, want probe error", got)
+	}
+	if !strings.Contains(got, "city store was probed") {
+		t.Fatalf("message = %q, want city-scope disclosure", got)
+	}
+	if !strings.Contains(got, "doltlite") {
+		t.Fatalf("message = %q, want doltlite residual note", got)
 	}
 }
 
