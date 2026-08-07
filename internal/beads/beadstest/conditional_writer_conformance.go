@@ -2,6 +2,7 @@ package beadstest
 
 import (
 	"errors"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -12,6 +13,12 @@ import (
 // ConditionalWriterOptions controls optional legs of the ConditionalWriter
 // conformance suite that not every store can express.
 type ConditionalWriterOptions struct {
+	// RowBackedMutationFlavors declares that direct whole-row mutation flavors
+	// expose their fresh revision through the Store read surface. MemStore,
+	// FileStore, and real BdStore do; wrappers whose cache projection cannot
+	// preserve every unconditional flavor leave this false.
+	RowBackedMutationFlavors bool
+
 	// OpenDisabled returns a fresh store of the same kind whose conditional
 	// writes are turned off at the instance level (e.g. MemStore/FileStore with
 	// DisableConditionalWrites=true). When non-nil, the disable_toggle subtest
@@ -77,7 +84,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 
-	t.Run(name+"/every_mutation_bumps_revision", func(t *testing.T) {
+	t.Run(name+"/whole_bead_conditional_write_changes_revision", func(t *testing.T) {
 		s := open(t)
 		w := writerFor(t, s)
 		b, err := s.Create(beads.Bead{Title: "orig"})
@@ -86,55 +93,62 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 		id := b.ID
 
-		prev := revOf(t, s, id)
-		bump := func(label string, mutate func() error) {
-			t.Helper()
-			if err := mutate(); err != nil {
-				t.Fatalf("%s: %v", label, err)
-			}
-			cur := revOf(t, s, id)
-			if cur <= prev {
-				t.Fatalf("%s did not bump revision: %d -> %d (want strictly greater)", label, prev, cur)
-			}
-			prev = cur
+		before := revOf(t, s, id)
+		if err := w.UpdateIfMatch(id, before, beads.UpdateOpts{Title: strPtr("renamed")}); err != nil {
+			t.Fatalf("UpdateIfMatch: %v", err)
+		}
+		after := revOf(t, s, id)
+		if after == 0 || after == before {
+			t.Fatalf("UpdateIfMatch did not change to a nonzero revision: %d -> %d", before, after)
+		}
+	})
+
+	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
+		s := open(t)
+		w := writerFor(t, s)
+		parentBefore, err := s.Create(beads.Bead{Title: "restricted-update-parent"})
+		if err != nil {
+			t.Fatalf("Create parent fixture: %v", err)
+		}
+		parent := "parent-after"
+		tests := []struct {
+			name string
+			opts beads.UpdateOpts
+		}{
+			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
+			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
+			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
 		}
 
-		// Every UpdateOpts field flavor is exercised separately: MemStore bumps
-		// once regardless, but BdStore fans different opts to different bd
-		// subcommands, so a per-field missed bump is exactly what this catches.
-		bump("Update(title)", func() error { return s.Update(id, beads.UpdateOpts{Title: strPtr("renamed")}) })
-		bump("Update(labels)", func() error { return s.Update(id, beads.UpdateOpts{Labels: []string{"alpha"}}) })
-		bump("Update(status)", func() error { return s.Update(id, beads.UpdateOpts{Status: strPtr("in_progress")}) })
-		bump("Update(description)", func() error { return s.Update(id, beads.UpdateOpts{Description: strPtr("desc")}) })
-		bump("Update(priority)", func() error { p := 2; return s.Update(id, beads.UpdateOpts{Priority: &p}) })
-		bump("Update(metadata-opt)", func() error { return s.Update(id, beads.UpdateOpts{Metadata: map[string]string{"mo": "1"}}) })
-		bump("Update(removeLabels)", func() error { return s.Update(id, beads.UpdateOpts{RemoveLabels: []string{"alpha"}}) })
-		bump("SetMetadata", func() error { return s.SetMetadata(id, "k", "v") })
-		bump("Update(assignee)", func() error { return s.Update(id, beads.UpdateOpts{Assignee: strPtr("agent")}) })
-		// Close then Reopen. Isolate each verb's bump where the store allows a Get
-		// on a closed bead (MemStore, FileStore, bd); for stores that return
-		// ErrNotFound from Get on a closed bead (CachingStore), fall back to
-		// asserting only that the Close+Reopen pair bumped.
-		if err := s.Close(id); err != nil {
-			t.Fatalf("Close: %v", err)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				created, err := s.Create(beads.Bead{
+					Title:    "restricted-update",
+					ParentID: parentBefore.ID,
+					Labels:   []string{"keep", "remove"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := s.Get(created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				err = w.UpdateIfMatch(created.ID, before.Revision, tt.opts)
+				var unsupported *beads.ConditionalUpdateFieldUnsupportedError
+				if !errors.As(err, &unsupported) {
+					t.Fatalf("UpdateIfMatch(%s) = %v, want *ConditionalUpdateFieldUnsupportedError", tt.name, err)
+				}
+				after, err := s.Get(created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(after, before) {
+					t.Fatalf("restricted conditional update mutated bead: before=%#v after=%#v", before, after)
+				}
+			})
 		}
-		if closed, err := s.Get(id); err == nil {
-			if closed.Revision <= prev {
-				t.Fatalf("Close did not bump revision: %d -> %d", prev, closed.Revision)
-			}
-			prev = closed.Revision
-		}
-		bump("Reopen", func() error { return s.Reopen(id) })
-		bump("CompareAndSetMetadataKey", func() error {
-			ok, err := w.CompareAndSetMetadataKey(id, "casKey", "", "first")
-			if err != nil {
-				return err
-			}
-			if !ok {
-				t.Fatal("CompareAndSetMetadataKey claiming an absent key returned (false, nil)")
-			}
-			return nil
-		})
 	})
 
 	t.Run(name+"/reads_never_bump", func(t *testing.T) {
@@ -168,7 +182,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 	})
 
-	t.Run(name+"/revision_monotonic_never_reused", func(t *testing.T) {
+	t.Run(name+"/revision_tokens_are_never_reused_during_a_bead_lifetime", func(t *testing.T) {
 		s := open(t)
 		b, err := s.Create(beads.Bead{Title: "mono"})
 		if err != nil {
@@ -176,24 +190,181 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		}
 		id := b.ID
 
-		seen := map[int64]bool{}
 		last := revOf(t, s, id)
-		seen[last] = true
+		if last == 0 {
+			t.Fatal("created bead has zero revision")
+		}
+		seen := map[int64]struct{}{last: {}}
 		for i := 0; i < 8; i++ {
 			if err := s.SetMetadata(id, "counter", string(rune('a'+i))); err != nil {
 				t.Fatal(err)
 			}
 			cur := revOf(t, s, id)
-			if cur <= last {
-				t.Fatalf("revision not monotonic at step %d: %d -> %d", i, last, cur)
+			if cur == 0 || cur == last {
+				t.Fatalf("revision did not change to a nonzero token at step %d: %d -> %d", i, last, cur)
 			}
-			if seen[cur] {
-				t.Fatalf("revision %d reused at step %d", cur, i)
+			if _, exists := seen[cur]; exists {
+				t.Fatalf("revision token %d was reused at step %d", cur, i)
 			}
-			seen[cur] = true
+			seen[cur] = struct{}{}
 			last = cur
 		}
 	})
+
+	t.Run(name+"/release_if_current_mints_revision_and_stales_prior_token", func(t *testing.T) {
+		s := open(t)
+		w := writerFor(t, s)
+		releaser, ok := s.(beads.ConditionalAssignmentReleaser)
+		if !ok {
+			t.Fatalf("%T does not implement ConditionalAssignmentReleaser", s)
+		}
+		created, err := s.Create(beads.Bead{
+			Title:    "release-fence",
+			Assignee: "worker-1",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inProgress := "in_progress"
+		if err := s.Update(created.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatal(err)
+		}
+		before, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		released, err := releaser.ReleaseIfCurrent(created.ID, "worker-2")
+		if err != nil {
+			t.Fatalf("ReleaseIfCurrent wrong assignee: %v", err)
+		}
+		if released {
+			t.Fatal("ReleaseIfCurrent wrong assignee = true, want false")
+		}
+		afterNoop, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterNoop.Revision != before.Revision {
+			t.Fatalf("no-op ReleaseIfCurrent minted revision %d -> %d", before.Revision, afterNoop.Revision)
+		}
+
+		released, err = releaser.ReleaseIfCurrent(created.ID, "worker-1")
+		if err != nil {
+			t.Fatalf("ReleaseIfCurrent matching assignee: %v", err)
+		}
+		if !released {
+			t.Fatal("ReleaseIfCurrent matching assignee = false, want true")
+		}
+		afterRelease, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if afterRelease.Revision == 0 || afterRelease.Revision == before.Revision {
+			t.Fatalf("ReleaseIfCurrent did not mint a fresh nonzero revision: %d -> %d", before.Revision, afterRelease.Revision)
+		}
+		if afterRelease.Status != "open" || afterRelease.Assignee != "" {
+			t.Fatalf("released bead = %+v, want open and unassigned", afterRelease)
+		}
+
+		title := "stale overwrite"
+		err = w.UpdateIfMatch(created.ID, before.Revision, beads.UpdateOpts{Title: &title})
+		if !beads.IsPreconditionFailed(err) {
+			t.Fatalf("UpdateIfMatch with pre-release revision = %v, want precondition failure", err)
+		}
+		final, err := s.Get(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final.Title != "release-fence" {
+			t.Fatalf("stale pre-release write changed title to %q", final.Title)
+		}
+	})
+
+	if opts.RowBackedMutationFlavors {
+		t.Run(name+"/row_backed_mutation_flavors_mint_fresh_tokens", func(t *testing.T) {
+			s := open(t)
+			w := writerFor(t, s)
+			strPtr := func(s string) *string { return &s }
+			row, err := s.Create(beads.Bead{Title: "row-backed-mutations"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := map[int64]struct{}{revOf(t, s, row.ID): {}}
+			priority := 2
+
+			assertFresh := func(label string, mutate func() error) {
+				t.Helper()
+				before := revOf(t, s, row.ID)
+				if err := mutate(); err != nil {
+					t.Fatalf("%s: %v", label, err)
+				}
+				after := revOf(t, s, row.ID)
+				if after == 0 || after == before {
+					t.Fatalf("%s did not mint a fresh nonzero revision: %d -> %d", label, before, after)
+				}
+				if _, exists := seen[after]; exists {
+					t.Fatalf("%s reused revision token %d", label, after)
+				}
+				seen[after] = struct{}{}
+			}
+
+			updates := []struct {
+				name string
+				opts beads.UpdateOpts
+			}{
+				{name: "Update(title)", opts: beads.UpdateOpts{Title: strPtr("updated")}},
+				{name: "Update(status)", opts: beads.UpdateOpts{Status: strPtr("in_progress")}},
+				{name: "Update(type)", opts: beads.UpdateOpts{Type: strPtr("task")}},
+				{name: "Update(priority)", opts: beads.UpdateOpts{Priority: &priority}},
+				{name: "Update(description)", opts: beads.UpdateOpts{Description: strPtr("description")}},
+				{name: "Update(assignee)", opts: beads.UpdateOpts{Assignee: strPtr("agent")}},
+				{name: "Update(metadata)", opts: beads.UpdateOpts{Metadata: map[string]string{"update_metadata": "value"}}},
+			}
+			for _, update := range updates {
+				assertFresh(update.name, func() error { return s.Update(row.ID, update.opts) })
+			}
+
+			assertFresh("SetMetadata", func() error {
+				return s.SetMetadata(row.ID, "key", "value")
+			})
+
+			assertFresh("SetMetadataBatch", func() error {
+				return s.SetMetadataBatch(row.ID, map[string]string{"left": "one", "right": "two"})
+			})
+
+			assertFresh("UpdateIfMatch", func() error {
+				return w.UpdateIfMatch(row.ID, revOf(t, s, row.ID), beads.UpdateOpts{Title: strPtr("conditional-updated")})
+			})
+
+			assertFresh("CompareAndSetMetadataKey", func() error {
+				ok, err := w.CompareAndSetMetadataKey(row.ID, "conditional_metadata", "", "value")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					t.Fatal("CompareAndSetMetadataKey claiming an absent key returned (false, nil)")
+				}
+				return nil
+			})
+
+			assertFresh("Close", func() error { return s.Close(row.ID) })
+			assertFresh("Reopen", func() error { return s.Reopen(row.ID) })
+
+			conditionalClose, err := s.Create(beads.Bead{Title: "conditional-close"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := revOf(t, s, conditionalClose.ID)
+			if err := w.CloseIfMatch(conditionalClose.ID, before); err != nil {
+				t.Fatalf("CloseIfMatch: %v", err)
+			}
+			after := revOf(t, s, conditionalClose.ID)
+			if after == 0 || after == before {
+				t.Fatalf("CloseIfMatch did not mint a fresh nonzero revision: %d -> %d", before, after)
+			}
+		})
+	}
 
 	t.Run(name+"/stale_revision_is_precondition_failed", func(t *testing.T) {
 		s := open(t)
@@ -260,8 +431,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		if got.Title != "applied" {
 			t.Fatalf("UpdateIfMatch did not apply opts: title = %q, want %q", got.Title, "applied")
 		}
-		if got.Revision <= aRev {
-			t.Fatalf("UpdateIfMatch did not bump revision: %d -> %d", aRev, got.Revision)
+		if got.Revision == 0 || got.Revision == aRev {
+			t.Fatalf("UpdateIfMatch did not change to a nonzero revision: %d -> %d", aRev, got.Revision)
 		}
 
 		// CloseIfMatch at the current revision succeeds.
@@ -454,8 +625,8 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		if got := after.Metadata["sibling"]; got != "preserved" {
 			t.Fatalf("unrelated sibling metadata = %q, want %q", got, "preserved")
 		}
-		if after.Revision == before.Revision {
-			t.Fatalf("sole successful UpdateIfMatch did not bump revision %d", before.Revision)
+		if after.Revision == 0 || after.Revision == before.Revision {
+			t.Fatalf("sole successful UpdateIfMatch did not change to a nonzero revision: %d -> %d", before.Revision, after.Revision)
 		}
 	})
 

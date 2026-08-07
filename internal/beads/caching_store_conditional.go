@@ -114,6 +114,9 @@ func (c *CachingStore) probeConditionalWriteCapability() (bool, string) {
 // fails or the precondition does. A backing without the capability yields
 // ErrConditionalWriteUnsupported — never an unconditional write.
 func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
+	}
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
 		return ErrConditionalWriteUnsupported

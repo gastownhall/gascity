@@ -184,8 +184,8 @@ func TestCachingStoreCASRetryLoopConverges(t *testing.T) {
 		if backing.getCalls == pre {
 			t.Fatal("post-evict Get did not consult the backing")
 		}
-		if fresh.Revision <= got.Revision {
-			t.Fatalf("post-evict Get returned revision %d, want > %d (the post-write revision)", fresh.Revision, got.Revision)
+		if fresh.Revision == 0 || fresh.Revision == got.Revision {
+			t.Fatalf("post-evict Get returned revision %d, want a nonzero token different from %d (the post-write revision)", fresh.Revision, got.Revision)
 		}
 		if fresh.Title != title {
 			t.Fatalf("post-evict Get returned title %q, want %q", fresh.Title, title)
@@ -225,7 +225,7 @@ func TestCachingStoreCASRetryLoopConverges(t *testing.T) {
 		if backing.getCalls != pre {
 			t.Fatal("pre-evict Get consulted the backing; the staleness setup is vacuous")
 		}
-		if stale.Revision >= live.Revision {
+		if stale.Revision == live.Revision {
 			t.Fatalf("cached revision %d is not stale against the backing's %d", stale.Revision, live.Revision)
 		}
 

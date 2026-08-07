@@ -162,12 +162,16 @@ type ConditionalAssignmentReleaser interface {
 // table against every implementing store, including real bd under the
 // integration build tag):
 //
-//   - Every bead carries an opaque int64 revision. Callers may test it only for
-//     equality; arithmetic, ordering across beads, and gap inference are all
-//     undefined.
-//   - Every USER-VISIBLE mutation of this bead bumps the revision: field
-//     updates, label add/remove, metadata writes (any key), assign, close,
-//     reopen, delete. Reads never bump.
+//   - Every bead carries a nonzero opaque int64 revision. Callers may test it
+//     only for equality; arithmetic, ordering across beads, and gap inference
+//     are undefined. A token is never intentionally reused during one bead's
+//     observed lifetime.
+//   - Every successful mutation of revision-guarded whole-row content —
+//     conditional or unconditional — mints a fresh nonzero revision. This
+//     covers row-backed Update fields, metadata writes, Close, and Reopen;
+//     reads never change it.
+//     Separate label/parent persistence and derived or heartbeat fields are
+//     outside this guarantee.
 //   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
 //     maintains a denormalized is_blocked column on the issue row that other
 //     beads' dependency/close/route writes recompute (the same reason bd pins
@@ -175,8 +179,9 @@ type ConditionalAssignmentReleaser interface {
 //     bumps the revision is backend-dependent and callers must not rely on
 //     either answer. This is why every consumer treats PreconditionFailedError
 //     as a re-read trigger, never as a conclusion about what changed.
-//   - A bead's revision is monotonically increasing for the lifetime of the bead
-//     and is never reused.
+//   - The immediately prior token is stale after a whole-row mutation and is
+//     rejected; concurrent writes with the same observed revision have exactly
+//     one winner. Backends may generate either counters or random tokens.
 //
 // GRANULARITY CONTRACT: consumers may assume NEITHER value-level nor
 // revision-level conflict semantics. Backends differ — sqlite and the native
@@ -186,8 +191,11 @@ type ConditionalAssignmentReleaser interface {
 // the value-CAS RESULT either way, but must not build timing or interference
 // assumptions on top of it.
 type ConditionalWriter interface {
-	// UpdateIfMatch applies opts only if the bead's revision equals
-	// expectedRevision; otherwise it returns *PreconditionFailedError.
+	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError. ParentID,
+	// Labels, and RemoveLabels are rejected with
+	// *ConditionalUpdateFieldUnsupportedError: bd persists those fields through
+	// separate writes, so they cannot share this guarded-update contract.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -211,6 +219,37 @@ type ConditionalWriter interface {
 // pinned as invalid input: an empty fenced update neither evaluates the fence
 // nor bumps the revision on ANY store.
 var ErrEmptyConditionalUpdate = errors.New("conditional update: empty UpdateOpts (nothing to apply)")
+
+// ConditionalUpdateFieldUnsupportedError reports an UpdateIfMatch option that
+// is not row-backed across every ConditionalWriter implementation.
+type ConditionalUpdateFieldUnsupportedError struct {
+	Field string
+}
+
+// Error reports the conditional-update field that cannot be revision-guarded.
+func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
+}
+
+// validateConditionalUpdateOpts rejects the fields bd must persist separately
+// before any store evaluates a revision fence or mutates state.
+func validateConditionalUpdateOpts(o UpdateOpts) error {
+	switch {
+	case o.ParentID != nil:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case len(o.Labels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	case len(o.RemoveLabels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
+	case isEmptyUpdateOpts(o):
+		return ErrEmptyConditionalUpdate
+	default:
+		return nil
+	}
+}
 
 // isEmptyUpdateOpts reports whether opts carries no mutation at all.
 func isEmptyUpdateOpts(o UpdateOpts) bool {
