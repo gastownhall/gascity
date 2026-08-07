@@ -1180,6 +1180,14 @@ func persistStateMutation(root *storageRoot, state persistedState, allowAppliedA
 	installed := loadStateFromDirectory(root)
 	if installed.err != nil || !installed.present || installed.state != state || !bytes.Equal(installed.raw, data) {
 		err := errors.Join(installed.err, errors.New("productmetrics: applied state did not read back exactly"))
+		if installed.err == nil {
+			// A cleanly readable record that is absent or differs from the
+			// content this mutation just installed means a peer changed state
+			// inside the rename→read-back window — the same concurrency the
+			// incarnation check below reports for byte-identical replacement.
+			// An unreadable record stays unlabeled: it cannot be attributed.
+			err = errors.Join(ErrStateChangedConcurrently, err)
+		}
 		_ = installed.Close()
 		if result.state == storageWriteAppliedSyncPending {
 			err = errors.Join(errStateAppliedSyncPending, writeErr, err)

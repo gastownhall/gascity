@@ -1340,6 +1340,51 @@ func TestDisableAndPurgeDetectsByteIdenticalRecordSwapAtAuthorityMint(t *testing
 	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
 }
 
+// The different-bytes variant of the mint-window race: a peer installing a
+// MUTATED record between the disable write's rename and the read-back must
+// classify as a concurrent state change, not as a generic disable-write
+// failure. This is the interleaving TestDisableAndPurgeRejectsUnprovenPeerSuccessor
+// hits nondeterministically when its unlocked successor write lands before
+// authority is minted.
+func TestDisableAndPurgeClassifiesMutatedRecordSwapAtAuthorityMint(t *testing.T) {
+	home, service, _ := newRecordServiceFixture(t, testEventIDThree)
+	configPath := filepath.Join(home.Root(), configFileName)
+	var swapped atomic.Bool
+	var swapErr error
+	service.deps.storageHooks.afterAtomicWrite = func(path string, outcome storageWriteState) {
+		if path != configPath || outcome != storageWriteAppliedDurable || swapped.Load() {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		state, err := decodePersistedState(data)
+		if err != nil || state.Preference != preferenceDisabled || state.CleanupKind != cleanupDisable {
+			return
+		}
+		swapped.Store(true)
+		state.RequiredNoticeVersion++
+		mutated, err := encodePersistedState(state)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		temp := path + ".mutated-swap"
+		if err := os.WriteFile(temp, mutated, 0o600); err != nil {
+			swapErr = err
+			return
+		}
+		swapErr = os.Rename(temp, path)
+	}
+	_, err := service.DisableAndPurge(context.Background())
+	if swapErr != nil || !swapped.Load() {
+		t.Fatalf("mutated swap: performed=%v err=%v", swapped.Load(), swapErr)
+	}
+	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
+}
+
 func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name      string
