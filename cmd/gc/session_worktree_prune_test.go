@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -17,18 +18,20 @@ import (
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted.
 type fakeGitProbe struct {
-	isRepo           bool
-	currentBranch    string
-	currentBranchErr error
-	hasUncommitted   bool
-	hasUnpushed      bool
-	unpushedErr      error
-	hasStashes       bool
-	stashesErr       error
-	worktreeRemove   func(path string, force bool) error
-	removedPath      string
-	removedForce     bool
-	removeInvoked    bool
+	isRepo             bool
+	currentBranch      string
+	currentBranchErr   error
+	hasUncommitted     bool
+	hasUnpushed        bool
+	unpushedErr        error
+	hasStashes         bool
+	stashesErr         error
+	statusPorcelain    string
+	statusPorcelainErr error
+	worktreeRemove     func(path string, force bool) error
+	removedPath        string
+	removedForce       bool
+	removeInvoked      bool
 }
 
 func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
@@ -40,6 +43,10 @@ func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
 func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
+func (f *fakeGitProbe) StatusPorcelain() (string, error) {
+	return f.statusPorcelain, f.statusPorcelainErr
+}
+
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	f.removeInvoked = true
 	f.removedPath = path
@@ -51,8 +58,12 @@ func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 }
 
 // assertWorktreeStaleMarker fails the test unless workerDir contains a
-// .worktree-stale marker recording the given branch and reason. Shared by
-// both the raw and session.Info test forms.
+// .worktree-stale marker satisfying the full contract established by
+// packs/gastown/scripts/worktree-setup.sh's write_stale_marker: the
+// machine-readable header (branch=, worktree=, reason=, blocking=, at=)
+// followed by a blank line and self-contained WHAT HAPPENED / WHAT TO DO
+// prose, with the header preceding the prose. Shared by both the raw and
+// session.Info test forms.
 func assertWorktreeStaleMarker(t *testing.T, workerDir, wantBranch, wantReason string) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(workerDir, worktreeStaleFileName))
@@ -63,8 +74,39 @@ func assertWorktreeStaleMarker(t *testing.T, workerDir, wantBranch, wantReason s
 	if !strings.Contains(content, "branch="+wantBranch) {
 		t.Errorf("marker content = %q, want to contain %q", content, "branch="+wantBranch)
 	}
+	if !strings.Contains(content, "worktree="+workerDir) {
+		t.Errorf("marker content = %q, want to contain %q", content, "worktree="+workerDir)
+	}
 	if !strings.Contains(content, "reason="+wantReason) {
 		t.Errorf("marker content = %q, want to contain %q", content, "reason="+wantReason)
+	}
+	if !strings.Contains(content, "blocking=no") {
+		t.Errorf("marker content = %q, want to contain %q", content, "blocking=no")
+	}
+
+	var atLine string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "at=") {
+			atLine = strings.TrimPrefix(line, "at=")
+			break
+		}
+	}
+	if atLine == "" {
+		t.Errorf("marker content = %q, want an at= header line", content)
+	} else if _, err := time.Parse(time.RFC3339, atLine); err != nil {
+		t.Errorf("at= value %q is not RFC3339: %v", atLine, err)
+	}
+
+	if !strings.Contains(content, "WHAT HAPPENED") {
+		t.Errorf("marker content = %q, want a WHAT HAPPENED section", content)
+	}
+	if !strings.Contains(content, "WHAT TO DO") {
+		t.Errorf("marker content = %q, want a WHAT TO DO section", content)
+	}
+	reasonIdx := strings.Index(content, "reason=")
+	whatIdx := strings.Index(content, "WHAT HAPPENED")
+	if reasonIdx == -1 || whatIdx == -1 || reasonIdx > whatIdx {
+		t.Errorf("marker content = %q, want header (reason=) to precede WHAT HAPPENED prose", content)
 	}
 }
 
@@ -422,6 +464,134 @@ func TestPruneAgentHomeWorktreeIfSafe_NilConfig(t *testing.T) {
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, nil, &stderr) {
 		t.Fatal("prune returned true with nil cfg")
+	}
+}
+
+func TestWriteWorktreeStaleMarker_UncommittedWorkListsDirtyPaths(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{
+		isRepo:          true,
+		hasUncommitted:  true,
+		currentBranch:   "builder/ga-abc123",
+		statusPorcelain: " M cmd/gc/foo.go\n?? cmd/gc/bar_test.go\n",
+	})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true with uncommitted work")
+	}
+	data, err := os.ReadFile(filepath.Join(fx.workerDir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{"Dirty paths", "cmd/gc/foo.go", "cmd/gc/bar_test.go"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("marker content = %q, want to contain %q", content, want)
+		}
+	}
+}
+
+func TestWriteWorktreeStaleMarker_UnpushedCommitsGuidanceIsReasonSpecific(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true with unpushed commits")
+	}
+	data, err := os.ReadFile(filepath.Join(fx.workerDir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "git push -u origin") {
+		t.Errorf("marker content = %q, want unpushed-specific guidance", content)
+	}
+	if strings.Contains(content, "git stash") {
+		t.Errorf("marker content = %q, want no stash guidance for unpushed-commits reason", content)
+	}
+}
+
+func TestWriteWorktreeStaleMarker_StashedWorkGuidanceIsReasonSpecific(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune returned true with stashes")
+	}
+	data, err := os.ReadFile(filepath.Join(fx.workerDir, worktreeStaleFileName))
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "git stash pop") {
+		t.Errorf("marker content = %q, want stash-specific guidance", content)
+	}
+	if strings.Contains(content, "git push -u origin") {
+		t.Errorf("marker content = %q, want no push guidance for stashed-work reason", content)
+	}
+}
+
+// TestWorktreeStaleGuidance exercises worktreeStaleGuidance directly: every
+// known reason code must be self-contained (WHAT HAPPENED / WHAT TO DO /
+// NEVER) and reason-specific, and an unrecognized reason code must still
+// fall back to guidance rather than leaving the reader with nothing — the
+// same guarantee packs/gastown/scripts/worktree-setup.sh's
+// stale_marker_guidance makes for its own fallback case.
+func TestWorktreeStaleGuidance(t *testing.T) {
+	cases := []struct {
+		name    string
+		reason  string
+		dirty   string
+		want    []string
+		mustNot []string
+	}{
+		{
+			name:   "uncommitted work lists dirty paths",
+			reason: worktreeStaleReasonUncommittedWork,
+			dirty:  " M cmd/gc/foo.go\n?? cmd/gc/bar_test.go\n",
+			want:   []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "cmd/gc/foo.go", "cmd/gc/bar_test.go", "git status --porcelain"},
+		},
+		{
+			name:   "uncommitted work with no listing still self-describes",
+			reason: worktreeStaleReasonUncommittedWork,
+			dirty:  "",
+			want:   []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER"},
+		},
+		{
+			name:    "unpushed commits",
+			reason:  worktreeStaleReasonUnpushedCommits,
+			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git log --oneline @{u}..HEAD", "git push -u origin"},
+			mustNot: []string{"git stash"},
+		},
+		{
+			name:    "stashed work",
+			reason:  worktreeStaleReasonStashedWork,
+			want:    []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "git stash pop", "git stash list"},
+			mustNot: []string{"git push -u origin"},
+		},
+		{
+			name:   "unknown reason falls back rather than leaving no guidance",
+			reason: "some-future-reason",
+			want:   []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "some-future-reason"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := worktreeStaleGuidance(c.reason, c.dirty)
+			for _, want := range c.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("worktreeStaleGuidance(%q) = %q, want to contain %q", c.reason, got, want)
+				}
+			}
+			for _, mustNot := range c.mustNot {
+				if strings.Contains(got, mustNot) {
+					t.Errorf("worktreeStaleGuidance(%q) = %q, want NOT to contain %q", c.reason, got, mustNot)
+				}
+			}
+		})
 	}
 }
 
