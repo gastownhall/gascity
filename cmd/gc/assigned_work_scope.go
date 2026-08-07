@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -139,8 +140,22 @@ func filterAssignedWorkBeadsForPoolDemand(
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
+	now := time.Now().UTC()
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
+		// A deferred bead is deliberately parked (future defer_until) and is
+		// invisible to bd ready, so scale_check reports zero demand for it.
+		// But this pool-demand pass draws from a raw List(status=open) that
+		// still returns deferred beads. A deferred bead that retains a stale
+		// gc.routed_to would otherwise count as poolDesired=1 with no matching
+		// ready work, driving the reconciler to spawn an ephemeral session that
+		// immediately orphan-drains — a spawn/drain loop that only ends when
+		// the bead's defer elapses or the route is stripped by hand. Excluding
+		// deferred beads here mirrors bd ready's server-side filter so gc's
+		// internal demand agrees with the shim.
+		if beads.IsDeferred(wb, now) {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
