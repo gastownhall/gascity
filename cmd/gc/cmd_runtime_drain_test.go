@@ -963,7 +963,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
 		time.Millisecond, time.Second, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
@@ -973,11 +973,43 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	}
 }
 
+// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
+// the gc runtime request-restart path: a pinned session (pin_awake ==
+// "true") is kill-protected by the reconciler unless an explicit controller
+// reset is persisted, so persistRestart is mandatory rather than best-effort
+// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
+func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), tc.persistRestart, true, rec, "mayor", "mayor",
+				10*time.Millisecond, time.Second, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Restart requested") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+			}
+		})
+	}
+}
+
 func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
 	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
 		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
@@ -997,7 +1029,7 @@ func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
 	dops := newFakeDrainOps()
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
 		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -1015,7 +1047,7 @@ func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
 		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -1033,7 +1065,7 @@ func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
+		done <- doRuntimeRequestRestart(ctx, dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
 			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
 	}()
 
@@ -1145,7 +1177,7 @@ func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, persistRestart, events.Discard, "mayor", "mayor",
+		done <- doRuntimeRequestRestart(ctx, dops, runtime.NewFake(), persistRestart, false, events.Discard, "mayor", "mayor",
 			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
 	}()
 

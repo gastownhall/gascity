@@ -307,6 +307,7 @@ func requestedRigEndpointState(rig config.Rig, currentState, cityState contract.
 			EndpointStatus: contract.EndpointStatusVerified,
 			DoltHost:       "127.0.0.1",
 			DoltPort:       strings.TrimSpace(opts.Port),
+			DoltMode:       "server",
 		}
 		if opts.AdoptUnverified {
 			state.EndpointStatus = contract.EndpointStatusUnverified
@@ -326,6 +327,7 @@ func requestedRigEndpointState(rig config.Rig, currentState, cityState contract.
 		DoltHost:       strings.TrimSpace(opts.Host),
 		DoltPort:       strings.TrimSpace(opts.Port),
 		DoltUser:       user,
+		DoltMode:       "server",
 	}
 	if opts.AdoptUnverified {
 		state.EndpointStatus = contract.EndpointStatusUnverified

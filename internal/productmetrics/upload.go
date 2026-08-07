@@ -151,12 +151,9 @@ func newProductionUploadTransport(identity ReleaseIdentity) (*uploadTransport, e
 	if identity != compiledIdentity {
 		return nil, fmt.Errorf("productmetrics: release identity does not match this artifact")
 	}
-	// S1 deliberately defines no official BuildKind. Even a same-package test
-	// literal with plausible endpoint/version/epoch material remains inert. R2
-	// must add an attested official kind and explicitly open BuildKind.String.
-	if compiledIdentity.BuildKind() == BuildDevelopment {
-		return nil, fmt.Errorf("productmetrics: development release identity cannot upload")
-	}
+	// Every classified build (development, canary, release) uploads; only an
+	// out-of-range/unknown build kind is refused. The reported release_version
+	// carries the provenance so reporting can filter development from release.
 	if compiledIdentity.BuildKind().String() == "unknown" {
 		return nil, fmt.Errorf("productmetrics: unknown release identity cannot upload")
 	}
@@ -489,7 +486,7 @@ func (transport *uploadTransport) requestDependencies() (uploadRequestDependenci
 			return uploadRequestDependencies{}, fmt.Errorf("productmetrics: custom CA environment disables upload")
 		}
 		identity := CurrentReleaseIdentity()
-		if identity.BuildKind() == BuildDevelopment || identity.BuildKind().String() == "unknown" ||
+		if identity.BuildKind().String() == "unknown" ||
 			!validPauseReleaseVersion(identity.ReleaseVersion()) || !validMetricsEpoch(identity.MetricsEpoch()) {
 			return uploadRequestDependencies{}, fmt.Errorf("productmetrics: production upload release identity is invalid")
 		}

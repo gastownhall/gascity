@@ -2,6 +2,7 @@ package testenv_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -458,29 +459,133 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(tc.bin, "-test.run=^TestInitRefusesProdDoltPort$", "-test.v")
-			cmd.Env = append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
-			out, err := cmd.Output()
-			if tc.wantPanic {
-				if err == nil {
-					t.Fatalf("child succeeded but should have refused the prod Dolt port; output:\n%s", out)
-				}
-				stderr := exitStderr(err)
-				for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
-					if !strings.Contains(stderr, want) {
-						t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
-					}
-				}
-				return
+			env := append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
+			assertRefusesDoltPort(t, tc.bin, "TestInitRefusesProdDoltPort", "", env, tc.wantPanic, tc.wantOutput)
+		})
+	}
+}
+
+// assertRefusesDoltPort re-execs bin under testName's -test.run pattern (with
+// dir as its working directory, unless empty) and asserts either a panic —
+// whose stderr must contain both diagnostic substrings — or, when wantPanic
+// is false, that stdout contains every string in wantOutput. Shared by
+// TestInitRefusesProdDoltPort and TestInitRefusesAmbientCityDoltPort so the
+// hardcoded-port and ambient-city detection arms exercise a single re-exec
+// call site instead of two, keeping this package's tracked subprocess census
+// unchanged (see internal/testpolicy/resourcecensus and test/test-resources.toml).
+func assertRefusesDoltPort(t *testing.T, bin, testName, dir string, env []string, wantPanic bool, wantOutput []string) {
+	t.Helper()
+	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env
+	out, err := cmd.Output()
+	if wantPanic {
+		if err == nil {
+			t.Fatalf("child succeeded but should have refused the Dolt port; output:\n%s", out)
+		}
+		stderr := exitStderr(err)
+		for _, want := range []string{"production Dolt server", "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("panic message missing %q; stderr:\n%s", want, stderr)
 			}
-			if err != nil {
-				t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
-			}
-			for _, want := range tc.wantOutput {
-				if !strings.Contains(string(out), want) {
-					t.Errorf("child output missing %q; got:\n%s", want, out)
-				}
-			}
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("re-exec: %v\nstderr: %s", err, exitStderr(err))
+	}
+	for _, want := range wantOutput {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("child output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// buildSyntheticCity creates a t.TempDir() city tree — a city.toml marker at
+// the root and a managed-Dolt runtime state file recording port — and
+// returns a directory nested three levels below the root, so pointing
+// cmd.Dir at it exercises the ambient arm's upward walk rather than a
+// same-directory check. The synthetic root is a fresh temp dir, so the walk
+// finds this city.toml before it could ever reach any real ambient city
+// further up the real filesystem tree.
+func buildSyntheticCity(t *testing.T, port int) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("# synthetic city\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	stateDir := filepath.Join(root, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir dolt state dir: %v", err)
+	}
+	state := fmt.Sprintf(`{"running":true,"pid":1,"port":%d,"data_dir":"x"}`, port)
+	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+		t.Fatalf("write dolt-state.json: %v", err)
+	}
+	nested := filepath.Join(root, "a", "b", "c")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested dir: %v", err)
+	}
+	return nested
+}
+
+// TestInitRefusesAmbientCityDoltPort proves the ambient-city detection arm in
+// refuseProdDoltPort is actually wired into init() end-to-end — not just
+// correct as a pure function, which TestAmbientCityDoltPort in
+// testenv_internal_test.go already covers against synthetic trees directly.
+// The child's cmd.Dir is pointed at a synthetic city tree whose port is a
+// neutral synthetic value — neither the hardcoded ProdDoltPort (3307) nor
+// the fleet's real managed ambient port (28231) — so a panic here can only
+// be caused by the ambient arm consulting that synthetic city's own state,
+// never by a coincidental match against this process's real environment.
+func TestInitRefusesAmbientCityDoltPort(t *testing.T) {
+	if os.Getenv("GC_TESTENV_CHILD") == "1" {
+		os.Stdout.WriteString("BEADS_DOLT_SERVER_PORT=" + os.Getenv("BEADS_DOLT_SERVER_PORT") + "\n") //nolint:errcheck
+		os.Exit(0)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	const ambientPort = 19999 // neither ProdDoltPort (3307) nor the fleet's real ambient port (28231)
+
+	cases := []struct {
+		name       string
+		port       string
+		extraEnv   []string
+		wantPanic  bool
+		wantOutput []string
+	}{
+		{
+			name:      "surviving port matching ambient city port panics",
+			port:      "19999",
+			wantPanic: true,
+		},
+		{
+			name:       "surviving port not matching ambient city port survives",
+			port:       "20000",
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=20000\n"},
+		},
+		{
+			name:       "opt-out allows ambient-matching port through",
+			port:       "19999",
+			extraEnv:   []string{"GC_ALLOW_PROD_DOLT_PORT_IN_TESTS=1"},
+			wantOutput: []string{"BEADS_DOLT_SERVER_PORT=19999\n"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := buildSyntheticCity(t, ambientPort)
+			env := append([]string{
+				"GC_TESTENV_CHILD=1",
+				"GC_TESTENV_PASSTHROUGH=BEADS_DOLT_SERVER_PORT",
+				"BEADS_DOLT_SERVER_PORT=" + tc.port,
+			}, tc.extraEnv...)
+			assertRefusesDoltPort(t, exe, "TestInitRefusesAmbientCityDoltPort", dir, env, tc.wantPanic, tc.wantOutput)
 		})
 	}
 }

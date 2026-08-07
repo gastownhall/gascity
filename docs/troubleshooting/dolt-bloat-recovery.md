@@ -137,6 +137,25 @@ succeed. Do **not** set the global opt-out in the shared `mol-dog-compactor`
 order for the same reason; set the per-database env on the affected city
 instead.
 
+## Compacting a database that must never reach a remote
+
+Some databases are deliberately local — a privacy boundary, or a store whose
+remote was configured by accident. Mark those `.no-sync` and compaction skips
+its remote phase entirely: no fetch, no push, and no deferred push recorded.
+The database still flattens and GCs, so it keeps the disk benefit:
+
+```bash
+# Exclude one database from all remote sync, compaction included.
+touch <cityPath>/.beads/dolt/<database>/.no-sync
+```
+
+`gc dolt sync` and `gc dolt pull` honor the same marker, so one file covers
+every remote path.
+
+Choose `.no-sync` over `--skip-fetch` when a database must never reach a
+remote. `--skip-fetch` defers the push and waits for the remote to become
+usable later; `.no-sync` states that it never will.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of

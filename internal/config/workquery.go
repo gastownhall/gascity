@@ -30,6 +30,32 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
+// excludeHoldLabelsShellArgs renders a repeated --exclude-label flag for
+// every beadmeta.DispatchHoldLabels value, so route-scoped, unassigned
+// pool-demand queries never surface a bead intentionally parked on a
+// dispatch hold (ga-x9kptu / ga-5736js). Assignee-scoped tiers (Tier 1/2)
+// must stay hold-transparent by design and must never call this.
+func excludeHoldLabelsShellArgs() string {
+	var args string
+	for _, label := range beadmeta.DispatchHoldLabels {
+		args += ` --exclude-label "` + label + `"`
+	}
+	return args
+}
+
+// excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
+// that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
+// filters that have no bd-side --exclude-label flag to lean on. Mirrors the
+// bracketed-count style of the dependency-blocking select above it so both
+// clauses read the same way (ga-x9kptu / ga-5736js).
+func excludeHoldLabelsJQClause() string {
+	conds := make([]string, len(beadmeta.DispatchHoldLabels))
+	for i, label := range beadmeta.DispatchHoldLabels {
+		conds[i] = `. == "` + label + `"`
+	}
+	return ` | select(([ (.labels // [])[] | select(` + strings.Join(conds, " or ") + `) ] | length) == 0)`
+}
+
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
 // builders use it so embedded key spellings stay anchored to the beadmeta
@@ -39,7 +65,7 @@ func jqMeta(key string) string {
 }
 
 func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -51,7 +77,7 @@ func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -70,13 +96,16 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
-func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
-	filter := `[.[] | ` + selector +
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
+	body := selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
 		` | select(([ (.dependencies // [])[]` +
 		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
-		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)]` +
-		` | sort_by(.created_at // "")`
+		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)`
+	if excludeHoldLabels {
+		body += excludeHoldLabelsJQClause()
+	}
+	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "")`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -91,6 +120,7 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
+		true,
 	)
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
@@ -171,9 +201,67 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
+}
+
+// inProgressBlockedByEnrichmentScript hardens the in_progress "crash recovery"
+// work-query tier against re-serving a bead that cannot progress.
+//
+// `bd list --status in_progress` does no readiness computation: unlike
+// `bd ready` it emits neither blocked_by nor is_blocked. That makes the
+// defensive hook-side filter (filterUnreadyHookCandidates ->
+// isDepBlockedHookCandidate) a structural no-op for this tier, because an
+// absent blocked_by is correctly read as "not blocked". A step that is
+// in_progress + assigned but held by an open gate or an unclosed blocking
+// dependency is therefore re-served on every hook tick, forever.
+//
+// `bd ready` cannot be substituted here: it excludes in_progress by design,
+// so it would return nothing and defeat crash recovery entirely. Instead we
+// read the candidate's own dependency rows and attach the blocked_by array
+// the rest of the pipeline already knows how to interpret. When the candidate
+// is blocked we skip it and fall through to the ready-gated tier, so a session
+// holding one blocked step can still be served its other ready assigned work.
+//
+// Only ready-blocking dependency types are considered, matching
+// beads.IsReadyBlockingDependencyType; parent-child and tracks edges never
+// block readiness. Status interpretation is left to the shared Go filter:
+// any non-closed blocker counts.
+//
+// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
+// degrades to the stock behavior of serving the candidate unchanged, never to
+// dropping it, so a malformed or log-prefixed bd stdout can never disable
+// crash recovery.
+func inProgressBlockedByEnrichmentScript(shellVar string) string {
+	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
+		`.dependency_type == "conditional-blocks") | {id, status}]`
+	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+
+	const enrichJQ = `map(. + {blocked_by: $bb})`
+
+	v := `$` + shellVar
+	// The enriched payload lands in a scratch var derived from shellVar so the
+	// candidate itself is never clobbered: if jq fails (non-JSON or
+	// log-prefixed `bd list` stdout) the original is served unchanged.
+	enrichedVar := shellVar + `_enriched`
+	e := `$` + enrichedVar
+	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`bb="[]"; ` +
+		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
+		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); ` +
+		`[ -z "$bb" ] && bb="[]"; ` +
+		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
+		`[ -z "$nblocked" ] && nblocked=0; ` +
+		`if [ "$nblocked" = "0" ]; then ` +
+		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`printf "%s" "` + v + `" && exit 0; ` +
+		`fi; `
 }
 
 func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
@@ -197,7 +285,9 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `
@@ -227,7 +317,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 	if includeEphemeralReady {
 		return ""
 	}
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
+	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
@@ -470,7 +560,11 @@ func (a *Agent) EffectiveSlingQuery() string {
 // this agent. Callers outside config should prefer this helper over rebuilding
 // the command string to preserve the bd boundary invariant.
 func (a *Agent) DefaultSlingQuery() string {
-	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + a.QualifiedName()
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	return "bd update {} --set-metadata " + beadmeta.RoutedToMetadataKey + "=" + route
 }
 
 // EffectivePoolDemandQuery returns the count-form pool-demand query the

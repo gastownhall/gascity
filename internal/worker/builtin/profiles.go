@@ -125,11 +125,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ForkFlag:               "--fork-session",
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		// Config-facing names map to current CLI values: Claude Code rejects the
+		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
 			"unrestricted": "--dangerously-skip-permissions",
 			"plan":         "--permission-mode plan",
-			"auto-edit":    "--permission-mode auto-edit",
-			"full-auto":    "--permission-mode full-auto",
+			"auto-edit":    "--permission-mode acceptEdits",
+			"full-auto":    "--permission-mode dontAsk",
 		},
 		OptionsSchema: []BuiltinProviderOption{
 			{
@@ -138,8 +140,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:    "select",
 				Default: "auto-edit",
 				Choices: []BuiltinOptionChoice{
-					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "auto-edit"}},
-					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "full-auto"}},
+					{Value: "auto-edit", Label: "Edit automatically", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
+					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
 					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
 					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
 				},
@@ -165,11 +167,29 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "", Label: "Default"},
 					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
+					{Value: "opus-5", Label: "Opus 5", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
 					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
 					{Value: "sonnet-5", Label: "Sonnet 5", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
 					{Value: "sonnet-4-6", Label: "Sonnet 4.6", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
+					// Canonical provider model IDs accepted verbatim. Operators pin the
+					// full "claude-*" id in agent.toml rather than the short alias, and
+					// before these entries existed such a value was not in this enum at
+					// all: the launch path found no FlagArgs and silently emitted NO
+					// --model, while the named-session resolution path hard-errored on
+					// the same value ("invalid value for model: claude-opus-5"). A whole
+					// city ran unpinned for hours on the launch side while four agents
+					// were unwakeable on the resolution side (ra-jbbv0).
+					{Value: "claude-opus-5", Label: "Opus 5 (canonical id)", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
+					// The "[1m]" launch suffix is a valid Claude Code model-id form and
+					// operators pin it directly; it is emitted verbatim rather than
+					// normalized down to "claude-opus-5", because silently rewriting an
+					// explicit pin is the same class of surprise these entries exist to
+					// eliminate.
+					{Value: "claude-opus-5[1m]", Label: "Opus 5 1M (canonical id)", FlagArgs: []string{"--model", "claude-opus-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-5[1m]"}}},
+					{Value: "claude-sonnet-5", Label: "Sonnet 5 (canonical id)", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
+					{Value: "claude-fable-5", Label: "Fable 5 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 				},
 			},
 		},
@@ -511,20 +531,26 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:        "subcommand",
 	},
 	"opencode": {
-		DisplayName:      "OpenCode",
-		Command:          "opencode",
-		Args:             []string{},
-		PromptMode:       "flag",
-		PromptFlag:       "--prompt",
-		ReadyDelayMs:     8000,
-		ProcessNames:     []string{"opencode", "node", "bun"},
-		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "--session",
-		ResumeStyle:      "flag",
-		ACPArgs:          []string{"acp"},
+		DisplayName:  "OpenCode",
+		Command:      "opencode",
+		Args:         []string{},
+		PromptMode:   "flag",
+		PromptFlag:   "--prompt",
+		ReadyDelayMs: 8000,
+		ProcessNames: []string{"opencode", "node", "bun"},
+		// OpenCode handles permissions through OPENCODE_PERMISSION and does not
+		// show the Claude/Codex startup dialogs. Without this override, its
+		// process-name hint enables two acceptance passes. Each pass polls
+		// multiple unsupported dialog classes with independent timeouts, so the
+		// first can exhaust the managed startup lease while OpenCode is working.
+		AcceptStartupDialogs: boolPtr(false),
+		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:          true,
+		SupportsHooks:        true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		ACPArgs:              []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			{
 				Key:   "model",

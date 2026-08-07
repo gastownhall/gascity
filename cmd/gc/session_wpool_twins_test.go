@@ -395,3 +395,73 @@ func TestSnapshotAddInfoConcurrentAndCoherent(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeNonExpandingPoolSessionInfoForSelectionDrainedNamedPredecessor pins
+// the production call site of the #2885 self-owner exception. An asleep, drained
+// configured-named predecessor for canonical identity X used to squat X's alias
+// forever: the alias claim failed with ErrSessionAliasExists, selection fell back
+// to recording deferred pool-alias-conflict bookkeeping, and the live pool-managed
+// session never collapsed onto its own canonical identity.
+//
+// Both cfg.NamedSessions arrangements are exercised because the owner-scoped
+// claim changes behavior in the trailing reserved-alias loop too: with X present
+// in cfg.NamedSessions, selfOwner == reserved short-circuits the reservation that
+// would otherwise refuse the alias.
+func TestNormalizeNonExpandingPoolSessionInfoForSelectionDrainedNamedPredecessor(t *testing.T) {
+	cfgAgent := &config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	canonical := cfgAgent.QualifiedName()
+
+	cases := []struct {
+		name string
+		city *config.City
+	}{
+		{
+			name: "canonical absent from cfg.NamedSessions",
+			city: &config.City{},
+		},
+		{
+			name: "canonical reserved by cfg.NamedSessions",
+			city: &config.City{NamedSessions: []config.NamedSession{{Name: "mayor", Template: "mayor"}}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			predecessor := wpoolSessionBead("gm-drained-named", "open", "mayor", nil, map[string]string{
+				"session_name": canonical, "session_origin": "named",
+				"configured_named_session": "true", "configured_named_identity": canonical,
+				"state": "asleep", "sleep_reason": "drained",
+			})
+			liveBead := wpoolSessionBead("gm-live", "open", "mayor-1", nil, map[string]string{
+				"template": "mayor", "agent_name": "mayor-1", "alias": "mayor-1",
+				"session_name": "s-live", "pool_managed": "true", "state": "awake",
+			})
+			store := beads.NewMemStoreFrom(1, []beads.Bead{predecessor, liveBead}, nil)
+			bp := &agentBuildParams{beadStore: store, city: tc.city}
+
+			folded, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, sessiontest.SeedBead(t, liveBead))
+			if err != nil {
+				t.Fatalf("normalizeNonExpandingPoolSessionInfoForSelection: %v", err)
+			}
+			if folded.Alias != canonical {
+				t.Errorf("alias = %q, want %q (drained named predecessor must not block the collapse)", folded.Alias, canonical)
+			}
+			if folded.PoolAliasConflict != "" || folded.PoolAliasConflictCount != "" || folded.PoolAliasConflictAt != "" {
+				t.Errorf("deferred-conflict bookkeeping recorded: conflict=%q count=%q at=%q",
+					folded.PoolAliasConflict, folded.PoolAliasConflictCount, folded.PoolAliasConflictAt)
+			}
+
+			persisted, err := session.NewStore(beads.SessionStore{Store: store}).Get("gm-live")
+			if err != nil {
+				t.Fatalf("store Get: %v", err)
+			}
+			if persisted.Alias != canonical {
+				t.Errorf("persisted alias = %q, want %q", persisted.Alias, canonical)
+			}
+			if persisted.PoolAliasConflict != "" || persisted.PoolAliasConflictCount != "" || persisted.PoolAliasConflictAt != "" {
+				t.Errorf("persisted deferred-conflict bookkeeping: conflict=%q count=%q at=%q",
+					persisted.PoolAliasConflict, persisted.PoolAliasConflictCount, persisted.PoolAliasConflictAt)
+			}
+		})
+	}
+}

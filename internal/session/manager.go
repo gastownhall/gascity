@@ -793,6 +793,17 @@ func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
 	}
 }
 
+// WithClock supplies the time source the Manager stamps lifecycle timestamps
+// from (e.g. pending_create_started_at). A nil clock retains the immutable
+// production wall clock.
+func WithClock(clk clock.Clock) ManagerOption {
+	return func(m *Manager) {
+		if clk != nil {
+			m.clk = clk
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
@@ -961,16 +972,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeAlias := alias
-		if runtimeAlias == "" {
-			runtimeAlias = strings.TrimSpace(extraMeta["agent_name"])
-		}
+		runtimeInfo := m.infoFromBead(b)
 		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			b.ID,
-			sessName,
-			runtimeAlias,
-			template,
-			meta["session_origin"],
+			runtimeInfo,
 			DefaultGeneration,
 			DefaultContinuationEpoch,
 			meta["instance_token"],
@@ -1128,7 +1132,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			meta["session_key"] = sessionKey
 		}
 		meta["pending_create_claim"] = "true"
-		meta["pending_create_started_at"] = pendingCreateStartedAt(time.Now().UTC())
+		meta["pending_create_started_at"] = pendingCreateStartedAt(m.now().UTC())
 		if explicitName != "" {
 			meta["session_name"] = explicitName
 			meta["session_name_explicit"] = "true"
@@ -1565,15 +1569,19 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 					}
 				}
 				update.Metadata = UpdatedAliasMetadata(b.Metadata, nextAlias)
+				runtimeInfo := m.infoFromBead(b)
+				runtimeInfo.SessionName = sessName
+				nextRuntimeInfo := runtimeInfo
+				nextRuntimeInfo.Alias = nextAlias
 				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
 				if runtimeRunning {
-					if err := SyncRuntimeAlias(m.sp, sessName, nextAlias); err != nil {
+					if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
 						return fmt.Errorf("updating runtime alias: %w", err)
 					}
 				}
 				if err := m.store.Update(id, update); err != nil {
 					if runtimeRunning {
-						if rollbackErr := SyncRuntimeAlias(m.sp, sessName, currentAlias); rollbackErr != nil {
+						if rollbackErr := SyncRuntimeAlias(m.sp, runtimeInfo); rollbackErr != nil {
 							log.Printf("session %s: restoring runtime alias %q on %s failed: %v", id, currentAlias, sessName, rollbackErr)
 						}
 					}

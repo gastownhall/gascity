@@ -9,9 +9,6 @@ import type {
   SupervisorStatusReport,
   ApiError,
   DashboardRuntimeConfig,
-  RunDiffRequest,
-  RunDiffResponse,
-  RunScopeKind,
   RunSummary,
   FormulaRunDetail,
 } from 'gas-city-dashboard-shared';
@@ -345,20 +342,11 @@ const decodeSupervisorStatus = objectDecoder<SupervisorStatusReport>(
     }
   },
 );
-const decodeRunDiff = objectDecoder<RunDiffResponse>('run diff', (record, url) => {
-  requireStringField(record, url, 'run diff', 'kind');
-  requireObjectField(record, url, 'run diff', 'rootPath');
-  requireObjectField(record, url, 'run diff', 'comparison');
-  requireArrayField(record, url, 'run diff', 'status');
-  requireArrayField(record, url, 'run diff', 'changedFiles');
-  requireStringField(record, url, 'run diff', 'patch');
-  requireBooleanField(record, url, 'run diff', 'truncated');
-});
 // The run summary/detail DTOs are produced by the Go run projection
 // (internal/runproj), which is golden-gated byte-for-byte against these exact
 // shapes. Validate the structural arrays/objects the renderers iterate at the
-// edge (matching decodeRunDiff's depth) so a wire-shape regression fails here
-// rather than mis-rendering deep in a lane or diagram component.
+// edge so a wire-shape regression fails here rather than mis-rendering deep in a
+// lane or diagram component.
 const decodeRunSummary = objectDecoder<RunSummary>('run summary', (record, url) => {
   // Validate every field a renderer dereferences: RunMap reads the counts,
   // the lane arrays, and totalActive/totalHistorical. The DTO is golden-gated
@@ -446,19 +434,6 @@ export const api = {
   supervisorStatus(): Promise<SupervisorStatusReport> {
     return request('GET', cityPath('/supervisor-status'), decodeSupervisorStatus);
   },
-  runDiff(
-    runId: string,
-    body: RunDiffRequest,
-    params?: { scopeKind?: RunScopeKind; scopeRef?: string },
-  ): Promise<RunDiffResponse> {
-    const qs = runQuery(params);
-    return request(
-      'POST',
-      cityPath(`/runs/${encodeURIComponent(runId)}/diff${qs}`),
-      decodeRunDiff,
-      body,
-    );
-  },
   // The run view reads its summary and per-run detail from the BFF run
   // projection (internal/api/dashboardbff/runtailer.go), a sub-second warm
   // fold of the city event log that already layers session health/census.
@@ -486,13 +461,3 @@ export const api = {
     return cityPath(`/runs/${encodeURIComponent(runId)}/detail/stream`);
   },
 };
-
-function runQuery(params?: { scopeKind?: RunScopeKind; scopeRef?: string }): string {
-  const search = new URLSearchParams();
-  if (params?.scopeKind && params.scopeRef) {
-    search.set('scope_kind', params.scopeKind);
-    search.set('scope_ref', params.scopeRef);
-  }
-  const qs = search.toString();
-  return qs.length > 0 ? `?${qs}` : '';
-}

@@ -848,6 +848,74 @@ func TestRunStepsEndpoint(t *testing.T) {
 	}
 }
 
+// TestRunStepsClampsCompletedRun proves the typed /steps endpoint honors run
+// terminality: a completed run whose steps lost their close events must report each
+// lingering step terminal (completed / skipped), never eternally active.
+func TestRunStepsClampsCompletedRun(t *testing.T) {
+	root := runRootBead("runc", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runc.step1", "runc", "closed", map[string]string{"gc.outcome": "pass"})),
+		beadCreatedEvent(3, runChildBead("runc.step2", "runc", "in_progress", nil)), // lost close event
+		beadCreatedEvent(4, runChildBead("runc.step3", "runc", "open", nil)),        // never started
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runc",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runc.step1"].Status != RunStepStatusCompleted {
+		t.Errorf("step1 = %q, want completed", byID["runc.step1"].Status)
+	}
+	if byID["runc.step2"].Status != RunStepStatusCompleted {
+		t.Errorf("lost-close step2 = %q, want completed (run is completed)", byID["runc.step2"].Status)
+	}
+	if byID["runc.step3"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step3 = %q, want skipped (never started under a completed run)", byID["runc.step3"].Status)
+	}
+}
+
+// TestRunStepsClampsFailedRunToCanceled proves the failure family: a failed run
+// cancels its lingering active steps (rather than completing them) and skips its
+// never-started ones, while a recorded step outcome is preserved.
+func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
+	root := runRootBead("runx", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "fail"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runx.step1", "runx", "in_progress", nil)),                                // lost close
+		beadCreatedEvent(3, runChildBead("runx.step2", "runx", "open", nil)),                                       // never started
+		beadCreatedEvent(4, runChildBead("runx.step3", "runx", "closed", map[string]string{"gc.outcome": "fail"})), // real failure
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runx",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runx.step1"].Status != RunStepStatusCanceled {
+		t.Errorf("lost-close step1 = %q, want canceled (run failed)", byID["runx.step1"].Status)
+	}
+	if byID["runx.step2"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step2 = %q, want skipped", byID["runx.step2"].Status)
+	}
+	if byID["runx.step3"].Status != RunStepStatusFailed {
+		t.Errorf("recorded-failure step3 = %q, want failed (real outcome preserved)", byID["runx.step3"].Status)
+	}
+}
+
 // TestRunGetBeyondHistoricalCap guards the false-404 defect: with more completed
 // runs than the projection's historical lane cap, every run must still resolve by
 // id (the single-run path bypasses the list cap via BuildRunLane).

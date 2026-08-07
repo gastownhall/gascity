@@ -291,7 +291,7 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	// Resolver-based lookup. ControlDispatcherForScope selects the configured
 	// dispatcher whose scope matches the graph store.
 	if agentCfg, ok := config.ControlDispatcherForScope(cfg, rigContext); ok {
-		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
+		return GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg), MetadataOnly: true}, nil
 	}
 	// Fallback for configs without a deterministic dispatcher (e.g. a plain
 	// control-dispatcher agent carrying no convoy-control StartCommand): defer
@@ -303,7 +303,7 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 		}
 		return GraphRouteBinding{}, fmt.Errorf("city control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
-	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
+	return GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg), MetadataOnly: true}, nil
 }
 
 // ResolveGraphStepBinding resolves the routing binding for a graph step
@@ -431,7 +431,7 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := GraphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
+	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
 	if agentCfg.SupportsInstanceExpansion() {
 		binding.MetadataOnly = true
 		cache[stepID] = binding

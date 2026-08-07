@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -534,24 +535,35 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		if m.gateBackoffActive(scoped, now) {
-			continue
-		}
-		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
-		})
-		if err != nil {
-			if m.gateFailClosed(ctx, a, scoped, err) {
-				if errors.Is(err, errGateTimeout) {
-					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-					// using the tick-start 'now' would set a deadline that has already passed.
-					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
-				}
+		// NoWorkGate orders (pure probes/sweeps that track no beads) opt out of
+		// BOTH open-work gates entirely. The gates exist to suppress re-dispatch
+		// while bead work is in flight, which is meaningless for an order that
+		// consumes no bead work; running them makes the order's dispatch
+		// contingent on a Dolt read completing inside orderGateTimeout, so a slow
+		// store times the gate out and skips the order every cycle (#2893
+		// dispatch starvation -> stale cooldown cache -> fail-closed health).
+		// These orders are still single-flight-bounded by their own cooldown
+		// interval plus the synchronous tracking bead created below.
+		if !a.NoWorkGate {
+			if m.gateBackoffActive(scoped, now) {
 				continue
 			}
-		}
-		if hasOpenTracking {
-			continue
+			hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+				return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
+			})
+			if err != nil {
+				if m.gateFailClosed(ctx, a, scoped, err) {
+					if errors.Is(err, errGateTimeout) {
+						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+						// using the tick-start 'now' would set a deadline that has already passed.
+						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+					}
+					continue
+				}
+			}
+			if hasOpenTracking {
+				continue
+			}
 		}
 
 		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)))
@@ -642,22 +654,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		// Skip dispatch if previous work hasn't been processed yet.
 		// Bound the wisp-aware open-work gate (#2921) with our per-order
-		// timeout so a slow store can't starve later orders.
-		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
-		})
-		if err != nil {
-			if m.gateFailClosed(ctx, a, scoped, err) {
-				if errors.Is(err, errGateTimeout) {
-					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-					// using the tick-start 'now' would set a deadline that has already passed.
-					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+		// timeout so a slow store can't starve later orders. NoWorkGate orders
+		// skip this gate too (see the first-gate skip above).
+		if !a.NoWorkGate {
+			hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+				return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
+			})
+			if err != nil {
+				if m.gateFailClosed(ctx, a, scoped, err) {
+					if errors.Is(err, errGateTimeout) {
+						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+						// using the tick-start 'now' would set a deadline that has already passed.
+						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+					}
+					continue
 				}
+			}
+			if hasOpenWork {
 				continue
 			}
-		}
-		if hasOpenWork {
-			continue
 		}
 
 		// Create the tracking bead (which suppresses re-fire on the next tick)
@@ -1606,6 +1621,11 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 	rootID := cookResult.RootID
+	if cookResult.GraphWorkflow {
+		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: store}, beads.WorkStore{Store: store}, rootID, "order-dispatch"); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: projecting execution facts for %s: %v", scoped, rootID, err)
+		}
+	}
 
 	// Stamp the created wisp through the store contract rather than a raw
 	// bd subprocess so controller dispatch stays provider-aware.
@@ -2488,6 +2508,56 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 		}
 	}
 	return deleted, deleteErr
+}
+
+// countClosedOrderTrackingRetentionEligible returns the number of closed
+// order-tracking beads across stores that would be deleted by
+// sweepClosedOrderTrackingRetentionAcrossStores. It performs no deletions.
+//
+// It reads via orders.Store.ClosedRunsForRetention and buckets via
+// bucketClosedRetentionRuns — the exact read and bucketing the sweep itself
+// uses — so this preview count cannot drift from what the sweep would delete.
+// The remaining logic (recent-history floor, then the deleteAfterClose cutoff on
+// the closed reference time) mirrors the sweep's, counting instead of deleting.
+func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	if policy.deleteAfterClose <= 0 {
+		return 0, nil
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	total := 0
+	cutoff := now.Add(-policy.deleteAfterClose)
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("listing closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		for _, group := range bucketClosedRetentionRuns(runs, onlyOrders) {
+			sort.Slice(group, func(a, b int) bool {
+				l := orderTrackingClosedReferenceTime(group[a])
+				r := orderTrackingClosedReferenceTime(group[b])
+				if l.Equal(r) {
+					return group[a].ID > group[b].ID
+				}
+				return l.After(r)
+			})
+			if len(group) <= policy.retainLast {
+				continue
+			}
+			for _, run := range group[policy.retainLast:] {
+				if orderTrackingClosedReferenceTime(run).Before(cutoff) {
+					total++
+				}
+			}
+		}
+	}
+	return total, errors.Join(errs...)
 }
 
 func orderTrackingRetentionBucket(run orders.OrderRun, onlyOrders map[string]struct{}) (string, bool) {

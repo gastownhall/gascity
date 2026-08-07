@@ -398,6 +398,7 @@ type storageDirectoryBackend interface {
 	unlinkEnumeratedEntry(storageEntry) error
 	removeEnumeratedDirectory(storageEntry) error
 	removeEnumeratedCleanupDirectory(storageEntry) error
+	tryAcquireLock(string) (storageLockBackend, bool, error)
 	acquireLock(context.Context, string) (storageLockBackend, error)
 	cleanupOnlyHandle() bool
 }
@@ -870,6 +871,17 @@ func (directory *storageDir) acquireLock(ctx context.Context, name string) (*adv
 		return nil, err
 	}
 	return &advisoryLock{backend: backend}, nil
+}
+
+func (directory *storageDir) tryAcquireUploaderLock() (*advisoryLock, bool, error) {
+	if directory == nil || directory.backend == nil {
+		return nil, false, errStorageClosed
+	}
+	backend, acquired, err := directory.backend.tryAcquireLock(uploaderLockName)
+	if err != nil || !acquired {
+		return nil, false, err
+	}
+	return &advisoryLock{backend: backend}, true, nil
 }
 
 func (lock *advisoryLock) Release() error {

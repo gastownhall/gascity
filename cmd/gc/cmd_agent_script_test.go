@@ -14,8 +14,9 @@ import (
 	"time"
 )
 
-func TestAgentScriptBDClaimUsesSessionActor(t *testing.T) {
-	t.Setenv("GC_SESSION_NAME", "demo/worker-1")
+func TestAgentScriptBDClaimUsesCanonicalActor(t *testing.T) {
+	t.Setenv("GC_ALIAS", "demo/worker")
+	t.Setenv("GC_SESSION_NAME", "demo--worker")
 
 	var calls [][]string
 	exec := agentScriptExecutor{
@@ -37,9 +38,42 @@ func TestAgentScriptBDClaimUsesSessionActor(t *testing.T) {
 	if exitCode != nil {
 		t.Fatalf("exitCode = %v, want nil", *exitCode)
 	}
-	want := []string{"bd", "update", "ga-123", "--claim", "--actor", "demo/worker-1"}
+	want := []string{"bd", "update", "ga-123", "--claim", "--actor", "demo/worker"}
 	if len(calls) != 1 || !slices.Equal(calls[0], want) {
 		t.Fatalf("calls = %#v, want %#v", calls, [][]string{want})
+	}
+}
+
+func TestAgentScriptClaimActorFallsBackToSessionName(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "demo--worker")
+	t.Setenv("BEADS_ACTOR", "")
+
+	if got := agentScriptClaimActor(); got != "demo--worker" {
+		t.Fatalf("agentScriptClaimActor() = %q, want session name fallback", got)
+	}
+}
+
+func TestAgentScriptClaimActorPrefersProjectedActor(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("BEADS_ACTOR", "repair-id")
+	t.Setenv("GC_AGENT", "stale")
+	t.Setenv("GC_SESSION_NAME", "s-repair-id")
+
+	if got := agentScriptClaimActor(); got != "repair-id" {
+		t.Fatalf("agentScriptClaimActor() = %q, want projected actor", got)
+	}
+}
+
+func TestAgentScriptAliasPrefersDurableOwner(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("BEADS_ACTOR", "repair-id")
+	t.Setenv("GC_AGENT", "stale")
+	t.Setenv("GC_SESSION_NAME", "s-repair-id")
+
+	if got := agentScriptAlias(); got != "repair-id" {
+		t.Fatalf("agentScriptAlias() = %q, want durable owner", got)
 	}
 }
 

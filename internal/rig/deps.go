@@ -60,6 +60,14 @@ type Deps struct {
 	// ProbeBranch returns the rig's git default branch, or "" when unknown.
 	// nil = skip the probe.
 	ProbeBranch func(rigPath string) string
+	// ResolveRegistryPack maps a registry pack name (flat "<name>" or scoped
+	// "<owner>/<name>") to the import source published for it, for --include
+	// tokens that name a registry pack instead of a path. It must not fetch or
+	// write anything: canonicalizePackIncludes runs on every rig add, so the
+	// CLI implementation reads only the on-disk registry caches. ok=false
+	// means "not a registry pack I can resolve" and leaves the token to path
+	// handling — the pre-registry behavior. nil = skip registry resolution.
+	ResolveRegistryPack func(name string) (source string, ok bool)
 	// CloneGitURL populates staging dir dstDir from gitURL with the hardened
 	// clone (C3/G15). nil = the caller does not support --git-url (the CLI local
 	// path, or config-append-only), so the clone step is skipped and the flow

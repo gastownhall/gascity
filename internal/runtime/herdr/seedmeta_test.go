@@ -11,7 +11,7 @@ import (
 // cfg.Env at creation); herdr's sidecar must be seeded explicitly or the
 // fresh runtime is reaped as "live runtime belongs to another session".
 func TestSeedMetaFromEnvMakesIdentityKeysReadable(t *testing.T) {
-	p := New("gctest-seedmeta", t.TempDir(), t.TempDir(), time.Second)
+	p := New("gctest-seedmeta", t.TempDir(), t.TempDir(), time.Second, 0)
 	env := map[string]string{
 		"GC_SESSION_ID":     "az-wisp-abc12",
 		"GC_INSTANCE_TOKEN": "tok-1",
@@ -34,7 +34,7 @@ func TestSeedMetaFromEnvMakesIdentityKeysReadable(t *testing.T) {
 
 // Later SetMeta calls override seeded values, matching tmux setenv semantics.
 func TestSeedMetaFromEnvIsOverridableBySetMeta(t *testing.T) {
-	p := New("gctest-seedmeta2", t.TempDir(), t.TempDir(), time.Second)
+	p := New("gctest-seedmeta2", t.TempDir(), t.TempDir(), time.Second, 0)
 	if err := p.seedMetaFromEnv("s1", map[string]string{"GC_INSTANCE_TOKEN": "old"}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestSeedMetaFromEnvIsOverridableBySetMeta(t *testing.T) {
 
 // Empty env is a no-op.
 func TestSeedMetaFromEnvEmptyIsNoOp(t *testing.T) {
-	p := New("gctest-seedmeta3", t.TempDir(), t.TempDir(), time.Second)
+	p := New("gctest-seedmeta3", t.TempDir(), t.TempDir(), time.Second, 0)
 	if err := p.seedMetaFromEnv("s1", nil); err != nil {
 		t.Fatalf("seedMetaFromEnv(nil) = %v, want nil", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/spf13/cobra"
 )
 
 type countOnlyMailProvider struct{}
@@ -1257,6 +1259,47 @@ func TestResolveMailRecipientIdentity_RejectsTemplatePrefixOnSessionSurface(t *t
 	}
 }
 
+func TestCmdMailSendExactSessionIDStaysPinned(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{sessionBead.ID, "body"}, false, false, "human", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	stored := mailSendTestFindMessage(t, cityPath)
+	if stored.Assignee != sessionBead.ID {
+		t.Fatalf("stored assignee = %q, want typed session ID %q", stored.Assignee, sessionBead.ID)
+	}
+}
+
 func TestResolveMailRecipientIdentity_BareNamedSessionUsesConfiguredMailboxWithoutMaterializing(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
@@ -2363,8 +2406,12 @@ func TestMailDeleteMultiSuccess(t *testing.T) {
 		t.Errorf("recorded events = %d, want 3", n)
 	}
 	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after delete: %v (want bead retained)", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, b.Status)
 		}
 	}
 }
@@ -2684,9 +2731,13 @@ func TestMailArchiveSuccess(t *testing.T) {
 		t.Errorf("stdout = %q, want archived confirmation", stdout.String())
 	}
 
-	// Verify bead is now gone.
-	if _, err := store.Get("gc-1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(gc-1) err = %v, want ErrNotFound", err)
+	// Verify bead is retained (closed, not deleted).
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("store.Get(gc-1) after archive: %v (want bead retained)", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 
@@ -2900,9 +2951,6 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
 	}
 
-	if _, err := store.Get(first.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("Get(%s) err = %v, want ErrNotFound", first.ID, err)
-	}
 	status := func(id string) string {
 		t.Helper()
 		b, err := store.Get(id)
@@ -2910,6 +2958,12 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
 		return b.Status
+	}
+	if got := status(first.ID); got != "closed" {
+		t.Fatalf("message %s status = %q, want closed (archive retains, never deletes)", first.ID, got)
+	}
+	if b, err := store.Get(first.ID); err != nil || b.Description == "" {
+		t.Fatalf("Get(%s) = %+v, %v; want retained bead with non-empty body", first.ID, b, err)
 	}
 	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
 		if got := status(id); got != "open" {
@@ -2953,8 +3007,12 @@ func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 		if !strings.Contains(stdout.String(), "Archived message "+id) {
 			t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), id)
 		}
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v, want retained bead (archive closes, never deletes)", id, err)
+		}
+		if b.Status != "closed" {
+			t.Fatalf("message %s status = %q, want closed", id, b.Status)
 		}
 	}
 	for _, id := range []string{nonEmpty.ID, otherSubject.ID} {
@@ -2969,6 +3027,33 @@ func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 }
 
 // --- gc mail send --notify ---
+
+func TestMailNotifyHelpDocumentsManagedWake(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func(io.Writer, io.Writer) *cobra.Command
+	}{
+		{name: "send", cmd: newMailSendCmd},
+		{name: "reply", cmd: newMailReplyCmd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := tt.cmd(&stdout, &stderr)
+			notify := cmd.Flags().Lookup("notify")
+			if notify == nil {
+				t.Fatal("--notify flag is missing")
+			}
+			if !strings.Contains(notify.Usage, "managed wake") {
+				t.Fatalf("--notify help = %q, want managed-wake behavior", notify.Usage)
+			}
+			if !strings.Contains(cmd.Long, "Unread mail alone does not request a wake") {
+				t.Fatalf("Long help = %q, want unread-mail wake boundary", cmd.Long)
+			}
+		})
+	}
+}
 
 func TestMailSendNotifySuccess(t *testing.T) {
 	store := beads.NewMemStore()

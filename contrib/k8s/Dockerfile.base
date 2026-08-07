@@ -8,11 +8,102 @@
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-toolchain
+
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b AS tool-builder
+
+ARG GH_VERSION=2.96.0
+ARG GH_SOURCE_REF=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
+ARG GH_SOURCE_SHA256=a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03
+ARG GH_SOURCE_DATE_EPOCH=1783026608
+ARG DOLT_VERSION=2.1.7
+ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
+ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
+ARG GRPC_VERSION=1.82.1
+ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
+ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
+ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce
+ARG DOLT_ICU_STATIC_SHA256=8b0234f16da73b9c8d47f86eeef98928879611149e3ee1bb560dddb0ffdd95a1
+ARG TARGETARCH
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/opt/cross/bin:/usr/local/go/bin:$PATH
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    file \
+    git \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# The latest published gh and Dolt binaries predate grpc-go 1.82.1. Rebuild the
+# same released versions from checksum-pinned source with the patched module.
+RUN mkdir -p /src/gh /src/dolt /out \
+    && curl -fsSL --retry 3 \
+       "https://github.com/cli/cli/archive/${GH_SOURCE_REF}.tar.gz" \
+       -o /tmp/gh-source.tar.gz \
+    && echo "${GH_SOURCE_SHA256}  /tmp/gh-source.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/gh-source.tar.gz --strip-components=1 -C /src/gh \
+    && curl -fsSL --retry 3 \
+       "https://github.com/dolthub/dolt/archive/${DOLT_SOURCE_REF}.tar.gz" \
+       -o /tmp/dolt-source.tar.gz \
+    && echo "${DOLT_SOURCE_SHA256}  /tmp/dolt-source.tar.gz" | sha256sum --check --strict \
+    && tar -xzf /tmp/dolt-source.tar.gz --strip-components=1 -C /src/dolt \
+    && rm -f /tmp/gh-source.tar.gz /tmp/dolt-source.tar.gz
+
+# Reproduce Dolt's release build with its checksum-pinned musl cross-toolchain
+# and static ICU data. Both archives are published by Dolt's release process.
+RUN case "${TARGETARCH}" in \
+      amd64) optcross_arch=x86_64; optcross_sha256="${DOLT_OPTCROSS_X86_64_SHA256}" ;; \
+      arm64) optcross_arch=aarch64; optcross_sha256="${DOLT_OPTCROSS_AARCH64_SHA256}" ;; \
+      *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 3 \
+       "https://dolthub-tools.s3.us-west-2.amazonaws.com/optcross/${optcross_arch}-linux_${DOLT_TOOLCHAIN_RELEASE}.tar.xz" \
+       -o /tmp/optcross.tar.xz \
+    && echo "${optcross_sha256}  /tmp/optcross.tar.xz" | sha256sum --check --strict \
+    && curl -fsSL --retry 3 \
+       "https://dolthub-tools.s3.us-west-2.amazonaws.com/icustatic/${DOLT_TOOLCHAIN_RELEASE}.tar.xz" \
+       -o /tmp/icustatic.tar.xz \
+    && echo "${DOLT_ICU_STATIC_SHA256}  /tmp/icustatic.tar.xz" | sha256sum --check --strict \
+    && tar -xJf /tmp/optcross.tar.xz -C / \
+    && tar -xJf /tmp/icustatic.tar.xz -C / \
+    && rm -f /tmp/optcross.tar.xz /tmp/icustatic.tar.xz
+
+WORKDIR /src/gh
+RUN go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && GH_VERSION="${GH_VERSION}" SOURCE_DATE_EPOCH="${GH_SOURCE_DATE_EPOCH}" \
+       go run script/build.go bin/gh \
+    && install -m 0755 bin/gh /out/gh \
+    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+
+WORKDIR /src/dolt/go
+RUN case "${TARGETARCH}" in \
+      amd64) dolt_cc=x86_64-linux-musl-gcc; dolt_cxx=x86_64-linux-musl-g++; dolt_as=x86_64-linux-musl-as ;; \
+      arm64) dolt_cc=aarch64-linux-musl-gcc; dolt_cxx=aarch64-linux-musl-g++; dolt_as=aarch64-linux-musl-as ;; \
+      *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && grep -Fq "Version = \"${DOLT_VERSION}\"" cmd/dolt/doltversion/version.go \
+    && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && CGO_ENABLED=1 GOOS=linux GOARCH="${TARGETARCH}" \
+       CC="${dolt_cc}" CXX="${dolt_cxx}" AS="${dolt_as}" \
+       CGO_LDFLAGS="-static -s" go build \
+       -tags="icu_static,timetzdata" \
+       -trimpath \
+       -ldflags="-s -w" \
+       -o /out/dolt \
+       ./cmd/dolt \
+    && file /out/dolt | grep -Fq "statically linked" \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG CLAUDE_CODE_VERSION=2.1.123
-ARG DOLT_VERSION=2.1.7
 
 # System packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,20 +127,10 @@ COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
 RUN /tmp/install-claude-native.sh "${CLAUDE_CODE_VERSION}" \
     && rm -f /tmp/install-claude-native.sh
 
-# GitHub CLI (for git credential helper in containers).
-RUN mkdir -p -m 755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
-
-# Dolt CLI — pinned version (keep in sync with deps.env).
-COPY .github/scripts/install-dolt-archive.sh /tmp/install-dolt-archive.sh
-RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
-    && rm -f /tmp/install-dolt-archive.sh
+# GitHub CLI and Dolt, rebuilt above with the patched grpc-go dependency.
+COPY --from=tool-builder /out/gh /usr/bin/gh
+COPY --from=tool-builder /out/dolt /usr/local/bin/dolt
+RUN gh --version && dolt version
 
 # Default non-root user for Claude Code (--dangerously-skip-permissions rejects root).
 # When LINUX_USERNAME is set at runtime, the pod entrypoint creates a dynamic

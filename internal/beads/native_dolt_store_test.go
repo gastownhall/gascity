@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -339,11 +340,15 @@ func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *test
 	// issue set intentionally includes a blocked bead whose dependency
 	// graph the spy treats as fully satisfied (it is returned unconditionally
 	// whenever queried by status), to prove Ready() must never surface it
-	// even when GetReadyWork would happily return it if asked.
+	// even when GetReadyWork would happily return it if asked. gc-deferred
+	// carries a past DeferUntil to represent an expired time-bound deferral;
+	// the no-DeferUntil (indefinite) case is covered separately by
+	// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads.
+	past := time.Now().UTC().Add(-24 * time.Hour)
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
 		{ID: "gc-pinned", Title: "pinned", Status: beadslib.Status("pinned"), IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-hooked", Title: "hooked", Status: beadslib.Status("hooked"), IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-review", Title: "review", Status: beadslib.Status("review"), IssueType: beadslib.TypeTask, Priority: 2},
@@ -416,6 +421,52 @@ func TestNativeDoltStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
 	}
 	if ids[futureDeferred.ID] {
 		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
+	}
+}
+
+// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads covers bd defer
+// <id> without --until: a first-class, documented "status-based" indefinite
+// deferral (upstream cmd/bd/defer.go) that sets status=deferred and leaves
+// defer_until NULL, distinct from bd defer <id> --until=<time>'s time-bound
+// snooze. nativeDoltOpenReadyStatuses must keep querying StatusDeferred so an
+// *expired* time-bound deferral (defer_until in the past) can resurface, but
+// an issue that was never time-bound (defer_until nil) must not fall through
+// IsReadyCandidateForTier's nil-DeferUntil case as if it were an ordinary
+// open bead that was never deferred at all.
+func TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	issues := []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred-indefinite", Title: "indefinite", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred-expired", Title: "expired", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
+	}
+	storage := &nativeDoltStorageSpy{
+		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
+			var result []*beadslib.Issue
+			for _, issue := range issues {
+				if issue.Status != filter.Status {
+					continue
+				}
+				result = append(result, cloneNativeIssueForTest(issue))
+			}
+			return result, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+
+	wantIDs := map[string]bool{"gc-open": true, "gc-deferred-expired": true}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
+	}
+	for _, bead := range got {
+		if !wantIDs[bead.ID] {
+			t.Fatalf("Ready returned unexpected bead %q from %+v — an indefinitely status-deferred bead (status=deferred, defer_until=NULL) must never surface as ready", bead.ID, got)
+		}
 	}
 }
 
@@ -985,6 +1036,132 @@ func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testin
 	}
 }
 
+func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
+	getCalls := 0
+	updateCalls := 0
+	var writtenMetadata json.RawMessage
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			getCalls++
+			metadata := json.RawMessage(`{"existing":"before-conflict"}`)
+			if getCalls > 1 {
+				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
+			}
+			return &beadslib.Issue{
+				ID:        "gc-conflict",
+				Title:     "metadata conflict",
+				Status:    beadslib.StatusOpen,
+				IssueType: beadslib.TypeTask,
+				Priority:  2,
+				Metadata:  metadata,
+			}, nil
+		},
+		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+			updateCalls++
+			if updateCalls == 1 {
+				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
+			}
+			raw, ok := updates["metadata"].(json.RawMessage)
+			if !ok {
+				t.Fatalf("metadata update type = %T, want json.RawMessage", updates["metadata"])
+			}
+			writtenMetadata = slices.Clone(raw)
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.SetMetadataBatch("gc-conflict", map[string]string{"requested": "written"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	if getCalls != 2 {
+		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
+	}
+	if updateCalls != 2 {
+		t.Fatalf("UpdateIssue calls = %d, want 2", updateCalls)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
+		t.Fatalf("unmarshal written metadata: %v", err)
+	}
+	want := map[string]string{"concurrent": "preserved", "requested": "written"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("written metadata = %#v, want %#v", got, want)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testing.T) {
+	wantErr := errors.New("metadata write denied")
+	getCalls := 0
+	updateCalls := 0
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			getCalls++
+			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
+		},
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			updateCalls++
+			return wantErr
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	err := store.SetMetadataBatch("gc-permanent", map[string]string{"requested": "written"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
+	}
+	if getCalls != 1 || updateCalls != 1 {
+		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t *testing.T) {
+	wantErr := errors.New("commit failed (SQLSTATE 40001): serialization failure")
+	getCalls := 0
+	updateCalls := 0
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			getCalls++
+			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
+		},
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			updateCalls++
+			return wantErr
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	err := store.SetMetadataBatch("gc-persistent-conflict", map[string]string{"requested": "written"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
+	}
+	if getCalls != 3 || updateCalls != 3 {
+		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 3 each", getCalls, updateCalls)
+	}
+}
+
+func TestNativeDoltSerializationConflictClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "mysql error and SQLSTATE", err: errors.New("Error 1213 (40001): serialization failure"), want: true},
+		{name: "SQLSTATE", err: errors.New("commit failed (SQLSTATE 40001)"), want: true},
+		{name: "Dolt conflict wording", err: errors.New("this transaction conflicts with a committed transaction"), want: true},
+		{name: "unrelated serialization wording", err: errors.New("serialization failed while encoding metadata"), want: false},
+		{name: "permanent error", err: errors.New("permission denied"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNativeDoltSerializationConflict(tt.err); got != tt.want {
+				t.Fatalf("isNativeDoltSerializationConflict(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeDoltStoreReadyFiltersGasCityExcludedTypesBeforeLimit(t *testing.T) {
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -1550,6 +1727,50 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT after open = %q, want ambient restored", got)
+	}
+}
+
+// TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen exercises the
+// real newNativeDoltStoreAt wiring (not the in-memory-only default used by
+// newNativeDoltStoreForTest / the conformance factory): it swaps only the
+// external Dolt-open seam and proves SetLocalString/GetLocalString survive a
+// second open of the same scopeRoot, i.e. clone-local data really lives on
+// disk at <scopeRoot>/.beads/local-strings.json rather than in process memory.
+func TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen(t *testing.T) {
+	scopeRoot := filepath.Join(t.TempDir(), "scope")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() {
+		nativeDoltOpenBestAvailable = oldOpen
+	})
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (first open): %v", err)
+	}
+	if err := store.SetLocalString("gc-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	sidecarPath := filepath.Join(scopeRoot, ".beads", "local-strings.json")
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("expected sidecar file at %s: %v", sidecarPath, err)
+	}
+
+	reopened, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (reopen): %v", err)
+	}
+	got, err := reopened.GetLocalString("gc-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString after reopen: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Fatalf("GetLocalString after reopen = %q, want persisted value", got)
 	}
 }
 

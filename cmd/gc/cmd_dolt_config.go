@@ -102,6 +102,10 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			if err := syncManagedDoltPortMirrors(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-config normalize-scope: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			return nil
 		},
 	}

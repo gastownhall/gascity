@@ -537,6 +537,16 @@ id = "probe"
 title = "Probe the endpoint"
 ```
 
+```shell
+~/my-city
+$ gc formula show poll-until
+Formula: poll-until
+
+Steps (2):
+  ├── poll-until.poll.iter1.probe: Probe the endpoint
+  └── poll-until.workflow-finalize: Finalize workflow [needs: poll-until.poll.iter1.probe]
+```
+
 The caveat: nothing re-runs the body yet. Cooking validates the condition, but no
 component in the current release — v1 or v2 — reads it back at runtime, so an
 `until` loop runs exactly one iteration. Treat it as declared intent; use Check

@@ -819,20 +819,22 @@ exec %q "$@"
 	}
 }
 
-func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
-	cityPath := t.TempDir()
-	fakeBin := t.TempDir()
-
+// reachableServerEnv builds a fake lsof/nc/dolt PATH plus a live TCP
+// listener so health.sh's server-detection probes all report reachable,
+// returning the environment for exec.Command. Shared by every test that
+// needs the script to see server_reachable=true without a real dolt
+// sql-server.
+func reachableServerEnv(t *testing.T, root, cityPath string) []string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("Listen: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
-exit 0
-`)
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
 probe_port="$3"
@@ -841,13 +843,9 @@ if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" 
 fi
 exit 1
 `)
-	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
-exit 0
-`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
 
-	root := repoRoot(t)
-	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=",
@@ -857,7 +855,23 @@ exit 0
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	out, err := cmd.CombinedOutput()
+}
+
+// newHealthScriptCmd builds an *exec.Cmd for invoking health.sh with the
+// given environment and args. Callers choose Output() (stdout only, for
+// JSON-mode assertions that must not see stray stderr) vs
+// CombinedOutput() (for human-mode assertions and failure messages).
+func newHealthScriptCmd(root string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command("sh", append([]string{filepath.Join(root, healthScript)}, args...)...)
+	cmd.Env = env
+	return cmd
+}
+
+func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+
+	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").CombinedOutput()
 	if err != nil {
 		t.Fatalf("health.sh failed: %v\n%s", err, out)
 	}
@@ -1998,4 +2012,202 @@ func TestHealthScriptJSONAlwaysExitsZero(t *testing.T) {
 	if !strings.Contains(string(out), `"reachable": false`) {
 		t.Errorf("JSON payload missing expected `\"reachable\": false`; got:\n%s", out)
 	}
+}
+
+// writeQuarantineMarker writes a compaction quarantine marker at the same
+// path gc dolt compact uses: $cityPath/.gc/runtime/packs/dolt/
+// compact-quarantine/<db>, with the line-oriented db=/reason=/created_at=
+// body the compact script emits.
+func writeQuarantineMarker(t *testing.T, cityPath, db, reason, createdAt string) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	body := fmt.Sprintf("db=%s\nreason=%s\ncreated_at=%s\n", db, reason, createdAt)
+	if err := os.WriteFile(filepath.Join(dir, db), []byte(body), 0o644); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+}
+
+// writeQuarantineTransients drops the two transient siblings compact/run.sh
+// leaves in the quarantine directory alongside real markers: the mktemp
+// `<db>.probe.XXXXXX` write test that ensure_compact_marker_writable performs
+// on every flatten (empty), and the `<db>.tmp.XXXXXX` staging file
+// write_compact_marker fills before its atomic rename (full marker body).
+// Neither is a marker; health must ignore both.
+func writeQuarantineTransients(t *testing.T, cityPath, db string) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, db+".probe.AbC123"), nil, 0o644); err != nil {
+		t.Fatalf("write probe sibling: %v", err)
+	}
+	body := fmt.Sprintf("db=%s\nreason=staging write in flight\ncreated_at=%s\n",
+		db, time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	if err := os.WriteFile(filepath.Join(dir, db+".tmp.XyZ789"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write tmp sibling: %v", err)
+	}
+}
+
+// TestHealthScriptSurfacesQuarantineInJSON pins gascity#3729: an active
+// compaction quarantine marker blocks auto-GC indefinitely but was invisible
+// to `gc dolt health`. The JSON report must carry a `quarantine` array naming
+// each quarantined db, its reason, and its age — surfaced independently of
+// server reachability, since the un-GC'd bloat can itself wedge the server.
+func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	created := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04:05Z")
+	writeQuarantineMarker(t, cityPath, "hq", "post-flatten row count decreased", created)
+	// A concurrent compaction leaves transient siblings in this same
+	// directory; only the real marker may appear in the report.
+	writeQuarantineTransients(t, cityPath, "hq")
+
+	// No live server: lsof/nc/dolt fail so the bounded probe is skipped and the
+	// filesystem-only quarantine scan is exercised in isolation. JSON mode
+	// always exits 0.
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=59998",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Quarantine []struct {
+			DB     string `json:"db"`
+			Reason string `json:"reason"`
+			AgeSec int    `json:"age_sec"`
+		} `json:"quarantine"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	if len(report.Quarantine) != 1 {
+		t.Fatalf("quarantine = %d entries, want 1\n%s", len(report.Quarantine), out)
+	}
+	q := report.Quarantine[0]
+	if q.DB != "hq" {
+		t.Errorf("quarantine db = %q, want hq", q.DB)
+	}
+	if q.Reason != "post-flatten row count decreased" {
+		t.Errorf("quarantine reason = %q, want the marker reason", q.Reason)
+	}
+	// created 2h ago: age must be positive and in a sane window, proving the
+	// RFC3339 created_at was parsed (not the mtime fallback to ~0).
+	if q.AgeSec < 3600 || q.AgeSec > 86400 {
+		t.Errorf("quarantine age_sec = %d, want ~7200 (created_at 2h ago parsed)", q.AgeSec)
+	}
+}
+
+// TestHealthScriptQuarantineHumanExitCode pins the operator-facing half of
+// gascity#3729: with the server reachable, a standing quarantine marker must
+// (a) print a "Compaction quarantine" section naming the db/reason/age and
+// (b) exit with the distinct code 2 so CLI/CI callers catch a blocked
+// compaction without conflating it with an unreachable server (exit 1). With
+// no marker, the command stays silent about quarantine and exits 0.
+func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
+	root := repoRoot(t)
+
+	// reachableEnv builds an environment in which the health script sees a
+	// reachable server: an inconclusive lsof, an nc that connects to the bound
+	// port, and a dolt whose SELECT 1 succeeds — mirroring
+	// TestHealthScriptReportsRunningWhenLsofIsInconclusive.
+	reachableEnv := func(t *testing.T, cityPath string) []string {
+		t.Helper()
+		return reachableServerEnv(t, root, cityPath)
+	}
+
+	mkCity := func(t *testing.T) string {
+		t.Helper()
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+			[]byte(`{"dolt_database":"hq"}`), 0o644); err != nil {
+			t.Fatalf("write metadata: %v", err)
+		}
+		return cityPath
+	}
+
+	t.Run("marker present exits 2 with section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		created := time.Now().UTC().Add(-49 * time.Hour).Format("2006-01-02T15:04:05Z")
+		writeQuarantineMarker(t, cityPath, "hq", "post-flatten table value hash changed with row-count increase", created)
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected ExitError (exit 2), got err=%v\n%s", err, out)
+		}
+		if exitErr.ExitCode() != 2 {
+			t.Fatalf("exit code = %d, want 2 (reachable + quarantine active)\n%s", exitErr.ExitCode(), out)
+		}
+		s := string(out)
+		if !strings.Contains(s, "Compaction quarantine: 1") {
+			t.Errorf("output missing quarantine section:\n%s", s)
+		}
+		if !strings.Contains(s, "hq: post-flatten table value hash changed with row-count increase") {
+			t.Errorf("output missing db/reason line:\n%s", s)
+		}
+		if !strings.Contains(s, "held 2d") {
+			t.Errorf("output missing day-scale age (held 2d...):\n%s", s)
+		}
+	})
+
+	t.Run("no marker exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero with no quarantine: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("unexpected quarantine section with no marker:\n%s", out)
+		}
+	})
+
+	// ensure_compact_marker_writable runs its mktemp probe on EVERY flatten,
+	// so a healthy city with an in-flight compaction routinely has a
+	// `<db>.probe.XXXXXX` sitting in the quarantine directory with no real
+	// marker beside it. Treating it as a marker would alarm operators (and
+	// flip the exit code to 2) during ordinary compaction.
+	t.Run("transient siblings only exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		writeQuarantineTransients(t, cityPath, "hq")
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero for transient compact siblings: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("transient compact siblings reported as quarantine:\n%s", out)
+		}
+	})
 }

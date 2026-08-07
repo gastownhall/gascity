@@ -169,6 +169,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"dep remove": {},
 }
 
+// GlobalValueFlags returns the flags accepted by every bd subcommand that
+// consume the next argument as their value. A caller locating the subcommand in
+// an argv must skip these values, or it reads one of them as the verb.
+func GlobalValueFlags() map[string]bool {
+	return mergeFlagSets(globalValueFlags)
+}
+
 // Subcommands returns the bd subcommand keys this package has flag
 // manifests for (e.g. "close", "mol pour"), in no particular order.
 func Subcommands() []string {

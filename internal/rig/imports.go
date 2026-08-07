@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
 func formatBoundImports(imports []config.BoundImport) string {
@@ -23,28 +24,53 @@ func formatBoundImports(imports []config.BoundImport) string {
 	return strings.Join(parts, ", ")
 }
 
-// canonicalizeBuiltinPackIncludes rewrites --include tokens that name a
-// bundled pack to its canonical remote source. Builtin packs compose from
-// the user-global repo cache and are not registered in [packs], so a bare
-// "<name>" or "packs/<name>" token (the form documented in `gc rig add
-// --help`) would otherwise be persisted as the non-resolvable literal
-// "./<token>", breaking pack expansion citywide (gascity#3137). A token
-// whose raw form or derived single-segment name is a key in packs, or
-// that resolves to a real local pack directory in the city, is left
-// unchanged so explicit references keep their configured/local source
-// rather than being shadowed by the builtin.
-func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource) []string {
+// canonicalizePackIncludes rewrites --include tokens that name a pack (rather
+// than a path) to that pack's canonical remote source. Builtin packs compose
+// from the user-global repo cache and registry packs live behind a catalog;
+// neither is registered in [packs], so a bare "<name>", "packs/<name>", or
+// scoped "<owner>/<name>" token would otherwise be persisted as the
+// non-resolvable literal "./<token>", breaking pack expansion citywide
+// (gascity#3137 for builtins, registry-sfn for registry packs).
+//
+// A token is a pack-NAME candidate only when it matches the registry
+// pack-name grammar (packregistry.ValidatePackName). "Contains a slash" is
+// not a usable proxy for "this is a path" any more: community registry packs
+// publish under scoped owner/pack names, which are names that contain a
+// slash. The grammar also excludes every path/URL shape that matters here —
+// absolute paths, "../", "./", dots, underscores, uppercase, "://", "git@" —
+// so a real local or remote import is never mistaken for a name.
+//
+// Resolution precedence, most explicit first:
+//
+//  1. a [packs] entry keyed by the raw token or the packs/-stripped name: an
+//     explicit reference keeps its configured source;
+//  2. a real local pack in the city (<city>/<token>/pack.toml): a local
+//     import is not a pack-name reference;
+//  3. a bundled builtin pack matching the packs/-stripped name;
+//  4. a pack of that exact name in a cached registry catalog;
+//  5. otherwise the token is left verbatim for local/remote path handling.
+//
+// Local content therefore wins over the registry (2 before 4): a directory
+// the user can see and edit must never be silently swapped for a fetched
+// pack. Builtins win over the registry (3 before 4) so a published pack can
+// never shadow a name shipped in the binary.
+func canonicalizePackIncludes(fs fsys.FS, cityPath string, includes []string, packs map[string]config.PackSource, resolveRegistryPack func(string) (string, bool)) []string {
 	out := make([]string, len(includes))
 	for i, inc := range includes {
 		out[i] = inc
-		tok := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(inc)), "./")
+		raw := filepath.ToSlash(strings.TrimSpace(inc))
+		tok := strings.TrimPrefix(raw, "./")
 		name := tok
+		// pathDeclared marks the two spellings that say "path" outright: an
+		// explicit "./" prefix, and the documented city-local "packs/<name>"
+		// form. Builtin canonicalization accepts both (unchanged), but neither
+		// may be reinterpreted as a registry pack name.
+		pathDeclared := tok != raw
 		if rest, ok := strings.CutPrefix(tok, "packs/"); ok {
 			name = rest
+			pathDeclared = true
 		}
-		// Only accept a single-segment pack name; arbitrary nested paths are
-		// treated as real local imports, not builtin-pack references.
-		if name == "" || strings.Contains(name, "/") {
+		if name == "" {
 			continue
 		}
 		// Don't shadow an explicitly configured [packs] reference: a token
@@ -56,7 +82,7 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 			continue
 		}
 		// A token that resolves to a real local pack in the city is a local
-		// import, not a builtin-pack reference.
+		// import, not a pack-name reference.
 		if !filepath.IsAbs(tok) {
 			if _, err := fs.Stat(filepath.Join(cityPath, filepath.FromSlash(tok), "pack.toml")); err == nil {
 				continue
@@ -64,9 +90,42 @@ func canonicalizeBuiltinPackIncludes(fs fsys.FS, cityPath string, includes []str
 		}
 		if source, ok := builtinpacks.CanonicalImportSource(name); ok {
 			out[i] = source
+			continue
+		}
+		if source, ok := registryPackIncludeSource(fs, cityPath, tok, pathDeclared, resolveRegistryPack); ok {
+			out[i] = source
 		}
 	}
 	return out
+}
+
+// registryPackIncludeSource resolves tok as a registry pack name, the last
+// resort in the canonicalizePackIncludes precedence chain.
+//
+// Two deliberate refusals keep it from changing what an already-working
+// include means:
+//
+//   - a token that declares itself a path — "./<path>", or the documented
+//     city-local "packs/<name>" form — is never treated as a registry name,
+//     so a registry owner segment named "packs" cannot reinterpret existing
+//     include lists and "./x" always means the directory x;
+//   - anything already present on disk at that path wins, even a directory
+//     with no pack.toml (a looser test than the builtin step above, which is
+//     frozen for compatibility). New behavior gets the conservative rule: the
+//     registry never shadows local content.
+func registryPackIncludeSource(fs fsys.FS, cityPath, tok string, pathDeclared bool, resolveRegistryPack func(string) (string, bool)) (string, bool) {
+	if resolveRegistryPack == nil || pathDeclared {
+		return "", false
+	}
+	if err := packregistry.ValidatePackName(tok); err != nil {
+		return "", false
+	}
+	// The grammar rejects absolute paths and "..", so joining tok onto the
+	// city path cannot escape it.
+	if _, err := fs.Stat(filepath.Join(cityPath, filepath.FromSlash(tok))); err == nil {
+		return "", false
+	}
+	return resolveRegistryPack(tok)
 }
 
 func boundImportsFromImportMap(imports map[string]config.Import) []config.BoundImport {

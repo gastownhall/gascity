@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -280,7 +281,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_ORIGIN":   "ephemeral",
 		"GC_AGENT":            sessName,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
@@ -438,12 +438,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
-	prependGCBinDirToPATH(env, env["GC_BIN"])
+	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
-	// ScrubTokenEnv so its credential refs survive. The env-ref values ($VAR)
+	// ScrubTokenEnv so its credential refs survive — which is exactly why the
+	// controller-only re-pin below has to come after this block. The env-ref
+	// values ($VAR)
 	// resolve from the controller environment via expandEnvMap; the resolved
 	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
 	// them), only the selected NAME — carried to runtime.Config.Upstream
@@ -484,7 +486,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				if envName == "" {
 					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
 				}
-				env[envName] = os.ExpandEnv(r.value)
+				env[envName] = processenv.ExpandSessionEnvValue(r.value)
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
@@ -497,6 +499,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
 	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+
+	// Same placement, same reason, for the controller-only keys: every layer
+	// above is config-authored, so a literal [workspace.env] GC_CONTROLLER_TOKEN
+	// — or an upstream whose api_key_env names it — would otherwise overwrite the
+	// empty value passthroughEnv() pinned, and the upstream block writes after
+	// the ScrubTokenEnv call. Re-pinning after the last writer makes the merge
+	// order irrelevant. Empty, not deleted: the session inherits an environment
+	// that already carries the controller's value, so only an explicit empty
+	// assignment overrides it.
+	for key, val := range processenv.ControllerOnlyEnvOverlay() {
+		env[key] = val
+	}
 
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath

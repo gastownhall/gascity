@@ -47,6 +47,9 @@
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
 # and unverified remote heads must become ancestry-verifiable before push.
+# A database marked .no-sync (same marker the sync and pull commands honor) has
+# no remote phase at all: it is never fetched or pushed, never gets a
+# pending-push marker, and an existing one is cleared so it cannot block flatten.
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -1236,6 +1239,16 @@ oldgen_has_files() {
   [ -n "$(find "$oldgen_dir" -mindepth 1 -print -quit 2>/dev/null)" ]
 }
 
+# no_sync_database reports whether the operator excluded this database from all
+# remote sync with a .no-sync marker — the same contract the sync and pull
+# commands honor (commands/sync/run.sh, commands/pull/run.sh). Such a database
+# has no push step, so compaction treats it exactly like a database with no
+# remotes: flatten and GC locally, never fetch or push, never defer a push.
+no_sync_database() {
+  db="$1"
+  [ -f "$DOLT_DATA_DIR/$db/.no-sync" ]
+}
+
 compact_marker_path() {
   dir="$1"
   db="$2"
@@ -1302,12 +1315,17 @@ write_compact_marker() {
     return 1
   fi
   if [ "$dir" = "$quarantine_dir" ]; then
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at" || true
+    emit_compact_quarantine_event "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
+      record_quarantine_notify_state "$db" "$reason" 1
+    else
+      record_quarantine_notify_state "$db" "$reason" 0
+    fi
   fi
   return 0
 }
 
-send_compact_quarantine_alert() {
+emit_compact_quarantine_event() {
   _ca_db="$1"
   _ca_type="$2"
   _ca_path="$3"
@@ -1315,7 +1333,122 @@ send_compact_quarantine_alert() {
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
   gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
-  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
+}
+
+mail_compact_quarantine_alert() {
+  _ca_db="$1"
+  _ca_type="$2"
+  _ca_path="$3"
+  _ca_reason="$4"
+  _ca_created_at="${5:-<unknown>}"
+  _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
+  if gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg"; then
+    return 0
+  fi
+  return 1
+}
+
+send_compact_quarantine_alert() {
+  emit_compact_quarantine_event "$@"
+  mail_compact_quarantine_alert "$@"
+}
+
+# quarantine_should_notify DB REASON
+#   Fail-open dedup check: EMIT (return 0) unless the quarantine marker's
+#   last_notified_reason already matches REASON, meaning a mail already went
+#   out for this exact quarantine state. A missing marker, missing field, or
+#   unreadable marker always emits — this must never wrongly suppress a real
+#   alert. Mirrors the notify-once-per-distinct-state marker shape in
+#   gc-management's packs/maintainer-pr-review/scripts/hold-notice-lib.sh.
+quarantine_should_notify() {
+  db="$1"
+  reason="$2"
+  _qn_marker=$(compact_marker_path "$quarantine_dir" "$db")
+  [ -f "$_qn_marker" ] && [ -r "$_qn_marker" ] || return 0
+  _qn_prev_reason=$(compact_marker_value "$quarantine_dir" "$db" last_notified_reason || true)
+  [ -n "$_qn_prev_reason" ] || return 0
+  [ "$_qn_prev_reason" = "$reason" ] && return 1
+  return 0
+}
+
+# record_quarantine_notify_state DB REASON EMITTED
+#   Patches only the notify-bookkeeping fields (seen_count, notify_count,
+#   last_notified_ts, last_notified_reason) onto DB's existing quarantine
+#   marker, preserving every other field byte-for-byte. EMITTED=1 bumps
+#   notify_count and stamps last_notified_ts/last_notified_reason; EMITTED=0
+#   only bumps seen_count. A missing marker or write failure is a silent
+#   no-op — bookkeeping must never block or fail compaction.
+record_quarantine_notify_state() {
+  db="$1"
+  reason="$2"
+  _qn_emitted="$3"
+
+  _qn_marker=$(compact_marker_path "$quarantine_dir" "$db")
+  [ -f "$_qn_marker" ] && [ -r "$_qn_marker" ] || return 0
+
+  _qn_seen_count=$(compact_marker_value "$quarantine_dir" "$db" seen_count || true)
+  case "$_qn_seen_count" in ''|*[!0-9]*) _qn_seen_count=0 ;; esac
+  _qn_seen_count=$((_qn_seen_count + 1))
+
+  _qn_notify_count=$(compact_marker_value "$quarantine_dir" "$db" notify_count || true)
+  case "$_qn_notify_count" in ''|*[!0-9]*) _qn_notify_count=0 ;; esac
+  _qn_last_ts=$(compact_marker_value "$quarantine_dir" "$db" last_notified_ts || true)
+  _qn_last_reason=$(compact_marker_value "$quarantine_dir" "$db" last_notified_reason || true)
+  if [ "$_qn_emitted" = "1" ]; then
+    _qn_notify_count=$((_qn_notify_count + 1))
+    _qn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _qn_last_reason="$reason"
+  fi
+
+  _qn_old_umask=$(umask)
+  umask 077
+  _qn_tmp=$(mktemp "$quarantine_dir/$db.tmp.XXXXXX") || {
+    umask "$_qn_old_umask"
+    return 0
+  }
+  umask "$_qn_old_umask"
+  if ! awk '!/^(seen_count|notify_count|last_notified_ts|last_notified_reason)=/' "$_qn_marker" > "$_qn_tmp" 2>/dev/null; then
+    rm -f "$_qn_tmp"
+    return 0
+  fi
+  if ! {
+    printf 'seen_count=%s\n' "$_qn_seen_count"
+    printf 'notify_count=%s\n' "$_qn_notify_count"
+    printf 'last_notified_ts=%s\n' "$_qn_last_ts"
+    printf 'last_notified_reason=%s\n' "$_qn_last_reason"
+  } >> "$_qn_tmp" 2>/dev/null; then
+    rm -f "$_qn_tmp"
+    return 0
+  fi
+  if ! grep -q '^db=' "$_qn_tmp" 2>/dev/null; then
+    rm -f "$_qn_tmp"
+    return 0
+  fi
+  mv -f "$_qn_tmp" "$_qn_marker" || rm -f "$_qn_tmp"
+  return 0
+}
+
+# report_existing_quarantine DB
+#   Diagnostic + alert path for a compact/bare-gc invocation that hit an
+#   already-quarantined database. The event still fires every cycle; the
+#   mail is gated by quarantine_should_notify so a stable quarantine reason
+#   pages once instead of on every subsequent run.
+report_existing_quarantine() {
+  db="$1"
+  quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+  quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+  quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+  print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+
+  emit_compact_quarantine_event "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
+
+  quarantine_alert_emitted=0
+  if quarantine_should_notify "$db" "${quarantine_reason:-<unknown>}"; then
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"; then
+      quarantine_alert_emitted=1
+    fi
+  fi
+  record_quarantine_notify_state "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted"
 }
 
 ensure_compact_marker_writable() {
@@ -1868,11 +2001,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    report_existing_quarantine "$db"
     return 1
   fi
 
@@ -1882,6 +2011,11 @@ flatten_database() {
       return 0
     fi
     pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    if [ -n "$pending_remote" ] && no_sync_database "$db"; then
+      # Marker predates the .no-sync marker: retry the GC, drop the push.
+      printf 'compact: db=%s pending_gc remote=%s dropped — remote sync disabled (.no-sync)\n' "$db" "$pending_remote"
+      pending_remote=""
+    fi
     pending_expected_remote_head=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head_verified || true)
     pending_compacted_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
@@ -1945,6 +2079,18 @@ flatten_database() {
       return "$push_rc"
     fi
     return 1
+  fi
+
+  if has_compact_marker "$pending_push_dir" "$db" && no_sync_database "$db"; then
+    # The marker records a push this database must never make. Keeping it would
+    # block flatten forever: the retry branch below returns before the flatten
+    # path, and past the max-age window it hard-fails as stale on every run.
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — dry-run (would clear deferred push)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — clearing deferred push\n' "$db"
+    clear_compact_marker "$pending_push_dir" "$db"
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
@@ -2072,7 +2218,9 @@ flatten_database() {
   remote_branch="main"
   expected_remote_head=""
   expected_remote_head_verified=0
-  if probed_remote=$(select_remote "$db"); then
+  if no_sync_database "$db"; then
+    printf 'compact: db=%s remote sync disabled (.no-sync) — compacting locally only\n' "$db"
+  elif probed_remote=$(select_remote "$db"); then
     remote="$probed_remote"
   else
     printf 'compact: db=%s remote selection failed — fail\n' "$db" >&2
@@ -2558,11 +2706,7 @@ bare_gc_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    report_existing_quarantine "$db"
     return 1
   fi
 

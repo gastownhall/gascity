@@ -44,8 +44,12 @@ run_step6() {
     step6_file="$tmpdir/step6.sh"
     run_script="$tmpdir/run.sh"
 
-    mkdir -p "$tmpdir/.beads"
+    mkdir -p "$tmpdir/.beads/backup"
     printf '{"dolt_database":"test_db"}' > "$tmpdir/.beads/metadata.json"
+    # Provide a fresh backup_state.json so the backup-age guard does not block bd.
+    _NOW_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$_NOW_TS" \
+        > "$tmpdir/.beads/backup/backup_state.json"
 
     printf '%s\n' "$STEP6" > "$step6_file"
 
@@ -56,10 +60,10 @@ run_step6() {
     cat > "$run_script" << RUNEOF
 #!/usr/bin/env bash
 set -euo pipefail
-bd()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
+gc()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
 dolt_sql()      { touch '$dolt_flag'; }
 record_anomaly(){ :; }
-export -f bd dolt_sql record_anomaly
+export -f gc dolt_sql record_anomaly
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 SESSION_BEAD_PATTERN='$pattern'
@@ -68,6 +72,7 @@ DRY_RUN=''
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 CITY_DB='test_db'
+GC_BACKUP_MAX_AGE_FOR_BULK_DELETE=86400
 . '$step6_file'
 RUNEOF
 
@@ -94,18 +99,22 @@ run_step6_via_env() {
     step6_file="$tmpdir/step6.sh"
     run_script="$tmpdir/run.sh"
 
-    mkdir -p "$tmpdir/.beads"
+    mkdir -p "$tmpdir/.beads/backup"
     printf '{"dolt_database":"test_db"}' > "$tmpdir/.beads/metadata.json"
+    # Provide a fresh backup_state.json so the backup-age guard does not block bd.
+    _NOW_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$_NOW_TS" \
+        > "$tmpdir/.beads/backup/backup_state.json"
 
     printf '%s\n' "$STEP6" > "$step6_file"
 
     cat > "$run_script" << RUNEOF
 #!/usr/bin/env bash
 set -euo pipefail
-bd()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
+gc()            { printf '%s\n' "\$*" > '$bd_args_file'; touch '$bd_flag'; printf '{"pruned_count":3}'; }
 dolt_sql()      { touch '$dolt_flag'; }
 record_anomaly(){ :; }
-export -f bd dolt_sql record_anomaly
+export -f gc dolt_sql record_anomaly
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 GC_REAPER_SESSION_BEAD_PATTERN='$env_val'
@@ -115,6 +124,7 @@ DRY_RUN=''
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 CITY_DB='test_db'
+GC_BACKUP_MAX_AGE_FOR_BULK_DELETE=86400
 . '$step6_file'
 RUNEOF
 

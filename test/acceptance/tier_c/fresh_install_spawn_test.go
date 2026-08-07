@@ -232,8 +232,10 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	require.Equal(t, "shipped", workOutcome, "completed fresh-init work should have a shipped work record")
 	require.NotEmpty(t, workCommit, "shipped fresh-init work should record its integrating commit")
 	require.NotEmpty(t, workBranch, "shipped fresh-init work should record its integrating branch")
-	require.Equal(t, workCommit, gitCmd(t, c.Dir, "rev-parse", workBranch), "recorded branch should resolve to the integrating commit")
-	require.Equal(t, outputRel, gitCmd(t, c.Dir, "show", "--format=", "--name-only", workCommit, "--", outputRel), "integrating commit should contain the requested city-root artifact")
+	resolvedWorkCommit := requireResolvedGitCommit(t, c.Dir, workCommit)
+	resolvedWorkBranch := requireResolvedGitCommit(t, c.Dir, workBranch)
+	require.Equal(t, resolvedWorkCommit, resolvedWorkBranch, "recorded branch should resolve to the integrating commit")
+	require.Equal(t, outputRel, gitCmd(t, c.Dir, "show", "--format=", "--name-only", resolvedWorkCommit, "--", outputRel), "integrating commit should contain the requested city-root artifact")
 
 	return freshInstallSlingResult{
 		CityDir:            c.Dir,
@@ -243,6 +245,14 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		OutputPath:         outputPath,
 		OutputContents:     strings.TrimSpace(string(outputContents)),
 	}
+}
+
+func requireResolvedGitCommit(t *testing.T, dir, revision string) string {
+	t.Helper()
+	require.False(t, strings.HasPrefix(revision, "-"), "Git commit revision must not be option-like: %q", revision)
+	resolved := gitCmd(t, dir, "rev-parse", "--verify", revision+"^{commit}")
+	require.Regexp(t, `^[0-9a-f]{40}$`, resolved, "resolved Git commit %q", revision)
+	return resolved
 }
 
 func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {

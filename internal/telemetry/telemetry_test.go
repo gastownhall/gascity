@@ -331,7 +331,7 @@ func TestNewResource_HonorsOTELResourceAttributes(t *testing.T) {
 
 	attrs := make(map[string]string)
 	for _, kv := range res.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	if got := attrs["deployment.environment"]; got != "prod" {
 		t.Errorf("deployment.environment = %q, want %q", got, "prod")
@@ -361,7 +361,7 @@ func TestNewResource_OwnGCIdentityWinsOverInheritedEnv(t *testing.T) {
 
 	attrs := make(map[string]string)
 	for _, kv := range res.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	if got := attrs["gc.agent"]; got != "b" {
 		t.Errorf("gc.agent = %q, want own identity %q to win over inherited env", got, "b")
@@ -381,7 +381,7 @@ func TestNewResource_ExplicitServiceIdentityWinsOverEnv(t *testing.T) {
 
 	attrs := make(map[string]string)
 	for _, kv := range res.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	if got := attrs["service.name"]; got != "test-svc" {
 		t.Errorf("service.name = %q, want explicit %q to win over env", got, "test-svc")
@@ -401,8 +401,8 @@ func TestNewResource_ExplicitServiceNameWinsOverOTELServiceName(t *testing.T) {
 	}
 
 	for _, kv := range res.Attributes() {
-		if string(kv.Key) == "service.name" && kv.Value.Emit() != "test-svc" {
-			t.Errorf("service.name = %q, want explicit %q to win over OTEL_SERVICE_NAME", kv.Value.Emit(), "test-svc")
+		if string(kv.Key) == "service.name" && kv.Value.String() != "test-svc" {
+			t.Errorf("service.name = %q, want explicit %q to win over OTEL_SERVICE_NAME", kv.Value.String(), "test-svc")
 		}
 	}
 }
@@ -423,7 +423,7 @@ func TestNewResource_ToleratesMalformedResourceAttributes(t *testing.T) {
 
 	attrs := make(map[string]string)
 	for _, kv := range res.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	if got := attrs["deployment.environment"]; got != "prod" {
 		t.Errorf("deployment.environment = %q, want %q", got, "prod")

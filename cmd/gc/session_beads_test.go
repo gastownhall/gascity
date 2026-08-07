@@ -2697,6 +2697,13 @@ func TestSyncSessionBeads_ClearsManagedAliasWhenRemoved(t *testing.T) {
 	} else if got != "" {
 		t.Fatalf("GC_ALIAS = %q, want empty", got)
 	}
+	for _, key := range []string{"GC_AGENT", "BEADS_ACTOR"} {
+		if got, err := sp.GetMeta("s-gc-123", key); err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		} else if got != "s-gc-123" {
+			t.Fatalf("%s = %q, want session-name fallback", key, got)
+		}
+	}
 }
 
 func TestSyncSessionBeads_Idempotent(t *testing.T) {

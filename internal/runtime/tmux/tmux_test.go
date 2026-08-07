@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,11 +32,241 @@ func hasTmux() bool {
 	return err == nil
 }
 
+// privateSocketName returns a short, unique, gctest-prefixed socket name for a
+// test that needs its own tmux SERVER — one forked from THIS process, so the
+// server's global environment is the test's own. The package socket hands back a
+// server started by whichever test ran first, which never saw the test's env.
+//
+// Short on purpose: the full socket path must fit a unix sun_path (~107 bytes),
+// and suffixing testSocketName (already ~34 chars under a per-run temp root)
+// overflows it — which tmux reports as the thoroughly misleading "no server
+// running" from new-session.
+func privateSocketName(tag string) string {
+	return fmt.Sprintf("gctest-%d-%s%d", os.Getpid(), tag, time.Now().UnixNano()%1e9)
+}
+
 // testTmux returns a Tmux instance that uses an isolated test socket.
 func testTmux() *Tmux {
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
 	return NewTmuxWithConfig(cfg)
+}
+
+// noServerPreflightExecutor makes only the first has-session preflight report
+// ErrNoServer, then delegates every other operation to real tmux. It models a
+// stale protocol observation while retaining the real socket boundary.
+type noServerPreflightExecutor struct {
+	used bool
+}
+
+func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if !e.used && firstArgsContainHasSession(args) {
+		e.used = true
+		return "", ErrNoServer
+	}
+	return realExecutor{}.executeCtx(ctx, args)
+}
+
+func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	newTmux := func(socketName string) *Tmux {
+		cfg := DefaultConfig()
+		cfg.SocketName = socketName
+		return NewTmuxWithConfig(cfg)
+	}
+	newSocketName := func(suffix string) string {
+		return fmt.Sprintf("gctest-live-socket-%s-%d-%d", suffix, os.Getpid(), time.Now().UnixNano())
+	}
+
+	t.Run("live-server-refuses", func(t *testing.T) {
+		tm := newTmux(newSocketName("live"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+
+		const instanceToken = "live-server-instance-token"
+		original := fmt.Sprintf("gc-live-original-%d", time.Now().UnixNano())
+		if err := tm.NewSession(original, ""); err != nil {
+			t.Fatalf("create original session: %v", err)
+		}
+		if err := tm.SetEnvironment(original, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
+			t.Fatalf("seed original instance token: %v", err)
+		}
+		serverPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid}: %v", err)
+		}
+		beforeSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat live socket %q: %v", socketPath, err)
+		}
+		beforeSessions, err := tm.ListSessions()
+		if err != nil {
+			t.Fatalf("list original sessions: %v", err)
+		}
+
+		guarded := NewProviderWithConfig(tm.cfg)
+		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		err = guarded.Start(context.Background(), original, runtimepkg.Config{
+			Command: "sleep 600",
+			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
+		})
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("Provider.Start error = %v, want ErrServerDegraded", err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			t.Fatalf("Provider.Start error = %v, must not wrap ErrNoServer", err)
+		}
+		for _, want := range []string{
+			"protocol=no-server",
+			"path=" + socketPath,
+			"inode=" + socketInode(beforeSocket),
+			"peer_pid=" + serverPID,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Provider.Start error = %q, want %q", err, want)
+			}
+		}
+
+		hasOriginal, err := tm.HasSession(original)
+		if err != nil {
+			t.Fatalf("check original session: %v", err)
+		}
+		if !hasOriginal {
+			t.Fatalf("original session %q was removed after guarded refusal", original)
+		}
+		afterSessions, err := tm.ListSessions()
+		if err != nil {
+			t.Fatalf("list sessions after guarded refusal: %v", err)
+		}
+		if !reflect.DeepEqual(afterSessions, beforeSessions) {
+			t.Fatalf("sessions after guarded refusal = %v, want %v", afterSessions, beforeSessions)
+		}
+		afterPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after guarded refusal: %v", err)
+		}
+		if afterPID != serverPID {
+			t.Fatalf("server pid after guarded refusal = %q, want %q", afterPID, serverPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after guarded refusal: %v", err)
+		}
+		if !os.SameFile(beforeSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("absent-allows-cold-creation", func(t *testing.T) {
+		tm := newTmux(newSocketName("absent"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove prior socket %q: %v", socketPath, err)
+		}
+
+		session := fmt.Sprintf("gc-absent-socket-%d", time.Now().UnixNano())
+		if err := tm.NewSession(session, ""); err != nil {
+			t.Fatalf("NewSession with absent socket: %v", err)
+		}
+		has, err := tm.HasSession(session)
+		if err != nil || !has {
+			t.Fatalf("created session present = %t, err = %v", has, err)
+		}
+	})
+
+	t.Run("stale-refused-allows-cold-creation", func(t *testing.T) {
+		tm := newTmux(newSocketName("stale"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+			t.Fatalf("create socket directory: %v", err)
+		}
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+		if err != nil {
+			t.Fatalf("create stale socket: %v", err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			t.Fatalf("close stale socket listener: %v", err)
+		}
+
+		session := fmt.Sprintf("gc-stale-socket-%d", time.Now().UnixNano())
+		if err := tm.NewSession(session, ""); err != nil {
+			t.Fatalf("NewSession with stale refused socket: %v", err)
+		}
+		has, err := tm.HasSession(session)
+		if err != nil || !has {
+			t.Fatalf("created session present = %t, err = %v", has, err)
+		}
+	})
+}
+
+// TestNewSessionSucceedsOnDrainedLiveServer covers gc's normal drained state:
+// exit-empty is off, so killing the last session leaves the server alive with
+// zero sessions and the socket still bound. tmux answers the preflight probe
+// with "no current target" — the server DID answer, so new-session attaches
+// rather than unlinking and rebinding, and creation must succeed.
+func TestNewSessionSucceedsOnDrainedLiveServer(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-drained-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		_ = tm.KillServer()
+		_ = os.Remove(socketPath)
+	})
+
+	first := fmt.Sprintf("gc-drained-first-%d", time.Now().UnixNano())
+	if err := tm.NewSession(first, ""); err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	if err := tm.SetExitEmpty(false); err != nil {
+		t.Fatalf("SetExitEmpty(false): %v", err)
+	}
+	if err := tm.KillSession(first); err != nil {
+		t.Fatalf("kill last session: %v", err)
+	}
+
+	sessions, err := tm.ListSessions()
+	if err != nil {
+		t.Fatalf("list sessions after drain: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions after drain = %v, want none", sessions)
+	}
+	if _, err := os.Lstat(socketPath); err != nil {
+		t.Fatalf("socket %q missing after drain: %v", socketPath, err)
+	}
+
+	second := fmt.Sprintf("gc-drained-second-%d", time.Now().UnixNano())
+	if err := tm.NewSession(second, ""); err != nil {
+		t.Fatalf("NewSession on drained live server: %v", err)
+	}
+	has, err := tm.HasSession(second)
+	if err != nil || !has {
+		t.Fatalf("session created on drained server present = %t, err = %v", has, err)
+	}
 }
 
 func ensureTestSocketSession(t *testing.T, tm *Tmux) {
@@ -2233,7 +2464,14 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// The "claude" provider is submit-verify-eligible, so NudgeSession waits to
+	// observe a busy indicator before reporting success — but the fake command
+	// here is plain `cat -v`, which can never produce one. That makes
+	// ErrNudgeSubmitUnconfirmed the correct, expected outcome (see
+	// ra-3x46cy/finding 1: NudgeSession must no longer swallow this into a
+	// false "delivered" nil). This test only cares whether Escape was sent
+	// before the paste, which is unaffected by the confirm outcome.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -3151,4 +3389,56 @@ func processAlive(pid string) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil || err == syscall.EPERM
+}
+
+// TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild is the
+// child-level proof behind convergence.ScrubTokenEnv and
+// processenv.ControllerOnlyEnvKeys: the controller token is withheld from agent
+// panes by an EMPTY value, not by dropping the key.
+//
+// A pane's shell inherits the tmux SERVER's global environment, which holds
+// whatever the controller exported when the server started. A key merely absent
+// from the -e set therefore arrives in the child carrying the controller's real
+// value — asserting on the env map alone cannot see that. Only the empty value
+// produces the `env -u` prefix that makes the var genuinely absent from the
+// child process.
+func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the server it starts forks from THIS
+	// process and its global environment carries the token. The package socket
+	// would hand back a server started by an earlier test, which never saw it.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("tp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "child-token")
+	sessionName := "gc-test-token-pin"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	command := fmt.Sprintf(`sh -c 'printf %%s "[${%s-ABSENT}]" > %s; sleep 30'`, tokenVar, report)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, command, map[string]string{tokenVar: ""}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	// Bounded poll on the pane's own report — the condition this test is about —
+	// rather than elapsed wall time. A leak shows up as a timeout whose message
+	// carries what the pane actually saw.
+	waitForMarker(t, report, "[ABSENT]")
+
+	got, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("reading pane report: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("pane child received the controller token: %s", got)
+	}
 }

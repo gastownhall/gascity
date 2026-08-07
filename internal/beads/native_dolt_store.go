@@ -2,7 +2,6 @@ package beads
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,107 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
-
-// rawDBGetter matches beadslib's internal storage.RawDBAccessor without
-// importing its internal package. DoltStore satisfies this interface.
-type rawDBGetter interface {
-	DB() *sql.DB
-}
-
-// idDefaultRepairTables lists the char(36) id columns whose DEFAULT (uuid())
-// some Dolt versions silently strip from the expression default that beads
-// migrations add via PREPARE/EXECUTE. Without the default, beadslib INSERTs
-// that never supply id fail with "Field 'id' doesn't have a default value":
-//   - dependencies: DepAdd (migration 0043)
-//   - events / wisp_events: RecordEventInTable, reached when gc stamps
-//     metadata (e.g. gc.routed_to during sling) on a non-ephemeral bead.
-var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
-
-// repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
-// the id column exists without a default.
-//
-// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
-// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
-// probe was a full catalog scan — cheap once, but it runs per store open per
-// repair table, and a fleet of concurrent gc/bd sessions firing it several
-// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
-// Default cell directly, so one cheap statement replaces the scan.
-func repairIDDefault(db *sql.DB, table string) error {
-	// 'id' contains no LIKE wildcards, but Field is still compared exactly
-	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
-	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
-	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
-	if err != nil {
-		if isTableNotExistError(err) {
-			return nil
-		}
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	defaultIdx := -1
-	for i, col := range cols {
-		if strings.EqualFold(col, "Default") {
-			defaultIdx = i
-			break
-		}
-	}
-	if defaultIdx < 0 {
-		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
-	}
-
-	idFound, withDefault := false, false
-	cells := make([]sql.RawBytes, len(cols))
-	dest := make([]any, len(cols))
-	for i := range cells {
-		dest[i] = &cells[i]
-	}
-	for rows.Next() {
-		if err := rows.Scan(dest...); err != nil {
-			return fmt.Errorf("checking %s.id default: %w", table, err)
-		}
-		if len(cells) > 0 && string(cells[0]) == "id" {
-			idFound = true
-			withDefault = cells[defaultIdx] != nil
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	if !idFound || withDefault {
-		// Column absent, or the default is already present.
-		return nil
-	}
-	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
-		return fmt.Errorf("repairing %s.id default: %w", table, err)
-	}
-	return nil
-}
-
-// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
-// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
-// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
-// wisp_events on an older schema) is not an error.
-func isTableNotExistError(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return mysqlErr.Number == 1146
-	}
-	// The embedded Dolt driver surfaces the same condition without the
-	// go-sql-driver error type; match Dolt's message shape.
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
-}
 
 const nativeDoltStoreActor = "gascity"
 
@@ -285,10 +185,33 @@ type NativeDoltStore struct {
 	readRetryBudgetOverride time.Duration
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode.
-	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
-	// effect today is require→typed refusal / auto→loud degrade at the
-	// seam, never a silent legacy write under require.
+	// NativeDoltStore implements the NARROW metadata value-CAS
+	// (MetadataCASWriter, see native_dolt_store_conditional.go) but NOT
+	// ConditionalWriter, so the stamp's effect at the seam is unchanged:
+	// require→typed refusal / auto→loud degrade, never a silent legacy write
+	// under require.
+	//
+	// The gap is the revision-CAS trio, and it is a BACKEND gap, not an
+	// unwritten method. UpdateIfMatch/CloseIfMatch/DeleteIfMatch need a fence
+	// token that advances on every mutation and is never reused; beads v1.1.0
+	// has none. types.Issue carries no revision, the issues DDL has no version
+	// column, updated_at is second-granularity — so two same-second writes
+	// compare EQUAL and a stale fence silently succeeds, which is the lost
+	// update the fence exists to prevent — and label mutations never touch
+	// updated_at at all. A counter this store maintained itself would fence
+	// nothing, because the Dolt database is multi-writer (bd CLI, other
+	// gascity processes, graph-apply). Upstream beads #4697 (claim_fence) is
+	// the missing primitive; when it lands the trio becomes implementable and
+	// this store can declare ConditionalWriter.
+	//
+	// Declaring ConditionalWriter early to expose the CAS method would make
+	// ResolveConditionalWriter resolve under require and hand the trio's
+	// callers a wrong fence — the precise silent-write failure this refusal
+	// currently makes impossible. internal/beads/metadata_cas.go carries the
+	// full reasoning and the narrow interface's own resolution path.
 	condWritesStamp
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -325,7 +248,7 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -345,11 +268,12 @@ func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
-	storage, prefix, err := openAndRepairNativeStorage(ctx, scopeRoot, env, true)
+	storage, prefix, err := openNativeStorage(ctx, scopeRoot, env, true)
 	if err != nil {
 		return nil, err
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -361,17 +285,15 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 // caller that has re-resolved the CURRENT managed Dolt env (fresh port) passes
 // it here to get a fresh handle bound to the live server.
 func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]string) (NativeStorage, error) {
-	storage, _, err := openAndRepairNativeStorage(ctx, scopeRoot, env, false)
+	storage, _, err := openNativeStorage(ctx, scopeRoot, env, false)
 	return storage, err
 }
 
-// openAndRepairNativeStorage projects the scoped Dolt env, opens the
-// best-available native storage, repairs the id-default columns some Dolt
-// versions strip, and (when readPrefix) reads the configured issue prefix while
-// the env is still projected. It is shared by the initial open and by the
-// read-path reconnect that recovers from a managed-Dolt hard-kill/rebind, so
-// both establish an identically configured connection.
-func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
+// openNativeStorage projects the scoped Dolt env, opens the best-available
+// native storage, and (when readPrefix) reads the configured issue prefix while
+// the env is still projected. It is shared by the initial open and the
+// read-path reconnect that recovers from a managed-Dolt hard-kill/rebind.
+func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
 	restoreEnv, err := withNativeDoltOpenEnv(env)
 	if err != nil {
 		return nil, "", err
@@ -387,15 +309,6 @@ func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[s
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
-		}
-	}
-	if accessor, ok := storage.(rawDBGetter); ok {
-		for _, table := range idDefaultRepairTables {
-			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
-				// Log but don't fail: the error will surface on the first
-				// DepAdd / event-recording write against the affected table.
-				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
-			}
 		}
 	}
 	return storage, prefix, nil
@@ -1264,6 +1177,17 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 				return err
 			}
 			for _, issue := range issues {
+				// The StatusDeferred branch exists so an expired time-bound
+				// deferral (defer_until in the past) can resurface. An issue
+				// with no defer_until at all was never time-bound — it's bd
+				// defer's status-based indefinite deferral — and must stay
+				// hidden. mapBdStatus collapses status to "open" and
+				// IsDeferred only inspects DeferUntil, so both would
+				// otherwise look identical to an ordinary open bead once
+				// beadFromNativeIssue erases the raw status.
+				if status == beadslib.StatusDeferred && issue.DeferUntil == nil {
+					continue
+				}
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err
@@ -1387,6 +1311,11 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
+const (
+	nativeMetadataWriteAttempts     = 3
+	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+)
+
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	storage, release, err := s.acquireStorage()
@@ -1394,8 +1323,23 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
+
+	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		cancel()
+		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
+	}
+	return err
+}
+
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
+// A retry must call this whole operation again so metadata committed by the
+// competing transaction is included rather than overwritten from a stale read.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1418,6 +1362,42 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 		return err
 	}
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+}
+
+// isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
+// serialization conflicts, which are known not to have committed and are safe
+// to retry. Ambiguous connection failures intentionally remain fail-fast.
+func isNativeDoltSerializationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 1213") ||
+		(strings.Contains(msg, "sqlstate") && strings.Contains(msg, "40001")) ||
+		strings.Contains(msg, "(40001)") ||
+		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+}
+
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than through Dolt storage: unlike SetMetadata,
+// this never touches the Dolt DB or commits. Does not validate that id
+// refers to an existing bead — see the interface doc comment for why.
+func (s *NativeDoltStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *NativeDoltStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
 }
 
 // Tx executes fn inside a single native Dolt transaction so every write in the
@@ -1484,7 +1464,13 @@ func (s *NativeDoltStore) Delete(id string) error {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	return nativeStoreError(id, storage.DeleteIssue(ctx, id))
+	if err := nativeStoreError(id, storage.DeleteIssue(ctx, id)); err != nil {
+		return err
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
+	}
+	return nil
 }
 
 // Ping verifies that the upstream storage is reachable.

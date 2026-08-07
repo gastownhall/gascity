@@ -15,7 +15,7 @@ import (
 // never touches the herdr client, so no herdr binary or server is required.
 func newTestProvider(t *testing.T, setupTimeout time.Duration) *Provider {
 	t.Helper()
-	return New("gctest-prestart", t.TempDir(), t.TempDir(), setupTimeout)
+	return New("gctest-prestart", t.TempDir(), t.TempDir(), setupTimeout, 0)
 }
 
 func TestRunPreStartNoCommandsIsNoOp(t *testing.T) {
@@ -125,7 +125,7 @@ func TestRunPreStartRespectsSetupTimeout(t *testing.T) {
 // A non-positive setupTimeout falls back to the default rather than making
 // every pre_start fail instantly with an already-expired context.
 func TestNewDefaultsSetupTimeout(t *testing.T) {
-	p := New("gctest-default", t.TempDir(), t.TempDir(), 0)
+	p := New("gctest-default", t.TempDir(), t.TempDir(), 0, 0)
 	if p.setupTimeout != defaultSetupTimeout {
 		t.Errorf("setupTimeout = %v, want default %v", p.setupTimeout, defaultSetupTimeout)
 	}
@@ -139,7 +139,7 @@ func TestNewDefaultsSetupTimeout(t *testing.T) {
 // command runs with cwd falling back to the city root instead.
 func TestRunPreStartToleratesMissingGCDir(t *testing.T) {
 	cityRoot := t.TempDir()
-	p := New("gctest-prestart-missing", t.TempDir(), cityRoot, 10*time.Second)
+	p := New("gctest-prestart-missing", t.TempDir(), cityRoot, 10*time.Second, 0)
 	cfg := runtime.Config{
 		Env:      map[string]string{"GC_DIR": filepath.Join(cityRoot, "does", "not", "exist")},
 		PreStart: []string{"pwd > cwd.txt"},

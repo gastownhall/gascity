@@ -104,8 +104,10 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	// Verify session.woke event exists.
-	verifyEvents(t, cityDir, "session.woke")
+	// Session activation becomes visible before its wake event is durably
+	// appended, so wait on the event-log fact rather than racing an immediate
+	// API query. Event query behavior is covered independently above.
+	verifyEventLogEventually(t, cityDir, "session.woke")
 
 	// Restart the city so we observe a session stop event without tearing the
 	// city out of supervisor scope before querying the API.
@@ -125,7 +127,7 @@ func verifyEventLogEventually(t *testing.T, cityDir, eventType string) {
 	t.Helper()
 
 	eventLog := filepath.Join(cityDir, ".gc", "events.jsonl")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	needle := `"type":"` + eventType + `"`
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(eventLog)

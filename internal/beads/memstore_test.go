@@ -20,6 +20,17 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunFenceConformance(t, factory)
 }
 
+func TestMemStoreCreateUsesSerializableTimestamp(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{Title: "serializable timestamp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.CreatedAt != created.CreatedAt.Round(0) {
+		t.Fatalf("CreatedAt retained a process-local monotonic clock: %v", created.CreatedAt)
+	}
+}
+
 func TestMemStoreConditionalWriterConformance(t *testing.T) {
 	beadstest.RunConditionalWriterConformanceWithOptions(t, "MemStore",
 		func(_ *testing.T) beads.Store { return beads.NewMemStore() },

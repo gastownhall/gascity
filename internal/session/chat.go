@@ -373,11 +373,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		b.Metadata["instance_token"] = instanceToken
 	}
 	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		id,
-		sessName,
-		strings.TrimSpace(b.Metadata["alias"]),
-		strings.TrimSpace(b.Metadata["template"]),
-		strings.TrimSpace(b.Metadata["session_origin"]),
+		infoFromPersistedBead(b),
 		generation,
 		continuationEpoch,
 		instanceToken,
@@ -492,11 +488,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		b.Metadata["instance_token"] = instanceToken
 	}
 	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		id,
-		sessName,
-		strings.TrimSpace(b.Metadata["alias"]),
-		strings.TrimSpace(b.Metadata["template"]),
-		strings.TrimSpace(b.Metadata["session_origin"]),
+		infoFromPersistedBead(b),
 		generation,
 		continuationEpoch,
 		instanceToken,

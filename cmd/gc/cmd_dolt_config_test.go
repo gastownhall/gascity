@@ -334,6 +334,35 @@ prefix = "fe"
 	}
 }
 
+func TestRemoveScopeLocalDoltServerArtifactsPreservesPortMirror(t *testing.T) {
+	scopeDir := t.TempDir()
+	beadsDir := filepath.Join(scopeDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+	for _, name := range []string{"dolt-server.pid", "dolt-server.lock", "dolt-server.log", "dolt-server.port"} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("3307\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", name, err)
+		}
+	}
+
+	if err := removeScopeLocalDoltServerArtifacts(scopeDir); err != nil {
+		t.Fatalf("removeScopeLocalDoltServerArtifacts: %v", err)
+	}
+	for _, name := range []string{"dolt-server.pid", "dolt-server.lock", "dolt-server.log"} {
+		if _, err := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists, stat err = %v", name, err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("ReadFile(dolt-server.port): %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "3307" {
+		t.Fatalf("dolt-server.port = %q, want %q", got, "3307")
+	}
+}
+
 // TestDoltliteReindexCheckMatchesBuildCapability pins the ga-7hei capability
 // probe the maintenance shell gate depends on: `gc dolt-config
 // doltlite-reindex --check` must exit 0 exactly when this build can reindex in
