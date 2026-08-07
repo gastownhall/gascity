@@ -2245,6 +2245,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}
 
+	// FR-PM.3: diff pool max_active_sessions before the in-memory swap so the
+	// reload reply surfaces old → new bounds. Active counts use the still-
+	// current config for template attribution.
+	poolBoundChanges := poolMaxActiveSessionChanges(cr.cfg, nextCfg)
+	poolActiveCounts := cr.countActiveSessionsByTemplate(cr.cfg)
+
 	cr.serviceStateMu.Lock()
 	cr.cfg = nextCfg
 	cr.sp = nextSp
@@ -2318,6 +2324,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))
+	message, warnings = appendPoolMaxBoundFeedback(message, warnings, poolBoundChanges, poolActiveCounts)
 	fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
 	telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeApplied), len(warnings), nil)
 	if trace != nil {

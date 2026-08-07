@@ -1,0 +1,434 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+func reloadPoolIntPtr(n int) *int { return &n }
+
+func TestFormatResolvedMaxActiveSessions(t *testing.T) {
+	if got := formatResolvedMaxActiveSessions(nil); got != "unlimited" {
+		t.Fatalf("nil = %q, want unlimited", got)
+	}
+	if got := formatResolvedMaxActiveSessions(reloadPoolIntPtr(-1)); got != "unlimited" {
+		t.Fatalf("-1 = %q, want unlimited", got)
+	}
+	if got := formatResolvedMaxActiveSessions(reloadPoolIntPtr(0)); got != "0" {
+		t.Fatalf("0 = %q, want 0", got)
+	}
+	if got := formatResolvedMaxActiveSessions(reloadPoolIntPtr(8)); got != "8" {
+		t.Fatalf("8 = %q, want 8", got)
+	}
+}
+
+func TestPoolMaxActiveSessionChanges_Table(t *testing.T) {
+	t.Parallel()
+
+	agent := func(name, dir string, max *int) config.Agent {
+		return config.Agent{Name: name, Dir: dir, MaxActiveSessions: max}
+	}
+
+	tests := []struct {
+		name string
+		old  *config.City
+		new  *config.City
+		want []string // formatted change lines; empty means no changes
+	}{
+		{
+			name: "bound increase reported",
+			old: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(6))},
+			},
+			new: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(8))},
+			},
+			want: []string{"pool rig-a/executor: max_active_sessions 6 → 8"},
+		},
+		{
+			name: "bound decrease reported",
+			old: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(4))},
+			},
+			new: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(2))},
+			},
+			want: []string{"pool rig-a/executor: max_active_sessions 4 → 2"},
+		},
+		{
+			name: "no pool changes",
+			old: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(6))},
+			},
+			new: &config.City{
+				Agents: []config.Agent{agent("executor", "rig-a", reloadPoolIntPtr(6))},
+			},
+			want: nil,
+		},
+		{
+			name: "default resolution via workspace max",
+			old: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: reloadPoolIntPtr(2)},
+				Agents:    []config.Agent{agent("worker", "", nil)},
+			},
+			new: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: reloadPoolIntPtr(5)},
+				Agents:    []config.Agent{agent("worker", "", nil)},
+			},
+			want: []string{"pool worker: max_active_sessions 2 → 5"},
+		},
+		{
+			name: "default resolution via rig max",
+			old: &config.City{
+				Rigs:   []config.Rig{{Name: "oss", MaxActiveSessions: reloadPoolIntPtr(3)}},
+				Agents: []config.Agent{agent("polecat", "oss", nil)},
+			},
+			new: &config.City{
+				Rigs:   []config.Rig{{Name: "oss", MaxActiveSessions: reloadPoolIntPtr(7)}},
+				Agents: []config.Agent{agent("polecat", "oss", nil)},
+			},
+			want: []string{"pool oss/polecat: max_active_sessions 3 → 7"},
+		},
+		{
+			name: "explicit agent max wins over workspace change",
+			old: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: reloadPoolIntPtr(2)},
+				Agents:    []config.Agent{agent("worker", "", reloadPoolIntPtr(4))},
+			},
+			new: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: reloadPoolIntPtr(9)},
+				Agents:    []config.Agent{agent("worker", "", reloadPoolIntPtr(4))},
+			},
+			want: nil,
+		},
+		{
+			name: "nil to unlimited equivalent skips",
+			old: &config.City{
+				Agents: []config.Agent{agent("worker", "", nil)},
+			},
+			new: &config.City{
+				Agents: []config.Agent{agent("worker", "", reloadPoolIntPtr(-1))},
+			},
+			want: nil,
+		},
+		{
+			name: "added agent does not produce pool line",
+			old: &config.City{
+				Agents: []config.Agent{agent("a", "", reloadPoolIntPtr(1))},
+			},
+			new: &config.City{
+				Agents: []config.Agent{
+					agent("a", "", reloadPoolIntPtr(1)),
+					agent("b", "", reloadPoolIntPtr(3)),
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "multiple pools sorted by name",
+			old: &config.City{
+				Agents: []config.Agent{
+					agent("planner", "rig-a", reloadPoolIntPtr(2)),
+					agent("executor", "rig-a", reloadPoolIntPtr(6)),
+				},
+			},
+			new: &config.City{
+				Agents: []config.Agent{
+					agent("planner", "rig-a", reloadPoolIntPtr(3)),
+					agent("executor", "rig-a", reloadPoolIntPtr(8)),
+				},
+			},
+			want: []string{
+				"pool rig-a/executor: max_active_sessions 6 → 8",
+				"pool rig-a/planner: max_active_sessions 2 → 3",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := poolMaxActiveSessionChanges(tt.old, tt.new)
+			if len(tt.want) == 0 {
+				if len(got) != 0 {
+					t.Fatalf("changes = %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("len(changes) = %d, want %d: %+v", len(got), len(tt.want), got)
+			}
+			for i, line := range tt.want {
+				if gotLine := formatPoolMaxBoundChangeLine(got[i]); gotLine != line {
+					t.Fatalf("change[%d] = %q, want %q", i, gotLine, line)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolMaxBoundDrainWarning(t *testing.T) {
+	t.Parallel()
+	c := poolMaxBoundChange{
+		Name: "rig-a/executor",
+		Old:  reloadPoolIntPtr(4),
+		New:  reloadPoolIntPtr(2),
+	}
+	if got := poolMaxBoundDrainWarning(c, 2); got != "" {
+		t.Fatalf("active==new bound: warning = %q, want empty", got)
+	}
+	if got := poolMaxBoundDrainWarning(c, 1); got != "" {
+		t.Fatalf("active<new bound: warning = %q, want empty", got)
+	}
+	got := poolMaxBoundDrainWarning(c, 3)
+	if !strings.Contains(got, "rig-a/executor") {
+		t.Fatalf("warning missing pool name: %q", got)
+	}
+	if !strings.Contains(got, "4 → 2") {
+		t.Fatalf("warning missing bounds: %q", got)
+	}
+	if !strings.Contains(got, "3 active") {
+		t.Fatalf("warning missing active count: %q", got)
+	}
+	if !strings.Contains(got, "normal reconcile") || !strings.Contains(got, "not replaced") {
+		t.Fatalf("warning missing attrition semantics: %q", got)
+	}
+	// Unlimited new bound never warns.
+	c.New = nil
+	if got := poolMaxBoundDrainWarning(c, 99); got != "" {
+		t.Fatalf("unlimited new: warning = %q, want empty", got)
+	}
+}
+
+func TestAppendPoolMaxBoundFeedback(t *testing.T) {
+	t.Parallel()
+	base := "Config reloaded: 1 agents, 0 rigs (rev abc)"
+	changes := []poolMaxBoundChange{
+		{Name: "rig-a/executor", Old: reloadPoolIntPtr(6), New: reloadPoolIntPtr(8)},
+		{Name: "rig-a/planner", Old: reloadPoolIntPtr(4), New: reloadPoolIntPtr(2)},
+	}
+	active := map[string]int{"rig-a/planner": 3}
+	msg, warnings := appendPoolMaxBoundFeedback(base, nil, changes, active)
+	if !strings.HasPrefix(msg, base+"\n") {
+		t.Fatalf("message prefix = %q", msg)
+	}
+	if !strings.Contains(msg, "pool rig-a/executor: max_active_sessions 6 → 8") {
+		t.Fatalf("message missing increase line: %q", msg)
+	}
+	if !strings.Contains(msg, "pool rig-a/planner: max_active_sessions 4 → 2") {
+		t.Fatalf("message missing decrease line: %q", msg)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "rig-a/planner") {
+		t.Fatalf("warnings = %v, want one planner drain warning", warnings)
+	}
+
+	// No changes: message and warnings unchanged.
+	msg2, warnings2 := appendPoolMaxBoundFeedback(base, []string{"keep"}, nil, nil)
+	if msg2 != base {
+		t.Fatalf("no-change message = %q, want %q", msg2, base)
+	}
+	if len(warnings2) != 1 || warnings2[0] != "keep" {
+		t.Fatalf("no-change warnings = %v", warnings2)
+	}
+}
+
+func TestPoolBaseIdentity(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"executor-3":       "executor",
+		"rig-a/executor-2": "rig-a/executor",
+		"executor":         "",
+		"executor-0":       "",
+		"executor-01":      "",
+		"":                 "",
+	}
+	for in, want := range cases {
+		if got := poolBaseIdentity(in); got != want {
+			t.Fatalf("poolBaseIdentity(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestReloadConfigTracedReportsPoolMaxBoundChanges(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeReloadPoolBoundConfig(t, tomlPath, 6, 4)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	// Three running pool instances under the planner template so a decrease
+	// to 2 produces a drain warning.
+	for _, name := range []string{"planner-1", "planner-2", "planner-3"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// (a) increase + (b) decrease with active above new bound
+	writeReloadPoolBoundConfig(t, tomlPath, 8, 2)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want applied; error=%q warnings=%v stderr=%q",
+			reply.Outcome, reply.Error, reply.Warnings, stderr.String())
+	}
+	if !strings.Contains(reply.Message, "pool executor: max_active_sessions 6 → 8") {
+		t.Fatalf("message missing increase: %q", reply.Message)
+	}
+	if !strings.Contains(reply.Message, "pool planner: max_active_sessions 4 → 2") {
+		t.Fatalf("message missing decrease: %q", reply.Message)
+	}
+	if !warningsContain(reply.Warnings, "pool planner: max_active_sessions 4 → 2") {
+		t.Fatalf("warnings missing drain notice: %v", reply.Warnings)
+	}
+	if !warningsContain(reply.Warnings, "3 active") {
+		t.Fatalf("warnings missing active count: %v", reply.Warnings)
+	}
+	// Increase must not produce a drain warning.
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, "executor") && strings.Contains(w, "drain") {
+			t.Fatalf("unexpected drain warning for increase: %q", w)
+		}
+	}
+}
+
+func TestReloadConfigTracedNoPoolLinesWhenBoundsUnchanged(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeReloadPoolBoundConfig(t, tomlPath, 6, 4)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+
+	// Change only an unrelated field so revision changes but pool bounds do not.
+	writeReloadPoolBoundConfigWithExtra(t, tomlPath, 6, 4, "1s")
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want applied; error=%q", reply.Outcome, reply.Error)
+	}
+	if strings.Contains(reply.Message, "max_active_sessions") {
+		t.Fatalf("message should omit pool lines when bounds unchanged: %q", reply.Message)
+	}
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, "max_active_sessions") {
+			t.Fatalf("warnings should omit pool lines: %v", reply.Warnings)
+		}
+	}
+}
+
+func TestReloadConfigTracedDefaultResolutionWorkspaceMax(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeReloadWorkspaceMaxConfig(t, tomlPath, 2)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+
+	writeReloadWorkspaceMaxConfig(t, tomlPath, 5)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want applied; error=%q", reply.Outcome, reply.Error)
+	}
+	if !strings.Contains(reply.Message, "pool worker: max_active_sessions 2 → 5") {
+		t.Fatalf("message missing default-resolution change: %q", reply.Message)
+	}
+}
+
+func writeReloadPoolBoundConfig(t *testing.T, tomlPath string, executorMax, plannerMax int) {
+	t.Helper()
+	writeReloadPoolBoundConfigWithExtra(t, tomlPath, executorMax, plannerMax, "")
+}
+
+func writeReloadPoolBoundConfigWithExtra(t *testing.T, tomlPath string, executorMax, plannerMax int, shutdownTimeout string) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	var b strings.Builder
+	b.WriteString("[workspace]\nname = \"test-city\"\n\n")
+	b.WriteString("[beads]\nprovider = \"file\"\n\n")
+	b.WriteString("[session]\nprovider = \"fake\"\n\n")
+	if shutdownTimeout != "" {
+		b.WriteString("[daemon]\nshutdown_timeout = \"")
+		b.WriteString(shutdownTimeout)
+		b.WriteString("\"\n\n")
+	}
+	b.WriteString("[[agent]]\nname = \"executor\"\nmax_active_sessions = ")
+	b.WriteString(strconv.Itoa(executorMax))
+	b.WriteString("\n\n[[agent]]\nname = \"planner\"\nmax_active_sessions = ")
+	b.WriteString(strconv.Itoa(plannerMax))
+	b.WriteString("\n")
+	if err := os.WriteFile(tomlPath, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeReloadWorkspaceMaxConfig(t *testing.T, tomlPath string, workspaceMax int) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	data := "[workspace]\nname = \"test-city\"\nmax_active_sessions = " + strconv.Itoa(workspaceMax) +
+		"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n" +
+		"[[agent]]\nname = \"worker\"\n"
+	if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
