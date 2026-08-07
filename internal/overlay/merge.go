@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // mergeablePaths is the set of relative paths that get JSON-level merge
@@ -192,7 +195,7 @@ func mergeHooksMap(base, over map[string]any) map[string]any {
 		overArr, okOver := toSliceAny(v)
 		baseArr, okBase := toSliceAny(result[k])
 		if okOver && okBase {
-			result[k] = mergeHookArray(baseArr, overArr)
+			result[k] = mergeHookArray(k, baseArr, overArr)
 		} else {
 			result[k] = v
 		}
@@ -203,19 +206,23 @@ func mergeHooksMap(base, over map[string]any) map[string]any {
 // mergeHookArray merges two arrays of hook entries by identity key.
 // Entries with the same identity → overlay replaces base in-place.
 // New entries → appended.
-func mergeHookArray(base, over []any) []any {
-	// Build ordered result starting from base entries.
-	result := make([]any, len(base))
-	copy(result, base)
-
-	// Index base entries by identity for in-place replacement.
+func mergeHookArray(category string, base, over []any) []any {
+	// Build ordered result starting from base entries, collapsing keyed
+	// duplicates so stale managed entries do not survive a later overlay
+	// replacement.
+	result := make([]any, 0, len(base)+len(over))
 	baseIdx := make(map[string]int) // identity → index in result
-	for i, entry := range result {
+	for _, entry := range base {
 		if m, ok := entry.(map[string]any); ok {
-			if key, hasKey := hookEntryKey(m); hasKey {
-				baseIdx[key] = i
+			if key, hasKey := hookEntryKey(category, m); hasKey {
+				if idx, found := baseIdx[key]; found {
+					result[idx] = entry
+					continue
+				}
+				baseIdx[key] = len(result)
 			}
 		}
+		result = append(result, entry)
 	}
 
 	for _, entry := range over {
@@ -224,7 +231,7 @@ func mergeHookArray(base, over []any) []any {
 			result = append(result, entry)
 			continue
 		}
-		key, hasKey := hookEntryKey(m)
+		key, hasKey := hookEntryKey(category, m)
 		if !hasKey {
 			// No identity → always append.
 			result = append(result, entry)
@@ -244,7 +251,12 @@ func mergeHookArray(base, over []any) []any {
 
 // hookEntryKey extracts the identity key from a hook entry.
 // Returns the key string and true if an identity was found.
-func hookEntryKey(entry map[string]any) (string, bool) {
+func hookEntryKey(category string, entry map[string]any) (string, bool) {
+	if category == "SessionStart" {
+		if key, ok := managedSessionStartHookKey(entry); ok {
+			return key, true
+		}
+	}
 	if v, ok := entry["matcher"]; ok {
 		s, sok := v.(string)
 		if !sok {
@@ -278,6 +290,67 @@ func hookEntryKey(entry map[string]any) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func managedSessionStartHookKey(entry map[string]any) (string, bool) {
+	if command, ok := entry["command"].(string); ok && isManagedSessionStartPrimeCommand(command) {
+		return "managed-session-start-prime", true
+	}
+	inner, ok := entry["hooks"].([]any)
+	if !ok {
+		return "", false
+	}
+	for _, hook := range inner {
+		m, ok := hook.(map[string]any)
+		if !ok {
+			continue
+		}
+		command, ok := m["command"].(string)
+		if ok && isManagedSessionStartPrimeCommand(command) {
+			return "managed-session-start-prime", true
+		}
+	}
+	return "", false
+}
+
+func isManagedSessionStartPrimeCommand(command string) bool {
+	// Managed commands carry a shell prefix:
+	//   export PATH="..." && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart <gc ...>
+	// Take everything after the last "&&" so the quoted PATH and the "&&"
+	// operator never reach the word splitter.
+	if idx := strings.LastIndex(command, "&&"); idx >= 0 {
+		command = command[idx+2:]
+	}
+	tokens := shellquote.Split(command)
+	i := 0
+	for i < len(tokens) && strings.Contains(tokens[i], "=") && !strings.HasPrefix(tokens[i], "=") {
+		i++ // skip leading env assignments (GC_MANAGED_SESSION_HOOK=1, …)
+	}
+	if i >= len(tokens) || tokens[i] != "gc" {
+		return false
+	}
+	args := tokens[i+1:]
+	// strip optional --city <dir> / --city=<dir>
+	if len(args) >= 2 && args[0] == "--city" {
+		args = args[2:]
+	} else if len(args) >= 1 && strings.HasPrefix(args[0], "--city=") {
+		args = args[1:]
+	}
+	// direct: prime --hook --hook-format codex
+	if len(args) >= 4 && args[0] == "prime" && args[1] == "--hook" &&
+		args[2] == "--hook-format" && args[3] == "codex" {
+		return true
+	}
+	// wrapper: hook run … -- prime --hook --hook-format codex
+	if len(args) >= 2 && args[0] == "hook" && args[1] == "run" {
+		for j := 2; j+4 < len(args); j++ {
+			if args[j] == "--" && args[j+1] == "prime" && args[j+2] == "--hook" &&
+				args[j+3] == "--hook-format" && args[j+4] == "codex" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // innerHooksKey derives a stable identity from the inner "hooks" array of a
