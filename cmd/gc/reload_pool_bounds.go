@@ -118,84 +118,51 @@ func appendPoolMaxBoundFeedback(message string, warnings []string, changes []poo
 	return strings.Join(lines, "\n"), warnings
 }
 
+// poolBoundChangesNeedActiveCounts reports whether any change is a decrease to a
+// finite bound. Drain warnings are the only consumer of session counts; skip
+// store work on unchanged reloads and on increase-only / unlimited reloads.
+func poolBoundChangesNeedActiveCounts(changes []poolMaxBoundChange) bool {
+	for _, c := range changes {
+		if c.New == nil || *c.New < 0 {
+			continue // unlimited new bound never drains
+		}
+		// Finite new bound: need counts only when it is strictly tighter than old.
+		if c.Old == nil || *c.Old < 0 {
+			return true // unlimited → finite is a decrease
+		}
+		if *c.New < *c.Old {
+			return true
+		}
+	}
+	return false
+}
+
 // countActiveSessionsByTemplate returns open session counts keyed by agent
-// QualifiedName. Prefers session beads when available; falls back to running
-// provider sessions attributed via identity resolution against cfg.
+// QualifiedName from the sessions bead store. When the store is unavailable or
+// ListAll fails, returns an empty map so callers omit drain warnings honestly
+// rather than inventing counts via provider-name heuristics.
 func (cr *CityRuntime) countActiveSessionsByTemplate(cfg *config.City) map[string]int {
 	counts := make(map[string]int)
 	if cr == nil || cfg == nil {
 		return counts
 	}
-	if store := cr.sessionsBeadStore(); store.Store != nil {
-		infos, err := sessionFrontDoor(store.Store).ListAll(sessionpkg.ListAllOptions{})
-		if err == nil {
-			for _, info := range infos {
-				if info.Closed {
-					continue
-				}
-				template := strings.TrimSpace(normalizedSessionTemplateInfo(info, cfg))
-				if template == "" {
-					continue
-				}
-				counts[template]++
-			}
-			return counts
-		}
-	}
-	if cr.sp == nil {
+	store := cr.sessionsBeadStore()
+	if store.Store == nil {
 		return counts
 	}
-	running, err := cr.sp.ListRunning("")
+	infos, err := sessionFrontDoor(store.Store).ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		return counts
 	}
-	for _, name := range running {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	for _, info := range infos {
+		if info.Closed {
 			continue
 		}
-		template := resolvedTemplateForIdentity(name, cfg)
+		template := strings.TrimSpace(normalizedSessionTemplateInfo(info, cfg))
 		if template == "" {
-			// Provider process names are sometimes city-prefixed
-			// (e.g. "gc-city-planner"). Try the final dash-separated
-			// segment as an agent identity before giving up.
-			if idx := strings.LastIndex(name, "-"); idx >= 0 {
-				if resolved := resolvedTemplateForIdentity(name[idx+1:], cfg); resolved != "" {
-					template = resolved
-				}
-			}
+			continue
 		}
-		if template == "" {
-			// Match bounded pool instance "template-N" / "dir/template-N".
-			if base := poolBaseIdentity(name); base != "" {
-				template = resolvedTemplateForIdentity(base, cfg)
-			}
-		}
-		if template != "" {
-			counts[template]++
-		}
+		counts[template]++
 	}
 	return counts
-}
-
-// poolBaseIdentity strips a trailing "-N" pool slot suffix when present.
-func poolBaseIdentity(sessionName string) string {
-	sessionName = strings.TrimSpace(sessionName)
-	if sessionName == "" {
-		return ""
-	}
-	i := strings.LastIndex(sessionName, "-")
-	if i <= 0 || i == len(sessionName)-1 {
-		return ""
-	}
-	slot := sessionName[i+1:]
-	for _, r := range slot {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	if slot == "0" || (len(slot) > 1 && slot[0] == '0') {
-		return ""
-	}
-	return sessionName[:i]
 }

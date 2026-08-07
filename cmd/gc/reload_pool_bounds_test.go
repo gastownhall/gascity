@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func reloadPoolIntPtr(n int) *int { return &n }
@@ -92,13 +93,13 @@ func TestPoolMaxActiveSessionChanges_Table(t *testing.T) {
 			name: "default resolution via rig max",
 			old: &config.City{
 				Rigs:   []config.Rig{{Name: "oss", MaxActiveSessions: reloadPoolIntPtr(3)}},
-				Agents: []config.Agent{agent("polecat", "oss", nil)},
+				Agents: []config.Agent{agent("worker-pool", "oss", nil)},
 			},
 			new: &config.City{
 				Rigs:   []config.Rig{{Name: "oss", MaxActiveSessions: reloadPoolIntPtr(7)}},
-				Agents: []config.Agent{agent("polecat", "oss", nil)},
+				Agents: []config.Agent{agent("worker-pool", "oss", nil)},
 			},
-			want: []string{"pool oss/polecat: max_active_sessions 3 → 7"},
+			want: []string{"pool oss/worker-pool: max_active_sessions 3 → 7"},
 		},
 		{
 			name: "explicit agent max wins over workspace change",
@@ -243,51 +244,49 @@ func TestAppendPoolMaxBoundFeedback(t *testing.T) {
 	}
 }
 
-func TestPoolBaseIdentity(t *testing.T) {
+func TestPoolBoundChangesNeedActiveCounts(t *testing.T) {
 	t.Parallel()
-	cases := map[string]string{
-		"executor-3":       "executor",
-		"rig-a/executor-2": "rig-a/executor",
-		"executor":         "",
-		"executor-0":       "",
-		"executor-01":      "",
-		"":                 "",
+	if poolBoundChangesNeedActiveCounts(nil) {
+		t.Fatal("nil changes should not need counts")
 	}
-	for in, want := range cases {
-		if got := poolBaseIdentity(in); got != want {
-			t.Fatalf("poolBaseIdentity(%q) = %q, want %q", in, got, want)
-		}
+	if poolBoundChangesNeedActiveCounts([]poolMaxBoundChange{
+		{Name: "a", Old: reloadPoolIntPtr(2), New: reloadPoolIntPtr(8)},
+	}) {
+		t.Fatal("increase-only should not need counts")
+	}
+	if !poolBoundChangesNeedActiveCounts([]poolMaxBoundChange{
+		{Name: "a", Old: reloadPoolIntPtr(8), New: reloadPoolIntPtr(2)},
+	}) {
+		t.Fatal("finite decrease should need counts")
+	}
+	if !poolBoundChangesNeedActiveCounts([]poolMaxBoundChange{
+		{Name: "a", Old: nil, New: reloadPoolIntPtr(2)},
+	}) {
+		t.Fatal("unlimited→finite should need counts")
+	}
+	if poolBoundChangesNeedActiveCounts([]poolMaxBoundChange{
+		{Name: "a", Old: reloadPoolIntPtr(2), New: nil},
+	}) {
+		t.Fatal("finite→unlimited should not need counts")
 	}
 }
 
-// TestCountActiveSessionsByTemplate_ProviderFallback covers the provider-list
-// attribution path when no session-bead store is available: direct identity,
-// last-segment city-prefixed names, and pool slot suffixes.
-func TestCountActiveSessionsByTemplate_ProviderFallback(t *testing.T) {
+// TestCountActiveSessionsByTemplate_NoStore returns empty when the sessions
+// bead store is unavailable — no provider-list heuristics.
+func TestCountActiveSessionsByTemplate_NoStore(t *testing.T) {
 	t.Parallel()
-
 	cfg := &config.City{
-		// SessionTemplate deliberately empty: last-segment fallback must not
-		// depend on it (prefix stripping was dead code).
-		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
 			{Name: "planner", MaxActiveSessions: reloadPoolIntPtr(4)},
-			{Name: "executor", MaxActiveSessions: reloadPoolIntPtr(6)},
 		},
 	}
-
 	sp := runtime.NewFake()
-	for _, name := range []string{
-		"planner-1",            // pool slot → planner
-		"gc-test-city-planner", // city-prefixed process name → last segment
-		"executor-2",
-		"unrelated-session", // no matching agent
-	} {
+	// Provider sessions must not be attributed without a bead store.
+	for _, name := range []string{"planner-1", "planner-2", "gc-test-city-planner"} {
 		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatalf("start %s: %v", name, err)
 		}
 	}
-
 	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: t.TempDir(),
 		CityName: "test-city",
@@ -301,16 +300,75 @@ func TestCountActiveSessionsByTemplate_ProviderFallback(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
+	counts := cr.countActiveSessionsByTemplate(cfg)
+	if len(counts) != 0 {
+		t.Fatalf("without bead store, counts = %v, want empty", counts)
+	}
+}
+
+// TestCountActiveSessionsByTemplate_BeadStore counts open session beads by template.
+func TestCountActiveSessionsByTemplate_BeadStore(t *testing.T) {
+	t.Parallel()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "planner", MaxActiveSessions: reloadPoolIntPtr(4)},
+			{Name: "executor", MaxActiveSessions: reloadPoolIntPtr(6)},
+		},
+	}
+	store := beads.NewMemStore()
+	for i, name := range []string{"planner-1", "planner-2", "executor-1"} {
+		agent := "planner"
+		if strings.HasPrefix(name, "executor") {
+			agent = "executor"
+		}
+		if _, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
+			Title:     agent,
+			AgentName: agent,
+			Metadata: map[string]string{
+				"session_name": name,
+				"template":     agent,
+			},
+		}); err != nil {
+			t.Fatalf("create session %d (%s): %v", i, name, err)
+		}
+	}
+	// Closed session must not count.
+	closedID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
+		Title:     "planner",
+		AgentName: "planner",
+		Metadata: map[string]string{
+			"session_name": "planner-closed",
+			"template":     "planner",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed session: %v", err)
+	}
+	if err := store.Close(closedID); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: t.TempDir(),
+		CityName: "test-city",
+		Cfg:      cfg,
+		SP:       runtime.NewFake(),
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(runtime.NewFake()),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.standaloneCityStore = store
 
 	counts := cr.countActiveSessionsByTemplate(cfg)
 	if got := counts["planner"]; got != 2 {
-		t.Fatalf("counts[planner] = %d, want 2 (slot + city-prefixed); full=%v", got, counts)
+		t.Fatalf("counts[planner] = %d, want 2; full=%v", got, counts)
 	}
 	if got := counts["executor"]; got != 1 {
 		t.Fatalf("counts[executor] = %d, want 1; full=%v", got, counts)
-	}
-	if _, ok := counts["unrelated-session"]; ok {
-		t.Fatalf("unexpected count for unresolved name: %v", counts)
 	}
 }
 
@@ -321,11 +379,19 @@ func TestReloadConfigTracedReportsPoolMaxBoundChanges(t *testing.T) {
 
 	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 	sp := runtime.NewFake()
-	// Three running pool instances under the planner template so a decrease
-	// to 2 produces a drain warning.
-	for _, name := range []string{"planner-1", "planner-2", "planner-3"} {
-		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
-			t.Fatalf("start %s: %v", name, err)
+	// Three open planner session beads so a decrease to 2 produces a drain warning.
+	// Counts come only from the sessions bead store (no provider-list heuristics).
+	store := beads.NewMemStore()
+	for i, name := range []string{"planner-1", "planner-2", "planner-3"} {
+		if _, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
+			Title:     "planner",
+			AgentName: "planner",
+			Metadata: map[string]string{
+				"session_name": name,
+				"template":     "planner",
+			},
+		}); err != nil {
+			t.Fatalf("create session %d (%s): %v", i, name, err)
 		}
 	}
 	var stdout, stderr bytes.Buffer
@@ -344,6 +410,7 @@ func TestReloadConfigTracedReportsPoolMaxBoundChanges(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})
+	cr.standaloneCityStore = store
 
 	// (a) increase + (b) decrease with active above new bound
 	writeReloadPoolBoundConfig(t, tomlPath, 8, 2)
