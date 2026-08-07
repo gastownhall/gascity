@@ -1049,7 +1049,8 @@ printf 'status=%s\n' "$status"
 
 	bt := "`"
 	probe := bt + "beads" + bt + "." + bt + managedDoltProbeTable + bt
-	wantSQL := "CREATE TABLE IF NOT EXISTS " + probe + " (k INT PRIMARY KEY); " +
+	wantSQL := "USE " + bt + "beads" + bt + "; " +
+		"CREATE TABLE IF NOT EXISTS " + probe + " (k INT PRIMARY KEY); " +
 		"REPLACE INTO " + probe + " VALUES (1); " +
 		"INSERT IGNORE INTO " + bt + "beads" + bt + "." + bt + "dolt_ignore" + bt +
 		" (pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1);"
