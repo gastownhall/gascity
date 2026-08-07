@@ -174,3 +174,56 @@ func TestSendKeysHiddenAttachedRecordsPoke(t *testing.T) {
 		t.Errorf("post-grace unanswered picker keystroke resolved to %v, want the genuine prior %v", got, genuine)
 	}
 }
+
+// TestSendKeysHiddenAttachedUnknownKeyFallsThroughWithoutPartialWrite pins the
+// other half of the sendHiddenAttachedKeys fix: every key is resolved to its
+// byte sequence BEFORE anything is written, so a key hiddenAttachedKeyBytes
+// cannot resolve falls the whole call through to the SendKeysRaw path with no
+// partial hidden-client write and no recorded poke. Before the fix the resolve
+// and write were interleaved per key, so SendKeys(sess, "Enter", <unknown>)
+// wrote the Enter to the hidden client, then fell through and re-sent BOTH keys
+// via SendKeysRaw — a double-delivered Enter.
+func TestSendKeysHiddenAttachedUnknownKeyFallsThroughWithoutPartialWrite(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fe
+
+	const sess = "hidden-attach-unknown-key"
+	sink := &recordingWriteCloser{}
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{
+		sess: {stdin: sink},
+	}
+	tm.hiddenAttachMu.Unlock()
+
+	p := &Provider{tm: tm}
+	// "F5" has no hiddenAttachedKeyBytes mapping; "Enter" does. The unknown key
+	// must veto the hidden write for the whole sequence, not just for itself.
+	if err := p.SendKeys(sess, "Enter", "F5"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	if got := sink.written(); got != "" {
+		t.Fatalf("hidden client received %q, want no partial write before the unknown-key fallthrough (the Enter would be double-delivered by the raw fallback)", got)
+	}
+
+	tm.pokeMu.Lock()
+	_, ok := tm.pokes[sess]
+	tm.pokeMu.Unlock()
+	if ok {
+		t.Fatal("unknown-key fallthrough recorded a poke; nothing was delivered through the hidden client")
+	}
+
+	// The raw fallback must still deliver BOTH keys, in order, via send-keys.
+	var sent []string
+	for _, call := range fe.calls {
+		for i, arg := range call {
+			if arg == "send-keys" && len(call) > i+3 && call[i+1] == "-t" && call[i+2] == sess {
+				sent = append(sent, call[i+3])
+			}
+		}
+	}
+	if len(sent) != 2 || sent[0] != "Enter" || sent[1] != "F5" {
+		t.Fatalf("SendKeysRaw fallback delivered %v, want [Enter F5]", sent)
+	}
+}
