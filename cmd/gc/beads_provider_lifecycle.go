@@ -104,6 +104,7 @@ func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
 		cfg.MaxConnections != 0 ||
 		cfg.ReadTimeoutMillis != 0 ||
 		cfg.WriteTimeoutMillis != 0 ||
+		cfg.WaitTimeoutSeconds != 0 ||
 		cfg.DoltLockReleaseTimeout != ""
 }
 
@@ -2231,7 +2232,6 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_MAX_CONNECTIONS",
 		"GC_DOLT_READ_TIMEOUT_MILLIS",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
-		"GC_DOLT_WAIT_TIMEOUT",
 		"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
 	} {
 		env = removeEnvKey(env, key)
@@ -2275,7 +2275,14 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		if dc.WriteTimeoutMillis > 0 {
 			env = append(env, fmt.Sprintf("GC_DOLT_WRITE_TIMEOUT_MILLIS=%d", dc.WriteTimeoutMillis))
 		}
+		// Unlike the fields above, GC_DOLT_WAIT_TIMEOUT is not stripped
+		// unconditionally: an ambient value is the only way this was
+		// configurable before the city field existed, so a city that stays
+		// silent must keep inheriting it rather than silently reverting to
+		// the managed default. Strip at the point of projection so the city
+		// still wins where it speaks, without leaving a duplicate key.
 		if dc.WaitTimeoutSeconds > 0 {
+			env = removeEnvKey(env, "GC_DOLT_WAIT_TIMEOUT")
 			env = append(env, fmt.Sprintf("GC_DOLT_WAIT_TIMEOUT=%d", dc.WaitTimeoutSeconds))
 		}
 		// An explicit "0s" is meaningful (probe once, no wait), so gate on

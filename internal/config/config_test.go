@@ -239,6 +239,33 @@ read_timeout_millis = -1
 	}
 }
 
+// TestLoadRejectsNegativeDoltWaitTimeoutSeconds pins wait_timeout_seconds to the
+// same non-negative rule as its sibling listener overrides. A negative value in
+// city.toml would load clean and then be discarded by the > 0 resolution guard,
+// so the operator would see the managed default with no diagnostic. The negative
+// escape hatch that suppresses the system variable entirely stays env-only, via
+// GC_DOLT_WAIT_TIMEOUT.
+func TestLoadRejectsNegativeDoltWaitTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+wait_timeout_seconds = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(fsys.OSFS{}, path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative wait_timeout_seconds rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] wait_timeout_seconds must not be negative") {
+		t.Fatalf("Load() error = %q, want wait_timeout_seconds rejection", got)
+	}
+}
+
 func TestParseWithAgentsAndStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]

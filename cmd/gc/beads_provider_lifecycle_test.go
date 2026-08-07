@@ -474,6 +474,7 @@ func TestProviderLifecycleProcessEnvPropagatesManagedDoltListenerOverrides(t *te
 		ReadTimeoutMillis:  300000,
 		WriteTimeoutMillis: 600000,
 		MaxConnections:     1024,
+		WaitTimeoutSeconds: 120,
 	})
 	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
 
@@ -489,10 +490,45 @@ func TestProviderLifecycleProcessEnvPropagatesManagedDoltListenerOverrides(t *te
 		"GC_DOLT_READ_TIMEOUT_MILLIS":  "300000",
 		"GC_DOLT_WRITE_TIMEOUT_MILLIS": "600000",
 		"GC_DOLT_MAX_CONNECTIONS":      "1024",
+		"GC_DOLT_WAIT_TIMEOUT":         "120",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// TestProviderLifecycleProcessEnvPreservesAmbientWaitTimeout pins the one
+// asymmetry in the projection: every other GC_DOLT_* listener key is stripped
+// unconditionally and re-added only from city.toml, but an ambient
+// GC_DOLT_WAIT_TIMEOUT was the only way to configure the reap window before the
+// city field existed. Stripping it for a city that stays silent would silently
+// revert such a deployment to the managed default of 30s.
+//
+// The base environment is passed as a literal slice rather than set with
+// t.Setenv: the cmd/gc environment ledger must not grow (see TESTING.md).
+func TestProviderLifecycleProcessEnvPreservesAmbientWaitTimeout(t *testing.T) {
+	cityPath := normalizePathForCompare(t.TempDir())
+	// No cityDoltConfigs entry: this is the silent-city.toml case.
+	cityDoltConfigs.Delete(cityPath)
+
+	envEntries := providerLifecycleProcessEnvFromBase(
+		cityPath,
+		"exec:"+gcBeadsBdScriptPath(cityPath),
+		[]string{"GC_DOLT_WAIT_TIMEOUT=45"},
+	)
+
+	count := 0
+	for _, entry := range envEntries {
+		if key, value, ok := strings.Cut(entry, "="); ok && key == "GC_DOLT_WAIT_TIMEOUT" {
+			count++
+			if value != "45" {
+				t.Fatalf("GC_DOLT_WAIT_TIMEOUT = %q, want %q", value, "45")
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("GC_DOLT_WAIT_TIMEOUT appears %d times, want 1; env = %v", count, envEntries)
 	}
 }
 
@@ -537,6 +573,9 @@ func TestCityDoltConfigHasLifecycleFieldsRecognizesDoltLockReleaseTimeout(t *tes
 	// entry and the value never reaches providerLifecycleProcessEnv.
 	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{DoltLockReleaseTimeout: "90s"}) {
 		t.Fatal("cityDoltConfigHasLifecycleFields must recognize DoltLockReleaseTimeout")
+	}
+	if !cityDoltConfigHasLifecycleFields(config.DoltConfig{WaitTimeoutSeconds: 120}) {
+		t.Fatal("cityDoltConfigHasLifecycleFields must recognize WaitTimeoutSeconds")
 	}
 	if cityDoltConfigHasLifecycleFields(config.DoltConfig{}) {
 		t.Fatal("cityDoltConfigHasLifecycleFields must stay false for an empty config")
