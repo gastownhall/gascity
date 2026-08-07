@@ -395,7 +395,7 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 				logPrefix, infraMigrationClassList(), report.Target.Binding, report.Target.MarkerPath(), storageMigrationCommand)
 		}
 	case infraMigrationStranded:
-		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s.",
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer, recover them into the binding's database, and re-check with `gc storage status`, which exits zero once the binding contains them.",
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	case infraMigrationUncheckable:
 		situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)

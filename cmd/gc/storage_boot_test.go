@@ -384,6 +384,12 @@ func TestStorageGateRefusalNamesTheStrandedIDs(t *testing.T) {
 	if strings.Contains(err.Error(), "see the ids above") {
 		t.Errorf("the refusal defers to output the supervisor never records: %v", err)
 	}
+	// The refusal must also say what recovery looks like: the ids alone tell
+	// the operator what is wrong, not what to do, and this string is the only
+	// output the supervisor records.
+	if !strings.Contains(err.Error(), "gc storage status") {
+		t.Errorf("the refusal names no recovery re-check: %v", err)
+	}
 }
 
 // TestStorageGateDoesNotCallAnUnreadableBindingUnmigrated covers the message on

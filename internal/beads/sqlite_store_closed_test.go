@@ -76,8 +76,12 @@ func TestSQLiteStoreExportedMethodsRejectUseAfterClose(t *testing.T) {
 			}
 		})
 	}
-	if guarded < 30 {
-		t.Fatalf("reflection reached only %d error-returning methods; the enumeration is broken", guarded)
+	// The floor is the count this enumeration reaches today. New methods are
+	// covered automatically and only raise it; a drop below it means the
+	// enumeration broke, not that the store shrank. Raise the floor when
+	// methods are deliberately removed.
+	if guarded < 36 {
+		t.Fatalf("reflection reached only %d error-returning methods, below the proven floor of 36; the enumeration is broken", guarded)
 	}
 
 	for name := range sqliteMethodsExemptFromClosedGuard {
