@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1320,6 +1321,142 @@ func TestNativeDoltStoreTxRollsBackOnError(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreCloseWithMetadataIfMatchCommitsOneFencedTerminalState(t *testing.T) {
+	storage := &commitCountingMemStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{
+		Title:    "atomic terminal state",
+		Metadata: map[string]string{"sibling": "preserved"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	commitsBeforeClose := storage.commits
+	if err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{
+		"state":        "drained",
+		"close_reason": "reconciler stop",
+	}); err != nil {
+		t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+	}
+	if got := storage.commits - commitsBeforeClose; got != 1 {
+		t.Fatalf("atomic metadata close issued %d commits, want exactly one", got)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	for key, want := range map[string]string{
+		"sibling":      "preserved",
+		"state":        "drained",
+		"close_reason": "reconciler stop",
+	} {
+		if got.Metadata[key] != want {
+			t.Fatalf("metadata[%q] = %q, want %q (metadata and close must share one commit)", key, got.Metadata[key], want)
+		}
+	}
+}
+
+func TestNativeDoltStoreCloseWithMetadataIfMatchRejectsStaleRevisionWithoutMutation(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	created, err := store.Create(Bead{Title: "stale fenced close", Metadata: map[string]string{"sibling": "before"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(created.ID, "intervening", "write"); err != nil {
+		t.Fatalf("intervening SetMetadata: %v", err)
+	}
+	before, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before stale close: %v", err)
+	}
+
+	err = store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("CloseWithMetadataIfMatch stale error = %v, want precondition failure", err)
+	}
+	after, getErr := store.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("Get after stale close: %v", getErr)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("stale close mutated bead:\n got: %#v\nwant: %#v", after, before)
+	}
+}
+
+func TestNativeDoltStoreCloseWithMetadataIfMatchRollsBackMetadataWhenCloseFails(t *testing.T) {
+	sentinel := errors.New("injected close failure")
+	storage := &nativeDoltFailingCloseStorage{
+		nativeDoltMemStorage: newNativeDoltMemStorage(),
+		closeIssue: func(context.Context, string, string, string, string) error {
+			return sentinel
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{Title: "rollback fenced close", Metadata: map[string]string{"sibling": "before"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	before, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before close: %v", err)
+	}
+
+	err = store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("CloseWithMetadataIfMatch error = %v, want injected close failure", err)
+	}
+	after, getErr := store.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("Get after failed close: %v", getErr)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("failed close left partial mutation:\n got: %#v\nwant: %#v", after, before)
+	}
+}
+
+func TestNativeDoltStoreCloseWithMetadataIfMatchHasOneSameRevisionWinner(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	created, err := store.Create(Bead{Title: "racing fenced close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	results := make(chan error, 2)
+	for _, value := range []string{"first", "second"} {
+		value := value
+		go func() {
+			results <- store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"winner": value})
+		}()
+	}
+	var wins, losses int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			wins++
+		case IsPreconditionFailed(err):
+			losses++
+		default:
+			t.Fatalf("same-revision close error = %v, want nil or precondition failure", err)
+		}
+	}
+	if wins != 1 || losses != 1 {
+		t.Fatalf("same-revision results wins=%d losses=%d, want exactly one of each", wins, losses)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after race: %v", err)
+	}
+	if got.Status != "closed" || (got.Metadata["winner"] != "first" && got.Metadata["winner"] != "second") {
+		t.Fatalf("winner state = %#v, want one complete terminal result", got)
+	}
+}
+
 func TestNativeDoltStoreDependencyRoundTrip(t *testing.T) {
 	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 	parent, err := store.Create(Bead{Title: "dependency parent"})
@@ -2557,6 +2694,24 @@ func (s *nativeDoltMemStorage) Close() error {
 type nativeDoltCloseCapturingStorage struct {
 	*nativeDoltMemStorage
 	closeReasons []string
+}
+
+type nativeDoltFailingCloseStorage struct {
+	*nativeDoltMemStorage
+	closeIssue func(context.Context, string, string, string, string) error
+}
+
+func (s *nativeDoltFailingCloseStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
+		return fn(nativeDoltTransactionForTest{storage: s})
+	})
+}
+
+func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
+	if s.closeIssue != nil {
+		return s.closeIssue(ctx, id, reason, actor, session)
+	}
+	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
 }
 
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

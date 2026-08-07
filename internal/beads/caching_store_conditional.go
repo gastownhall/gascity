@@ -31,9 +31,54 @@ import (
 // succeeds, feeds the change notification verbatim and nothing else.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)
+	_ AtomicConditionalCloser          = (*CachingStore)(nil)
 	_ conditionalWritesModeCarrier     = (*CachingStore)(nil)
 	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
 )
+
+// CloseWithMetadataIfMatch delegates the indivisible terminal write only when
+// its resolved backing exposes that capability. The cache always evicts after
+// a proven success: no returned row can be attributed to this write, so
+// retaining one would invent a revisioned snapshot. The closed notification is
+// emitted exactly once even when a backing hides closed beads from Get.
+func (c *CachingStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error {
+	closer, ok := AtomicConditionalCloserFor(c.conditionalBacking())
+	if !ok {
+		return ErrConditionalWriteUnsupported
+	}
+	if err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata); err != nil {
+		c.applyConditionalWriteFailure(id, err)
+		return err
+	}
+
+	fresh, err := c.backing.Get(id)
+	c.evictForConditionalWrite(id)
+	if err == nil {
+		// The successful capability call proves the terminal status. Do not
+		// install this best-effort reread into the cache.
+		fresh.Status = "closed"
+		c.notifyChange("bead.closed", fresh)
+		return nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		c.recordProblem("refresh bead after atomic conditional close", fmt.Errorf("%s: %w", id, err))
+	}
+	// The capability call is the proof of closure; ID and terminal status are
+	// the only facts safe to publish when the reread is unavailable.
+	c.notifyChange("bead.closed", Bead{ID: id, Status: "closed"})
+	return nil
+}
+
+// AtomicConditionalCloserHandle exposes the cache forwarding surface only when
+// its resolved backing can perform the atomic terminal write. Returning the
+// cache (rather than the backing) preserves eviction and notification semantics
+// for callers that discover the optional capability through this handle.
+func (c *CachingStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
+	if _, ok := AtomicConditionalCloserFor(c.conditionalBacking()); !ok {
+		return nil, false
+	}
+	return c, true
+}
 
 // The cache is a wrapper, not a second store, so it carries no
 // conditional-writes stamp of its own (§6.3): the stamp, its read, and the

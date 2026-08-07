@@ -213,6 +213,39 @@ type ConditionalWriter interface {
 	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
 }
 
+// AtomicConditionalCloser closes a bead and merges metadata only when the
+// bead's revision still equals expectedRevision. Implementations commit the
+// metadata and close together, or neither change persists.
+//
+// This is deliberately narrower than ConditionalWriter: it is needed only by
+// terminal-state writers that cannot tolerate a metadata/close split, and is
+// exposed only by stores that can prove both operations share one transaction.
+type AtomicConditionalCloser interface {
+	CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) error
+}
+
+// AtomicConditionalCloserHandleProvider lets a wrapper expose the atomic
+// terminal-write capability of its resolved backing without claiming it when
+// that backing cannot provide it.
+type AtomicConditionalCloserHandleProvider interface {
+	AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool)
+}
+
+// AtomicConditionalCloserFor returns the atomic terminal-write capability when
+// store implements it. Unlike ConditionalWriterFor, this is not a rollout
+// policy seam: callers must refuse when the underlying store cannot provide
+// this all-or-nothing operation.
+func AtomicConditionalCloserFor(store Store) (AtomicConditionalCloser, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if provider, ok := store.(AtomicConditionalCloserHandleProvider); ok {
+		return provider.AtomicConditionalCloserHandle()
+	}
+	closer, ok := store.(AtomicConditionalCloser)
+	return closer, ok
+}
+
 // ErrEmptyConditionalUpdate reports an UpdateIfMatch with no fields to apply.
 // The three in-tree implementations diverged here (bd cannot express an empty
 // fenced update; the native stores validated-and-bumped), so the contract is
