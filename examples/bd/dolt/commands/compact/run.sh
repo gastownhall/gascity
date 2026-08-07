@@ -1172,6 +1172,7 @@ verify_counts() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1270,6 +1271,7 @@ verify_counts() {
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
+        verify_counts_same_count_drift_tables="$verify_counts_same_count_drift_tables $t"
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -2257,6 +2259,7 @@ flatten_database() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -2736,8 +2739,9 @@ flatten_database() {
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
     # Downgrade quarantine -> defer ONLY for the ambiguous gain+drift case when
     # a concurrent writer is proven. Every other integrity failure (row-count
-    # decrease, same-count hash drift, table-list drift, probe failure) and the
-    # gain+drift case with a stable HEAD still quarantine below unchanged.
+    # decrease, same-count hash drift, table-list drift, probe failure) falls
+    # through: to the direct preservation proof immediately below where drift is
+    # the only category, and to the quarantine otherwise.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
@@ -2756,24 +2760,35 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
-    # Option A (#2846): HEAD movement is only a proxy for "pre-flight rows
-    # remain reachable". When gain+drift is the only failure category but no
-    # concurrent writer was HEAD-proven — the absorbed-writer race, where the
-    # writer's commit was folded into the flatten and left no HEAD fingerprint
-    # — prove preservation directly by diffing the pre-flight snapshot HEAD
-    # against the flatten commit for each gained+drifted table. Purely additive
-    # (no removed/modified rows) proves every pre-flight row survived; defer
-    # exactly as the HEAD-proven path above does. Any removed/modified row, or
-    # a diff-probe failure, fails closed and falls through to the quarantine.
-    if [ "${verify_counts_saw_gain:-0}" = "1" ] && \
-       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+    # Option A (#2846, widened for #3341): HEAD movement is only a proxy for
+    # "pre-flight rows remain reachable". When table value-hash drift is the
+    # only failure category — with a row gain (concurrent INSERT), without one
+    # (concurrent in-place UPDATE), or a mix of both across tables — prove
+    # preservation directly by diffing the pre-flight snapshot HEAD against the
+    # flatten commit for each drifted table. A diff that drops no row proves
+    # every pre-flight row survived; defer exactly as the HEAD-proven path
+    # above does. Any removed row, or a diff-probe failure, fails closed and
+    # falls through to the quarantine.
+    #
+    # This needs no HEAD proof because it proves reachability instead of
+    # inferring it, so it also carries the absorbed-writer race, where the
+    # writer's commit was folded into the flatten and left no HEAD fingerprint.
+    # Same-count hash drift stays disqualifying for the two HEAD-proxy branches
+    # around it — those infer preservation and have no direct evidence — but an
+    # in-place UPDATE is the dominant write shape on a busy issues table, so
+    # refusing it here made a HEAD-proven writer race quarantine anyway and left
+    # the check unsatisfiable on a live store (#3341). A concurrent DELETE shows
+    # as a removed row, fails this proof, and is carried by the row-decrease
+    # writer-race branch below.
+    verify_counts_drift_proof_tables="${verify_counts_gain_drift_tables}${verify_counts_same_count_drift_tables}"
+    if { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
+         [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; } && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
-       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
-      printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+       drift_preserves_preflight_rows "$db" "$head" "$flatten_head" "$verify_counts_drift_proof_tables"; then
+      printf 'compact: db=%s value-hash drift proven row-preserving via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (concurrent writer), not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "$flatten_head" "${verify_counts_drift_proof_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then

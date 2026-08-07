@@ -856,7 +856,7 @@ case "$query" in
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if [ "$mode" = "same_row_count_writer" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_update_race" ] || [ "$mode" = "preservation_diff_probe_failure" ] || [ "$mode" = "mixed_update_and_insert_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -864,7 +864,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('notes')"*)
-    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "mixed_update_and_insert_race" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-notes-after-writer
       exit 0
     fi
@@ -1002,7 +1002,7 @@ case "$query" in
       print_cell blocked_issues
       exit 0
     fi
-    if [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ]; then
+    if [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "mixed_update_and_insert_race" ]; then
       print_cells beads notes
       exit 0
     fi
@@ -1015,6 +1015,35 @@ case "$query" in
       exit 0
     fi
     print_cell beads
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"'beads')"*|*"DOLT_DIFF("*"'notes')"*)
+    # Post-flatten preservation proof (drift_preserves_preflight_rows): count of
+    # rows DROPPED between the stable pre-flight HEAD and the flatten commit for
+    # a drifted table that is in the verified set. Zero proves every pre-flight
+    # row survived whatever the concurrent writer did to it. This arm must stay
+    # ABOVE the row-count arms below — the proof is a SELECT COUNT(*) naming the
+    # same table, so they would otherwise answer it with a row count.
+    case "$mode" in
+      same_row_count_update_race|mixed_update_and_insert_race)
+        # Concurrent in-place UPDATE (and, in the mixed mode, a concurrent
+        # INSERT alongside it): rows change value, none are dropped.
+        print_cell 0
+        ;;
+      same_table_replacement_with_row_gain|mixed_row_count_gain_and_same_count_hash_drift|writer_race_with_mixed_same_count_hash_drift|same_row_count_writer|row_count_and_hash_diverges)
+        # A pre-flight row is gone at the flatten commit — preservation is
+        # unprovable however HEAD moved, so these stay quarantined.
+        print_cell 1
+        ;;
+      preservation_diff_probe_failure)
+        printf 'preservation diff unavailable\n' >&2
+        exit 56
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"blocked_issues"*)
@@ -1054,7 +1083,7 @@ case "$query" in
       printf 'row count exploded after flatten\n' >&2
       exit 47
     fi
-    if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
+    if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "mixed_update_and_insert_race" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 11
     elif { [ "$mode" = "row_count_decreases" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 9
@@ -2644,6 +2673,101 @@ func TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead(t *testing.
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("stable-HEAD gain+drift must block full GC:\n%s", string(data))
+	}
+}
+
+// assertCompactPreservationDeferred encodes the shared expectations for a defer
+// carried by the direct preservation proof rather than by HEAD movement: the
+// run exits 0, names the proof in its defer message, writes NO quarantine
+// marker, records the pending-GC retry marker, and leaves GC for the next run.
+func assertCompactPreservationDeferred(t *testing.T, fixture compactScriptFixture, out string, err error, tables string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("preservation defer must exit 0 (skip, not failure): %v\n%s", err, out)
+	}
+	want := "value-hash drift proven row-preserving via DOLT_DIFF(headcommit..compactcommit) for tables [" + tables + "]"
+	if !strings.Contains(out, want) || !strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing preservation defer message %q:\n%s", want, out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("preservation defer must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("preservation defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("preservation defer must skip GC this run:\n%s", string(data))
+	}
+}
+
+// Production incident (hq since 2026-07-29, dip since 2026-08-04, #3341): the
+// post-flatten row_count / table_value_hash probes read the LIVE working set of
+// a continuously-written DB, so an in-place UPDATE landing inside the flatten
+// window drifts a table's value hash with no row-count change. That is the
+// dominant write shape on a busy issues table (bd update, heartbeats, status
+// and metadata writes), and same-count drift disqualified every branch of the
+// writer-race ladder — so the DB re-quarantined roughly every two hours and all
+// future GC of it stayed blocked. The verification was unsatisfiable by
+// construction: a flatten of a 320k-row table takes far longer than the gap
+// between writes.
+//
+// An UPDATE rewrites a row's values but keeps the row reachable, so the direct
+// DOLT_DIFF proof drops no row and preservation holds. Defer, do not quarantine.
+func TestCompactScriptDefersSameCountHashDriftProvenRowPreserving(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_row_count_update_race", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing the same-count drift signal that the proof clears:\n%s", out)
+	}
+	if strings.Contains(out, "writer race detected") {
+		t.Fatalf("stable HEAD must not be misclassified as a HEAD-proven writer race:\n%s", out)
+	}
+	assertCompactPreservationDeferred(t, fixture, out, err, "beads")
+}
+
+// A concurrent INSERT and a concurrent UPDATE landing in the same flatten window
+// produce gain+drift on one table and same-count drift on another. Both tables
+// must be proven — the union of the two drift lists is what the proof runs over.
+func TestCompactScriptDefersMixedGainAndSameCountDriftProvenRowPreserving(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "mixed_update_and_insert_race", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "table=beads gained rows during flatten") ||
+		!strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing the mixed gain+drift and same-count drift signals:\n%s", out)
+	}
+	assertCompactPreservationDeferred(t, fixture, out, err, "beads notes")
+}
+
+// The proof is the only evidence on this branch — there is no HEAD proxy behind
+// it — so a diff probe that cannot answer must fail closed and quarantine.
+func TestCompactScriptQuarantinesSameCountHashDriftWhenPreservationProbeFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "preservation_diff_probe_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("an unanswerable preservation proof must stay a blocking failure:\n%s", out)
+	}
+	if strings.Contains(out, "proven row-preserving") {
+		t.Fatalf("a failed diff probe must not report a proof:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
+		t.Fatalf("unproven same-count drift should escalate as an integrity failure:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed without row-count increase" {
+		t.Fatalf("unproven same-count drift must quarantine with the same-count reason, got %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unproven same-count drift must block full GC:\n%s", string(data))
 	}
 }
 
