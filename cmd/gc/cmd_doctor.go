@@ -277,20 +277,46 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	storeFactory := openStoreForCity(cityPath)
 
+	// One store preflight gates every store-dependent check (city multi-scope
+	// + per-rig) so an unreachable store is not re-opened dozens of times
+	// (#5064). buildDoctorChecks also runs at gc start warmup construction.
+	storeOK := true
+	var storePreflightErr error
+	var activeRigs []config.Rig
+	if cfgErr == nil && cfg != nil {
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+		activeRigs = make([]config.Rig, 0, len(cfg.Rigs))
+		for _, rig := range cfg.Rigs {
+			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
+				continue
+			}
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			activeRigs = append(activeRigs, rig)
+		}
+		if err := doctorBeadStorePreflight(cityPath, storeFactory); isBeadStoreUnreachable(err) {
+			storeOK = false
+			storePreflightErr = err
+		}
+	}
+
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
-		register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
-		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
-		register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
-		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
-		register(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
-		register(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
-		register(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
-		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
-		register(newBacklogDepthCheck(cityPath, storeFactory))
-		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
-		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+		if storeOK {
+			register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
+			register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+			register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
+			register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+			register(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
+			register(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
+			register(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
+			register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
+			register(newBacklogDepthCheck(cityPath, storeFactory))
+			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
+			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
 	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
@@ -332,30 +358,32 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
 	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
 
-	// Custom types check — city store.
-	register(doctor.NewCustomTypesCheck(cityPath, "city"))
-	register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
+	// Custom types / hold-label conventions — city store (gated with preflight).
+	if storeOK {
+		register(doctor.NewCustomTypesCheck(cityPath, "city"))
+		register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
+	}
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil && cfg != nil {
-		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
-		for _, rig := range cfg.Rigs {
-			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
-				continue
-			}
-			if strings.TrimSpace(rig.Path) == "" {
-				continue
-			}
+		if !storeOK {
+			skipCount := beadStorePreflightSkipCount(len(activeRigs))
+			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
+		}
+		for _, rig := range activeRigs {
 			register(doctor.NewRigPathCheck(rig))
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
-			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
+			if storeOK {
+				register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
+			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
-			// Custom types check — rig store.
-			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
-			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
+			if storeOK {
+				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+				register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
+			}
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
