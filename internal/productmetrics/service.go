@@ -1186,6 +1186,16 @@ func persistStateMutation(root *storageRoot, state persistedState, allowAppliedA
 		}
 		return loadedState{}, err
 	}
+	if installed.lease == nil || installed.lease.incarnation() != result.record {
+		// The path re-open read back the exact bytes this mutation wrote, but
+		// from a different file than the one this write installed: a peer
+		// replaced the record inside the rename→read-back window. Authority
+		// must bind to the record this process installed — adopting the
+		// peer's file would leave two holders revalidating successfully
+		// against the same incarnation.
+		_ = installed.Close()
+		return loadedState{}, ErrStateChangedConcurrently
+	}
 	if result.state == storageWriteAppliedSyncPending {
 		if !allowAppliedActivation {
 			_ = installed.Close()
