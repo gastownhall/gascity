@@ -356,6 +356,16 @@ func TestLegacyCombinedFenceComparisonAllowsOnlyWALIndexReaderMarkChurn(t *testi
 	if _, err := shm.WriteAt([]byte{1}, 100); err != nil {
 		t.Fatalf("changing legacy WAL-index reader mark: %v", err)
 	}
+	// The reader-mark region is deliberately excluded from the WAL-index hash,
+	// so the STRICT comparison's sensitivity to this write rests on ModTime
+	// alone. A same-tick write is invisible on filesystems with coarse
+	// timestamp granularity (CI runners), which is a property of the kernel,
+	// not of the comparator. Move the mtime explicitly so the test asserts the
+	// comparator's field sensitivity deterministically everywhere.
+	markTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(shmPath, markTime, markTime); err != nil {
+		t.Fatalf("bumping legacy WAL-index mtime: %v", err)
+	}
 	afterReadMark, err := captureLegacyCombinedSource(sourceDir)
 	if err != nil {
 		t.Fatalf("capturing legacy source after reader-mark change: %v", err)

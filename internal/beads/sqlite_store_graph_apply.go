@@ -273,8 +273,10 @@ func sqliteGraphEdgeMetadataPart(value string) string {
 // dependency that touches one of ids. Dependency rows are stored separately,
 // so callers use this in the same transaction that removes those rows.
 func (s *SQLiteStore) clearGraphEdgeMetadataForBeadsTx(ctx context.Context, tx *sql.Tx, ids []string) error {
-	clauses := make([]string, 0, len(ids)*2)
-	args := make([]any, 0, len(ids)*2)
+	// No capacity hint: the id lists here are small, and arithmetic inside an
+	// allocation size is what code scanners flag as overflow-prone.
+	var clauses []string
+	var args []any
 	for _, id := range ids {
 		if id == "" {
 			continue

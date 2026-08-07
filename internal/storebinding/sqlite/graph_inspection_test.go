@@ -206,6 +206,14 @@ func TestGraphSourceFenceComparisonAllowsOnlyWALIndexReaderMarkChurn(t *testing.
 	if _, err := shm.WriteAt([]byte{1}, 100); err != nil {
 		t.Fatalf("changing Graph WAL-index reader mark: %v", err)
 	}
+	// The reader-mark region is deliberately excluded from the WAL-index hash,
+	// so the STRICT comparison's sensitivity to this write rests on ModTime
+	// alone. Move the mtime explicitly so the assertion does not depend on the
+	// filesystem's timestamp granularity (coarse on CI runners).
+	markTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(shmPath, markTime, markTime); err != nil {
+		t.Fatalf("bumping Graph WAL-index mtime: %v", err)
+	}
 	after, err := captureGraphSource(databasePath)
 	if err != nil {
 		t.Fatalf("capturing Graph source after read mark: %v", err)

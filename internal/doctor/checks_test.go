@@ -3381,6 +3381,40 @@ max_connections = 1024
 	}
 }
 
+// TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout is the regression for the
+// false drift this check used to report. It resolved the expected wait_timeout
+// from the doctor process's own GC_DOLT_WAIT_TIMEOUT, so a city that configures
+// the value looked drifted whenever doctor ran from a shell that does not export
+// it — and the remediation hint then advised the stop/restart that would have
+// really introduced drift. The env is deliberately left UNSET here: that is the
+// operator-shell case.
+func TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+wait_timeout_seconds = 120
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("Load city.toml: %v", err)
+	}
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "120",
+	})
+	c := NewDoltConfigCheckForConfig(dir, false, cfg, nil)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for city-configured wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestDoltConfigCheck_AcceptsLegacyArchiveLevelOne(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	writeDoctorManagedDoltConfig(t, dir, map[string]any{
