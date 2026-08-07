@@ -1754,15 +1754,36 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	if client == nil {
 		return false, nil
 	}
-	for _, key := range keys {
+	if len(keys) == 0 {
+		return true, nil
+	}
+	// Resolve every key to its byte sequence before writing anything: an unknown
+	// key must fall through to the SendKeysRaw path (used=false) without a partial
+	// hidden-client write or a recorded poke.
+	seqs := make([][]byte, len(keys))
+	for i, key := range keys {
 		seq, ok := hiddenAttachedKeyBytes(key)
 		if !ok {
 			return false, nil
 		}
+		seqs[i] = seq
+	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too — mirroring sendHiddenAttachedText. Without it, the
+	// detached-Gemini rewind picker keys ResetInterruptedTurn drives through
+	// SendKeys (and the detached Interrupt's Ctrl-C) would let gc's own final
+	// keystroke echo count as the agent responding once the sequence outlasts
+	// pokeEcho (see discountPokeActivity). beginPoke captures the genuine prior
+	// before the first write — carrying a still-unanswered earlier poke's baseline
+	// forward so chained gc echoes don't become the new prior — and stamps it only
+	// after the last key lands. A failed write records nothing.
+	commitPoke := t.beginPoke(target)
+	for _, seq := range seqs {
 		if err := client.write(seq); err != nil {
 			return true, err
 		}
 	}
+	commitPoke()
 	return true, nil
 }
 
