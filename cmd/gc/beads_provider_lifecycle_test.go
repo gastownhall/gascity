@@ -666,7 +666,14 @@ func TestGcBeadsBdReadOnlyFallbackDoesNotTargetLegacyProbeDatabase(t *testing.T)
 	script := string(scriptData)
 	assertNoManagedDoltProbeDrop(t, "gc-beads-bd read-only fallback", script)
 	assertNoManagedDoltProbeLegacyTarget(t, "gc-beads-bd read-only fallback", script)
-	for _, want := range []string{"SHOW DATABASES", managedDoltProbeTable, "performance_schema", "sys"} {
+	for _, want := range []string{
+		"SHOW DATABASES",
+		managedDoltProbeTable,
+		"performance_schema",
+		"sys",
+		"INSERT IGNORE INTO ",
+		"(pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1)",
+	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("gc-beads-bd read-only fallback missing %q", want)
 		}
@@ -882,6 +889,21 @@ func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatab
 	}
 }
 
+// runShHarness runs a generated harness script through sh with the given
+// environment and fails the test if the script itself errors. Shared by the
+// gc-beads-bd harness tests so the untagged subprocess census carries one call
+// site instead of one per test.
+func runShHarness(t *testing.T, harness, label string, env []string) []byte {
+	t.Helper()
+	cmd := exec.Command("sh", harness)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s harness failed: %v\n%s", label, err, out)
+	}
+	return out
+}
+
 func TestGcBeadsBdReadOnlyFallbackNoUserDatabaseIsDiagnostic(t *testing.T) {
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
@@ -933,15 +955,10 @@ printf 'status=%s\n' "$status"
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("sh", harness)
-	cmd.Env = append(sanitizedBaseEnv(
+	out := runShHarness(t, harness, "check_read_only", append(sanitizedBaseEnv(
 		"INVOCATION_FILE="+invocationFile,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-	), "GC_BIN=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("check_read_only harness failed: %v\n%s", err, out)
-	}
+	), "GC_BIN="))
 	if !strings.Contains(string(out), "status=2") {
 		t.Fatalf("check_read_only output = %s, want diagnostic status 2", out)
 	}
@@ -954,6 +971,94 @@ printf 'status=%s\n' "$status"
 	}
 	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
 		t.Fatalf("check_read_only ran write probe without user database:\n%s", invocation)
+	}
+}
+
+// TestGcBeadsBdReadOnlyFallbackRegistersProbeTableInDoltIgnore pins the shell
+// fallback probe to the same SQL the gc binary builds in
+// managedDoltReadOnlyProbeStatementsFor: the probe table is registered in
+// dolt_ignore so history flattening can never first-commit it (an unregistered
+// probe table is committed by the compaction flatten's `DOLT_COMMIT -Am`, which
+// drifts the database hash and quarantines GC for that database — hq June 2026,
+// daa 2026-08-04). The registration must stay LAST so a read-only server still
+// fails on the CREATE or REPLACE, which is what this function's read-only
+// classification keys on.
+func TestGcBeadsBdReadOnlyFallbackRegistersProbeTableInDoltIgnore(t *testing.T) {
+	cityPath := t.TempDir()
+	materializeBuiltinPacksForTest(t, cityPath)
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  *"sql -r csv -q SHOW DATABASES"*)
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\nbeads\n'
+    exit 0
+    ;;
+  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
+    echo "Error: this server is set to read only mode" >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "read-only-probe-sql.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+set +e
+check_read_only
+status=$?
+set -e
+printf 'status=%s\n' "$status"
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runShHarness(t, harness, "check_read_only", append(sanitizedBaseEnv(
+		"INVOCATION_FILE="+invocationFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	), "GC_BIN="))
+	if !strings.Contains(string(out), "status=0") {
+		t.Fatalf("check_read_only output = %s, want read-only status 0 (ignore registration must not disturb classification)", out)
+	}
+	invocationData, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	invocation := string(invocationData)
+
+	bt := "`"
+	probe := bt + "beads" + bt + "." + bt + managedDoltProbeTable + bt
+	wantSQL := "USE " + bt + "beads" + bt + "; " +
+		"CREATE TABLE IF NOT EXISTS " + probe + " (k INT PRIMARY KEY); " +
+		"REPLACE INTO " + probe + " VALUES (1); " +
+		"INSERT IGNORE INTO " + bt + "beads" + bt + "." + bt + "dolt_ignore" + bt +
+		" (pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1);"
+	if !strings.Contains(invocation, wantSQL) {
+		t.Fatalf("check_read_only write probe SQL missing dolt_ignore registration.\ninvocation:\n%s\nwant substring:\n%s", invocation, wantSQL)
+	}
+	if strings.Contains(invocation, "REPLACE INTO "+bt+"beads"+bt+"."+bt+"dolt_ignore"+bt) {
+		t.Fatalf("check_read_only must INSERT IGNORE the rule so an operator ignored=0 override survives:\n%s", invocation)
 	}
 }
 
@@ -1011,15 +1116,10 @@ printf 'status=%s\n' "$status"
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("sh", harness)
-	cmd.Env = append(sanitizedBaseEnv(
+	out := runShHarness(t, harness, "op_health", append(sanitizedBaseEnv(
 		"INVOCATION_FILE="+invocationFile,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-	), "GC_BIN=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("op_health harness failed: %v\n%s", err, out)
-	}
+	), "GC_BIN="))
 	if !strings.Contains(string(out), "status=0") {
 		t.Fatalf("op_health output = %s, want success status", out)
 	}
@@ -1080,12 +1180,7 @@ printf 'status=%%s\n' "$status"
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("sh", harness)
-	cmd.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("check_read_only harness failed: %v\n%s", err, out)
-	}
+	out := runShHarness(t, harness, "check_read_only", sanitizedBaseEnv("PATH="+os.Getenv("PATH")))
 	if !strings.Contains(string(out), "status=2") {
 		t.Fatalf("check_read_only output = %s, want diagnostic status 2", out)
 	}
