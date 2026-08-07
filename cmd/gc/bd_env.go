@@ -118,6 +118,37 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 	return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
 }
 
+// errBdNotOnPath reports that neither the workspace pin nor the ambient
+// lookup produced a bd executable. Callers phrase their own remediation.
+var errBdNotOnPath = errors.New("bd not found in PATH")
+
+// resolveBdBinaryForCity resolves the bd executable a city runs. A scope
+// carrying a complete storage binding runs the binary its workspace PATH
+// pins, because only that build speaks the bound backend; every other scope
+// keeps the ambient lookup. An ambient miss is errBdNotOnPath so callers can
+// phrase their own remediation; a pin that is configured but unresolvable is
+// returned verbatim rather than masked as a missing binary.
+func resolveBdBinaryForCity(cityPath string) (string, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return "", err
+	}
+	if completeBinding {
+		pinned, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return "", err
+		}
+		if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
+			return pinned, nil
+		}
+	}
+	bdPath, err := exec.LookPath("bd")
+	if err != nil {
+		return "", errBdNotOnPath
+	}
+	return bdPath, nil
+}
+
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {

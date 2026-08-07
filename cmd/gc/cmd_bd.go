@@ -321,9 +321,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
+	// Resolve the same binary every other bd path in the tree resolves: a
+	// city whose scope carries a complete storage binding pins the bd build
+	// that speaks that backend, and the passthrough must honor the pin or it
+	// hands the command to an ambient bd that rejects the bound backend.
+	bdPath, err := resolveBdBinaryForCity(cityPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

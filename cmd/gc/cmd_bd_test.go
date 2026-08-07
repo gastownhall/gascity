@@ -2478,3 +2478,91 @@ prefix = "fe"
 		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
 	}
 }
+
+// TestGcBdPassthroughResolvesBdBinary pins the binary the `gc bd`
+// passthrough execs. A city whose scope carries a complete storage binding
+// runs the bd its workspace PATH pins — an ambient bd that cannot speak the
+// bound backend would reject every command. A city with neither a binding
+// nor a pin keeps the ambient lookup.
+func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
+	t.Run("complete binding runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t, "ambient-bd")
+
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		cityTOML := "[workspace]\nname = \"demo\"\n\n[workspace.env]\nPATH = " +
+			strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		metadata := []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`)
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), metadata, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
+	t.Run("no binding falls back to ambient bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t, "ambient-bd")
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
+		}
+	})
+}
+
+// newGcBdBinaryProbeCity returns a city whose only bd on the ambient PATH
+// reports the given identity, so a passthrough test can tell which binary
+// actually ran. The caller writes city.toml.
+func newGcBdBinaryProbeCity(t *testing.T, ambientIdentity string) string {
+	t.Helper()
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// See TestResolveBdScopeTarget: isolate cwd so any `.beads/redirect` in
+	// the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	ambientDir := t.TempDir()
+	writeGcBdProbeScript(t, filepath.Join(ambientDir, "bd"), ambientIdentity)
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "bd")
+	return cityDir
+}
+
+// writeGcBdProbeScript writes a stand-in bd that announces which binary ran.
+func writeGcBdProbeScript(t *testing.T, path, identity string) {
+	t.Helper()
+	script := "#!/bin/sh\necho " + identity + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}

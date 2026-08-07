@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1493,23 +1492,11 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // runner keeps the logical command name as "bd" so its timeout, telemetry,
 // and backup policy still apply while executing that pin.
 func requireBdBinaryForCity(cityPath string) error {
-	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
-	if err != nil {
-		return err
-	}
-	if completeBinding {
-		pinned, err := workspacePinnedBdBinary(cityPath)
-		if err != nil {
-			return err
-		}
-		if filepath.IsAbs(strings.TrimSpace(pinned)) {
-			return nil
-		}
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
+	_, err := resolveBdBinaryForCity(cityPath)
+	if errors.Is(err, errBdNotOnPath) {
 		return fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 	}
-	return nil
+	return err
 }
 
 // openExecStoreAtForCityWithConfig opens the exec-provider store for a city.
