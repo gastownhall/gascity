@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2271,6 +2272,7 @@ func (s *nativeDoltStorageSpy) Close() error {
 type nativeDoltMemStorage struct {
 	beadslib.Storage
 	store *MemStore
+	txMu  sync.Mutex
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
@@ -2284,6 +2286,8 @@ func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn 
 }
 
 func runNativeDoltMemStorageTransactionForTest(storage *nativeDoltMemStorage, fn func() error) error {
+	storage.txMu.Lock()
+	defer storage.txMu.Unlock()
 	storage.store.mu.Lock()
 	seq, beads, deps := storage.store.snapshot()
 	storage.store.mu.Unlock()
@@ -2338,6 +2342,23 @@ func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates
 	return s.store.Update(id, opts)
 }
 
+func (s *nativeDoltMemStorage) UpdateIssueChecked(
+	_ context.Context,
+	id string,
+	updates map[string]interface{},
+	_ string,
+	opts beadslib.UpdateIssueOptions,
+) error {
+	updateOpts, err := nativeDoltMemUpdateOpts(updates)
+	if err != nil {
+		return err
+	}
+	if opts.ExpectedVersion == nil {
+		return s.store.Update(id, updateOpts)
+	}
+	return nativeDoltMemCheckedError(s.store.UpdateIfMatch(id, *opts.ExpectedVersion, updateOpts))
+}
+
 func (s *nativeDoltMemStorage) ReopenIssue(_ context.Context, id string, _ string, _ string) error {
 	return s.store.Reopen(id)
 }
@@ -2346,8 +2367,40 @@ func (s *nativeDoltMemStorage) CloseIssue(_ context.Context, id string, _ string
 	return s.store.Close(id)
 }
 
+func (s *nativeDoltMemStorage) CloseIssueChecked(
+	_ context.Context,
+	id string,
+	_ string,
+	opts beadslib.CloseIssueOptions,
+) (beadslib.CloseIssueResult, error) {
+	current, err := s.store.Get(id)
+	if err != nil {
+		return beadslib.CloseIssueResult{}, err
+	}
+	if opts.ExpectedVersion == nil {
+		err = s.store.Close(id)
+	} else {
+		err = s.store.CloseIfMatch(id, *opts.ExpectedVersion)
+	}
+	if err != nil {
+		return beadslib.CloseIssueResult{}, nativeDoltMemCheckedError(err)
+	}
+	return beadslib.CloseIssueResult{Unchanged: current.Status == "closed"}, nil
+}
+
 func (s *nativeDoltMemStorage) DeleteIssue(_ context.Context, id string) error {
 	return s.store.Delete(id)
+}
+
+func (s *nativeDoltMemStorage) DeleteIssueChecked(_ context.Context, id string, expectedVersion int64) error {
+	return nativeDoltMemCheckedError(s.store.DeleteIfMatch(id, expectedVersion))
+}
+
+func nativeDoltMemCheckedError(err error) error {
+	if !IsPreconditionFailed(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", beadslib.ErrVersionMismatch, err)
 }
 
 func (s *nativeDoltMemStorage) SearchIssues(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
