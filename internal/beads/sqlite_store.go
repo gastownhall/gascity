@@ -293,13 +293,17 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	return s, nil
 }
 
+// sqliteStoreDSNReadOnlyMode is the mode= value that makes a connection
+// incapable of writing or checkpointing.
+const sqliteStoreDSNReadOnlyMode = "ro"
+
 // sqliteStoreDSN returns a file URI whose path and query are encoded
 // independently. In read-only mode SQLite's mode=ro is a hard capability: it
 // cannot take a write lock or checkpoint a source WAL during close.
 func sqliteStoreDSN(path string, readOnly bool) string {
 	mode := ""
 	if readOnly {
-		mode = "ro"
+		mode = sqliteStoreDSNReadOnlyMode
 	}
 	return sqliteStoreDSNWithMode(path, mode)
 }
@@ -312,6 +316,41 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
+
+	// Read-path tuning, on every mode. All three touch only this process's own
+	// memory and address space, never the database bytes, so they are as
+	// correct on the read-only migration-source open as on the writer.
+	//
+	// cache_size is negative because SQLite reads negative values as KiB
+	// rather than pages, so this is 64 MiB against a 2 MiB default that a city
+	// graph outgrows almost immediately. mmap_size then maps the database
+	// instead of read()-ing every page into that cache, which is where the
+	// win keeps coming from once the graph is larger than any cache worth
+	// allocating. temp_store keeps ORDER BY sorters and transient B-trees off
+	// disk; it is the only one of the three that does nothing for a plain
+	// scan, and it earns its place on sorted queries.
+	query.Add("_pragma", "cache_size(-64000)")
+	query.Add("_pragma", "mmap_size(268435456)")
+	query.Add("_pragma", "temp_store(MEMORY)")
+
+	// synchronous is a write-durability knob, so it is scoped to the modes
+	// that can actually write. A mode=ro connection holds a read-only
+	// descriptor and can neither mutate a row nor checkpoint the WAL, which is
+	// the guarantee the migration-source contract rests on. Leaving the pragma
+	// off that DSN keeps the guarantee readable straight off the URI instead
+	// of making a reader derive that it happens to be inert there.
+	//
+	// NORMAL is a deliberate durability trade on the writable modes. Under WAL
+	// — which every store this package creates uses — it drops the per-commit
+	// fsync, so an OS or power crash can lose the tail of the most recently
+	// committed transactions. It cannot corrupt the database: WAL frames carry
+	// checksums and a torn tail is discarded during recovery. A crash of this
+	// process alone loses nothing, because the frames are already handed to
+	// the kernel.
+	if mode != sqliteStoreDSNReadOnlyMode {
+		query.Add("_pragma", "synchronous(NORMAL)")
+	}
+
 	if mode != "" {
 		query.Set("mode", mode)
 	}
