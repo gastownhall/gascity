@@ -115,7 +115,7 @@ func OpenGraph(spec storebinding.BindingSpec) (*GraphComponent, error) {
 	if spec.Provider != ProviderID {
 		return nil, fmt.Errorf("%w: provider %q", ErrInvalidGraphComponent, spec.Provider)
 	}
-	path, err := GraphPath(spec.Path)
+	path, err := GraphPath(BindingRoot(spec))
 	if err != nil {
 		return nil, err
 	}

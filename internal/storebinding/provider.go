@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -112,6 +113,22 @@ type BindingSpec struct {
 	Provider  ProviderID
 	Path      string
 	ConfigRef ConfigRef
+	// CityRoot is the absolute directory of the city this binding belongs to.
+	//
+	// It is here because a provider's configuration is relative to a city and
+	// nothing else in this envelope says which one. Without it the only base a
+	// provider can resolve against is the process working directory — which is
+	// the city for a command run inside one, and is emphatically not the city
+	// for a supervisor hosting many of them from one process. A provider that
+	// resolves against the working directory therefore serves a different
+	// binding depending on where the binary was started, and two cities can
+	// silently land on the same location.
+	//
+	// Plan resolution stamps it. An empty value stays legal because a plan can
+	// be resolved without one — a caller that knows no city, and every test
+	// that only exercises planning — and a provider that needs it refuses when
+	// it is absent rather than inventing a base.
+	CityRoot string
 }
 
 // Validate verifies that a binding specification is safe for provider selection.
@@ -135,6 +152,17 @@ func (s BindingSpec) Validate() error {
 	}
 	if err := validateSecretFree("binding path", s.Path); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidBindingSpec, err)
+	}
+	if s.CityRoot != "" {
+		if err := validateSecretFree("binding city root", s.CityRoot); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidBindingSpec, err)
+		}
+		if !filepath.IsAbs(s.CityRoot) {
+			// A relative city root is the defect this field exists to remove,
+			// wearing the field's name: whatever resolved it would be back to
+			// guessing a base from the working directory.
+			return fmt.Errorf("%w: city root %q is not absolute", ErrInvalidBindingSpec, s.CityRoot)
+		}
 	}
 	return nil
 }

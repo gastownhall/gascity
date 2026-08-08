@@ -361,7 +361,12 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 				fmt.Fprintf(stdout, "born-split: BLOCKED — provider %s does not open a bead engine, so the classes assigned to binding %s cannot be served\n", provider, binding) //nolint:errcheck // best-effort stdout
 				return 1
 			}
-			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider, configuredBindingLocation(storage.Bindings[binding])); held {
+			location, locErr := servedBindingLocation(plan, binding, storage.Bindings[binding])
+			if locErr != nil {
+				fmt.Fprintf(stderr, "%s: %v\n", logPrefix, locErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider, location); held {
 				fmt.Fprintf(stdout, "born-split: BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
 				return 1
 			}

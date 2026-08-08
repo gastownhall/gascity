@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -28,8 +29,14 @@ import (
 // own closed set does not carry.
 func provisionWorkspace(t *testing.T, root string) {
 	t.Helper()
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".beads"), 0o755); err != nil {
 		t.Fatalf("creating %s: %v", root, err)
+	}
+	// The workspace's own configuration file is what makes the directory a
+	// provisioned workspace; without it the library would build one from
+	// defaults and this provider refuses before it can.
+	if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("writing the workspace configuration: %v", err)
 	}
 	ctx := context.Background()
 	storage, err := beads.OpenNativeStorage(ctx, root, nil)
@@ -52,10 +59,13 @@ func provisionWorkspace(t *testing.T, root string) {
 // classes route to that workspace, and a bead written through a routed class
 // store is in the workspace afterwards.
 func TestStorageGateServesACityFromItsBeadsWorkspace(t *testing.T) {
+	// Deliberately not standing in the city: the gate must resolve the binding
+	// from the city it was handed, which is what a supervisor hosting many
+	// cities from one process depends on.
+	t.Chdir(t.TempDir())
 	cityPath := t.TempDir()
-	t.Chdir(cityPath)
 	stubInfraMigrationSource(t)
-	root, err := beadsworkspace.WorkspaceRoot("infra")
+	root, err := beadsworkspace.WorkspaceRoot(cityPath, "infra")
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}

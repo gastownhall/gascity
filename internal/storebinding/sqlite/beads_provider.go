@@ -84,7 +84,7 @@ func (BeadsProviderFactory) New(spec storebinding.BindingSpec) (storebinding.Pro
 	if spec.Provider != BeadsProviderID {
 		return nil, fmt.Errorf("%w: provider %q", ErrInvalidBeadsBinding, spec.Provider)
 	}
-	path, err := GraphPath(spec.Path)
+	path, err := GraphPath(BindingRoot(spec))
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +204,7 @@ func (p *beadsProvider) boundTo(spec storebinding.BindingSpec) error {
 	if spec.Provider != BeadsProviderID {
 		return fmt.Errorf("%w: provider %q", ErrInvalidBeadsBinding, spec.Provider)
 	}
-	path, err := GraphPath(spec.Path)
+	path, err := GraphPath(BindingRoot(spec))
 	if err != nil {
 		return err
 	}

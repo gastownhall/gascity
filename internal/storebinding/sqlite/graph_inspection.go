@@ -53,11 +53,36 @@ var (
 	closeGraphInspectionDatabase  = func(database *sql.DB) error { return database.Close() }
 )
 
+// BindingRoot resolves the binding root one specification names.
+//
+// A configured path is relative to the CITY, not to the directory the process
+// happens to have been started in. The two are the same for a command run
+// inside the city it acts on, and they are not the same for a supervisor that
+// hosts every registered city from one process started wherever its launcher
+// was — which is where a working-directory base sends a binding to a path no
+// migration ever wrote to. The city root is stamped into every specification
+// at plan resolution; a specification without one keeps the older behavior,
+// because there is nothing else to resolve against.
+func BindingRoot(spec storebinding.BindingSpec) string {
+	root := spec.Path
+	if root == "" {
+		root = defaultBindingRoot()
+	}
+	if !filepath.IsAbs(root) && spec.CityRoot != "" {
+		return filepath.Join(spec.CityRoot, root)
+	}
+	return root
+}
+
+// defaultBindingRoot is the binding root a specification that states none
+// means.
+func defaultBindingRoot() string { return filepath.Join(".gc", "store") }
+
 // GraphPath returns the exact deployed Graph database path below a SQLite
 // binding root. An empty root means the default .gc/store root.
 func GraphPath(root string) (string, error) {
 	if root == "" {
-		root = filepath.Join(".gc", "store")
+		root = defaultBindingRoot()
 	}
 	canonicalRoot, err := canonicalPath(root)
 	if err != nil {
@@ -117,7 +142,7 @@ func NewGraphInspector(spec storebinding.BindingSpec) (*GraphInspector, error) {
 	if spec.Provider != ProviderID {
 		return nil, fmt.Errorf("%w: provider %q", ErrInvalidGraphTarget, spec.Provider)
 	}
-	path, err := GraphPath(spec.Path)
+	path, err := GraphPath(BindingRoot(spec))
 	if err != nil {
 		return nil, err
 	}

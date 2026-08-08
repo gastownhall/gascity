@@ -30,6 +30,12 @@ func makeWorkspace(t *testing.T, root, prefix string) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("creating %s: %v", root, err)
 	}
+	// The configuration file first, because that is what provisioning means
+	// here: the library reads it to learn which backend serves the workspace,
+	// and a provider that finds no such file refuses rather than letting the
+	// library build one from defaults. An empty object keeps every default,
+	// which is the embedded backend this fixture wants.
+	provisionWorkspaceConfig(t, root)
 	ctx := context.Background()
 	storage, err := beads.OpenNativeStorage(ctx, root, nil)
 	if err != nil {
@@ -58,8 +64,8 @@ func makeWorkspace(t *testing.T, root, prefix string) {
 // the store handed back writes into the workspace the configuration reference
 // names, and the bead is still there after the handle is closed.
 func TestOpenEngineServesTheWorkspaceTheBindingNames(t *testing.T) {
-	_, provider, spec := cityWithProvider(t)
-	root, err := WorkspaceRoot(testConfigRef)
+	city, provider, spec := cityWithProvider(t)
+	root, err := WorkspaceRoot(city, testConfigRef)
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}
@@ -108,8 +114,8 @@ func TestOpenEngineServesTheWorkspaceTheBindingNames(t *testing.T) {
 // workspace that mints under the work store's namespace is refused before its
 // store escapes.
 func TestOpenEngineRefusesAWorkspaceOnAnotherIDPrefix(t *testing.T) {
-	_, provider, spec := cityWithProvider(t)
-	root, err := WorkspaceRoot(testConfigRef)
+	city, provider, spec := cityWithProvider(t)
+	root, err := WorkspaceRoot(city, testConfigRef)
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}

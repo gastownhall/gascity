@@ -28,7 +28,7 @@ func TestQ1DefaultCityResolvesOneReservedBindingWithNoProvider(t *testing.T) {
 	registry := q1EmptyFrozenRegistry(t)
 	pins := q1DefaultPins(q1Pin(storebinding.HQScope(), "gc", "hq"))
 
-	plan, err := storebinding.ResolveStoragePlan(registry, city.EffectiveStorage(), pins)
+	plan, err := storebinding.ResolveStoragePlan(registry, city.EffectiveStorage(), pins, "")
 	if err != nil {
 		t.Fatalf("resolving a default city's storage plan against an empty registry: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestQ1DefaultCityResolvesOneReservedBindingWithNoProvider(t *testing.T) {
 		// The error has to be the REGISTRY refusing the lookup, not a later
 		// consistency check: only an unknown-provider failure proves the
 		// default path's success came from performing no lookup at all.
-		_, err := storebinding.ResolveStoragePlan(registry, relocated, pins)
+		_, err := storebinding.ResolveStoragePlan(registry, relocated, pins, "")
 		if !errors.Is(err, storebinding.ErrUnknownProvider) {
 			t.Fatalf("an explicit binding resolved against an empty registry with %v, want a %v; the default-path assertions above prove nothing about provider resolution",
 				err, storebinding.ErrUnknownProvider)
@@ -139,7 +139,7 @@ func TestQ1DefaultPlanEnumeratesHQAndEveryRigWorkspace(t *testing.T) {
 		q1Suspended(q1Pin(storebinding.RigScope("alpha"), "ga", "alpha")),
 		q1Pin(storebinding.RigScope("mu"), "gm", "mu"),
 	)
-	plan, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), pins)
+	plan, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), pins, "")
 	if err != nil {
 		t.Fatalf("resolving a multi-rig default city: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestQ1PinnedBootstrapIdentitiesDoNotFollowMutableMetadata(t *testing.T) {
 		q1Pin(storebinding.HQScope(), "gc", "hq-ledger"),
 		q1Pin(storebinding.RigScope("alpha"), "ga", "alpha-ledger"),
 	}
-	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), agreeing); err != nil {
+	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), agreeing, ""); err != nil {
 		t.Fatalf("an observation agreeing with the recorded pins was rejected: %v", err)
 	}
 
@@ -276,7 +276,7 @@ func TestQ1PinnedBootstrapIdentitiesDoNotFollowMutableMetadata(t *testing.T) {
 		q1Pin(storebinding.HQScope(), "gc", "hq-ledger"),
 		q1Pin(storebinding.RigScope("alpha"), "ga", "alpha-ledger-moved"),
 	}
-	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), drifted); !errors.Is(err, storebinding.ErrWorkPinDrift) {
+	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), drifted, ""); !errors.Is(err, storebinding.ErrWorkPinDrift) {
 		t.Fatalf("a drifted physical identity resolved with %v, want a %v; the recorded pin must win", err, storebinding.ErrWorkPinDrift)
 	}
 
@@ -285,7 +285,7 @@ func TestQ1PinnedBootstrapIdentitiesDoNotFollowMutableMetadata(t *testing.T) {
 		q1Pin(storebinding.HQScope(), "gc", "hq-ledger"),
 		q1Pin(storebinding.RigScope("renamed"), "ga", "alpha-ledger"),
 	}
-	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), renamed); !errors.Is(err, storebinding.ErrWorkPinDrift) {
+	if _, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), renamed, ""); !errors.Is(err, storebinding.ErrWorkPinDrift) {
 		t.Fatalf("an observed scope the pins do not name resolved with %v, want a %v", err, storebinding.ErrWorkPinDrift)
 	}
 }
@@ -335,7 +335,7 @@ func TestQ1DefaultPlanRejectsUnselectableWorkspacePrefixes(t *testing.T) {
 	_, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), q1DefaultPins(
 		q1Pin(storebinding.HQScope(), "gc", "hq"),
 		q1Pin(storebinding.RigScope("alpha"), "gc", "alpha"),
-	))
+	), "")
 	if !errors.Is(err, storebinding.ErrInvalidWorkPin) {
 		t.Fatalf("two workspaces sharing prefix %q resolved with %v, want a %v", "gc", err, storebinding.ErrInvalidWorkPin)
 	}
@@ -354,7 +354,7 @@ func q1DefaultStorage() config.StorageConfig {
 // any error.
 func q1MustResolve(t *testing.T, pins storebinding.WorkPinInputs) *storebinding.StoragePlan {
 	t.Helper()
-	plan, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), pins)
+	plan, err := storebinding.ResolveStoragePlan(q1EmptyFrozenRegistry(t), q1DefaultStorage(), pins, "")
 	if err != nil {
 		t.Fatalf("resolving a default city's storage plan: %v", err)
 	}

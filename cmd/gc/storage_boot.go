@@ -211,30 +211,16 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
 				logPrefix, binding, storage.Bindings[binding].Provider)
 		}
-		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider, configuredBindingLocation(storage.Bindings[binding])); held {
+		location, err := servedBindingLocation(plan, binding, storage.Bindings[binding])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+		}
+		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider, location); held {
 			report = blocked
 			report.Target = target
 		} else {
 			report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
 			report.Target = target
-		}
-	}
-	if report.serving() {
-		// Serving is durable history the moment it happens, on BOTH arms:
-		// the note records which binding and provider serve this city's
-		// infrastructure classes, and every later boot or migration that
-		// points them anywhere else refuses until the operator attests by
-		// removing it. Without the built-in arm writing it too, a city that
-		// genesised on this build's engine could be re-pointed at another
-		// binding and orphaned silently in the outbound direction.
-		bindingCfg := storage.Bindings[target.Binding]
-		location := configuredBindingLocation(bindingCfg)
-		if bindingCfg.Provider == config.StorageProviderSQLiteBeads {
-			location = target.Database
-		}
-		note := bornSplitServedNote{Binding: target.Binding, Provider: bindingCfg.Provider, Location: location}
-		if err := writeBornSplitServedNote(cityPath, note); err != nil {
-			return nil, fmt.Errorf("%s: recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", logPrefix, err)
 		}
 	}
 	if !report.serving() {
@@ -246,7 +232,71 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		return nil, errors.New(advice)
 	}
 	recordStorageBindingOutcome(rec, report, "")
-	return openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
+		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
+	}
+	return routes, nil
+}
+
+// recordServedBinding writes the durable record of which binding served this
+// city's infrastructure classes, and where.
+//
+// It runs AFTER the binding opened, and the order is the whole point. The note
+// is history: every later boot or migration that points the classes somewhere
+// else refuses until an operator attests by deleting it. Written before the
+// open, a city that never served — a mistyped configuration reference, a
+// workspace that is not there — acquired that history anyway, and then fixing
+// the typo was itself a re-point the note refused. Nothing is lost by waiting:
+// the note exists so a later genesis cannot bless an empty store while the
+// city's real state sits in a binding, and a binding that never opened holds
+// no state to orphan.
+func recordServedBinding(plan *storebinding.StoragePlan, cityPath string, storage config.StorageConfig, target infraBindingTarget) error {
+	bindingCfg := storage.Bindings[target.Binding]
+	location, err := servedBindingLocation(plan, target.Binding, bindingCfg)
+	if err != nil {
+		return err
+	}
+	note := bornSplitServedNote{Binding: target.Binding, Provider: bindingCfg.Provider, Location: location}
+	if err := writeBornSplitServedNote(cityPath, note); err != nil {
+		return fmt.Errorf("recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", err)
+	}
+	return nil
+}
+
+// servedBindingLocation reports WHERE a binding serves from, in the one
+// spelling every reader and writer of the served-binding note must agree on.
+//
+// The provider answers when it can, because only the provider knows how its
+// own configuration becomes a location — and because a configuration reference
+// is not an answer: two cities can carry the identical reference and serve
+// from different directories, and a note holding the reference cannot tell
+// them apart. A provider that offers no locator falls back to what it was
+// configured with, which is what a city recorded before this seam existed.
+//
+// A locator that fails is a refusal, not a fallback: a provider that cannot
+// say where it serves must not have a note written about it.
+func servedBindingLocation(plan *storebinding.StoragePlan, name string, binding config.StorageBindingConfig) (string, error) {
+	if plan != nil {
+		for _, planned := range plan.Bindings() {
+			if string(planned.Name) != name {
+				continue
+			}
+			locator, ok := storebinding.BindingLocatorFor(planned)
+			if !ok {
+				break
+			}
+			location, err := locator.BindingLocation(planned.Spec)
+			if err != nil {
+				return "", fmt.Errorf("resolving where binding %q serves from: %w", name, err)
+			}
+			return location, nil
+		}
+	}
+	return configuredBindingLocation(binding), nil
 }
 
 // bornSplitServedNote records the durable fact that this city has served its
@@ -523,7 +573,16 @@ func resolveCityStoragePlan(cityPath string, cfg *config.City) (*storebinding.St
 	if err != nil {
 		return nil, err
 	}
-	plan, err := storebinding.ResolveStoragePlan(registry, cfg.EffectiveStorage(), cityStorageWorkPins(cityPath, cfg))
+	// The city root is stamped into every binding specification here, once.
+	// It is what a provider resolves its city-relative configuration against,
+	// and it must be this city's path rather than the process's directory: one
+	// supervisor process hosts every registered city, so the two are the same
+	// only for a command run inside the city it is acting on.
+	root, err := filepath.Abs(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the city root %q: %w", cityPath, err)
+	}
+	plan, err := storebinding.ResolveStoragePlan(registry, cfg.EffectiveStorage(), cityStorageWorkPins(cityPath, cfg), root)
 	if err != nil {
 		return nil, fmt.Errorf("resolving the storage plan: %w", err)
 	}

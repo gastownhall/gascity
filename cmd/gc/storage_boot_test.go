@@ -740,7 +740,7 @@ func TestStorageWorkPinsDescribeEveryBoundScope(t *testing.T) {
 	if err := registry.Freeze(); err != nil {
 		t.Fatalf("freezing an empty registry: %v", err)
 	}
-	plan, err := storebinding.ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), pins)
+	plan, err := storebinding.ResolveStoragePlan(registry, (&config.City{}).EffectiveStorage(), pins, "")
 	if err != nil {
 		t.Fatalf("the config-derived pins do not resolve a default plan: %v", err)
 	}

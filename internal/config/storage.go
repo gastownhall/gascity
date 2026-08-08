@@ -11,11 +11,15 @@ const (
 	// StorageWorkBinding is the immutable reserved binding backed by the
 	// bootstrap Work topology.
 	StorageWorkBinding = "work"
-	// StorageProviderSQLiteBeads is the built-in provider: one SQLite bead
-	// ledger projected into the storage classes a binding serves.
+	// StorageProviderSQLiteBeads is the one built-in provider configured by a
+	// path: a single SQLite bead ledger projected into the storage classes its
+	// binding serves. It is the only provider `path` is valid for; every other
+	// compiled provider, built-in or not, is configured by config_ref.
 	StorageProviderSQLiteBeads = "sqlite-beads"
 	// DefaultSQLiteStoragePath is the provider-owned root used when a SQLite
-	// binding omits path.
+	// binding omits path. Like any relative binding path it is resolved
+	// against the city, not against the working directory of whatever process
+	// opens the binding.
 	DefaultSQLiteStoragePath = ".gc/store"
 )
 
@@ -95,15 +99,17 @@ type StorageClasses struct {
 }
 
 // StorageBindingConfig selects one compiled storage provider and its typed,
-// secret-free configuration; SQLite accepts `path` (default `.gc/store`), while
-// other providers accept an opaque `config_ref` resolved by that provider.
+// secret-free configuration; the SQLite provider accepts `path` (default
+// `.gc/store`), while every other provider accepts an opaque `config_ref` that
+// provider resolves. Both are relative to the city that declares the binding.
 type StorageBindingConfig struct {
 	// Provider is the exact ID of a provider compiled into this gc binary.
 	Provider string `toml:"provider" jsonschema:"required"`
-	// Path is the SQLite binding root. Empty defaults to ".gc/store".
+	// Path is the SQLite binding root, relative to the city unless absolute.
+	// Empty defaults to ".gc/store".
 	Path string `toml:"path,omitempty" jsonschema:"default=.gc/store"`
-	// ConfigRef is an opaque, secret-free reference resolved by a non-built-in
-	// provider.
+	// ConfigRef is an opaque, secret-free reference resolved by the provider
+	// that owns the binding, within the city that declares it.
 	ConfigRef string `toml:"config_ref,omitempty"`
 }
 

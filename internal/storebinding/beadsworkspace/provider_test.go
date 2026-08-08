@@ -2,12 +2,17 @@ package beadsworkspace
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
@@ -16,30 +21,36 @@ import (
 // testConfigRef is the workspace every test in this package binds to.
 const testConfigRef = "infra"
 
-// cityWithProvider puts the test in a fresh city directory and returns the
-// facade one binding of this provider resolves to there, plus its
-// specification.
+// cityWithProvider returns a fresh city directory and the facade one binding of
+// this provider resolves to there.
 //
-// The chdir is the city: nothing carries a city root to a provider, so the
-// working directory is what a relative binding location resolves against —
-// for this provider exactly as for the built-in one's path. The returned city
-// path is the working directory the process reports rather than the temp path
-// handed to chdir, so an assertion about what the city holds reads the same
-// directory the provider resolves against even when the temp root is a
-// symlink.
+// No test in this package changes the working directory, and that is a
+// property under test as much as a convenience: this provider resolves against
+// the city root its specification carries, so a test that stood inside the
+// city would pass equally well against a provider that resolved against the
+// process — which is exactly the defect the city root exists to remove.
 func cityWithProvider(t *testing.T) (string, storebinding.Provider, storebinding.BindingSpec) {
 	t.Helper()
-	t.Chdir(t.TempDir())
-	city, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	spec := storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef}
+	city := t.TempDir()
+	spec := storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef, CityRoot: city}
 	provider, err := ProviderFactory{}.New(spec)
 	if err != nil {
 		t.Fatalf("constructing the provider for config_ref %q: %v", testConfigRef, err)
 	}
 	return city, provider, spec
+}
+
+// provisionWorkspaceConfig writes the workspace's own configuration file, which
+// is what makes a directory a provisioned workspace rather than one the linked
+// library would populate with defaults.
+func provisionWorkspaceConfig(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(workspaceStatePath(root), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", workspaceStatePath(root), err)
+	}
+	if err := os.WriteFile(workspaceConfigPath(root), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", workspaceConfigPath(root), err)
+	}
 }
 
 // engineOpener is the seam a booting city serves a binding through. A provider
@@ -54,21 +65,75 @@ func engineOpener(t *testing.T, provider storebinding.Provider) storebinding.Eng
 	return opener
 }
 
-// directoryEntries lists a directory's own names. It is a POSITIVE read: an
-// unreadable directory fails the test rather than reading as empty, which is
-// how a stat-based check turns a fault into evidence of absence.
-func directoryEntries(t *testing.T, dir string) []string {
+// treeContents fingerprints a directory tree by path AND by content, so a
+// comparison across an operation catches a file rewritten in place as well as
+// one that was added. An unreadable tree fails the test rather than comparing
+// equal to nothing.
+func treeContents(t *testing.T, root string) []string {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
+	var lines []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		if entry.IsDir() {
+			lines = append(lines, "dir  "+rel)
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		sum := sha256.Sum256(data)
+		lines = append(lines, "file "+rel+" "+hex.EncodeToString(sum[:]))
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("listing %s: %v", dir, err)
+		t.Fatalf("walking %s: %v", root, err)
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
+	sort.Strings(lines)
+	return lines
+}
+
+func sameTree(before, after []string) bool {
+	if len(before) != len(after) {
+		return false
 	}
-	sort.Strings(names)
-	return names
+	for index := range before {
+		if before[index] != after[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// recordingEngine is an opened workspace whose prefix is dictated and whose
+// close is observable. It exists so the admission decision — above all the
+// close that has to follow a refusal — is proved without a live workspace.
+type recordingEngine struct {
+	beads.Store
+	prefix string
+	closes int
+}
+
+func (e *recordingEngine) IDPrefix() string { return e.prefix }
+
+func (e *recordingEngine) CloseStore() error {
+	e.closes++
+	return nil
+}
+
+func reservedGraphPrefix(t *testing.T) string {
+	t.Helper()
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok || prefix == "" {
+		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
+	}
+	return prefix
 }
 
 func TestFactoryRegistersTheCompiledProviderID(t *testing.T) {
@@ -82,17 +147,21 @@ func TestFactoryRegistersTheCompiledProviderID(t *testing.T) {
 
 // TestFactoryRefusesASpecificationThatIsNotThisProvidersScope pins what a
 // binding of this provider must say before anything opens: it names this
-// provider, and it names a workspace by configuration reference.
+// provider, it names a workspace by configuration reference, and it says which
+// city that workspace belongs to.
 func TestFactoryRefusesASpecificationThatIsNotThisProvidersScope(t *testing.T) {
+	city := t.TempDir()
 	for _, tc := range []struct {
 		name string
 		spec storebinding.BindingSpec
 	}{
-		{"another provider's binding", storebinding.BindingSpec{Name: "infra", Provider: storebinding.ProviderID(config.StorageProviderSQLiteBeads), ConfigRef: "infra"}},
-		{"no workspace named", storebinding.BindingSpec{Name: "infra", Provider: ProviderID}},
-		{"a path instead of a reference", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, Path: ".gc/store"}},
-		{"a reference that is not a directory name", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: ".."}},
-		{"no binding name", storebinding.BindingSpec{Provider: ProviderID, ConfigRef: "infra"}},
+		{"another provider's binding", storebinding.BindingSpec{Name: "infra", Provider: storebinding.ProviderID(config.StorageProviderSQLiteBeads), ConfigRef: "infra", CityRoot: city}},
+		{"no workspace named", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, CityRoot: city}},
+		{"a path instead of a reference", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, Path: ".gc/store", CityRoot: city}},
+		{"a reference that is not a directory name", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: "..", CityRoot: city}},
+		{"no binding name", storebinding.BindingSpec{Provider: ProviderID, ConfigRef: "infra", CityRoot: city}},
+		{"no city to resolve against", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: "infra"}},
+		{"a city root that is not absolute", storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: "infra", CityRoot: "relative/city"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			provider, err := ProviderFactory{}.New(tc.spec)
@@ -106,34 +175,92 @@ func TestFactoryRefusesASpecificationThatIsNotThisProvidersScope(t *testing.T) {
 	}
 }
 
-// TestWorkspaceRootIsTheCityRelativeStorageDirectory pins the layout a
-// configuration reference resolves to, which is the whole of this provider's
-// configuration surface.
-func TestWorkspaceRootIsTheCityRelativeStorageDirectory(t *testing.T) {
-	city, _, _ := cityWithProvider(t)
-
-	root, err := WorkspaceRoot(testConfigRef)
+// TestWorkspaceRootIsUnderTheCityTheBindingNames pins the layout, and pins that
+// the city comes from the binding rather than from the process.
+func TestWorkspaceRootIsUnderTheCityTheBindingNames(t *testing.T) {
+	city := t.TempDir()
+	root, err := WorkspaceRoot(city, testConfigRef)
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}
-	// The expectation is built from the working directory the process reports
-	// rather than from the temp path, so a temp root reached through a symlink
-	// (the default on macOS) compares as the directory the test stands in.
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if want := filepath.Join(cwd, ".gc", "storage", "infra"); root != want {
-		t.Errorf("workspace root = %s, want %s (city %s)", root, want, city)
+	if want := filepath.Join(city, ".gc", "storage", testConfigRef); root != want {
+		t.Errorf("workspace root = %s, want %s", root, want)
 	}
 }
 
+// TestWorkspaceRootRefusesWithoutACityRatherThanGuessingOne is the whole reason
+// the city root is carried: the tempting default is the working directory, and
+// under a supervisor that hosts every registered city from one process, that
+// directory is nobody's city.
+func TestWorkspaceRootRefusesWithoutACityRatherThanGuessingOne(t *testing.T) {
+	root, err := WorkspaceRoot("", testConfigRef)
+	if !errors.Is(err, ErrInvalidWorkspaceBinding) {
+		t.Fatalf("WorkspaceRoot with no city = (%q, %v), want %v", root, err, ErrInvalidWorkspaceBinding)
+	}
+	if root != "" {
+		t.Errorf("a refused resolution returned the path %q", root)
+	}
+	if !strings.Contains(err.Error(), "CityRoot") {
+		t.Errorf("the refusal does not name the field that is missing: %v", err)
+	}
+	if _, err := WorkspaceRoot("relative/city", testConfigRef); !errors.Is(err, ErrInvalidWorkspaceBinding) {
+		t.Errorf("WorkspaceRoot with a relative city = %v, want %v", err, ErrInvalidWorkspaceBinding)
+	}
+}
+
+// TestTwoCitiesSharingAConfigRefResolveDifferentWorkspaces is the defect this
+// design exists to make impossible, asserted as a divergence rather than as a
+// property of one city: the same configuration reference in two cities is two
+// workspaces, never one shared directory.
+func TestTwoCitiesSharingAConfigRefResolveDifferentWorkspaces(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+
+	firstProvider, err := ProviderFactory{}.New(storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef, CityRoot: first})
+	if err != nil {
+		t.Fatalf("constructing the first city's provider: %v", err)
+	}
+	secondProvider, err := ProviderFactory{}.New(storebinding.BindingSpec{Name: "infra", Provider: ProviderID, ConfigRef: testConfigRef, CityRoot: second})
+	if err != nil {
+		t.Fatalf("constructing the second city's provider: %v", err)
+	}
+
+	firstRoot := boundRootOf(t, firstProvider)
+	secondRoot := boundRootOf(t, secondProvider)
+	if firstRoot == secondRoot {
+		t.Fatalf("two cities sharing config_ref %q resolved the same workspace %s", testConfigRef, firstRoot)
+	}
+	if !strings.HasPrefix(firstRoot, first) || !strings.HasPrefix(secondRoot, second) {
+		t.Fatalf("workspaces %s and %s are not under their own cities %s and %s", firstRoot, secondRoot, first, second)
+	}
+}
+
+// boundRootOf reports the workspace a facade is bound to, through the location
+// seam a city records rather than through the struct field, so the divergence
+// proof reads the same answer the boot gate writes down.
+func boundRootOf(t *testing.T, provider storebinding.Provider) string {
+	t.Helper()
+	locator, ok := provider.(storebinding.BindingLocator)
+	if !ok {
+		t.Fatal("the provider reports no binding location")
+	}
+	bound, ok := provider.(*workspaceProvider)
+	if !ok {
+		t.Fatalf("provider is %T, want the workspace facade", provider)
+	}
+	location, err := locator.BindingLocation(bound.spec)
+	if err != nil {
+		t.Fatalf("resolving the binding location: %v", err)
+	}
+	return location
+}
+
 // TestInspectReportsTheWorkspaceAndCreatesNothing is the mutation-free half of
-// the contract, proved as a negative from a directory listing rather than from
+// the contract, proved as a negative from a directory walk rather than from
 // the absence of an error.
 func TestInspectReportsTheWorkspaceAndCreatesNothing(t *testing.T) {
 	city, provider, spec := cityWithProvider(t)
-	before := directoryEntries(t, city)
+	before := treeContents(t, city)
 
 	inspection, err := storebinding.InspectBinding(context.Background(), provider, spec)
 	if err != nil {
@@ -153,20 +280,18 @@ func TestInspectReportsTheWorkspaceAndCreatesNothing(t *testing.T) {
 			t.Errorf("the inspected scope excludes %s; one workspace serves every class its binding is assigned", class)
 		}
 	}
-	if after := directoryEntries(t, city); len(after) != len(before) {
+	if after := treeContents(t, city); !sameTree(before, after) {
 		t.Errorf("inspecting the binding changed the city directory: %v -> %v", before, after)
 	}
 
 	// The identity moves when the workspace appears, and only then: it is what
 	// a stat can honestly claim and nothing more.
 	absent := inspection.Target.Components[0].PhysicalIdentity
-	root, err := WorkspaceRoot(testConfigRef)
+	root, err := WorkspaceRoot(city, testConfigRef)
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}
-	if err := os.MkdirAll(workspaceMetadataPath(root), 0o755); err != nil {
-		t.Fatalf("creating the workspace fixture: %v", err)
-	}
+	provisionWorkspaceConfig(t, root)
 	present, err := storebinding.InspectBinding(context.Background(), provider, spec)
 	if err != nil {
 		t.Fatalf("inspecting a present workspace: %v", err)
@@ -178,14 +303,18 @@ func TestInspectReportsTheWorkspaceAndCreatesNothing(t *testing.T) {
 
 // TestInspectRefusesASpecificationOtherThanTheBoundOne keeps a facade bound to
 // one binding: answering for a second would report on a workspace the caller
-// did not name.
+// did not name — including one that differs only in which city it belongs to.
 func TestInspectRefusesASpecificationOtherThanTheBoundOne(t *testing.T) {
 	_, provider, spec := cityWithProvider(t)
-	other := spec
-	other.ConfigRef = "elsewhere"
+	elsewhere := spec
+	elsewhere.ConfigRef = "elsewhere"
+	otherCity := spec
+	otherCity.CityRoot = t.TempDir()
 
-	if _, err := provider.Inspect(context.Background(), other); !errors.Is(err, ErrInvalidWorkspaceBinding) {
-		t.Fatalf("inspecting a different binding = %v, want %v", err, ErrInvalidWorkspaceBinding)
+	for _, other := range []storebinding.BindingSpec{elsewhere, otherCity} {
+		if _, err := provider.Inspect(context.Background(), other); !errors.Is(err, ErrInvalidWorkspaceBinding) {
+			t.Fatalf("inspecting binding %+v = %v, want %v", other, err, ErrInvalidWorkspaceBinding)
+		}
 	}
 }
 
@@ -233,8 +362,8 @@ func TestFencedArmsRefuseRatherThanPretend(t *testing.T) {
 }
 
 // TestOpenEngineRefusesWithoutTouchingTheWorkspace covers every refusal that
-// precedes the open, and proves none of them left a directory behind. An open
-// that creates a workspace on the way to refusing it is the failure this
+// precedes the open, and proves none of them left anything behind. An open
+// that builds a workspace on the way to refusing it is the failure this
 // ordering exists to prevent.
 func TestOpenEngineRefusesWithoutTouchingTheWorkspace(t *testing.T) {
 	city, provider, spec := cityWithProvider(t)
@@ -245,6 +374,10 @@ func TestOpenEngineRefusesWithoutTouchingTheWorkspace(t *testing.T) {
 	}
 	foreign := spec
 	foreign.ConfigRef = "elsewhere"
+	root, err := WorkspaceRoot(city, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving the workspace root: %v", err)
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -264,34 +397,126 @@ func TestOpenEngineRefusesWithoutTouchingTheWorkspace(t *testing.T) {
 			if store != nil || closer != nil {
 				t.Fatal("a refused open returned a store or a closer")
 			}
+			if errors.Is(err, ErrWorkspaceUnavailable) && !strings.Contains(err.Error(), root) {
+				t.Errorf("the refusal does not name the workspace path it looked at (%s): %v", root, err)
+			}
 		})
 	}
-	if entries := directoryEntries(t, city); len(entries) != 0 {
+	if entries := treeContents(t, city); len(entries) != 1 {
 		t.Errorf("a refused open left %v in the city directory", entries)
 	}
 }
 
-// TestOpenEngineRequiresTheReservedClassPrefix pins the one property that
-// cannot be imposed on a workspace and therefore has to be required: an id
-// minted in this binding is never one the work store could have minted.
-func TestOpenEngineRequiresTheReservedClassPrefix(t *testing.T) {
+// TestOpenEngineRefusesAHalfProvisionedWorkspaceWithoutBuildingOne is the
+// residue proof, and it is why the presence test is the configuration file
+// rather than the directory. The linked library treats a directory with no
+// configuration as "use the defaults" and builds a complete engine inside it,
+// so a weaker check makes a refusing boot create the very thing it rejects.
+func TestOpenEngineRefusesAHalfProvisionedWorkspaceWithoutBuildingOne(t *testing.T) {
+	city, provider, spec := cityWithProvider(t)
+	root, err := WorkspaceRoot(city, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving the workspace root: %v", err)
+	}
+	if err := os.MkdirAll(workspaceStatePath(root), 0o755); err != nil {
+		t.Fatalf("creating the half-provisioned workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceStatePath(root), "leftover.txt"), []byte("not a configuration\n"), 0o644); err != nil {
+		t.Fatalf("seeding the half-provisioned workspace: %v", err)
+	}
+	classes, err := workspaceClasses()
+	if err != nil {
+		t.Fatalf("building the served class set: %v", err)
+	}
+	before := treeContents(t, root)
+
+	store, closer, err := engineOpener(t, provider).OpenEngine(spec, classes)
+	if !errors.Is(err, ErrWorkspaceUnavailable) {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		t.Fatalf("OpenEngine on a workspace with no configuration = %v, want %v", err, ErrWorkspaceUnavailable)
+	}
+	if store != nil || closer != nil {
+		t.Fatal("a refused open returned a store or a closer")
+	}
+	if !strings.Contains(err.Error(), workspaceConfigPath(root)) {
+		t.Errorf("the refusal does not name the configuration file it looked for: %v", err)
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Errorf("the refusal does not name the workspace it resolved: %v", err)
+	}
+	if after := treeContents(t, root); !sameTree(before, after) {
+		t.Errorf("the refused open changed the workspace:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// TestWorkspaceIsConfiguredAcceptsTheLegacySpelling keeps the presence test
+// aligned with what the linked library actually reads: it falls back to the
+// older configuration filename, so a workspace carrying only that one is
+// provisioned and must not be refused as empty.
+func TestWorkspaceIsConfiguredAcceptsTheLegacySpelling(t *testing.T) {
+	city, _, _ := cityWithProvider(t)
+	root, err := WorkspaceRoot(city, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving the workspace root: %v", err)
+	}
+	if err := os.MkdirAll(workspaceStatePath(root), 0o755); err != nil {
+		t.Fatalf("creating the workspace: %v", err)
+	}
+	if err := os.WriteFile(workspaceLegacyConfigPath(root), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("writing the legacy configuration: %v", err)
+	}
+	configured, err := workspaceIsConfigured(root)
+	if err != nil {
+		t.Fatalf("reading the workspace configuration: %v", err)
+	}
+	if !configured {
+		t.Error("a workspace carrying the legacy configuration spelling reads as unprovisioned")
+	}
+}
+
+// TestOpenEngineRequiresTheReservedClassPrefixAndClosesWhatItRefuses pins the
+// one property that cannot be imposed on a workspace and therefore has to be
+// required — an id from this binding is never one the work store could have
+// minted — and pins that refusing it releases the handle the open took.
+func TestOpenEngineRequiresTheReservedClassPrefixAndClosesWhatItRefuses(t *testing.T) {
 	_, provider, _ := cityWithProvider(t)
 	workspace, ok := provider.(*workspaceProvider)
 	if !ok {
 		t.Fatalf("provider is %T, want the workspace facade", provider)
 	}
-	reserved, ok := config.ReservedClassPrefix(config.BeadClassGraph)
-	if !ok || reserved == "" {
-		t.Fatalf("no reserved id prefix is registered for the %q class", config.BeadClassGraph)
-	}
+	reserved := reservedGraphPrefix(t)
 
-	if err := workspace.mintsUnderReservedPrefix(reserved, reserved); err != nil {
+	admitted := &recordingEngine{Store: beads.NewMemStore(), prefix: reserved}
+	store, closer, err := workspace.admit(admitted, reserved)
+	if err != nil {
 		t.Fatalf("a workspace on the reserved prefix was refused: %v", err)
 	}
+	if store == nil || closer == nil {
+		t.Fatal("an admitted workspace came back without a store or a closer")
+	}
+	if admitted.closes != 0 {
+		t.Errorf("an admitted workspace was closed %d time(s) before its caller asked", admitted.closes)
+	}
+
 	for _, observed := range []string{"", "gc", "gr"} {
-		err := workspace.mintsUnderReservedPrefix(observed, reserved)
+		refused := &recordingEngine{Store: beads.NewMemStore(), prefix: observed}
+		store, closer, err := workspace.admit(refused, reserved)
 		if !errors.Is(err, ErrInvalidWorkspaceBinding) {
 			t.Errorf("a workspace minting under %q = %v, want %v", observed, err, ErrInvalidWorkspaceBinding)
+		}
+		if store != nil || closer != nil {
+			t.Errorf("a refused workspace (prefix %q) came back with a store or a closer", observed)
+		}
+		if refused.closes != 1 {
+			t.Errorf("a refused workspace (prefix %q) was closed %d time(s), want exactly 1: a refused open must not hold the workspace", observed, refused.closes)
+		}
+		if !strings.Contains(err.Error(), reserved) {
+			t.Errorf("the refusal does not name the required prefix %q: %v", reserved, err)
+		}
+		if observed != "" && !strings.Contains(err.Error(), observed) {
+			t.Errorf("the refusal does not name the prefix the workspace mints under (%q): %v", observed, err)
 		}
 	}
 }

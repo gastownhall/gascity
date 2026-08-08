@@ -13,6 +13,31 @@
 // writers may not even be on this machine. So every lifecycle arm that would
 // have to claim otherwise refuses in the open, and the one arm a booting city
 // actually walks is implemented for real. See engine.go.
+//
+// # Provisioning contract
+//
+// A city serves from a workspace it did not create, so the workspace has to
+// arrive already fit to serve. Three things are required of whoever provisions
+// it, and a city refuses rather than repairing any of them:
+//
+//   - The workspace exists at <city>/.gc/storage/<config_ref>/ and carries the
+//     linked library's own configuration file, .beads/metadata.json. That file
+//     is what names the backend; without it the library serves the directory
+//     with defaults, which for an empty directory means creating an engine.
+//   - Its configured issue prefix is the reserved graph-class prefix. gc cannot
+//     impose a prefix on a workspace, so a binding whose workspace mints under
+//     any other prefix is refused: its ids would be readable as the work
+//     store's. See mintsUnderReservedPrefix.
+//   - Its custom bead types include the coordination types a city writes —
+//     session, convoy, wisp, wait — which the library's own closed type set
+//     does not carry. This one is not checked here: the library refuses such a
+//     write immediately and by name, and a city has no business editing a
+//     workspace's type policy.
+//
+// The workspace's own configuration is the SOLE source of how it is served.
+// Ambient beads environment variables are deliberately not consulted: the open
+// projects an empty environment, so nothing a city process inherited can
+// re-point a binding at another database.
 package beadsworkspace
 
 import (
@@ -22,7 +47,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -39,10 +63,19 @@ const (
 	// workspace directory itself.
 	ComponentID = storebinding.ComponentID("workspace")
 
-	// workspaceMetadataDir is the directory the linked beads library keeps a
-	// workspace's own state and configuration in. Its presence is what makes a
-	// directory a workspace rather than an empty path.
-	workspaceMetadataDir = ".beads"
+	// workspaceStateDir is the directory the linked beads library keeps a
+	// workspace's own state and configuration in.
+	workspaceStateDir = ".beads"
+
+	// workspaceConfigFile is the workspace's own configuration file inside that
+	// directory — the one that names the backend serving the workspace. Its
+	// presence is what makes a directory a provisioned workspace rather than a
+	// path the library would populate with defaults.
+	workspaceConfigFile = "metadata.json"
+
+	// workspaceLegacyConfigFile is the older spelling the linked library still
+	// reads before falling back to defaults.
+	workspaceLegacyConfigFile = "config.json"
 )
 
 var (
@@ -63,6 +96,7 @@ var (
 
 	_ storebinding.ProviderFactory = ProviderFactory{}
 	_ storebinding.Provider        = (*workspaceProvider)(nil)
+	_ storebinding.BindingLocator  = (*workspaceProvider)(nil)
 )
 
 // ProviderFactory constructs the resource-free provider facade for one beads
@@ -143,6 +177,16 @@ func (p *workspaceProvider) Open(context.Context, storebinding.OpenRequest) (sto
 		ErrWorkspaceLifecycleUnavailable, p.spec.Name)
 }
 
+// BindingLocation reports the workspace directory this binding serves from, so
+// a city records where it actually served rather than the reference it was
+// asked to serve. Nothing is opened or stated to answer.
+func (p *workspaceProvider) BindingLocation(spec storebinding.BindingSpec) (string, error) {
+	if err := p.boundTo(spec); err != nil {
+		return "", err
+	}
+	return p.root, nil
+}
+
 // RetainedGuards reports no retained-guard lifecycle: this provider installs
 // and recovers no migration guard.
 func (p *workspaceProvider) RetainedGuards() (storebinding.RetainedGuardLifecycle, bool) {
@@ -186,25 +230,31 @@ func boundWorkspaceRoot(spec storebinding.BindingSpec) (string, error) {
 	if spec.Path != "" {
 		return "", fmt.Errorf("%w: binding %q names a path; this provider's configuration is a config_ref naming a workspace", ErrInvalidWorkspaceBinding, spec.Name)
 	}
-	return WorkspaceRoot(string(spec.ConfigRef))
+	root, err := WorkspaceRoot(spec.CityRoot, string(spec.ConfigRef))
+	if err != nil {
+		return "", fmt.Errorf("%w (binding %q)", err, spec.Name)
+	}
+	return root, nil
 }
 
-// WorkspaceRoot resolves the workspace directory a configuration reference
-// names: <city>/.gc/storage/<config_ref>.
+// WorkspaceRoot resolves the workspace directory a city's configuration
+// reference names: <city>/.gc/storage/<config_ref>.
 //
-// The city is the working directory, because nothing carries a city root to a
-// provider. The binding specification a provider is handed has a name, a
-// provider ID and this reference, and the engine-opening seam adds only the
-// classes to serve — so the base a relative location resolves against is the
-// process's own, exactly as it is for the built-in provider's `path`. A city
-// is the working directory of the commands that serve it, which is what makes
-// that the same directory in practice.
+// It is exported because the boot gate resolves the same directory when it
+// records which location served a city, and two spellings of one layout drift.
+//
+// An absent city root is refused rather than defaulted. The tempting default
+// is the process working directory, and it is wrong in the deployment that
+// matters most: one supervisor process hosts every registered city and is
+// started from wherever its launcher happened to be, so that default would
+// point every city at one directory — or, with the same configuration
+// reference in two cities, at one shared workspace. There is no base to guess.
 //
 // The reference is already restricted to an identifier by both config
 // validation and the binding specification, so no separator can arrive here.
 // A reference made only of dots is still an identifier and is refused: it
 // would name the parent of the directory this layout reserves.
-func WorkspaceRoot(configRef string) (string, error) {
+func WorkspaceRoot(cityRoot, configRef string) (string, error) {
 	ref := strings.TrimSpace(configRef)
 	if ref == "" {
 		return "", fmt.Errorf("%w: no config_ref names the workspace", ErrInvalidWorkspaceBinding)
@@ -212,17 +262,33 @@ func WorkspaceRoot(configRef string) (string, error) {
 	if strings.Trim(ref, ".") == "" {
 		return "", fmt.Errorf("%w: config_ref %q does not name a workspace directory", ErrInvalidWorkspaceBinding, ref)
 	}
-	root, err := filepath.Abs(filepath.Join(".gc", "storage", ref))
-	if err != nil {
-		return "", fmt.Errorf("resolving the workspace directory of config_ref %q: %w", ref, err)
+	root := strings.TrimSpace(cityRoot)
+	if root == "" {
+		return "", fmt.Errorf("%w: config_ref %q names a workspace under a city, and the binding carries no CityRoot to resolve it against", ErrInvalidWorkspaceBinding, ref)
 	}
-	return filepath.Clean(root), nil
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("%w: city root %q is not absolute", ErrInvalidWorkspaceBinding, root)
+	}
+	return filepath.Join(filepath.Clean(root), ".gc", "storage", ref), nil
 }
 
-// workspaceMetadataPath is the workspace's own state directory, the thing whose
-// presence makes a path a workspace.
-func workspaceMetadataPath(root string) string {
-	return filepath.Join(root, workspaceMetadataDir)
+// workspaceStatePath is the directory the linked beads library keeps a
+// workspace's state and configuration in.
+func workspaceStatePath(root string) string {
+	return filepath.Join(root, workspaceStateDir)
+}
+
+// workspaceConfigPath is the workspace's own configuration file: the one the
+// linked library reads to learn which backend serves this workspace.
+func workspaceConfigPath(root string) string {
+	return filepath.Join(workspaceStatePath(root), workspaceConfigFile)
+}
+
+// workspaceLegacyConfigPath is the older spelling of the same file. The linked
+// library still reads it (and migrates it), so a workspace carrying only this
+// one is provisioned and must not be mistaken for an empty directory.
+func workspaceLegacyConfigPath(root string) string {
+	return filepath.Join(workspaceStatePath(root), workspaceLegacyConfigFile)
 }
 
 // fenceTarget describes the one component this binding has.
@@ -260,7 +326,7 @@ func workspaceLocator(root string) storebinding.ComponentLocator {
 }
 
 // workspaceIdentity is everything a stat of the workspace can honestly claim:
-// where it is, and whether it is there.
+// where it is, and whether a provisioned workspace is there.
 //
 // It reads no deeper on purpose. Anything more specific — a generation, a
 // schema, a byte count — is a fact about the backend serving the workspace,
@@ -269,7 +335,7 @@ func workspaceLocator(root string) storebinding.ComponentLocator {
 // contents change does not: the honest reach of a directory stat.
 func workspaceIdentity(root string) storebinding.PhysicalIdentity {
 	state := "absent"
-	if info, err := os.Stat(workspaceMetadataPath(root)); err == nil && info.IsDir() {
+	if configured, err := workspaceIsConfigured(root); err == nil && configured {
 		state = "present"
 	}
 	sum := sha256.Sum256([]byte("gascity.beads-workspace.component.v1\x00" + state + "\x00" + root))

@@ -20,7 +20,20 @@ import (
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
-var _ storebinding.EngineOpener = (*beadsProvider)(nil)
+var (
+	_ storebinding.EngineOpener   = (*beadsProvider)(nil)
+	_ storebinding.BindingLocator = (*beadsProvider)(nil)
+)
+
+// BindingLocation reports the database this binding serves from — the same
+// file GraphPath resolved for the whole lifecycle, so what a city records as
+// its served location is the file it actually opens.
+func (p *beadsProvider) BindingLocation(spec storebinding.BindingSpec) (string, error) {
+	if err := p.boundTo(spec); err != nil {
+		return "", err
+	}
+	return p.path, nil
+}
 
 // storeCloser adapts a bead store's own close to io.Closer.
 //

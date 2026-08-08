@@ -828,13 +828,13 @@ SessionSleepConfig configures default idle sleep policies by session class.
 
 ## StorageBindingConfig
 
-StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; SQLite accepts `path` (default `.gc/store`), while other providers accept an opaque `config_ref` resolved by that provider.
+StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; the SQLite provider accepts `path` (default `.gc/store`), while every other provider accepts an opaque `config_ref` that provider resolves.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string | **yes** |  | Provider is the exact ID of a provider compiled into this gc binary. |
-| `path` | string |  | `.gc/store` | Path is the SQLite binding root. Empty defaults to ".gc/store". |
-| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by a non-built-in provider. |
+| `path` | string |  | `.gc/store` | Path is the SQLite binding root, relative to the city unless absolute. Empty defaults to ".gc/store". |
+| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by the provider that owns the binding, within the city that declares it. |
 
 ## StorageClasses
 

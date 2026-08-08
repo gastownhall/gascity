@@ -24,15 +24,25 @@ import (
 
 var _ storebinding.EngineOpener = (*workspaceProvider)(nil)
 
+// workspaceEngine is what an opened workspace has to be for a binding to serve
+// from it: a bead store that reports the prefix it mints under and owns a
+// handle it can release. It is an interface so the admission decision below —
+// including the close that has to follow a refusal — is provable without a
+// live workspace behind it.
+type workspaceEngine interface {
+	beads.Store
+	IDPrefix() string
+	CloseStore() error
+}
+
 // OpenEngine opens this binding's workspace for the classes it serves.
 //
-// Everything it proves, it proves before or immediately after the open and
-// never later: that the caller resolved this binding and not another, that the
-// classes are ones a single workspace can serve, that the workspace exists,
-// and that it mints ids under the reserved class prefix. The last one is the
-// only check with a cost — it is answered from what the open already read —
-// and it is the difference between a binding whose ids cannot collide with the
-// work store's and one that merely probably does not.
+// Everything it proves, it proves before the open or immediately after, never
+// later: that the caller resolved this binding and not another, that the
+// classes are ones a single workspace can serve, that the directory really is
+// a provisioned workspace, and that it mints ids under the reserved class
+// prefix. Only the last needs the workspace open, and it is answered from what
+// the open already read.
 func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
 	if err := p.boundTo(spec); err != nil {
 		return nil, nil, err
@@ -51,45 +61,75 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 	if !ok || prefix == "" {
 		return nil, nil, fmt.Errorf("%w: no reserved id prefix is registered for the %q class", ErrInvalidWorkspaceBinding, config.BeadClassGraph)
 	}
-	if err := p.workspacePresent(); err != nil {
+	if err := p.workspaceProvisioned(); err != nil {
 		return nil, nil, err
 	}
 
+	// The environment handed to the open is deliberately empty rather than
+	// inherited: the workspace's own configuration is the single source of how
+	// it is served, and ambient beads variables belong to whatever else this
+	// process talks to. A nil map projects an empty set for the open's
+	// duration, so nothing in this city's environment can re-point a binding.
 	store, err := beads.OpenNativeDoltStoreAt(context.Background(), p.root, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the workspace of binding %q at %s through the linked beads library: %w", p.spec.Name, p.root, err)
 	}
-	if err := p.mintsUnderReservedPrefix(store.IDPrefix(), prefix); err != nil {
-		if closeErr := store.CloseStore(); closeErr != nil {
+	return p.admit(store, prefix)
+}
+
+// admit hands back an opened workspace this binding may serve from, and closes
+// one it may not. A refused open that leaves its handle behind holds the
+// workspace for the life of a process that is about to refuse to start, which
+// is the failure such a boot is least able to explain.
+func (p *workspaceProvider) admit(engine workspaceEngine, reserved string) (beads.Store, io.Closer, error) {
+	if err := p.mintsUnderReservedPrefix(engine.IDPrefix(), reserved); err != nil {
+		if closeErr := engine.CloseStore(); closeErr != nil {
 			return nil, nil, errors.Join(err, fmt.Errorf("closing the refused workspace of binding %q: %w", p.spec.Name, closeErr))
 		}
 		return nil, nil, err
 	}
-	return store, storeCloser{store}, nil
+	return engine, storeCloser{engine}, nil
 }
 
-// workspacePresent refuses a binding whose workspace is not there.
+// workspaceProvisioned refuses a binding whose directory is not a workspace
+// somebody provisioned.
 //
-// Opening it anyway would create one, and a workspace created this way has no
-// configured id prefix — so the boot would succeed and the first write would
-// fail somewhere inside the linked library, naming a directory the operator
-// never chose to create. Refusing here says which directory is missing while
-// that is still the whole problem.
-func (p *workspaceProvider) workspacePresent() error {
-	metadata := workspaceMetadataPath(p.root)
-	info, err := os.Stat(metadata)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: binding %q names the workspace at %s, and %s is not there; create the workspace with the linked beads library's own tooling before a city serves from it",
-			ErrWorkspaceUnavailable, p.spec.Name, p.root, metadata)
-	}
+// The test is the presence of the workspace's own configuration file, and the
+// reason is that the linked library treats its absence as "no configuration"
+// and falls back to defaults — which for a fresh directory means creating a
+// complete engine on the spot. Any weaker directory test lets a boot that is
+// about to refuse build a database first: an empty directory passes, the
+// library populates it, and the prefix check then rejects the workspace it
+// just caused to exist. Requiring the file that NAMES the backend also makes
+// this provider's own premise true, because a workspace with no configuration
+// has not named one.
+func (p *workspaceProvider) workspaceProvisioned() error {
+	configured, err := workspaceIsConfigured(p.root)
 	if err != nil {
-		return fmt.Errorf("stating the workspace of binding %q at %s: %w", p.spec.Name, p.root, err)
+		return fmt.Errorf("reading the workspace configuration of binding %q at %s: %w", p.spec.Name, p.root, err)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%w: binding %q names the workspace at %s, where %s is not a directory",
-			ErrWorkspaceUnavailable, p.spec.Name, p.root, metadata)
+	if configured {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%w: binding %q names the workspace at %s, and its configuration %s is not there; provision the workspace with the linked beads library's own tooling before a city serves from it",
+		ErrWorkspaceUnavailable, p.spec.Name, p.root, workspaceConfigPath(p.root))
+}
+
+// workspaceIsConfigured reports whether the workspace holds the configuration
+// file the linked library reads, in either the current or the legacy spelling
+// that library still accepts. A read failure other than absence is returned
+// rather than swallowed: a directory this build cannot look at decides nothing.
+func workspaceIsConfigured(root string) (bool, error) {
+	for _, path := range []string{workspaceConfigPath(root), workspaceLegacyConfigPath(root)} {
+		info, err := os.Stat(path)
+		if err == nil {
+			return info.Mode().IsRegular(), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // mintsUnderReservedPrefix proves the workspace mints bead ids under the

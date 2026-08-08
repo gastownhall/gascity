@@ -2856,12 +2856,12 @@
         },
         "path": {
           "type": "string",
-          "description": "Path is the SQLite binding root. Empty defaults to \".gc/store\".",
+          "description": "Path is the SQLite binding root, relative to the city unless absolute.\nEmpty defaults to \".gc/store\".",
           "default": ".gc/store"
         },
         "config_ref": {
           "type": "string",
-          "description": "ConfigRef is an opaque, secret-free reference resolved by a non-built-in\nprovider."
+          "description": "ConfigRef is an opaque, secret-free reference resolved by the provider\nthat owns the binding, within the city that declares it."
         }
       },
       "additionalProperties": false,
@@ -2869,7 +2869,7 @@
       "required": [
         "provider"
       ],
-      "description": "StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; SQLite accepts `path` (default `.gc/store`), while other providers accept an opaque `config_ref` resolved by that provider."
+      "description": "StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; the SQLite provider accepts `path` (default `.gc/store`), while every other provider accepts an opaque `config_ref` that provider resolves."
     },
     "StorageClasses": {
       "properties": {

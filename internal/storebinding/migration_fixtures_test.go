@@ -112,7 +112,7 @@ func migrationPlanWithFactories(t *testing.T, classes map[coordclass.Class]strin
 	t.Helper()
 	factories := []*planCountingFactory{{id: "infra-provider"}, {id: "task-beads-provider"}}
 	registry, _ := planRegistry(t, factories...)
-	plan, err := ResolveStoragePlan(registry, planStorageConfig(classes, bindings), planWorkPins())
+	plan, err := ResolveStoragePlan(registry, planStorageConfig(classes, bindings), planWorkPins(), "")
 	if err != nil {
 		t.Fatalf("ResolveStoragePlan: %v", err)
 	}
