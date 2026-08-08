@@ -2790,6 +2790,7 @@ func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdisp
 	cs := d.cs
 	cs.mu.RLock()
 	cfg := cs.cfg
+	routes := cs.storageRoutes
 	var rec events.Recorder = cs.eventProv
 	cs.mu.RUnlock()
 	if rec == nil {
@@ -2797,7 +2798,10 @@ func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdisp
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	md := newMemoryOrderDispatcher(nil, cs.cityPath, cfg, rec, os.Stderr)
+	// The per-delivery dispatcher serves the same storage binding the
+	// controller booted, so a webhook-fired wisp lands in the same graph store
+	// a tick-fired one does.
+	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
 	return md.Dispatch(ctx, req)
 }
 
