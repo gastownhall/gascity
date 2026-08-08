@@ -41,6 +41,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -190,8 +192,26 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// the born-split discipline below, which asks nothing of the binding
 		// and proves the one invariant the work store alone can prove.
 		target = infraBindingTarget{Binding: binding}
+		// A provider that opens no bead engine cannot serve regardless of
+		// what the work store holds. Refusing here, before any outcome is
+		// recorded, keeps the event stream honest: a permanently unservable
+		// binding must not publish converged on every boot.
+		if opener := plannedBindingOpener(plan, binding); opener == nil {
+			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
+				logPrefix, binding, storage.Bindings[binding].Provider)
+		}
 		report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
 		report.Target = target
+		if report.serving() {
+			// Serving is durable history the moment it happens: record it
+			// before the first route opens, so a later re-point at this
+			// build's own engine cannot genesis an empty store while this
+			// binding still holds the city's infrastructure state.
+			note := bornSplitServedNote{Binding: binding, Provider: storage.Bindings[binding].Provider}
+			if err := writeBornSplitServedNote(cityPath, note); err != nil {
+				return nil, fmt.Errorf("%s: %w", logPrefix, err)
+			}
+		}
 	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
@@ -203,6 +223,76 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	}
 	recordStorageBindingOutcome(rec, report, "")
 	return openStorageRoutes(plan, target)
+}
+
+// bornSplitServedNote records the durable fact that this city has served its
+// infrastructure classes from a binding this build cannot read. It is not
+// process state — it is history, the same durability class as the convergence
+// marker, and the one input that keeps a later genesis from blessing an empty
+// store while the city's real state lives in that binding.
+type bornSplitServedNote struct {
+	Binding  string `json:"binding"`
+	Provider string `json:"provider"`
+}
+
+// bornSplitServedNotePath is where the note lives, under the city's own .gc.
+func bornSplitServedNotePath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "storage-served-binding.json")
+}
+
+// readBornSplitServedNote reads the note if one exists. An unreadable or
+// undecodable note is an error, never an absence: absence is the license
+// genesis acts on, and a corrupt file must not grant it.
+func readBornSplitServedNote(cityPath string) (bornSplitServedNote, bool, error) {
+	data, err := os.ReadFile(bornSplitServedNotePath(cityPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return bornSplitServedNote{}, false, nil
+	}
+	if err != nil {
+		return bornSplitServedNote{}, false, err
+	}
+	var note bornSplitServedNote
+	if err := json.Unmarshal(data, &note); err != nil {
+		return bornSplitServedNote{}, false, fmt.Errorf("decoding %s: %w", bornSplitServedNotePath(cityPath), err)
+	}
+	return note, true, nil
+}
+
+// writeBornSplitServedNote durably records the served binding before the first
+// serve. Atomic replace, idempotent, and a failure refuses the boot: serving
+// without the note is what re-opens the genesis hole this note closes.
+func writeBornSplitServedNote(cityPath string, note bornSplitServedNote) error {
+	path := bornSplitServedNotePath(cityPath)
+	if existing, present, err := readBornSplitServedNote(cityPath); err != nil {
+		return err
+	} else if present && existing == note {
+		return nil
+	}
+	data, err := json.Marshal(note)
+	if err != nil {
+		return fmt.Errorf("encoding the served-binding note: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".storage-served-binding-*")
+	if err != nil {
+		return fmt.Errorf("staging the served-binding note: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("writing the served-binding note: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("closing the served-binding note: %w", err)
+	}
+	if err := os.Rename(temp.Name(), path); err != nil {
+		_ = os.Remove(temp.Name())
+		return fmt.Errorf("installing the served-binding note: %w", err)
+	}
+	return nil
 }
 
 // checkBornSplitDiscipline decides whether a binding served by a provider this
@@ -247,6 +337,25 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	return infraMigrationReport{Outcome: infraMigrationBornSplitBlocked, Stranded: ids}
 }
 
+// plannedBindingOpener returns the engine-opening hook for the named binding
+// in a resolved plan, or nil when the plan does not carry the binding or its
+// provider opens no engine.
+func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebinding.EngineOpener {
+	if plan == nil {
+		return nil
+	}
+	for _, planned := range plan.Bindings() {
+		if string(planned.Name) != name {
+			continue
+		}
+		if opener, ok := storebinding.EngineOpenerFor(planned); ok {
+			return opener
+		}
+		return nil
+	}
+	return nil
+}
+
 // storageBindingEventTypes maps a migration outcome to the event that reports
 // it. Outcomes with no entry are not events: not-configured describes a city
 // that was never asked, and stranded is carried inside the refusal that names
@@ -257,6 +366,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationUnconverged:      events.StorageBindingUnconverged,
 	infraMigrationStranded:         events.StorageBindingUnconverged,
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
+	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
