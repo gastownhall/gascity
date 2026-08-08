@@ -49,10 +49,11 @@ const (
 )
 
 // sanctionedProviderIDs are the provider IDs compiled into this binary:
-// "sqlite" for the SQLite graph-engine inspection surface and "sqlite-beads"
-// for the bead-store provider. An out-of-tree provider registers its own ID
-// from its own tree, never from this one.
-var sanctionedProviderIDs = map[string]bool{"sqlite": true, "sqlite-beads": true}
+// "sqlite" for the SQLite graph-engine inspection surface, "sqlite-beads" for
+// the bead-store provider over it, and "beads-workspace" for the provider that
+// serves a binding from a beads workspace directory. An out-of-tree provider
+// registers its own ID from its own tree, never from this one.
+var sanctionedProviderIDs = map[string]bool{"sqlite": true, "sqlite-beads": true, "beads-workspace": true}
 
 // storageSurfaceDirs are the module-local directories that make up the storage
 // class surface. They are the packages the CGO invariance assertion covers.

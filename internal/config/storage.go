@@ -61,11 +61,13 @@ func (c StorageClass) String() string { return string(c) }
 //	provider = "sqlite-beads"
 //	path = ".gc/store"
 //
-// A non-built-in compiled provider uses an opaque configuration reference:
+// Every other provider — the other built-in ones as much as any an
+// out-of-tree build compiles in — is configured by an opaque reference that
+// provider resolves for itself:
 //
-//	[storage.bindings.tasks]
+//	[storage.bindings.infra]
 //	provider = "<compiled-provider-id>"
-//	config_ref = "city-work"
+//	config_ref = "infra"
 type StorageConfig struct {
 	// Classes contains the complete class-to-binding assignment.
 	Classes StorageClasses `toml:"classes" jsonschema:"required"`
