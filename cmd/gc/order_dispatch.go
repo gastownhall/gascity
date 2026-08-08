@@ -2309,9 +2309,21 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 //
 // nil means the two classes share a store — every city that relocates nothing —
 // and the wisp half then runs inside the per-store loop exactly where it always
-// did, once per scope. It is hoisted out of the loop only when wispStore is
-// distinct, because that store is city-level: sweeping it once per scope would
-// re-close the same subtrees and multiply the reported count.
+// did, once per scope.
+//
+// A non-nil wispStore ADDS a place to look; it does not move the search. The
+// per-scope stores keep their wisp half because a converged split city holds
+// wisp roots in both classes: every subtree born before cutover stayed in the
+// work ledger, and `gc order run` still mints its root through the unrouted
+// scope store. Those roots hold their order's gate shut just as hard — the gate
+// federates over both stores — so trading the work half for the graph half only
+// swaps which stalled wisp has no recovery.
+//
+// The binding is swept once, outside the loop, because it is city-level rather
+// than per-scope: sweeping it once per scope would re-close the same subtrees
+// and multiply the reported count. When it is itself one of the swept stores the
+// loop has already covered it, and the hoisted pass is skipped for the same
+// count-once reason.
 func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
@@ -2319,7 +2331,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 	if includeWispSubtrees && len(onlyOrders) == 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
-	perStoreWisps := includeWispSubtrees && wispStore == nil
+	perStoreWisps := includeWispSubtrees
 	result := orderTrackingSweepResult{}
 	var errs []error
 	for i, store := range stores {
@@ -2348,7 +2360,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 			result.sweptStoreKeys[key] = struct{}{}
 		}
 	}
-	if includeWispSubtrees && wispStore != nil {
+	if includeWispSubtrees && wispStore != nil && !storeListContains(stores, wispStore) {
 		n, err := sweepStaleOrderWispSubtreesMode(wispStore, now.Add(-staleAfter), onlyOrders, initiator, dryRun)
 		result.wispClosed += n
 		if err != nil {

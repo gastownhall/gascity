@@ -564,6 +564,96 @@ func TestOrderWispForceCloseStaysInTheOneStoreOnSingleStoreCity(t *testing.T) {
 	}
 }
 
+// TestOrderWispForceCloseSweepsBothClassesOnASplitCity is the other half of the
+// same recovery, and the two halves are not exclusive.
+//
+// Routing the force-close at the graph binding is only correct if it does not
+// stop looking in the work stores. A converged split city holds wisp roots in
+// both: every subtree born before cutover stayed in the work ledger, and
+// `gc order run` still mints its root through the unrouted scope store. Those
+// roots keep hasOpenWorkStrict returning true — the gate federates over both
+// stores — so a sweep that trades the work half for the graph half leaves them
+// suppressing their order with the same no-gc-level-recovery wedge the graph
+// half was written to close, only with the stores swapped.
+//
+// Both roots are also asserted as a count, not just as a status, because the
+// hoisted binding sweep must stay outside the per-scope loop: a work-half fix
+// that re-swept the binding once per scope would still turn both of these
+// closed while multiplying wispClosed.
+func TestOrderWispForceCloseSweepsBothClassesOnASplitCity(t *testing.T) {
+	workStore := beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	graphStore.IDPrefix = "gcg"
+
+	workRoot, workChild := seedOrderWispSubtreeForTest(t, workStore, "reaper")
+	graphRoot, graphChild := seedOrderWispSubtreeForTest(t, graphStore, "reaper")
+
+	now := workRoot.CreatedAt.Add(2 * time.Hour)
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, orderFilterForTest("reaper"), true)
+	if err != nil {
+		t.Fatalf("split-city sweep: %v", err)
+	}
+
+	for _, id := range []string{workRoot.ID, workChild.ID} {
+		if got := beadByIDForTest(t, workStore, id); got.Status != "closed" {
+			t.Fatalf("work-resident wisp bead %s status = %q, want closed; --include-wisps stopped sweeping the work stores, so a work-resident wisp root has no gc-level force-close and keeps its order suppressed on every tick", id, got.Status)
+		}
+	}
+	for _, id := range []string{graphRoot.ID, graphChild.ID} {
+		if got := beadByIDForTest(t, graphStore, id); got.Status != "closed" {
+			t.Fatalf("graph-resident wisp bead %s status = %q, want closed", id, got.Status)
+		}
+	}
+	if result.wispClosed != 4 {
+		t.Fatalf("wispClosed = %d, want 4 (both subtrees, each closed once)", result.wispClosed)
+	}
+}
+
+// TestOrderWispForceCloseCountsAStoreServingBothClassesOnce pins the reason the
+// binding sweep is hoisted out of the per-scope loop: a city whose graph binding
+// IS one of the swept stores must report its subtree once, not twice. Dry-run is
+// the mode that can actually double-count — the live path skips an
+// already-closed root on the second pass and would hide the double sweep.
+func TestOrderWispForceCloseCountsAStoreServingBothClassesOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := seedOrderWispSubtreeForTest(t, store, "reaper")
+
+	now := root.CreatedAt.Add(2 * time.Hour)
+	result, err := sweepStaleOrderTrackingAcrossStoresDryRun([]beads.Store{store}, store, now, time.Hour, orderFilterForTest("reaper"), true)
+	if err != nil {
+		t.Fatalf("collapsed-class dry-run sweep: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("dry-run wispClosed = %d, want 2; one store serving both classes was swept twice and the operator is told twice as much work is stale as there is", result.wispClosed)
+	}
+}
+
+// seedOrderWispSubtreeForTest creates the open wisp root and step the stale-wisp
+// force-close selects on: the "order-run:<name>" label plus gc.kind=workflow is
+// what staleOrderWispRoots matches.
+func seedOrderWispSubtreeForTest(t *testing.T, store beads.Store, order string) (beads.Bead, beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title:    order + " wisp",
+		Type:     "molecule",
+		Labels:   []string{"order-run:" + order},
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create wisp root: %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    order + " step",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("create wisp step: %v", err)
+	}
+	return root, child
+}
+
 func beadByIDForTest(t *testing.T, store beads.Store, id string) beads.Bead {
 	t.Helper()
 	b, err := store.Get(id)
