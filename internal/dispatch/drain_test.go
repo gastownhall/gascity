@@ -296,12 +296,15 @@ func TestDrainProjectedBlockerIDsRoutesMemberDepsToOwningStore(t *testing.T) {
 		},
 	}
 
-	blockerIDs, err := drainProjectedBlockerIDs(ambient, dependent.ID, manifest, ProcessOptions{MemberStores: []beads.Store{memberStore}})
+	projection, err := drainProjectedBlockerIDs(ambient, dependent.ID, manifest, ProcessOptions{MemberStores: []beads.Store{memberStore}})
 	if err != nil {
 		t.Fatalf("drainProjectedBlockerIDs: %v", err)
 	}
-	if len(blockerIDs) != 1 || blockerIDs[0] != "root-blocker" {
-		t.Fatalf("blockerIDs = %v, want [root-blocker] (member deps routed to member store, projected onto the blocker's item root)", blockerIDs)
+	if len(projection.BlockerIDs) != 1 || projection.BlockerIDs[0] != "root-blocker" {
+		t.Fatalf("blockerIDs = %v, want [root-blocker] (member deps routed to member store, projected onto the blocker's item root)", projection.BlockerIDs)
+	}
+	if len(projection.Unprojectable) != 0 {
+		t.Fatalf("unprojectable = %v, want none: an in-manifest blocker projects onto an item root, which is co-resident with the item workflow by construction", projection.Unprojectable)
 	}
 }
 
@@ -2190,5 +2193,474 @@ func TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary(t *testing.T
 	}
 	if got != beads.Store(work) {
 		t.Fatalf("drainUnitConvoyStore chose the ambient graph store for a work-resident member; the tracks edge it is about to write cannot reference an id that store cannot resolve")
+	}
+}
+
+// itemWorkflowBeadIDs returns every bead id in the item workflow rooted at
+// rootID, so an assertion can talk about the whole molecule rather than guessing
+// which step carries the projection.
+func itemWorkflowBeadIDs(t *testing.T, store beads.Store, rootID string) []string {
+	t.Helper()
+	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		t.Fatalf("listByWorkflowRoot(%s): %v", rootID, err)
+	}
+	ids := make([]string, 0, len(workflowBeads))
+	for _, bead := range workflowBeads {
+		ids = append(ids, bead.ID)
+	}
+	return ids
+}
+
+// assertNoUnresolvableBlockingDeps fails on any ready-blocking dependency in
+// store whose target store cannot resolve.
+//
+// This is the invariant, not a proxy for it: a dependency row lives in one
+// store's dep table, and both MemStore.readyLocked and sqliteReadySQL read a
+// missing target's status as "" — which is not "closed", so the dependent is
+// excluded from Ready forever and no action in any other store can release it.
+func assertNoUnresolvableBlockingDeps(t *testing.T, store *beads.MemStore) {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		deps, err := store.DepList(bead.ID, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s): %v", bead.ID, err)
+		}
+		for _, dep := range deps {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			if _, err := store.Get(dep.DependsOnID); err != nil {
+				t.Fatalf("dangling %s edge %s -> %s: the store holding the edge cannot resolve the target, so the dependent never becomes ready and closing the real blocker in its own store cannot release it: %v",
+					dep.Type, bead.ID, dep.DependsOnID, err)
+			}
+		}
+	}
+}
+
+// TestProcessDrainSplitCityResumeCompletesAfterAMemberVanishes pins the resume
+// half of routing unit convoys across the class boundary.
+//
+// A drain resumes from its persisted manifest, and expandDrain persists after
+// every row, so any mid-loop exit — ErrControlPending from the spawn boundary, a
+// reservation retry, a transient store error on row i>0 — leaves rows 0..i-1
+// with their unit convoy ids recorded and gc.drain_state=expanding. That is a
+// designed re-entry, not a crash.
+//
+// A member hard-deleted between passes is likewise a supported state, pinned for
+// single-store cities by TestProcessDrainReplayUsesManifestWhenMemberWasDeleted-
+// BeforeUnitCreation: loadDrainManifestMembers substitutes an unresolved
+// placeholder and the drain continues. Deriving the unit convoy's store from the
+// member breaks that on a split city, because the manifest records the convoy's
+// id but not the store that answered when it was minted — so mint and reload
+// disagree the moment the member's resolvability changes, and a not-found is not
+// a transient controller error, so the caller QUARANTINES the drain instead of
+// retrying it.
+func TestProcessDrainSplitCityResumeCompletesAfterAMemberVanishes(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, false)
+	opts := ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}}
+
+	if _, err := ProcessControl(graph, drain, opts); err != nil {
+		t.Fatalf("ProcessControl(first pass): %v", err)
+	}
+	expanded := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+
+	// The designed re-entry: rows persisted, control still expanding.
+	if err := graph.SetMetadata(drain.ID, beadmeta.DrainStateMetadataKey, beadmeta.DrainStateExpanding); err != nil {
+		t.Fatalf("rewind gc.drain_state: %v", err)
+	}
+	if err := work.Delete(memberIDs[0]); err != nil {
+		t.Fatalf("Delete(%s): %v", memberIDs[0], err)
+	}
+
+	result, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(resume after a member vanished): %v; a non-transient control error is quarantined by the caller, and the drain never expands its remaining rows", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+	resumed := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+	if len(resumed.Rows) != len(expanded.Rows) {
+		t.Fatalf("manifest rows after resume = %d, want the original %d", len(resumed.Rows), len(expanded.Rows))
+	}
+	for i, row := range resumed.Rows {
+		if row.UnitConvoyID != expanded.Rows[i].UnitConvoyID {
+			t.Fatalf("row %d unit convoy = %q, want the already-minted %q; a resume that cannot find the convoy it minted mints a duplicate", i, row.UnitConvoyID, expanded.Rows[i].UnitConvoyID)
+		}
+		if row.ItemRootID != expanded.Rows[i].ItemRootID {
+			t.Fatalf("row %d item root = %q, want the already-created %q", i, row.ItemRootID, expanded.Rows[i].ItemRootID)
+		}
+		if row.Status != "wired" {
+			t.Fatalf("row %d status = %q, want wired", i, row.Status)
+		}
+	}
+}
+
+// TestProcessDrainSplitCityUnitConvoyForAVanishedMember is the mint half, and
+// the split-city counterpart of
+// TestProcessDrainReplayUsesManifestWhenMemberWasDeletedBeforeUnitCreation.
+//
+// A drain resumes with row.UnitConvoyID empty either because no pass ever got to
+// the mint, or because one crashed between minting and persisting the id — and
+// both are the same shape once the member has since been deleted, because the
+// resumed pass sees only an unresolved placeholder for it.
+//
+// Neither may be answered from the ambient graph binding. A unit convoy is a
+// synthetic convoy and a synthetic convoy is a WORK bead, so a fresh mint belongs
+// in the work store — a member no store can resolve is a reason to have no tracks
+// edge (trackDrainMember stamps gc.drain_member_unresolved instead), not a reason
+// to file the convoy in the infra ledger, which the migration's own equality
+// invariant says work never enters. And the gc.drain_unit_key lookup that decides
+// between mint and reuse has to span the same stores, or the crashed-mid-mint
+// resume silently mints a second unit convoy for a row that already has one.
+func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		premint  bool
+		wantMint bool
+	}{
+		{name: "no unit convoy minted yet", premint: false, wantMint: true},
+		{name: "a previous pass minted one before crashing", premint: true, wantMint: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
+			if err := graph.SetMetadata(drain.ID, beadmeta.DrainMemberAccessMetadataKey, "exclusive"); err != nil {
+				t.Fatalf("SetMetadata(exclusive): %v", err)
+			}
+			drain = mustGetBead(t, graph, drain.ID)
+			root := mustGetBead(t, graph, drain.Metadata["gc.root_bead_id"])
+			parentConvoyID := root.Metadata["gc.input_convoy_id"]
+			members, err := convoycore.Members(work, parentConvoyID, false)
+			if err != nil {
+				t.Fatalf("Members: %v", err)
+			}
+			manifest := buildDrainManifest(drain, parentConvoyID, "drain-item", members)
+			missingID := manifest.Rows[0].MemberID
+
+			preminted := ""
+			if tc.premint {
+				// The mint the crashed pass completed, while the member was
+				// still resolvable. Its id never reached the manifest.
+				unit, created, err := ensureDrainUnitConvoy(graph, drain, parentConvoyID, len(members), manifest.Rows[0], members[0], ProcessOptions{MemberStores: []beads.Store{work}})
+				if err != nil {
+					t.Fatalf("pre-mint unit convoy: %v", err)
+				}
+				if !created {
+					t.Fatal("pre-mint did not create the unit convoy")
+				}
+				preminted = unit.ID
+			}
+
+			if err := work.Delete(missingID); err != nil {
+				t.Fatalf("Delete(%s): %v", missingID, err)
+			}
+			if err := persistDrainManifest(graph, drain.ID, manifest, map[string]string{beadmeta.DrainStateMetadataKey: beadmeta.DrainStateExpanding}); err != nil {
+				t.Fatalf("persist manifest: %v", err)
+			}
+
+			if _, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), ProcessOptions{
+				FormulaSearchPaths: []string{dir},
+				MemberStores:       []beads.Store{work},
+			}); err != nil {
+				t.Fatalf("ProcessControl(replay with a vanished member): %v", err)
+			}
+
+			replayed := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+			row := replayed.Rows[0]
+			if row.UnitConvoyID == "" || row.ItemRootID == "" {
+				t.Fatalf("row = %+v, want a unit convoy and an item root despite the missing member", row)
+			}
+			if !tc.wantMint && row.UnitConvoyID != preminted {
+				t.Fatalf("row unit convoy = %s, want the already-minted %s; a gc.drain_unit_key lookup that does not span the store the mint chose mints a duplicate for a row that already has one", row.UnitConvoyID, preminted)
+			}
+			if _, err := graph.Get(row.UnitConvoyID); err == nil {
+				t.Fatalf("unit convoy %s for the vanished member %s is in the GRAPH binding; a synthetic convoy is a work bead, and the migration's own equality invariant says work never crosses into the infra ledger", row.UnitConvoyID, missingID)
+			}
+			unit, err := work.Get(row.UnitConvoyID)
+			if err != nil {
+				t.Fatalf("unit convoy %s is not in the work store either: %v", row.UnitConvoyID, err)
+			}
+			if got := unit.Metadata[beadmeta.DrainMemberUnresolvedMetadataKey]; tc.wantMint && got != "true" {
+				t.Fatalf("unit convoy metadata = %#v, want the unresolved marker", unit.Metadata)
+			}
+			unitMembers, err := convoycore.Members(work, row.UnitConvoyID, true)
+			if err != nil {
+				t.Fatalf("Members(unit): %v", err)
+			}
+			for _, member := range unitMembers {
+				if member.ID == missingID && !convoycore.IsUnresolvedTrackedItem(member) {
+					t.Fatalf("unit members = %+v, want no resolvable track to the missing member %s", unitMembers, missingID)
+				}
+			}
+			// The surviving sibling is unaffected and still lands in the work store.
+			sibling := replayed.Rows[1]
+			if _, err := work.Get(sibling.UnitConvoyID); err != nil {
+				t.Fatalf("sibling unit convoy %s is not in the work store: %v", sibling.UnitConvoyID, err)
+			}
+		})
+	}
+}
+
+// TestEnsureDrainUnitConvoyPrefersTheWorkStoreOverAnEdgelessBindingCopy pins the
+// probe ORDER of the gc.drain_unit_key idempotence lookup.
+//
+// The lookup has to span every store the mint could have chosen, or a resume
+// mints a duplicate. Spanning them primary-first gets the wrong one on a real
+// converged city: a city migrated under the previous classification carries an
+// EDGELESS copy of every synthetic convoy in its binding — `gc storage migrate`
+// copied the row, and importInfraSnapshot re-added only the edges whose both
+// endpoints were infra — so the binding answers with a convoy that has no tracks
+// edge and cannot grow one, and the repair attempt fails cross-class.
+//
+// A unit convoy is a work bead, so the work class answers first.
+func TestEnsureDrainUnitConvoyPrefersTheWorkStoreOverAnEdgelessBindingCopy(t *testing.T) {
+	work := beads.NewMemStore()
+	control, err := work.Create(beads.Bead{Title: "drain", Type: "task"})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	parent, err := work.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	member, err := work.Create(beads.Bead{Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	row := drainManifestRow{Index: 0, MemberID: member.ID, UnitKey: "drain-unit:" + control.ID + ":0:" + member.ID}
+
+	// The real unit convoy, minted in the work store with its tracks edge.
+	minted, created, err := ensureDrainUnitConvoy(work, control, parent.ID, 1, row, member, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ensureDrainUnitConvoy(single store): %v", err)
+	}
+	if !created {
+		t.Fatal("first ensureDrainUnitConvoy did not create the unit convoy")
+	}
+
+	// What `gc storage migrate` left in the binding: the row, none of its edges.
+	graph := beads.NewMemStoreFrom(1000, []beads.Bead{minted}, nil)
+
+	reused, createdAgain, err := ensureDrainUnitConvoy(graph, control, parent.ID, 1, row, member, ProcessOptions{MemberStores: []beads.Store{work}})
+	if err != nil {
+		t.Fatalf("ensureDrainUnitConvoy(split city): %v; the lookup answered with the binding's edgeless copy and then tried to repair its missing track across the class boundary", err)
+	}
+	if createdAgain {
+		t.Fatalf("the lookup missed the unit convoy %s a previous pass already minted and created a duplicate", minted.ID)
+	}
+	if reused.ID != minted.ID {
+		t.Fatalf("reused unit convoy = %s, want the already-minted %s", reused.ID, minted.ID)
+	}
+	tracked, err := convoycore.HasTrack(work, minted.ID, member.ID)
+	if err != nil {
+		t.Fatalf("HasTrack: %v", err)
+	}
+	if !tracked {
+		t.Fatalf("unit convoy %s lost its tracks edge to %s", minted.ID, member.ID)
+	}
+}
+
+// TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge pins the blocker
+// projection to the same co-residence rule the convoy edge has.
+//
+// A drained member's out-of-convoy `blocks` dependency is an ordinary backlog
+// shape, and its target is a WORK bead. The item workflow the drain builds for
+// that member is graph-resident, so projecting the raw id writes a dependency row
+// into a store that cannot resolve its own target. That does not degrade to an
+// unenforced edge: the readiness reader treats a missing target's status as not
+// closed, so the item step is excluded from Ready permanently, completeDrain
+// returns ErrControlPending forever, and closing the real blocker in the work
+// store cannot release it — recovery needs manual DepRemove surgery in the
+// binding. There is no error, no quarantine, and no operator signal.
+//
+// An already-closed blocker is the same shape and far more common (any historical
+// `blocks` edge in a real backlog), which is why the classification is by
+// residence AND status: a terminal blocker constrains nothing, so omitting its
+// edge loses no meaning and is not worth an operator's attention. An open one
+// does lose meaning, so it is recorded on the item root.
+func TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		closeBlocker   bool
+		wantRecordedOn bool
+	}{
+		{name: "open out-of-convoy blocker is recorded", closeBlocker: false, wantRecordedOn: true},
+		{name: "closed out-of-convoy blocker constrains nothing", closeBlocker: true, wantRecordedOn: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, false)
+
+			blocker, err := work.Create(beads.Bead{Title: "outside the convoy", Type: "task"})
+			if err != nil {
+				t.Fatalf("create blocker: %v", err)
+			}
+			if tc.closeBlocker {
+				if err := work.Close(blocker.ID); err != nil {
+					t.Fatalf("Close(%s): %v", blocker.ID, err)
+				}
+			}
+			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
+
+			result, err := ProcessControl(graph, drain, ProcessOptions{
+				FormulaSearchPaths: []string{dir},
+				MemberStores:       []beads.Store{work},
+			})
+			if err != nil {
+				t.Fatalf("ProcessControl(member with an out-of-convoy blocker): %v", err)
+			}
+			if result.Action != "drain-expanded" {
+				t.Fatalf("result = %+v, want drain-expanded", result)
+			}
+
+			assertNoUnresolvableBlockingDeps(t, graph)
+
+			manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+			ready, err := graph.Ready()
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			readyIDs := make(map[string]bool, len(ready))
+			for _, b := range ready {
+				readyIDs[b.ID] = true
+			}
+			for i, row := range manifest.Rows {
+				runnable := false
+				for _, id := range itemWorkflowBeadIDs(t, graph, row.ItemRootID) {
+					if readyIDs[id] {
+						runnable = true
+						break
+					}
+				}
+				if !runnable {
+					t.Fatalf("row %d item workflow %s has nothing ready; the drained item can never be dispatched and the drain waits on it forever", i, row.ItemRootID)
+				}
+			}
+
+			root := mustGetBead(t, graph, manifest.Rows[0].ItemRootID)
+			recorded := root.Metadata[beadmeta.DrainUnprojectedBlockersMetadataKey]
+			if tc.wantRecordedOn {
+				if recorded != blocker.ID {
+					t.Fatalf("%s on item root %s = %q, want %q; an item workflow that runs without a constraint its source member had must say so on its own bead, not only in a log line",
+						beadmeta.DrainUnprojectedBlockersMetadataKey, root.ID, recorded, blocker.ID)
+				}
+			} else if recorded != "" {
+				t.Fatalf("%s = %q, want empty: a closed blocker constrains nothing, so omitting its edge loses no meaning and recording it would fire on every real backlog",
+					beadmeta.DrainUnprojectedBlockersMetadataKey, recorded)
+			}
+
+			// The sibling row has no blocker at all and must be untouched.
+			sibling := mustGetBead(t, graph, manifest.Rows[1].ItemRootID)
+			if got := sibling.Metadata[beadmeta.DrainUnprojectedBlockersMetadataKey]; got != "" {
+				t.Fatalf("sibling item root %s recorded %q, want nothing", sibling.ID, got)
+			}
+		})
+	}
+}
+
+// TestDrainProjectedBlockerIDsIsProbeFreeOnASingleStoreCity is the byte-identity
+// half of the blocker co-residence rule.
+//
+// Every city with no relocated graph class names no member stores, and for those
+// co-residence is not a question: there is one store, so every id it resolves is
+// co-resident. The check must not run for them — the projection is a per-row,
+// per-pass sweep, and the answer would be the read it already did.
+func TestDrainProjectedBlockerIDsIsProbeFreeOnASingleStoreCity(t *testing.T) {
+	inner := beads.NewMemStore()
+	blocker, err := inner.Create(beads.Bead{Title: "blocker", Type: "task"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	member, err := inner.Create(beads.Bead{Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	mustDepAdd(t, inner, member.ID, blocker.ID, "blocks")
+	store := &countingGetStore{Store: inner}
+
+	manifest := drainManifest{Version: 1, Rows: []drainManifestRow{{Index: 0, MemberID: member.ID, ItemRootID: "root-member"}}}
+	projection, err := drainProjectedBlockerIDs(store, member.ID, manifest, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("drainProjectedBlockerIDs: %v", err)
+	}
+	if len(projection.BlockerIDs) != 1 || projection.BlockerIDs[0] != blocker.ID {
+		t.Fatalf("blockerIDs = %v, want [%s]", projection.BlockerIDs, blocker.ID)
+	}
+	if len(projection.Unprojectable) != 0 {
+		t.Fatalf("unprojectable = %v, want none on a single-store city", projection.Unprojectable)
+	}
+	if store.gets != 0 {
+		t.Fatalf("the single-store path issued %d co-residence probe read(s); with one store every blocker is co-resident and the read is pure overhead on a per-row, per-pass sweep", store.gets)
+	}
+}
+
+// TestEnsureDrainUnitConvoyFindsAConvoyMintedBeforeItsMemberVanished pins the
+// SPAN of the gc.drain_unit_key idempotence lookup, as
+// TestEnsureDrainUnitConvoyPrefersTheWorkStoreOverAnEdgelessBindingCopy pins its
+// order.
+//
+// The key is the token that decides mint-or-reuse, and the manifest persists the
+// unit convoy's id but never the store that answered when it was minted. So the
+// lookup cannot be re-derived from the member: convoy members may be graph-class
+// (convoy.MemberClasses names Graph for exactly that), and a member that resolves
+// on the minting pass and not on the resuming pass moves the derived answer. Ask
+// one store and the resume misses a convoy that exists and mints a second one for
+// a row that already has one.
+func TestEnsureDrainUnitConvoyFindsAConvoyMintedBeforeItsMemberVanished(t *testing.T) {
+	work := beads.NewMemStore()
+	graph := beads.NewMemStoreFrom(1000, nil, nil)
+	opts := ProcessOptions{MemberStores: []beads.Store{work}}
+
+	control, err := graph.Create(beads.Bead{Title: "drain", Type: "task"})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	parent, err := work.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	member, err := graph.Create(beads.Bead{Title: "a graph-class member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	row := drainManifestRow{Index: 0, MemberID: member.ID, UnitKey: "drain-unit:" + control.ID + ":0:" + member.ID}
+
+	minted, created, err := ensureDrainUnitConvoy(graph, control, parent.ID, 1, row, member, opts)
+	if err != nil {
+		t.Fatalf("ensureDrainUnitConvoy(minting pass): %v", err)
+	}
+	if !created {
+		t.Fatal("minting pass did not create the unit convoy")
+	}
+	if _, err := graph.Get(minted.ID); err != nil {
+		t.Fatalf("unit convoy %s did not land with its member: %v", minted.ID, err)
+	}
+
+	// The member vanishes before the resuming pass, which therefore sees the
+	// unresolved placeholder loadDrainManifestMembers synthesizes.
+	if err := graph.Delete(member.ID); err != nil {
+		t.Fatalf("Delete(%s): %v", member.ID, err)
+	}
+	placeholder := beads.Bead{ID: member.ID, Title: member.ID, Type: "task", Status: "unknown"}
+
+	reused, createdAgain, err := ensureDrainUnitConvoy(graph, control, parent.ID, 1, row, placeholder, opts)
+	if err != nil {
+		t.Fatalf("ensureDrainUnitConvoy(resuming pass): %v", err)
+	}
+	if createdAgain || reused.ID != minted.ID {
+		t.Fatalf("resuming pass created unit convoy %s (created=%v), want the already-minted %s; a lookup re-derived from the member moves stores the moment the member stops resolving", reused.ID, createdAgain, minted.ID)
 	}
 }

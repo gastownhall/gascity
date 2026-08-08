@@ -48,8 +48,9 @@ type MemberClasses struct {
 	Work []beads.Store
 
 	// Graph names the Graph-class handle when graph-class beads (formula steps,
-	// control beads, synthetic convoys) can be members. Nil means this
-	// operation does not span the Graph class.
+	// control beads, wisp roots) can be members. It is never the class that owns
+	// the convoy itself — synthetic convoys are work beads like every other
+	// convoy. Nil means this operation does not span the Graph class.
 	Graph beads.Store
 }
 

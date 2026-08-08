@@ -93,6 +93,14 @@ const (
 	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
 	DrainStateMetadataKey                = "gc.drain_state"
 	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
+	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
+	// out-of-convoy blockers of its source member that the item workflow could
+	// not depend on because they live in another class store. The item workflow
+	// runs without those constraints: a dependency row can only reference an id
+	// its own store resolves, and writing one anyway removes the dependent from
+	// Ready forever. Only OPEN blockers are recorded — a terminal one constrains
+	// nothing, so omitting its edge loses no meaning. Comma-separated bead ids.
+	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
@@ -342,6 +350,7 @@ var KnownMetadataKeys = []string{
 	DrainParentConvoyIDMetadataKey,
 	DrainStateMetadataKey,
 	DrainUnitKeyMetadataKey,
+	DrainUnprojectedBlockersMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
 	ExclusiveDrainReservationMetadataKey,

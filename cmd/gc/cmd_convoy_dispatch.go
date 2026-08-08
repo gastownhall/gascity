@@ -193,10 +193,12 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	}
 
 	// store is the SCOPE store. Control beads, the workflow topology they
-	// mutate, and every bead the control kinds create (retry attempts, fanout
-	// fragments, drain units and their convoys) are graph class, so all of that
-	// runs against the graph store. store itself stays the work leg: it owns the
-	// input convoy whose tracks edges the execution snapshot below reads.
+	// mutate, and the graph beads the control kinds create (retry attempts,
+	// fanout fragments, drain item roots) are graph class, so all of that runs
+	// against the graph store. store itself stays the work leg: EVERY convoy is
+	// a work bead, the synthetic drain-unit ones included, so it owns both the
+	// input convoy whose tracks edges the execution snapshot below reads and the
+	// unit convoys a drain mints alongside its members.
 	graphStore := controlGraphStore(cityPath, storePath, cfg, store)
 
 	bead, err := graphStore.Get(beadID)
