@@ -47,9 +47,9 @@ const (
 	// label (gc:extmsg-binding, -delivery, -group, -transcript, ...).
 	// Canonical: internal/extmsg/labels.go.
 	labelExtmsgPrefix = "gc:extmsg-"
-	// typeConvoy is the convoy bead type. Convoys are work-class UNLESS marked
-	// synthetic (graph.v2 input convoys, drain-unit convoys), which fold into
-	// ClassGraph. Canonical: internal/convoy.
+	// typeConvoy is the convoy bead type. EVERY convoy is work class, including
+	// the synthetic ones the system mints as glue (graph.v2 input convoys,
+	// drain-unit convoys). Canonical: internal/convoy.
 	typeConvoy = "convoy"
 	// typeConvergence is the convergence-loop root bead type. Convergence roots
 	// carry no graph metadata, so they need an explicit arm to fold into
@@ -74,9 +74,10 @@ const (
 // classify_test.go:
 //
 //   - ClassMessaging for type=message (mail) and gc:extmsg-* (extmsg).
-//   - ClassGraph for synthetic convoys (gc.synthetic on a type=convoy bead),
-//     so graph.v2 input convoys and drain-unit convoys travel with the graph
-//     they glue, while user convoys remain ClassWork.
+//   - ClassWork for synthetic convoys (gc.synthetic / gc.synthetic_kind on a
+//     type=convoy bead), stated as an explicit arm rather than left to the
+//     default — see isSyntheticConvoy for why the arm has to be explicit and
+//     why it has to run before the workflow arm.
 //   - ClassGraph for convergence roots (type=convergence), folding the
 //     convergence engine's state in with the graph it pours.
 //
@@ -161,9 +162,12 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassSessions
 	case hasLabel(labels, labelNudge) || hasLabel(labels, labelNudgeQueue):
 		return ClassNudges
-	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
-		return ClassGraph
+	// Ahead of the workflow arm on purpose: a synthetic convoy is glue for a
+	// graph and can carry that graph's markers, and the workflow arm would take
+	// it on any one of them. See isSyntheticConvoy.
 	case beadType == typeConvoy && isSyntheticConvoy(metadata):
+		return ClassWork
+	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
@@ -193,6 +197,24 @@ func isWorkflowMetadata(metadata map[string]string) bool {
 
 // isSyntheticConvoy reports whether a convoy bead is system-minted glue
 // (graph.v2 input convoy or drain-unit convoy) rather than a human/sling convoy.
+//
+// It exists to route those convoys to ClassWork, which is where the default
+// would put them anyway — so the arm looks redundant and is not. Two things
+// make it load-bearing:
+//
+// It has to run BEFORE the workflow arm. A synthetic convoy is minted as glue
+// for a specific graph and carries that graph's identifying metadata (a
+// drain-unit convoy names its control and its parent convoy; nothing stops a
+// future one from carrying gc.root_bead_id, which is all the workflow arm
+// needs). Left to the default, the classification of a convoy would depend on
+// which incidental keys happen to be stamped on it.
+//
+// And a misclassification here is not a routing preference, it is a hard
+// failure. A convoy exists to hold `tracks` edges to its members, its members
+// are work beads, and convoy.TrackItemIn refuses an edge whose member is owned
+// by another class because a dep row cannot reference an id its own store
+// cannot resolve. A synthetic convoy classified anywhere but Work is a convoy
+// that can never track anything.
 func isSyntheticConvoy(metadata map[string]string) bool {
 	if metadata == nil {
 		return false

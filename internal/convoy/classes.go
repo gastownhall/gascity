@@ -14,13 +14,12 @@ import (
 // MemberClasses names the class handles a single convoy operation spans.
 //
 // Convoy membership is the one deliberately mixed-class relation in the bead
-// substrate: the convoy bead and its `tracks` edges are owned by one class
-// (Work for a user convoy, Graph for a synthetic formula/drain convoy) while
-// the members themselves can be owned by the other. Per the class-ownership
-// table only Work and Graph ever own
-// convoy members, so those are the only classes an operation can name here;
-// Sessions, Messaging, Orders and Nudges are non-participating by construction
-// rather than by a runtime skip.
+// substrate: the convoy bead and its `tracks` edges are owned by Work — every
+// convoy is a work bead, the synthetic formula/drain ones included — while the
+// members themselves can be owned by another class. Per the class-ownership
+// table only Work and Graph ever own convoy members, so those are the only
+// classes an operation can name here; Sessions, Messaging, Orders and Nudges are
+// non-participating by construction rather than by a runtime skip.
 //
 // Naming is the whole contract, in both directions:
 //

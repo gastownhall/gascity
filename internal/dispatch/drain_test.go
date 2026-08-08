@@ -1280,7 +1280,7 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unit, created, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member)
+	unit, created, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member, ProcessOptions{})
 	if err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
@@ -1348,7 +1348,7 @@ func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {
 		UnitKey:  "drain-unit:test:0:" + member.ID,
 	}
 
-	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member); err != nil {
+	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member, ProcessOptions{}); err != nil {
 		t.Fatalf("ensureDrainUnitConvoy: %v", err)
 	}
 	if len(store.listMetadataOpts) == 0 {
@@ -1865,12 +1865,14 @@ func assertNoBlockingDep(t *testing.T, store beads.Store, issueID, dependsOnID s
 // actually has: the graph.v2 input convoy and its work members in the WORK
 // store, the workflow root and the drain control in the graph binding.
 //
-// carryConvoyCopy models what `gc storage migrate` leaves behind. A synthetic
-// convoy is graph class, so the migration copies the convoy ROW into the
-// binding — but importInfraSnapshot re-adds only the dep edges whose BOTH
-// endpoints are infra, so the copy carries none of its tracks edges to the work
-// members. The two stores mint from disjoint id ranges, the way two real bead
-// databases with different prefixes do.
+// carryConvoyCopy models what a city migrated under the PREVIOUS classification
+// has on disk. Synthetic convoys used to be graph class, so `gc storage migrate`
+// copied the convoy ROW into the binding — but importInfraSnapshot re-adds only
+// the dep edges whose BOTH endpoints are infra, so the copy carries none of its
+// tracks edges to the work members. Synthetic convoys are work class now, so a
+// migration run today leaves no such copy; the copies already written are why
+// the shape still has to be covered. The two stores mint from disjoint id
+// ranges, the way two real bead databases with different prefixes do.
 func seedSplitClassDrainWorkflow(t *testing.T, carryConvoyCopy bool) (work *beads.MemStore, graph *beads.MemStore, drain beads.Bead, memberIDs []string) {
 	t.Helper()
 	work = beads.NewMemStore()
@@ -2039,5 +2041,154 @@ func TestProcessDrainNeverPassesAConvoyItCouldNotRead(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProcessDrainSplitCityExpandsAndCompletes is the end-to-end acceptance for
+// the owner ruling that a synthetic convoy is a WORK bead.
+//
+// It is the whole point of the ruling stated as an outcome: on a converged split
+// city a drain over a non-empty input convoy must reach the same terminal state
+// it reaches on a single-store city — a manifest row per member, a unit convoy
+// per row that actually TRACKS its member, and an item root per row. Expansion
+// alone is not the bar. Before the ruling the expansion happened and then
+// ensureDrainUnitConvoy minted the unit convoy in the GRAPH store while its
+// member lived in the work store, so the tracks edge convoycore refuses to write
+// across a class boundary failed the whole dispatch and the control quarantined.
+//
+// Both migration shapes are covered because they exercise different halves: a
+// convoy that only ever lived in the work store, and one whose edgeless copy
+// `gc storage migrate` left in the binding is the first thing a graph-store read
+// finds.
+func TestProcessDrainSplitCityExpandsAndCompletes(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		carryConvoyCopy bool
+	}{
+		{name: "convoy only in the work store", carryConvoyCopy: false},
+		{name: "edgeless migration copy also in the binding", carryConvoyCopy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, tc.carryConvoyCopy)
+
+			result, err := ProcessControl(graph, drain, ProcessOptions{
+				FormulaSearchPaths: []string{dir},
+				MemberStores:       []beads.Store{work},
+			})
+			if err != nil {
+				t.Fatalf("ProcessControl(split-city drain): %v; a control dispatch that returns a non-transient error is QUARANTINED by the caller, which is the state this ruling exists to remove", err)
+			}
+			if result.Action != "drain-expanded" {
+				t.Fatalf("result = %+v, want drain-expanded", result)
+			}
+			if result.Created != 2*len(memberIDs) {
+				t.Fatalf("created = %d, want %d — one unit convoy and one item root per member", result.Created, 2*len(memberIDs))
+			}
+
+			reloaded := mustGetBead(t, graph, drain.ID)
+			if got := reloaded.Metadata[beadmeta.DrainStateMetadataKey]; got != beadmeta.DrainStateExpanded {
+				t.Fatalf("gc.drain_state = %q, want %q", got, beadmeta.DrainStateExpanded)
+			}
+			manifest := mustDrainManifest(t, reloaded)
+			if len(manifest.Rows) != len(memberIDs) {
+				t.Fatalf("manifest rows = %d, want %d", len(manifest.Rows), len(memberIDs))
+			}
+			for i, row := range manifest.Rows {
+				if row.UnitConvoyID == "" {
+					t.Fatalf("row %d has no unit convoy", i)
+				}
+				if row.ItemRootID == "" {
+					t.Fatalf("row %d has no item root", i)
+				}
+				if row.Status != "wired" {
+					t.Fatalf("row %d status = %q, want wired", i, row.Status)
+				}
+				// The unit convoy is a synthetic convoy, so per the ruling it is a
+				// work bead: it must be readable from the work store and it must
+				// hold the tracks edge to its member there.
+				unit, err := work.Get(row.UnitConvoyID)
+				if err != nil {
+					t.Fatalf("unit convoy %s is not in the work store: %v; a synthetic convoy is a work bead and its tracks edge cannot reference a member the convoy's own store cannot resolve", row.UnitConvoyID, err)
+				}
+				if unit.Metadata[beadmeta.SyntheticKindMetadataKey] != "drain-unit-convoy" {
+					t.Fatalf("unit convoy %s metadata = %v, want gc.synthetic_kind=drain-unit-convoy", unit.ID, unit.Metadata)
+				}
+				tracked, err := convoycore.HasTrack(work, row.UnitConvoyID, row.MemberID)
+				if err != nil {
+					t.Fatalf("HasTrack(%s, %s): %v", row.UnitConvoyID, row.MemberID, err)
+				}
+				if !tracked {
+					t.Fatalf("unit convoy %s does not track member %s; the drain item formula resolves its work from convoy_id, so an untracked unit dispatches an empty convoy", row.UnitConvoyID, row.MemberID)
+				}
+			}
+		})
+	}
+}
+
+// countingGetStore counts Get calls so a test can assert that a code path
+// issued no read at all, which is what "byte-identical" means for a probe that
+// must not run.
+type countingGetStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *countingGetStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+// TestDrainUnitConvoyStoreIsTheAmbientStoreOnASingleStoreCity is the
+// byte-identity half of routing unit convoys to the member's owning store.
+//
+// Every city with no relocated graph class names no member stores, and for those
+// the unit convoy's store is not a question: it is the one store there is. The
+// owning-store probe must not run for them — not because the answer would be
+// wrong (it would be the same store) but because it is a read the drain does not
+// make today, once per unit convoy per pass, on the per-tick projection sweep.
+//
+// The identity assertion alone would not catch a probe, because the probe
+// returns the same handle. Counting the reads is what does.
+func TestDrainUnitConvoyStoreIsTheAmbientStoreOnASingleStoreCity(t *testing.T) {
+	store := &countingGetStore{Store: beads.NewMemStore()}
+	member, err := store.Create(beads.Bead{Title: "a member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	store.gets = 0
+
+	got, err := drainUnitConvoyStore(store, member, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("drainUnitConvoyStore: %v", err)
+	}
+	if got != beads.Store(store) {
+		t.Fatalf("drainUnitConvoyStore returned a different handle than the ambient store; the optional-capability assertions the drain makes are against that instance")
+	}
+	if store.gets != 0 {
+		t.Fatalf("the single-store path issued %d owning-store probe read(s); with no member stores named there is nothing to probe and the read is pure overhead", store.gets)
+	}
+}
+
+// TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary is the other
+// half: once a work-class member store is named, the unit convoy goes where the
+// member is, because convoy.TrackItemIn refuses an edge whose member is owned by
+// another class store.
+func TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary(t *testing.T) {
+	work := beads.NewMemStore()
+	graph := beads.NewMemStoreFrom(1000, nil, nil)
+	member, err := work.Create(beads.Bead{Title: "a work member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	got, err := drainUnitConvoyStore(graph, member, ProcessOptions{MemberStores: []beads.Store{work}})
+	if err != nil {
+		t.Fatalf("drainUnitConvoyStore: %v", err)
+	}
+	if got != beads.Store(work) {
+		t.Fatalf("drainUnitConvoyStore chose the ambient graph store for a work-resident member; the tracks edge it is about to write cannot reference an id that store cannot resolve")
 	}
 }

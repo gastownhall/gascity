@@ -128,7 +128,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		if row.UnitConvoyID == "" {
 			var created bool
 			var err error
-			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member)
+			unit, created, err = ensureDrainUnitConvoy(store, bead, parentConvoyID, len(members), *row, member, opts)
 			if err != nil {
 				return ControlResult{}, err
 			}
@@ -138,7 +138,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 			row.UnitConvoyID = unit.ID
 			row.Status = "unit-created"
 		} else {
-			reloaded, err := store.Get(row.UnitConvoyID)
+			reloaded, err := reloadDrainUnitConvoy(store, row.UnitConvoyID, member, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: loading drain unit convoy %s: %w", bead.ID, row.UnitConvoyID, err)
 			}
@@ -356,25 +356,31 @@ func drainMemberDepStore(store beads.Store, memberID string, opts ProcessOptions
 // never seen the convoy answers both reads EMPTY rather than erroring, and an
 // empty membership is indistinguishable from a genuinely empty input convoy, so
 // the drain expands to zero rows and closes gc.outcome=pass with every member
-// left open and undispatched. A graph.v2 input convoy is minted alongside its
-// work members (convoycore.TrackItemIn refuses a tracks edge whose member is
-// owned by another class, so a convoy is co-resident with its members), which
-// puts the edges in the work store while the drain runs in the binding.
+// left open and undispatched.
 //
-// Picking one store as the owner is not enough, because on a converged city the
-// convoy bead exists in BOTH: gc storage migrate copies the synthetic convoy row
-// into the binding while importInfraSnapshot re-adds only the edges whose both
-// endpoints are infra, so the copy carries no membership at all. An owner probe
-// finds that empty copy first and reports the same silent zero.
+// Which store SHOULD answer is settled: a convoy is a work bead, synthetic ones
+// included, so its edges are in the work store while the drain runs in the
+// binding. The work leg is therefore the authoritative one and the graph leg is
+// expected to contribute nothing.
 //
-// So membership is read as the UNION of what each candidate store records, which
-// is what convoy membership already is — an edge inventory. The union is
-// order-free and monotone: a store that never saw the convoy contributes
-// nothing, an edgeless migration copy contributes nothing, and no single store's
-// answer can subtract a member another store records. That makes a zero-row
-// expansion over a non-empty convoy structurally impossible rather than merely
-// unlikely. A member seen as an unresolved placeholder in one store and as a
-// real bead in another keeps the real bead.
+// It is still read as the UNION of what each candidate store records rather than
+// as a single lookup, for two reasons. A city migrated under the previous
+// classification has an edgeless copy of every synthetic convoy in its binding —
+// the migration copied the row and importInfraSnapshot re-added only the edges
+// whose both endpoints were infra — so "the store that has the convoy bead" is
+// still an ambiguous question on real disks, and answering it wrong is silent.
+// And the failure this guards is not a wrong answer but a green one: a drain
+// that could not read its membership produces byte-for-byte the same terminal
+// state as a drain that correctly found nothing to do.
+//
+// The union cannot be wrong in the way a single lookup can. It is order-free and
+// monotone — a store that never saw the convoy contributes nothing, an edgeless
+// copy contributes nothing, and no store's silence can subtract a member another
+// store records — so a zero-row expansion over a non-empty convoy is structurally
+// impossible rather than merely unlikely, and stays impossible even if some
+// future path mints a convoy somewhere this comment does not predict. A member
+// seen as an unresolved placeholder in one store and as a real bead in another
+// keeps the real bead.
 //
 // With no member stores configured — every single-store caller — this collapses
 // to the single convoycore.Members call it replaces, byte for byte.
@@ -623,7 +629,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 	createdCount := 0
 	var unit beads.Bead
 	if row.UnitConvoyID == "" {
-		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member)
+		createdUnit, created, err := ensureDrainUnitConvoy(store, control, manifest.ParentConvoyID, len(members), *row, member, opts)
 		if err != nil {
 			return 0, err
 		}
@@ -634,7 +640,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 		row.UnitConvoyID = unit.ID
 		row.Status = "unit-created"
 	} else {
-		reloaded, err := store.Get(row.UnitConvoyID)
+		reloaded, err := reloadDrainUnitConvoy(store, row.UnitConvoyID, member, opts)
 		if err != nil {
 			return 0, fmt.Errorf("%s: loading drain unit convoy %s: %w", control.ID, row.UnitConvoyID, err)
 		}
@@ -1019,15 +1025,43 @@ func orderDrainMembersByDependencies(store beads.Store, members []beads.Bead, op
 	return ordered, nil
 }
 
-func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
+// drainUnitConvoyStore returns the store a drain mints its unit convoy in, looks
+// it up in, and reads it back from: the store that owns the member the unit
+// convoy exists to track.
+//
+// That is not a choice among stores, it is the only store that works. A drain
+// unit convoy is a SYNTHETIC convoy and a synthetic convoy is a WORK bead
+// (coordclass.Classify), which is the same thing the mechanics already require:
+// the convoy's whole content is one `tracks` edge to one work member, and
+// convoy.TrackItemIn refuses an edge whose member is owned by another class,
+// because a dep row cannot reference an id its own store cannot resolve. Minted
+// anywhere else the convoy can never track the member it was created for, and
+// the drain fails on the very next call.
+//
+// With no member stores configured — every single-store caller — it returns the
+// ambient store without the owning-store probe, so the lookup, the create and
+// the reload are the same single-store reads they are today, with no extra
+// round-trip.
+func drainUnitConvoyStore(store beads.Store, member beads.Bead, opts ProcessOptions) (beads.Store, error) {
+	if len(opts.MemberStores) == 0 {
+		return store, nil
+	}
+	return drainMemberOwningStore(store, strings.TrimSpace(member.ID), opts)
+}
+
+func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
+	unitStore, err := drainUnitConvoyStore(store, member, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("%s: resolving the store for member %s: %w", control.ID, member.ID, err)
+	}
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
-	existing, err := store.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: row.UnitKey}, 1, beads.WithBothTiers)
+	existing, err := unitStore.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: row.UnitKey}, 1, beads.WithBothTiers)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
 	if len(existing) > 0 {
-		if err := ensureDrainUnitTrack(store, control.ID, existing[0].ID, member); err != nil {
+		if err := ensureDrainUnitTrack(unitStore, control.ID, existing[0].ID, member); err != nil {
 			return beads.Bead{}, false, err
 		}
 		return existing[0], false, nil
@@ -1043,7 +1077,7 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 		beadmeta.DrainMemberAccessMetadataKey: drainMemberAccess(control),
 		beadmeta.DrainUnitKeyMetadataKey:      row.UnitKey,
 	}
-	created, err := store.Create(beads.Bead{
+	created, err := unitStore.Create(beads.Bead{
 		Title:    fmt.Sprintf("drain unit %d for %s", row.Index, member.ID),
 		Type:     "convoy",
 		Priority: member.Priority,
@@ -1052,10 +1086,23 @@ func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: creating unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	if err := trackDrainMember(store, created.ID, member); err != nil {
+	if err := trackDrainMember(unitStore, created.ID, member); err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: tracking member %s from unit convoy %s: %w", control.ID, member.ID, created.ID, err)
 	}
 	return created, true, nil
+}
+
+// reloadDrainUnitConvoy re-reads a unit convoy a previous pass already minted,
+// from the store that owns it. A drain resumes from its persisted manifest, so
+// the reload has to reach the same ledger drainUnitConvoyStore minted into —
+// reading the ambient graph store instead would report a unit convoy that exists
+// as missing, which fails the whole dispatch.
+func reloadDrainUnitConvoy(store beads.Store, unitConvoyID string, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
+	unitStore, err := drainUnitConvoyStore(store, member, opts)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return unitStore.Get(unitConvoyID)
 }
 
 func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
