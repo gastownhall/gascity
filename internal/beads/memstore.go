@@ -28,6 +28,13 @@ type MemStore struct {
 	// wrapper — see the class_store optional-capability lesson).
 	DisableConditionalWrites bool
 
+	// IDPrefix replaces the "gc" prefix this store mints ids under. Two real
+	// bead databases mint under different prefixes, which is how an operator
+	// tells which store a bead came from; a test that stands two MemStores up
+	// as different coordination-class bindings needs the same distinction.
+	// Empty keeps the default, so every existing caller mints "gc-<n>".
+	IDPrefix string
+
 	// localStrings holds clone-local key-value data set via SetLocalString,
 	// keyed by bead ID then key. Deliberately excluded from
 	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
@@ -93,7 +100,11 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	defer m.mu.Unlock()
 
 	m.seq++
-	b.ID = fmt.Sprintf("gc-%d", m.seq)
+	prefix := m.IDPrefix
+	if prefix == "" {
+		prefix = "gc"
+	}
+	b.ID = fmt.Sprintf("%s-%d", prefix, m.seq)
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"

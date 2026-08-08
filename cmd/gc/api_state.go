@@ -2816,9 +2816,21 @@ func (cs *controllerState) WebhookDispatcher() orderdispatch.Dispatcher {
 type controllerWebhookDispatcher struct{ cs *controllerState }
 
 func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdispatch.DispatchRequest) (orderdispatch.DispatchResult, error) {
+	return d.dispatcher().Dispatch(ctx, req)
+}
+
+// dispatcher builds the per-delivery dispatcher Dispatch fires through, reading
+// the controller's live config, recorder and storage binding under the
+// hot-reload lock. It is separate from Dispatch so what this seam hands the
+// dispatcher is assertable without firing a delivery: the routes are the whole
+// reason a webhook-fired wisp lands in the same graph store a tick-fired one
+// does, and they arrive as a constructor argument that nothing downstream
+// re-resolves.
+func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	cs := d.cs
 	cs.mu.RLock()
 	cfg := cs.cfg
+	routes := cs.storageRoutes
 	var rec events.Recorder = cs.eventProv
 	cs.mu.RUnlock()
 	if rec == nil {
@@ -2826,8 +2838,7 @@ func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdisp
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	md := newMemoryOrderDispatcher(nil, cs.cityPath, cfg, rec, os.Stderr)
-	return md.Dispatch(ctx, req)
+	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
 }
 
 // ExtMsgServices returns the external messaging services.

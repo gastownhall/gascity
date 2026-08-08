@@ -600,7 +600,16 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	return targets
 }
 
-func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, error) {
+// orderTrackingSweepStoresForConfigTargets returns the per-scope ORDER stores a
+// sweep closes tracking beads in, together with the store its wisp-subtree half
+// has to run against when that is a different database.
+//
+// The two are returned together on purpose. `gc order sweep-tracking
+// --include-wisps` sweeps two coordination classes, and a caller that resolves
+// the tracking stores and forgets the wisp store gets a sweep that reports
+// wispClosed: 0 on a split city and exits 0 — the silent no-op this pairing
+// exists to make un-writable.
+func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, beads.Store, error) {
 	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
 	if len(requiredTargets) > 0 {
 		filtered := targets[:0]
@@ -611,9 +620,28 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 		}
 		targets = filtered
 	}
-	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
 	})
+	return stores, orderWispSweepStore(cityPath, cfg), err
+}
+
+// orderWispSweepStore returns the store that owns this city's order wisp roots
+// when it is NOT one of the stores orderTrackingSweepStoresForConfigTargets
+// opens — that is, when [storage] serves the graph class from its own binding.
+//
+// nil is the answer for every city that relocates nothing, and it is the signal
+// to keep sweeping wisp subtrees in the same store as the tracking beads. That
+// makes the single-store path byte-identical: resolveGraphStore returns the
+// workStore it is handed when nothing is relocated, and the workStore handed in
+// here is nil.
+//
+// The split-city case is the one this exists for. dispatchWisp creates the wisp
+// root in the graph store and the single-flight gate reads it there, so
+// `gc order sweep-tracking --include-wisps` — the only gc-level force-close for
+// a stalled wisp, and the recovery the docs name — has to look there too.
+func orderWispSweepStore(cityPath string, cfg *config.City) beads.Store {
+	return resolveGraphStore(cliStorageRoutes(cityPath), nil, cfg, cityPath, nil)
 }
 
 func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, openStore func(orderTrackingSweepTarget) (beads.Store, error)) ([]beads.Store, error) {
