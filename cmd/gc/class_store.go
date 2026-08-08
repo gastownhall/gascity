@@ -1,11 +1,16 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // This file is the controller/CLI-side seam of the per-class store refactor.
@@ -311,4 +316,32 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
 	return newMailProviderWithSessionStore(msgStore, sessStore)
+}
+
+// newCityExtMsgServices builds the controller's external-messaging services as
+// the split Messaging/Sessions form extmsg already exposes: bindings, groups,
+// participants, delivery contexts, memberships and transcripts persist in the
+// messaging-class store, while identity and liveness reads go to the
+// session-class directory.
+//
+// extmsg records are messaging class — they hide under type=task carrying a
+// gc:extmsg-* label, which is exactly why coordclass.Classify is a runtime
+// function and not a type filter. Both classes resolve to the work store at the
+// single-store bd backend, so this is byte-identical to the prior
+// extmsg.NewServices(workStore) and diverges only once a class relocates.
+//
+// A nil session directory is the one thing extmsg refuses, and it cannot happen
+// here: resolveSessionStore returns the work store when sessions are not
+// relocated. On the impossible path the error is reported and the unrouted
+// services are returned rather than dropping external messaging entirely.
+func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
+	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
+	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
+	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(beads.SessionStore{Store: sessStore}))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr
+		unrouted := extmsg.NewServices(workStore)
+		return &unrouted
+	}
+	return &svc
 }

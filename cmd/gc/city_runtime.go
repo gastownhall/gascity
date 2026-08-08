@@ -406,14 +406,14 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // setControllerState sets the API state for this city. The controller
 // state is managed by the caller (who also owns the API server), installed
 // before run starts, and never replaced afterward.
+// The routes deliberately do NOT cross here. They are a construction input to
+// newControllerStateWithRoutes, because the class-routed services a
+// controllerState owns — the mail provider and the external-messaging services —
+// are built during construction and cannot be re-pointed by a later assignment.
+// Installing them here also wrote the field without cs.mu while the API's class
+// accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
-	// The API projection reads the same classes through the same routes. This
-	// is the one place the pair is composed, so it is the one place the routes
-	// cross — a second resolution would be a second plan.
-	if cs != nil {
-		cs.storageRoutes = cr.storageRoutes
-	}
 }
 
 // crashTracker returns the crash tracker for API server wiring.
