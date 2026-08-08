@@ -227,6 +227,10 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// The URI is built structurally, not by concatenating path and query. A
 	// city directory may legitimately contain ?, #, %, or spaces; none may
 	// become a SQLite parameter or fragment while opening a migration source.
+	//
+	// One DSN serves both handles, so every pragma on it is charged
+	// sqliteStorePerStoreConnections times, not once. sqliteStoreDSNWithMode
+	// keeps that budget honest.
 	dsn := sqliteStoreDSN(dbPath, cfg.readOnly)
 	if cfg.privateRecovery {
 		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
@@ -282,8 +286,8 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("opening sqlite read pool %s: %w", dbPath, err)
 	}
-	readDB.SetMaxOpenConns(8)
-	readDB.SetMaxIdleConns(8)
+	readDB.SetMaxOpenConns(sqliteReadPoolSize)
+	readDB.SetMaxIdleConns(sqliteReadPoolSize)
 	readDB.SetConnMaxIdleTime(5 * time.Minute)
 	s.readDB = readDB
 
@@ -296,6 +300,15 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 // sqliteStoreDSNReadOnlyMode is the mode= value that makes a connection
 // incapable of writing or checkpointing.
 const sqliteStoreDSNReadOnlyMode = "ro"
+
+// sqliteReadPoolSize is how many connections the read pool may hand out at
+// once, and sqliteStorePerStoreConnections is that plus the single write
+// connection. Every pragma on the DSN is charged once per connection, so this
+// is the multiplier on anything the DSN makes a connection allocate.
+const (
+	sqliteReadPoolSize             = 8
+	sqliteStorePerStoreConnections = sqliteReadPoolSize + 1
+)
 
 // sqliteStoreDSN returns a file URI whose path and query are encoded
 // independently. In read-only mode SQLite's mode=ro is a hard capability: it
@@ -317,39 +330,55 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
 
-	// Read-path tuning, on every mode. All three touch only this process's own
-	// memory and address space, never the database bytes, so they are as
-	// correct on the read-only migration-source open as on the writer.
+	// mmap_size on every mode. It maps the database instead of read()-ing
+	// every page into the per-connection page cache, and it is the only tuning
+	// pragma here because it is the only one measurement supports. On a
+	// 231 MB / 51k-bead graph, 8 concurrent Ready() scans go 11.3 s -> 8.2 s
+	// with the mapping alone. It touches only this process's address space,
+	// never the database bytes, so it is as correct on the read-only
+	// migration-source open as on the writer.
 	//
-	// cache_size is negative because SQLite reads negative values as KiB
-	// rather than pages, so this is 64 MiB against a 2 MiB default that a city
-	// graph outgrows almost immediately. mmap_size then maps the database
-	// instead of read()-ing every page into that cache, which is where the
-	// win keeps coming from once the graph is larger than any cache worth
-	// allocating. temp_store keeps ORDER BY sorters and transient B-trees off
-	// disk; it is the only one of the three that does nothing for a plain
-	// scan, and it earns its place on sorted queries.
-	query.Add("_pragma", "cache_size(-64000)")
+	// It costs address space, not memory: nine connections map the same file
+	// nine times, which inflates VmSize by ~1.9 GB and VmRSS by the same file
+	// pages counted once per mapping. Pss — the honest figure — is unchanged,
+	// and anonymous memory goes DOWN, because pages served through the mapping
+	// never enter the page cache.
 	query.Add("_pragma", "mmap_size(268435456)")
-	query.Add("_pragma", "temp_store(MEMORY)")
 
-	// synchronous is a write-durability knob, so it is scoped to the modes
-	// that can actually write. A mode=ro connection holds a read-only
-	// descriptor and can neither mutate a row nor checkpoint the WAL, which is
-	// the guarantee the migration-source contract rests on. Leaving the pragma
-	// off that DSN keeps the guarantee readable straight off the URI instead
-	// of making a reader derive that it happens to be inert there.
+	// Three pragmas that look like they belong here and were measured out.
+	// Reasons, so nobody re-adds them from general SQLite advice:
 	//
-	// NORMAL is a deliberate durability trade on the writable modes. Under WAL
-	// — which every store this package creates uses — it drops the per-commit
-	// fsync, so an OS or power crash can lose the tail of the most recently
-	// committed transactions. It cannot corrupt the database: WAL frames carry
-	// checksums and a torn tail is discarded during recovery. A crash of this
-	// process alone loses nothing, because the frames are already handed to
-	// the kernel.
-	if mode != sqliteStoreDSNReadOnlyMode {
-		query.Add("_pragma", "synchronous(NORMAL)")
-	}
+	// cache_size — the page cache is per-connection, so any value here is a
+	// sqliteStorePerStoreConnections-way budget. cache_size(-64000) on all
+	// nine measured 1.19 GB of anonymous memory (modernc's allocator rounds
+	// each ~4.2 KiB page+header into its 8 KiB size class, ~2.1x nominal) and
+	// it is not even faster: with the mapping in place it bought nothing on
+	// any workload tried, and past the mmap window it was monotonically
+	// slower, because every page-cache allocation and eviction goes through
+	// libc's one global allocator mutex that all eight readers share. 8
+	// readers x 60k indexed lookups on a 441 MB graph: default 11.5 s / 53 MB
+	// anonymous, -8000 12.5 s / 156 MB, -64000 17.9 s / 907 MB. Writes were
+	// within noise at every size, in single-row and 4000-row transactions.
+	//
+	// temp_store(MEMORY) — modernc's sqlite3VdbeSorterInit allocates the
+	// sorter's bump arena only when the temp store is NOT in memory, so
+	// temp_store(MEMORY) turns every sorter record into an individual malloc
+	// behind that same global mutex. On the 8-connection read pool it made
+	// concurrent Ready() ~1.8x slower than no pragmas at all (20.6 s vs
+	// 11.3 s) — a regression on precisely the sorted scans it looks like it
+	// should help.
+	//
+	// synchronous(NORMAL) — a genuine ~30% write win that is not safe to take
+	// until the sequence floor leads the allocator. This store rebuilds its ID
+	// allocator at open from MAX(numeric suffix) over durable rows, so a WAL
+	// tail lost to a host crash regresses the allocator and reissues bead IDs
+	// that already escaped into the event log, into gc.root_bead_id and
+	// gc.step_ref in other class stores, and into printed output — durable
+	// references that then resolve, silently, to a different bead. FULL is
+	// what makes a returned ID durable before the caller sees it. The
+	// graph.seqfloor sidecar was built for this hazard but does not cover it
+	// today: it is written only at genesis, it trails rather than leads the
+	// allocator, and the other four reserved prefixes have no floor at all.
 
 	if mode != "" {
 		query.Set("mode", mode)
