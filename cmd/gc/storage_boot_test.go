@@ -1060,3 +1060,170 @@ func TestNewCityRuntimeRefusesAnUnconvergedCity(t *testing.T) {
 		t.Errorf("the constructor error does not name %q: %v", storageMigrationCommand, err)
 	}
 }
+
+// renamedEngineProviderFactory re-registers this build's own engine factory
+// under a foreign provider ID. A plan resolved against it carries a binding
+// that resolveInfraBindingTarget refuses — the provider is not the built-in
+// engine — while the binding itself still opens a real bead engine. That is
+// the exact shape of an out-of-tree engine provider, built from compiled
+// parts so the test proves the gate, not a mock.
+type renamedEngineProviderFactory struct {
+	inner storebinding.ProviderFactory
+	id    storebinding.ProviderID
+}
+
+func (f renamedEngineProviderFactory) ID() storebinding.ProviderID { return f.id }
+
+func (f renamedEngineProviderFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	spec.Provider = f.inner.ID()
+	provider, err := f.inner.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return renamedEngineProvider{Provider: provider, innerID: f.inner.ID()}, nil
+}
+
+// renamedEngineProvider forwards the whole provider facade and re-spells the
+// binding spec's provider before delegating OpenEngine, mirroring what a real
+// out-of-tree provider does with its own spec: the inner engine's "refuse a
+// foreign spec" defense stays armed, and the seam under test stays honest.
+type renamedEngineProvider struct {
+	storebinding.Provider
+	innerID storebinding.ProviderID
+}
+
+func (p renamedEngineProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	opener, ok := p.Provider.(storebinding.EngineOpener)
+	if !ok {
+		return nil, nil, errors.New("renamed inner provider opens no engine")
+	}
+	spec.Provider = p.innerID
+	return opener.OpenEngine(spec, classes)
+}
+
+// bornSplitCity configures a city whose infrastructure binding is served by a
+// registered non-built-in engine provider, and returns the in-memory work
+// store the born-split discipline scans.
+func bornSplitCity(t *testing.T) (cityPath string, cfg *config.City, source beads.Store) {
+	t.Helper()
+	cityPath = t.TempDir()
+	source = stubInfraMigrationSource(t)
+	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	binding := cfg.Storage.Bindings["infra"]
+	binding.Provider = "outoftree-engine"
+	cfg.Storage.Bindings["infra"] = binding
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(renamedEngineProviderFactory{
+			inner: sqlitebinding.BeadsProviderFactory{},
+			id:    "outoftree-engine",
+		}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+	return cityPath, cfg, source
+}
+
+// TestStorageGateServesBornSplitBindingWithCleanWorkStore proves the discipline's
+// serving half: a provider this build cannot migrate onto still serves the
+// split when the work store holds no infrastructure bead, and the routes it
+// returns reach a live engine.
+func TestStorageGateServesBornSplitBindingWithCleanWorkStore(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "plain work", Type: "task"})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("a born-split city with a clean work store refused to serve: %v\nstderr: %s", err, stderr.String())
+	}
+	if routes == nil {
+		t.Fatal("the gate served but returned no routes")
+	}
+	defer routes.close() //nolint:errcheck // test cleanup
+	store, ok := routes.stores[coordclass.ClassSessions]
+	if !ok {
+		t.Fatal("the routes carry no store for the session class")
+	}
+	if _, err := store.Create(beads.Bead{Title: "born on the binding", Type: "session", Labels: []string{"gc:session"}}); err != nil {
+		t.Fatalf("writing through the born-split routes: %v", err)
+	}
+}
+
+// TestStorageGateRefusesBornSplitBindingWhenWorkStoreHoldsInfraBeads proves the
+// refusing half, and pins where the evidence lives: the ids and the advice are
+// in the refusal STRING, because the supervisor records that string and
+// nothing else.
+func TestStorageGateRefusesBornSplitBindingWhenWorkStoreHoldsInfraBeads(t *testing.T) {
+	cityPath, cfg, source := bornSplitCity(t)
+	strayed := mustCreateInfraBead(t, source, beads.Bead{Title: "landed in work", Type: "session", Labels: []string{"gc:session"}})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a born-split city with an infrastructure bead in the work store served")
+	}
+	if !strings.Contains(err.Error(), strayed.ID) {
+		t.Errorf("the refusal does not name the bead %s: %v", strayed.ID, err)
+	}
+	if !strings.Contains(err.Error(), `binding "infra"`) {
+		t.Errorf("the refusal does not name the binding: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Do NOT revert") {
+		t.Errorf("the refusal does not withhold the revert: %v", err)
+	}
+}
+
+// TestStorageGateBornSplitCheckFailureIsUncheckableNotUnconverged proves that a
+// work store that cannot be read decides nothing about the city: the refusal
+// is a fact about the check, and it does not hand the operator a migration
+// this build cannot perform.
+func TestStorageGateBornSplitCheckFailureIsUncheckableNotUnconverged(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	failInfraMigrationSourceWith(t, func(string) (beads.Store, error) {
+		return nil, errors.New("injected work-store open failure")
+	})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an unprovable born-split invariant served")
+	}
+	if !strings.Contains(err.Error(), "could NOT be verified") {
+		t.Errorf("the refusal does not report an uncheckable city: %v", err)
+	}
+	if strings.Contains(err.Error(), storageMigrationCommand) {
+		t.Errorf("an uncheckable born-split city was handed the migration command this build cannot honor here: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "injected work-store open failure") {
+		t.Errorf("stderr does not carry the check's failure reason: %s", stderr.String())
+	}
+}
+
+// TestStorageGateBornSplitListFailureIsUncheckable proves the same for a work
+// store that opens but cannot be listed.
+func TestStorageGateBornSplitListFailureIsUncheckable(t *testing.T) {
+	cityPath, cfg, _ := bornSplitCity(t)
+	failInfraMigrationSourceWith(t, func(string) (beads.Store, error) {
+		return unlistableInfraSource{Store: beads.NewMemStore(), err: errors.New("injected list failure")}, nil
+	})
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an unlistable work store served a born-split binding")
+	}
+	if !strings.Contains(err.Error(), "could NOT be verified") {
+		t.Errorf("the refusal does not report an uncheckable city: %v", err)
+	}
+}

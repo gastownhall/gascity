@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -178,15 +179,20 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
-	if !ok {
+	var report infraMigrationReport
+	if ok {
+		report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
+	} else {
 		// The shape is the supported one, so the only thing that can have
 		// refused the target is the provider: this build carries the migration
 		// and genesis discipline for its own bead engine and for nothing else.
-		return nil, fmt.Errorf("%s: binding %q is backed by provider %q, and this build carries no migration or genesis discipline for it. %s",
-			logPrefix, binding, storage.Bindings[binding].Provider, storageSupportedTopologyStatement)
+		// A compiled provider that opens a bead engine can still serve — under
+		// the born-split discipline below, which asks nothing of the binding
+		// and proves the one invariant the work store alone can prove.
+		target = infraBindingTarget{Binding: binding}
+		report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
+		report.Target = target
 	}
-
-	report := checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice == "" {
@@ -199,16 +205,59 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	return openStorageRoutes(plan, target)
 }
 
+// checkBornSplitDiscipline decides whether a binding served by a provider this
+// build carries no migration discipline for may serve this city's split.
+//
+// Such a provider can still open the binding's bead engine — that is the
+// EngineOpener seam — but nothing in this build can move a bead onto its
+// binding, prove a marker about it, or read a manifest from it: the whole
+// convergence apparatus is written against this build's own engine. What CAN
+// be proven, from the work store alone, is the one invariant that matters for
+// a city born on the split: no infrastructure bead has ever landed in the
+// work store. So the discipline is containment with nothing persisted,
+// re-proven on every boot — serve while the work store holds zero
+// infrastructure beads, and refuse naming ids the moment one exists, whether
+// it was written by an earlier configuration, by a writer that never saw this
+// [storage] section, or by a city that in fact predates the split and needs a
+// migration this build cannot perform.
+//
+// Failures to prove are reported as facts about the check, not the city: a
+// work store that cannot be opened or listed decides nothing, and the
+// uncheckable outcome withholds both serving and the revert instruction.
+func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Writer) infraMigrationReport {
+	source, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+	}
+	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+	infra, err := readInfraSnapshot(source)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+	}
+	if len(infra) == 0 {
+		return infraMigrationReport{Outcome: infraMigrationConverged}
+	}
+	ids := make([]string, 0, len(infra))
+	for _, b := range infra {
+		ids = append(ids, b.ID)
+	}
+	sort.Strings(ids)
+	return infraMigrationReport{Outcome: infraMigrationBornSplitBlocked, Stranded: ids}
+}
+
 // storageBindingEventTypes maps a migration outcome to the event that reports
 // it. Outcomes with no entry are not events: not-configured describes a city
 // that was never asked, and stranded is carried inside the refusal that names
 // the ids.
 var storageBindingEventTypes = map[infraMigrationOutcome]string{
-	infraMigrationConverged:   events.StorageBindingConverged,
-	infraMigrationGenesis:     events.StorageBindingGenesis,
-	infraMigrationUnconverged: events.StorageBindingUnconverged,
-	infraMigrationStranded:    events.StorageBindingUnconverged,
-	infraMigrationUncheckable: events.StorageBindingUncheckable,
+	infraMigrationConverged:        events.StorageBindingConverged,
+	infraMigrationGenesis:          events.StorageBindingGenesis,
+	infraMigrationUnconverged:      events.StorageBindingUnconverged,
+	infraMigrationStranded:         events.StorageBindingUnconverged,
+	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
+	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
 // recordStorageBindingOutcome publishes what one gate or one migration

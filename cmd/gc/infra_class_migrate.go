@@ -291,6 +291,13 @@ const (
 	// migration may create. Boot creates the binding, records an empty proven
 	// copy, and serves from it.
 	infraMigrationGenesis
+	// infraMigrationBornSplitBlocked reports a city whose binding is served by
+	// a provider this build carries no migration discipline for, and whose
+	// work store holds infrastructure beads that binding cannot read. Such a
+	// binding serves only under the born-split invariant — the work store
+	// holds no infrastructure bead at all — and this outcome is that invariant
+	// failing, with the ids named.
+	infraMigrationBornSplitBlocked
 )
 
 // String names the outcome for operator-visible diagnostics and test failures.
@@ -308,6 +315,8 @@ func (o infraMigrationOutcome) String() string {
 		return "uncheckable"
 	case infraMigrationGenesis:
 		return "genesis"
+	case infraMigrationBornSplitBlocked:
+		return "born-split-blocked"
 	}
 	return fmt.Sprintf("infraMigrationOutcome(%d)", int(o))
 }
@@ -399,6 +408,9 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	case infraMigrationUncheckable:
 		situation = fmt.Sprintf("%s: this city's infrastructure binding %q could NOT be verified (reason above), so nothing here proved it is safe to serve from.", logPrefix, report.Target.Binding)
+	case infraMigrationBornSplitBlocked:
+		situation = fmt.Sprintf("%s: binding %q is served by a provider this build cannot migrate onto, so it serves only while the work store holds no infrastructure bead — and the work store holds %d: %s. Either an earlier configuration wrote them before this city moved to the split, or a writer without this [storage] configuration is still writing. The named beads are intact in the work store. Recover them into the binding's database with every writer stopped, or assign the infrastructure classes to a binding served by this build's own engine.",
+			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	default:
 		return ""
 	}
