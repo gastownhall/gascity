@@ -65,12 +65,14 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 		return nil, nil, err
 	}
 
-	// The environment handed to the open is deliberately empty rather than
-	// inherited: the workspace's own configuration is the single source of how
-	// it is served, and ambient beads variables belong to whatever else this
-	// process talks to. A nil map projects an empty set for the open's
-	// duration, so nothing in this city's environment can re-point a binding.
-	store, err := beads.OpenNativeDoltStoreAt(context.Background(), p.root, nil)
+	// Opened with every ambient BEADS_-prefixed variable withheld, because the
+	// workspace's own configuration is this provider's whole premise. An
+	// inherited variable naming another database, another directory or a
+	// credential command would decide how the workspace is served, and the
+	// city that inherited it never chose that. Withholding the namespace
+	// rather than a key list is deliberate: the list of variables the linked
+	// library reads is the library's to grow.
+	store, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the workspace of binding %q at %s through the linked beads library: %w", p.spec.Name, p.root, err)
 	}

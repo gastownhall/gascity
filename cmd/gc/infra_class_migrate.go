@@ -192,6 +192,11 @@ package main
 // city with no [storage] at all — does not resolve a migration target and this
 // opens nothing. A city whose destination already holds rows this migration did
 // not stamp is refused at the destination gate rather than overwritten.
+//
+// "No [storage] at all" means never configured, not un-configured: a city that
+// HAS served a split and then had its section deleted is held by the served-
+// binding note at the top of the boot gate, because its infrastructure state is
+// in a binding no work-store reader will ever look at.
 
 import (
 	"bufio"

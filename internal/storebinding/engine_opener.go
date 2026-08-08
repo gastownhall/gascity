@@ -55,9 +55,12 @@ type EngineOpener interface {
 // same opaque reference and resolve to different directories in different
 // cities; a note holding the reference cannot tell them apart.
 //
-// The location is secret-free and absolute, and it is derived, never observed:
-// answering must not open, stat, or create anything, because the note is
-// written on paths that have deliberately touched nothing yet.
+// The location is secret-free and absolute, and answering is READ-ONLY: it
+// must create and modify nothing, because the note is written on paths that
+// have deliberately built nothing yet. It may read the filesystem, and both
+// compiled providers do — resolving a location means following the symlinks in
+// it, or two spellings of one path record as two different bindings. What a
+// locator must never do is bring the location into existence.
 //
 // Optional, like the opener beside it. A provider that offers no locator has
 // its configured reference recorded instead, which is what a city did before

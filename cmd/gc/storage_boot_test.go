@@ -90,8 +90,9 @@ func TestStorageGateBypassesEverythingWithoutConfig(t *testing.T) {
 	refuseInfraMigrationSource(t)
 
 	for _, cfg := range []*config.City{nil, {}, {Beads: config.BeadsConfig{Provider: "bd"}}} {
+		cityPath := t.TempDir()
 		var stderr bytes.Buffer
-		routes, err := storageBootGate(t.TempDir(), cfg, "gc start", nil, &stderr)
+		routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
 		if err != nil {
 			t.Fatalf("a city with no [storage] was refused: %v", err)
 		}
@@ -101,9 +102,94 @@ func TestStorageGateBypassesEverythingWithoutConfig(t *testing.T) {
 		if stderr.Len() != 0 {
 			t.Errorf("a city with no [storage] wrote to stderr: %q", stderr.String())
 		}
+		// The one read the bypass performs must also create nothing: a city
+		// that was never configured is byte-identical after the gate ran.
+		if entries := directoryEntryNames(t, cityPath); len(entries) != 0 {
+			t.Errorf("the bypass left %v in a city that authored no [storage]", entries)
+		}
 	}
 	if *registries != 0 {
 		t.Errorf("the no-config path constructed %d provider registr(ies); the bypass must short-circuit before any of this runs", *registries)
+	}
+}
+
+// directoryEntryNames lists a directory's own names, failing on a directory it
+// cannot read rather than reporting it as empty.
+func directoryEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestDeletingTheStorageSectionCannotAbandonAServedBinding closes the last way
+// past the served-binding hold.
+//
+// The refusal ladder used to point straight at this edit: pointing the classes
+// back at work refuses while the note stands, so the operator deletes the
+// section the classes live in — and that reached the bypass, served everything
+// from the work store, and left months of session, graph and mail state in a
+// binding nothing would open again. The city has to be held on this edit too,
+// and the hold has to name the note, because deleting the note is the only
+// attestation that says the binding's contents are recovered or abandoned.
+func TestDeletingTheStorageSectionCannotAbandonAServedBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{
+		Binding:  "infra",
+		Provider: "outoftree-engine",
+		Location: filepath.Join(cityPath, ".gc", "storage", "infra"),
+	}); err != nil {
+		t.Fatalf("recording the served binding: %v", err)
+	}
+
+	registries := countStorageRegistryConstructions(t)
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, &config.City{}, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a city that served a split booted with its [storage] section deleted")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note that holds it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "infra") {
+		t.Errorf("the refusal does not name the binding the city served from: %v", err)
+	}
+	// Held, not investigated: the hold is one read of one path, and a city
+	// this build must not serve does not get a registry or a plan built for it.
+	if *registries != 0 {
+		t.Errorf("the held bypass constructed %d provider registr(ies), want none", *registries)
+	}
+}
+
+// TestCorruptNoteHoldsTheDeletedSectionToo keeps the bypass's new question
+// fail-closed in the same way every other reader of the note is: a note that
+// cannot be read withholds exactly what a readable one would, because a corrupt
+// file must not grant what its absence grants.
+func TestCorruptNoteHoldsTheDeletedSectionToo(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("creating the city .gc: %v", err)
+	}
+	if err := os.WriteFile(bornSplitServedNotePath(cityPath), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("writing the corrupt note: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, nil, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a city with an unreadable served-binding note booted through the bypass")
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note it could not read: %v", err)
 	}
 }
 
@@ -1735,5 +1821,174 @@ func TestStorageStatusHonorsNoteHoldOnBothArms(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"old-binding"`) {
 		t.Errorf("status does not name the served binding: %s", stdout.String())
+	}
+}
+
+// TestStoragePlanRefusesACityWithNoPath closes the back door into the defect
+// the city root exists to remove.
+//
+// filepath.Abs("") is the working directory. A caller that reached plan
+// resolution without a city — and there is no such production caller today,
+// which is exactly why nothing would notice — would have stamped that
+// directory into every binding specification, and every provider would have
+// resolved against it as if it were the city.
+func TestStoragePlanRefusesACityWithNoPath(t *testing.T) {
+	cfg := infraSplitConfig(config.DefaultSQLiteStoragePath)
+
+	plan, err := resolveCityStoragePlan("", cfg)
+	if err == nil {
+		t.Fatalf("a plan resolved for no city at all: %+v", plan)
+	}
+	if !strings.Contains(err.Error(), "no city path") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	routes, gateErr := storageBootGate("", cfg, "gc start", nil, &stderr)
+	if gateErr == nil {
+		_ = routes.close()
+		t.Fatal("the boot gate served a city it has no path for")
+	}
+}
+
+// TestHalfRevertRefusalCarriesTheNoteThatHoldsIt fixes an operator dead end.
+//
+// Pointing the classes back at work while leaving the binding defined is the
+// obvious half of a revert, and plan resolution rejects it — correctly, and
+// for a reason that says nothing about the hold that actually matters. An
+// operator who reads only "unreferenced storage binding" deletes the binding,
+// gets past that error, and meets the note refusal one edit later. Both
+// refusals are true, so the boot carries both.
+func TestHalfRevertRefusalCarriesTheNoteThatHoldsIt(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := writeBornSplitServedNote(cityPath, bornSplitServedNote{
+		Binding:  "infra",
+		Provider: "outoftree-engine",
+		Location: filepath.Join(cityPath, ".gc", "storage", "infra"),
+	}); err != nil {
+		t.Fatalf("recording the served binding: %v", err)
+	}
+	// Classes reverted to work, binding left behind: what an operator's first
+	// revert edit actually looks like.
+	cfg := &config.City{Storage: &config.StorageConfig{
+		Classes: config.StorageClasses{
+			Work: config.StorageWorkBinding, Graph: config.StorageWorkBinding,
+			Sessions: config.StorageWorkBinding, Messaging: config.StorageWorkBinding,
+			Orders: config.StorageWorkBinding, Nudges: config.StorageWorkBinding,
+		},
+		Bindings: map[string]config.StorageBindingConfig{
+			"infra": {Provider: "outoftree-engine", ConfigRef: "infra"},
+		},
+	}}
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a half-reverted city with a standing served-binding note booted")
+	}
+	if !strings.Contains(err.Error(), "unreferenced") {
+		t.Errorf("the refusal drops the configuration error the operator will hit first: %v", err)
+	}
+	if !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
+		t.Errorf("the refusal does not name the note that holds the revert: %v", err)
+	}
+}
+
+// closeCountingProviderFactory wraps a compiled engine provider and counts every
+// close of the handles it hands out, so a caller's cleanup is observable from
+// outside the provider.
+type closeCountingProviderFactory struct {
+	inner  storebinding.ProviderFactory
+	closes *int
+}
+
+func (f closeCountingProviderFactory) ID() storebinding.ProviderID { return f.inner.ID() }
+
+func (f closeCountingProviderFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	provider, err := f.inner.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return closeCountingProvider{Provider: provider, closes: f.closes}, nil
+}
+
+type closeCountingProvider struct {
+	storebinding.Provider
+	closes *int
+}
+
+func (p closeCountingProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	opener, ok := p.Provider.(storebinding.EngineOpener)
+	if !ok {
+		return nil, nil, errors.New("wrapped provider opens no engine")
+	}
+	store, closer, err := opener.OpenEngine(spec, classes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, countingCloser{inner: closer, closes: p.closes}, nil
+}
+
+type countingCloser struct {
+	inner  io.Closer
+	closes *int
+}
+
+func (c countingCloser) Close() error {
+	*c.closes++
+	return c.inner.Close()
+}
+
+// TestFailedNoteWriteReleasesTheBindingItJustOpened covers the ordering the
+// post-open note write created and nothing else reaches: the engine is open,
+// the durable record fails, and the boot returns an error. A process that
+// refuses to start while still holding the binding's engine is a boot the
+// operator cannot retry.
+func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
+	cityPath := t.TempDir()
+	stubInfraMigrationSource(t)
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	binding := cfg.Storage.Bindings["infra"]
+	binding.Provider = "outoftree-engine"
+	cfg.Storage.Bindings["infra"] = binding
+
+	closes := 0
+	prevRegistry := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registry := storebinding.NewProviderRegistry()
+		if err := registry.Register(closeCountingProviderFactory{
+			inner:  renamedEngineProviderFactory{inner: sqlitebinding.BeadsProviderFactory{}, id: "outoftree-engine"},
+			closes: &closes,
+		}); err != nil {
+			return nil, err
+		}
+		if err := registry.Freeze(); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prevRegistry })
+
+	prevWrite := writeServedBindingNote
+	writeServedBindingNote = func(string, bornSplitServedNote) error {
+		return errors.New("injected served-binding note failure")
+	}
+	t.Cleanup(func() { writeServedBindingNote = prevWrite })
+
+	var stderr bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &stderr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("a boot whose served-binding note could not be written reported success")
+	}
+	if routes != nil {
+		t.Errorf("a failed boot handed back routes %+v the caller would have to close", routes)
+	}
+	if !strings.Contains(err.Error(), "injected served-binding note failure") {
+		t.Errorf("the refusal does not carry the write failure: %v", err)
+	}
+	if closes != 1 {
+		t.Errorf("the opened binding was closed %d time(s), want exactly 1: a boot that refuses must not keep the engine it opened", closes)
 	}
 }

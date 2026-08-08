@@ -34,10 +34,15 @@
 //     write immediately and by name, and a city has no business editing a
 //     workspace's type policy.
 //
-// The workspace's own configuration is the SOLE source of how it is served.
-// Ambient beads environment variables are deliberately not consulted: the open
-// projects an empty environment, so nothing a city process inherited can
-// re-point a binding at another database.
+// The workspace's own configuration is the SOLE source of how it is served:
+// every ambient BEADS_-prefixed variable is withheld for the duration of the
+// open, so nothing a city process inherited — a database override, a directory
+// override, a credential command — can re-point a binding.
+//
+// One thing this provider does not exercise: a controller and a one-shot
+// command opening the same workspace at the same moment. Whether that is
+// contention, a wait, or a refusal is the workspace backend's answer, and
+// nothing here has been proved against it.
 package beadsworkspace
 
 import (
@@ -47,6 +52,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -269,7 +275,33 @@ func WorkspaceRoot(cityRoot, configRef string) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("%w: city root %q is not absolute", ErrInvalidWorkspaceBinding, root)
 	}
-	return filepath.Join(filepath.Clean(root), ".gc", "storage", ref), nil
+	canonical, err := canonicalCityRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving the city root %q: %w", root, err)
+	}
+	return filepath.Join(canonical, ".gc", "storage", ref), nil
+}
+
+// canonicalCityRoot resolves a city's own path through its symlinks, the way
+// the built-in provider canonicalizes a binding root.
+//
+// Two spellings of one city — the path a command was given and the path a
+// symlink points at — must produce one location string, because that string is
+// what a city records as the binding it served. Recorded under one spelling
+// and recomputed under the other, it reads as a re-point and holds the boot.
+//
+// A city root that does not exist cannot be resolved and is cleaned instead:
+// this runs on paths that have deliberately created nothing, and a missing
+// city is the caller's problem to report, not a resolution failure.
+func canonicalCityRoot(root string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return filepath.Clean(root), nil
+	}
+	return "", err
 }
 
 // workspaceStatePath is the directory the linked beads library keeps a

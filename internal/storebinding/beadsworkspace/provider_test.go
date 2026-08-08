@@ -183,8 +183,44 @@ func TestWorkspaceRootIsUnderTheCityTheBindingNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the workspace root: %v", err)
 	}
-	if want := filepath.Join(city, ".gc", "storage", testConfigRef); root != want {
+	// The expectation is canonicalized the same way the resolution is, so a
+	// temp root reached through a symlink (the default on macOS) compares as
+	// the city it is.
+	canonical, err := filepath.EvalSymlinks(city)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", city, err)
+	}
+	if want := filepath.Join(canonical, ".gc", "storage", testConfigRef); root != want {
 		t.Errorf("workspace root = %s, want %s", root, want)
+	}
+}
+
+// TestWorkspaceRootCanonicalizesTheCitySpelling pins the one thing a recorded
+// location cannot survive without: two spellings of one city resolve to one
+// string. A city reached through a symlink and the same city reached directly
+// would otherwise record and recompute different locations, and the difference
+// reads as a re-point that holds the boot.
+func TestWorkspaceRootCanonicalizesTheCitySpelling(t *testing.T) {
+	parent := t.TempDir()
+	direct := filepath.Join(parent, "city")
+	if err := os.MkdirAll(direct, 0o755); err != nil {
+		t.Fatalf("creating the city: %v", err)
+	}
+	linked := filepath.Join(parent, "city-link")
+	if err := os.Symlink(direct, linked); err != nil {
+		t.Skipf("this filesystem does not support symlinks: %v", err)
+	}
+
+	fromDirect, err := WorkspaceRoot(direct, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving through the direct spelling: %v", err)
+	}
+	fromLink, err := WorkspaceRoot(linked, testConfigRef)
+	if err != nil {
+		t.Fatalf("resolving through the symlinked spelling: %v", err)
+	}
+	if fromDirect != fromLink {
+		t.Errorf("the same city resolved %s through its path and %s through a symlink to it", fromDirect, fromLink)
 	}
 }
 
@@ -230,8 +266,17 @@ func TestTwoCitiesSharingAConfigRefResolveDifferentWorkspaces(t *testing.T) {
 	if firstRoot == secondRoot {
 		t.Fatalf("two cities sharing config_ref %q resolved the same workspace %s", testConfigRef, firstRoot)
 	}
-	if !strings.HasPrefix(firstRoot, first) || !strings.HasPrefix(secondRoot, second) {
-		t.Fatalf("workspaces %s and %s are not under their own cities %s and %s", firstRoot, secondRoot, first, second)
+	for _, city := range []struct {
+		path string
+		root string
+	}{{first, firstRoot}, {second, secondRoot}} {
+		want, err := WorkspaceRoot(city.path, testConfigRef)
+		if err != nil {
+			t.Fatalf("resolving the workspace of %s: %v", city.path, err)
+		}
+		if city.root != want {
+			t.Errorf("city %s serves %s, want its own workspace %s", city.path, city.root, want)
+		}
 	}
 }
 

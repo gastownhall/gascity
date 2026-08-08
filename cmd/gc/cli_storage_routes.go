@@ -126,7 +126,10 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // The config load is the only thing this adds to a city that relocates nothing:
 // storageBootGate owns the bypass, so a city with no [storage] section
 // constructs no registry, resolves no plan and reads no byte of a binding root
-// through this path either.
+// through this path either. The bypass does read the city's served-binding
+// note — one failed open on a city that never served a split — which is what
+// keeps deleting the [storage] section from being a way past every hold the
+// gate has.
 //
 // A config that will not load is treated as a city with no [storage]. By the
 // time a class resolver runs, the command's own load has already failed and
