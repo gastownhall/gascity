@@ -361,7 +361,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 				fmt.Fprintf(stdout, "born-split: BLOCKED — provider %s does not open a bead engine, so the classes assigned to binding %s cannot be served\n", provider, binding) //nolint:errcheck // best-effort stdout
 				return 1
 			}
-			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider); held {
+			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider, configuredBindingLocation(storage.Bindings[binding])); held {
 				fmt.Fprintf(stdout, "born-split: BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
 				return 1
 			}
@@ -384,6 +384,12 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	fmt.Fprintf(stdout, "binding: %s\n  database: %s\n  marker:   %s\n  manifest: %s\n", //nolint:errcheck // best-effort stdout
 		target.Binding, target.Database, target.MarkerPath(), target.ManifestPath())
+
+	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
+		blocked.Target = target
+		fmt.Fprintf(stdout, "served-binding hold: %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+		return 1
+	}
 
 	state, err := readInfraConvergenceState(target)
 	if err != nil {

@@ -174,6 +174,17 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 	if shape == storageSplitNone {
+		// The natural revert edit — every class pointed back at work — is
+		// exactly the re-point the served-binding note exists to hold. A city
+		// that never served a split has no note and passes untouched; the
+		// no-[storage]-at-all bypass above is deliberately not covered, so
+		// that boundary stays where the compatibility contract drew it.
+		if blocked, held := servedBindingNoteHold(cityPath, config.StorageWorkBinding, "", ""); held {
+			blocked.Target = infraBindingTarget{Binding: config.StorageWorkBinding}
+			advice := infraMigrationOperatorAdvice(blocked, logPrefix)
+			recordStorageBindingOutcome(rec, blocked, advice)
+			return nil, errors.New(advice)
+		}
 		return nil, nil
 	}
 
@@ -200,7 +211,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
 				logPrefix, binding, storage.Bindings[binding].Provider)
 		}
-		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider); held {
+		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider, configuredBindingLocation(storage.Bindings[binding])); held {
 			report = blocked
 			report.Target = target
 		} else {
@@ -216,9 +227,14 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// removing it. Without the built-in arm writing it too, a city that
 		// genesised on this build's engine could be re-pointed at another
 		// binding and orphaned silently in the outbound direction.
-		note := bornSplitServedNote{Binding: target.Binding, Provider: storage.Bindings[target.Binding].Provider}
+		bindingCfg := storage.Bindings[target.Binding]
+		location := configuredBindingLocation(bindingCfg)
+		if bindingCfg.Provider == config.StorageProviderSQLiteBeads {
+			location = target.Database
+		}
+		note := bornSplitServedNote{Binding: target.Binding, Provider: bindingCfg.Provider, Location: location}
 		if err := writeBornSplitServedNote(cityPath, note); err != nil {
-			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+			return nil, fmt.Errorf("%s: recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", logPrefix, err)
 		}
 	}
 	if !report.serving() {
@@ -241,6 +257,21 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 type bornSplitServedNote struct {
 	Binding  string `json:"binding"`
 	Provider string `json:"provider"`
+	// Location pins WHERE the binding serves from — the resolved database
+	// path for this build's engine, the configured reference otherwise — so
+	// a re-point that keeps the binding's name but moves its storage cannot
+	// slip past a name-and-provider comparison.
+	Location string `json:"location"`
+}
+
+// configuredBindingLocation is the location a note records for a binding this
+// build cannot resolve: the opaque reference its provider does, or the path
+// when a spec carries one.
+func configuredBindingLocation(binding config.StorageBindingConfig) string {
+	if binding.ConfigRef != "" {
+		return binding.ConfigRef
+	}
+	return binding.Path
 }
 
 // bornSplitServedNotePath is where the note lives, under the city's own .gc.
@@ -310,7 +341,7 @@ func writeBornSplitServedNote(cityPath string, note bornSplitServedNote) error {
 // an unreadable note holds exactly as a readable one would, because a corrupt
 // file must not grant what its absence grants. The note's removal is the
 // operator's attestation, and the refusal string carries everything.
-func servedBindingNoteHold(cityPath, binding, provider string) (infraMigrationReport, bool) {
+func servedBindingNoteHold(cityPath, binding, provider, location string) (infraMigrationReport, bool) {
 	note, present, err := readBornSplitServedNote(cityPath)
 	if err != nil {
 		return infraMigrationReport{
@@ -318,7 +349,7 @@ func servedBindingNoteHold(cityPath, binding, provider string) (infraMigrationRe
 			ServedNotePath: bornSplitServedNotePath(cityPath),
 		}, true
 	}
-	if !present || (note.Binding == binding && note.Provider == provider) {
+	if !present || (note.Binding == binding && note.Provider == provider && note.Location == location) {
 		return infraMigrationReport{}, false
 	}
 	return infraMigrationReport{

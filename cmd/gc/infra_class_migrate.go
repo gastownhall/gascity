@@ -299,12 +299,12 @@ const (
 	// failing, with the ids named.
 	infraMigrationBornSplitBlocked
 	// infraMigrationGenesisBlocked reports a city whose configuration points
-	// the infrastructure classes at this build's own engine, but whose served
-	// note records that they were previously served from a binding this build
-	// cannot read. Genesis's premise — no marker and an empty work store mean
-	// nothing exists anywhere — is false for such a city: its infrastructure
-	// state lives in the previously served binding, and creating a fresh
-	// store would make every bead there permanently invisible.
+	// the infrastructure classes somewhere other than the binding its served
+	// note records. Nothing on this path proves the configured target holds
+	// what the served binding holds — genesis's premise that no marker and an
+	// empty work store mean nothing exists anywhere is false for such a city —
+	// so serving, genesis and migration all refuse until the operator attests
+	// by removing the note.
 	infraMigrationGenesisBlocked
 )
 
@@ -437,7 +437,7 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 			situation = fmt.Sprintf("%s: this city's served-binding note (%s) exists but cannot be read, and an unreadable note must hold exactly as a readable one would: some binding served this city's infrastructure classes, and re-pointing them elsewhere would make every bead written there permanently invisible. Repair or inspect the note; removing it is the operator's attestation that the previously served binding's contents are recovered or deliberately abandoned.",
 				logPrefix, report.ServedNotePath)
 		} else {
-			situation = fmt.Sprintf("%s: this city's infrastructure classes are served from binding %q (provider %q), and this configuration points them somewhere else that cannot read what that binding holds. Proceeding would make every bead written there permanently invisible, so this refuses. Recover the binding's contents first; removing %s is the operator's attestation that they are recovered or deliberately abandoned.",
+			situation = fmt.Sprintf("%s: this city's infrastructure classes are served from binding %q (provider %q), and this configuration points them somewhere else. Nothing here proves the configured target holds what the served binding holds, so this refuses rather than risk making every bead written there invisible. Verify or recover the served binding's contents first; removing %s is the operator's attestation that they are recovered, still reachable through the new configuration, or deliberately abandoned.",
 				logPrefix, report.ServedBinding, report.ServedProvider, report.ServedNotePath)
 		}
 		// Neither canned tail applies: the revert grant is evidence about the
@@ -671,7 +671,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		return infraMigrationReport{Outcome: outcome}
 	}
 
-	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads); ok {
+	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); ok {
 		return blocked
 	}
 
@@ -904,7 +904,7 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 	// command: a copy of the work store's slice would bless a destination
 	// that silently omits everything the served binding holds. The note's
 	// removal is the operator's attestation, checked before anything opens.
-	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads); ok {
+	if blocked, ok := servedBindingNoteHold(cityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); ok {
 		return blocked
 	}
 
