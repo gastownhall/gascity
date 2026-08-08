@@ -349,6 +349,22 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			// serves classes it does not.
 			provider := storage.Bindings[binding].Provider
 			fmt.Fprintf(stdout, "binding: %s\n  provider: %s (not this build's engine; serves under the born-split discipline)\n", binding, provider) //nolint:errcheck // best-effort stdout
+			// The same resolution and seam check boot performs, so this
+			// command's exit code keeps its deploy-gate contract: a city boot
+			// refuses must not report may-serve here.
+			plan, planErr := resolveCityStoragePlan(request.CityPath, request.Cfg)
+			if planErr != nil {
+				fmt.Fprintf(stderr, "%s: %v\n", logPrefix, planErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if plannedBindingOpener(plan, binding) == nil {
+				fmt.Fprintf(stdout, "born-split: BLOCKED — provider %s does not open a bead engine, so the classes assigned to binding %s cannot be served\n", provider, binding) //nolint:errcheck // best-effort stdout
+				return 1
+			}
+			if blocked, held := servedBindingNoteHold(request.CityPath, binding, provider); held {
+				fmt.Fprintf(stdout, "born-split: BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+				return 1
+			}
 			report := checkBornSplitDiscipline(request.CityPath, logPrefix, stderr)
 			switch report.Outcome {
 			case infraMigrationConverged:

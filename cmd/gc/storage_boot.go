@@ -200,17 +200,25 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
 				logPrefix, binding, storage.Bindings[binding].Provider)
 		}
-		report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
-		report.Target = target
-		if report.serving() {
-			// Serving is durable history the moment it happens: record it
-			// before the first route opens, so a later re-point at this
-			// build's own engine cannot genesis an empty store while this
-			// binding still holds the city's infrastructure state.
-			note := bornSplitServedNote{Binding: binding, Provider: storage.Bindings[binding].Provider}
-			if err := writeBornSplitServedNote(cityPath, note); err != nil {
-				return nil, fmt.Errorf("%s: %w", logPrefix, err)
-			}
+		if blocked, held := servedBindingNoteHold(cityPath, binding, storage.Bindings[binding].Provider); held {
+			report = blocked
+			report.Target = target
+		} else {
+			report = checkBornSplitDiscipline(cityPath, logPrefix, stderr)
+			report.Target = target
+		}
+	}
+	if report.serving() {
+		// Serving is durable history the moment it happens, on BOTH arms:
+		// the note records which binding and provider serve this city's
+		// infrastructure classes, and every later boot or migration that
+		// points them anywhere else refuses until the operator attests by
+		// removing it. Without the built-in arm writing it too, a city that
+		// genesised on this build's engine could be re-pointed at another
+		// binding and orphaned silently in the outbound direction.
+		note := bornSplitServedNote{Binding: target.Binding, Provider: storage.Bindings[target.Binding].Provider}
+		if err := writeBornSplitServedNote(cityPath, note); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
 		}
 	}
 	if !report.serving() {
@@ -293,6 +301,32 @@ func writeBornSplitServedNote(cityPath string, note bornSplitServedNote) error {
 		return fmt.Errorf("installing the served-binding note: %w", err)
 	}
 	return nil
+}
+
+// servedBindingNoteHold is the one rule every serving and migrating path asks:
+// does the served-binding note name a different binding or provider than the
+// one this path is about to serve or migrate onto? A mismatch is a hold — the
+// note's binding holds infrastructure state the new target cannot read — and
+// an unreadable note holds exactly as a readable one would, because a corrupt
+// file must not grant what its absence grants. The note's removal is the
+// operator's attestation, and the refusal string carries everything.
+func servedBindingNoteHold(cityPath, binding, provider string) (infraMigrationReport, bool) {
+	note, present, err := readBornSplitServedNote(cityPath)
+	if err != nil {
+		return infraMigrationReport{
+			Outcome:        infraMigrationGenesisBlocked,
+			ServedNotePath: bornSplitServedNotePath(cityPath),
+		}, true
+	}
+	if !present || (note.Binding == binding && note.Provider == provider) {
+		return infraMigrationReport{}, false
+	}
+	return infraMigrationReport{
+		Outcome:        infraMigrationGenesisBlocked,
+		ServedBinding:  note.Binding,
+		ServedProvider: note.Provider,
+		ServedNotePath: bornSplitServedNotePath(cityPath),
+	}, true
 }
 
 // checkBornSplitDiscipline decides whether a binding served by a provider this
