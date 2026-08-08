@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -25,7 +24,6 @@ import (
 // dispatcher tests below fire.
 func newGraphOrderFixture(t *testing.T) (string, *config.City, orders.Order) {
 	t.Helper()
-	formulatest.EnableV2ForTest(t)
 	cityPath := t.TempDir()
 	formulaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(formulaDir, "reaper.toml"), []byte(`
@@ -42,12 +40,19 @@ metadata = { "gc.run_target" = "worker" }
 	}
 	maxOne, maxTwo := 1, 2
 	cfg := &config.City{
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
 			{Name: "worker", MaxActiveSessions: &maxTwo},
 			{Name: config.ControlDispatcherAgentName, MaxActiveSessions: &maxOne},
 		},
 	}
+	// The order's formula declares the graph.v2 contract, so the compiler
+	// capability has to be on for it to compile at all. Derive it from the city
+	// config the way a booting city does, so the dispatch under test runs the
+	// same gate pairing production runs; the cleanup restores the default.
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	a := orders.Order{
 		Name:         "reaper",
 		Formula:      "reaper",
