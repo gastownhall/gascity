@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,26 +14,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
-
-// splitCityStorageRoutes builds the routes a converged split city runs on: work
-// keeps its own ledger and every infrastructure class — graph included — is
-// served by one shared binding. That is the arrangement storageSplitWhole names
-// and openStorageRoutes produces, so a dispatcher handed these routes resolves
-// classes exactly as it does after a real cutover.
-func splitCityStorageRoutes(infra beads.Store) *storageRoutes {
-	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: "infra"}
-	for _, class := range coordclass.Classes() {
-		if class.IsInfrastructure() {
-			routes.stores[class] = infra
-		}
-	}
-	return routes
-}
 
 // newGraphOrderFixture writes a city-scoped graph.v2 order whose single worker
 // step routes to a city agent, and returns the city path, config and order the
@@ -126,7 +112,7 @@ func TestOrderDispatchWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 	m := &memoryOrderDispatcher{
 		aa:                   []orders.Order{a},
 		storeFn:              func(execStoreTarget) (beads.Store, error) { return workStore, nil },
-		storageRoutes:        splitCityStorageRoutes(graphStore),
+		storageRoutes:        messagingSplitRoutes(graphStore),
 		cfg:                  cfg,
 		cityName:             "test-city",
 		cityPath:             cityPath,
@@ -181,7 +167,7 @@ func TestOrderDispatchSingleFlightGateSeesGraphResidentWisp(t *testing.T) {
 	m := &memoryOrderDispatcher{
 		aa:                   []orders.Order{a},
 		storeFn:              func(execStoreTarget) (beads.Store, error) { return workStore, nil },
-		storageRoutes:        splitCityStorageRoutes(graphStore),
+		storageRoutes:        messagingSplitRoutes(graphStore),
 		cfg:                  cfg,
 		cityName:             "test-city",
 		cityPath:             cityPath,
@@ -306,7 +292,7 @@ func TestOrderDispatchExecutionFactsProjectFromTheGraphStore(t *testing.T) {
 	m := &memoryOrderDispatcher{
 		aa:                   []orders.Order{a},
 		storeFn:              func(execStoreTarget) (beads.Store, error) { return workStore, nil },
-		storageRoutes:        splitCityStorageRoutes(graphStore),
+		storageRoutes:        messagingSplitRoutes(graphStore),
 		cfg:                  cfg,
 		cityName:             "test-city",
 		cityPath:             cityPath,
@@ -347,4 +333,332 @@ func TestOrderDispatchExecutionFactsProjectFromTheGraphStore(t *testing.T) {
 	if got := trackingBeads(t, graphStore, labelOrderTracking); len(got) != 0 {
 		t.Fatalf("graph store holds order-tracking beads %+v, want none", got)
 	}
+}
+
+// TestOrderDispatchConstructorDeliversRoutesToTheWispBirth closes the gap
+// between "the routing decision is right" and "the routing decision is reached".
+//
+// Every other test in this file hands memoryOrderDispatcher its storageRoutes as
+// a struct-literal field, which proves dispatchWisp USES the field and nothing
+// about the four-hop argument chain that fills it in production
+// (newCityRuntime/rescan/reload/webhook -> buildOrderDispatcher* ->
+// newMemoryOrderDispatcher). Reverting those call sites to nil is a one-token
+// edit — the shape a rebase or a bad conflict resolution produces — and it
+// leaves build, vet, lint and every routing test green while putting every
+// dispatched wisp back in the work ledger, which is the stranded-graph-bead
+// incident this change exists to fix.
+//
+// So this one builds the dispatcher through the constructor and asserts on
+// behavior. Only storeFn is replaced afterwards, because the production opener
+// would reach for a real bd store; the routes come from the constructor, which
+// is the thing under test.
+func TestOrderDispatchConstructorDeliversRoutesToTheWispBirth(t *testing.T) {
+	cityPath, cfg, a := newGraphOrderFixture(t)
+	workStore := beads.NewMemStore()
+	workStore.IDPrefix = "mc"
+	graphStore := beads.NewMemStore()
+	graphStore.IDPrefix = "gcg"
+
+	var rec memRecorder
+	od := buildOrderDispatcherFromOrderSet(messagingSplitRoutes(graphStore), cityPath, cfg, []orders.Order{a}, &rec, io.Discard)
+	m, ok := od.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("buildOrderDispatcherFromOrderSet returned %T, want *memoryOrderDispatcher", od)
+	}
+	t.Cleanup(m.dispatchCancel)
+	m.storeFn = func(execStoreTarget) (beads.Store, error) { return workStore, nil }
+	m.maxDispatchesPerTick = 1
+
+	dispatchGraphOrder(t, m, cityPath)
+
+	root := workflowRoot(t, graphStore)
+	if !strings.HasPrefix(root.ID, "gcg-") {
+		t.Fatalf("wisp root id = %q, want the graph binding's %q prefix", root.ID, "gcg-")
+	}
+	for _, b := range allBeads(t, workStore) {
+		if b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+			t.Fatalf("wisp root %s was born in the work ledger; the constructor did not carry the storage routes to dispatchWisp", b.ID)
+		}
+	}
+}
+
+// TestOrderDispatcherServesTheBootResolvedBinding pins the three production
+// wiring sites that hand a live CityRuntime's opened binding to its order
+// dispatcher: boot, the order rescan, and a config reload.
+//
+// Pointer identity is the assertion, and it is the point: the dispatcher must
+// serve the binding this process OPENED AT BOOT, not a second resolution of the
+// same config. Storage handles are immutable for the life of a process — a
+// reload that changes [storage] is refused rather than applied — so a dispatcher
+// holding anything other than cr.storageRoutes is holding a handle to a database
+// nothing else in the process is reading.
+func TestOrderDispatcherServesTheBootResolvedBinding(t *testing.T) {
+	cr, tomlPath, _ := bootSplitCityForReloadWithOrder(t)
+
+	assertDispatcherRoutes := func(stage string) {
+		t.Helper()
+		if cr.od == nil {
+			t.Fatalf("%s: the split city has no order dispatcher, so this test asserts nothing", stage)
+		}
+		m, ok := cr.od.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("%s: cr.od is %T, want *memoryOrderDispatcher", stage, cr.od)
+		}
+		if m.storageRoutes != cr.storageRoutes {
+			t.Fatalf("%s: dispatcher routes = %p, want the runtime's boot-resolved routes %p; every wisp it dispatches is born in the work ledger and lands stranded off the binding",
+				stage, m.storageRoutes, cr.storageRoutes)
+		}
+	}
+
+	assertDispatcherRoutes("boot")
+
+	// The rescan rebuilds the dispatcher only when the order SET changed, so
+	// add an order rather than rescanning an unchanged one.
+	writeCityOrder(t, cr.cityPath, "sweeper")
+	changed, _, err := cr.rescanOrderDispatcher(context.Background(), cr.cityPath, cr.cfg, "test: order scan", time.Now())
+	if err != nil {
+		t.Fatalf("rescanOrderDispatcher: %v", err)
+	}
+	if !changed {
+		t.Fatal("the rescan reported no change, so it never rebuilt the dispatcher and this stage asserts nothing")
+	}
+	assertDispatcherRoutes("after rescanOrderDispatcher")
+
+	// A reload that leaves [storage] alone but changes something else: the
+	// dispatcher is rebuilt, and it must be rebuilt over the same binding.
+	writeSplitCityConfig(t, tomlPath, cr.cfg.Storage.Bindings["infra"].Path, "\n[daemon]\nshutdown_timeout = \"7s\"\n")
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual); reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reload failed, so the rebuilt dispatcher proves nothing: %s", reply.Error)
+	}
+	assertDispatcherRoutes("after reloadConfigTraced")
+}
+
+// TestWebhookOrderDispatcherServesTheBootResolvedBinding is the fourth wiring
+// site. The webhook receiver builds its own detached dispatcher per delivery
+// from controllerState rather than reusing cr.od, so it is a separate call to
+// newMemoryOrderDispatcher with its own lock-scoped read of the routes — and a
+// webhook-fired wisp has to land in the same graph store a tick-fired one does.
+func TestWebhookOrderDispatcherServesTheBootResolvedBinding(t *testing.T) {
+	graphStore := beads.NewMemStore()
+	routes := messagingSplitRoutes(graphStore)
+	cs := &controllerState{
+		cityPath:      t.TempDir(),
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		storageRoutes: routes,
+	}
+
+	md := controllerWebhookDispatcher{cs: cs}.dispatcher()
+	if md.storageRoutes != routes {
+		t.Fatalf("webhook dispatcher routes = %p, want the controller's %p; a webhook-fired wisp would be born in the work ledger", md.storageRoutes, routes)
+	}
+	if got := md.graphStoreFor(beads.NewMemStore()); got != beads.Store(graphStore) {
+		t.Fatalf("webhook dispatcher graph store = %T(%p), want the binding %p", got, got, graphStore)
+	}
+}
+
+// TestOrderWispForceCloseReachesTheGraphBinding pins the recovery half of the
+// wisp move.
+//
+// This change puts order wisp roots in the graph binding and federates the
+// single-flight gate over it, so a wisp whose agent died mid-run keeps
+// hasOpenWorkStrict returning true and suppresses its order on every tick. The
+// only gc-level force-close for that state is `gc order sweep-tracking
+// --include-wisps`, and its root selection (staleOrderWispRoots, by the
+// "order-run:<name>" label) runs against whatever store it is handed. Handed the
+// work stores, it finds no root, reports wispClosed: 0, exits 0 — and the order
+// stays wedged with no documented recovery but raw bd against the binding.
+func TestOrderWispForceCloseReachesTheGraphBinding(t *testing.T) {
+	workStore := beads.NewMemStore()
+	graphStore := beads.NewMemStore()
+	graphStore.IDPrefix = "gcg"
+
+	root, err := graphStore.Create(beads.Bead{
+		Title:    "reaper wisp",
+		Type:     "molecule",
+		Labels:   []string{"order-run:reaper"},
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create wisp root: %v", err)
+	}
+	child, err := graphStore.Create(beads.Bead{
+		Title:    "reaper step",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("create wisp step: %v", err)
+	}
+
+	onlyOrders := orderFilterForTest("reaper")
+	// Same shape the existing wisp-sweep tests use: push "now" past the fixture
+	// so the whole open subtree sits before the cutoff.
+	now := root.CreatedAt.Add(2 * time.Hour)
+
+	// The regression: sweeping only the work stores is a silent no-op.
+	blind, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, nil, now, time.Hour, onlyOrders, true)
+	if err != nil {
+		t.Fatalf("work-store-only sweep: %v", err)
+	}
+	if blind.wispClosed != 0 {
+		t.Fatalf("work-store-only sweep closed %d wisp bead(s); the fixture no longer models a graph-resident wisp", blind.wispClosed)
+	}
+	if got := beadByIDForTest(t, graphStore, root.ID); got.Status == "closed" {
+		t.Fatal("the work-store-only sweep closed the graph-resident root; the fixture is wrong")
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, onlyOrders, true)
+	if err != nil {
+		t.Fatalf("graph-routed sweep: %v", err)
+	}
+	if result.wispClosed == 0 {
+		t.Fatal("gc order sweep-tracking --include-wisps closed no wisp beads in the graph binding; a stalled graph-resident wisp has no gc-level recovery and its order stays suppressed forever")
+	}
+	for _, id := range []string{root.ID, child.ID} {
+		if got := beadByIDForTest(t, graphStore, id); got.Status != "closed" {
+			t.Fatalf("bead %s status = %q, want closed by the force-close", id, got.Status)
+		}
+	}
+}
+
+// TestOrderWispForceCloseStaysInTheOneStoreOnSingleStoreCity is the
+// compatibility half: a city that relocates nothing resolves no separate wisp
+// store, so the sweep keeps closing wisp subtrees in the same store as the
+// tracking beads, once per scope, exactly as before.
+func TestOrderWispForceCloseStaysInTheOneStoreOnSingleStoreCity(t *testing.T) {
+	cityPath := t.TempDir()
+	resetCLIStorageRoutes(t)
+	if got := orderWispSweepStore(cityPath, &config.City{Workspace: config.Workspace{Name: "test-city"}}); got != nil {
+		t.Fatalf("orderWispSweepStore = %T(%p) for a city with no [storage]; want nil so the sweep stays on the store it always used", got, got)
+	}
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "reaper wisp",
+		Type:     "molecule",
+		Labels:   []string{"order-run:reaper"},
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create wisp root: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "reaper step",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	}); err != nil {
+		t.Fatalf("create wisp step: %v", err)
+	}
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, root.CreatedAt.Add(2*time.Hour), time.Hour, orderFilterForTest("reaper"), true)
+	if err != nil {
+		t.Fatalf("single-store sweep: %v", err)
+	}
+	if result.wispClosed == 0 {
+		t.Fatal("single-store sweep closed no wisp beads; the per-store wisp half was lost")
+	}
+	if got := beadByIDForTest(t, store, root.ID); got.Status != "closed" {
+		t.Fatalf("wisp root status = %q, want closed", got.Status)
+	}
+}
+
+func beadByIDForTest(t *testing.T, store beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return b
+}
+
+// bootSplitCityForReloadWithOrder boots a split city that actually has an order,
+// so its runtime has a real order dispatcher to assert on. Orders are discovered
+// from <city>/orders/<name>.toml, not from city.toml, so the order file is
+// written before the runtime boots and survives the reloads below.
+func bootSplitCityForReloadWithOrder(t *testing.T) (*CityRuntime, string, *bytes.Buffer) {
+	t.Helper()
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeSplitCityConfig(t, tomlPath, filepath.Join(t.TempDir(), "store"), "")
+
+	writeCityOrder(t, cityPath, "reaper")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	stubInfraMigrationSource(t)
+
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if cr.storageRoutes == nil {
+		t.Fatal("the split city opened no storage routes, so nothing below is about a binding")
+	}
+	return cr, tomlPath, &stderr
+}
+
+// writeCityOrder drops a city-scoped cron order on disk. Orders are discovered
+// from <city>/orders/<name>.toml, so adding one is what makes an order rescan
+// report a changed set and rebuild the dispatcher.
+func writeCityOrder(t *testing.T, cityPath, name string) {
+	t.Helper()
+	ordersDir := filepath.Join(cityPath, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatalf("mkdir orders: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ordersDir, name+".toml"), []byte(`
+[order]
+exec = "true"
+trigger = "cron"
+schedule = "*/1 * * * *"
+`), 0o644); err != nil {
+		t.Fatalf("write order %s: %v", name, err)
+	}
+}
+
+// TestOrderTrackingSweepResolverPairsTheWispStoreWithTheTrackingStores pins
+// what `gc order sweep-tracking` is handed, which is the other half of the
+// force-close fix: the sweep can only reach the graph binding if its resolver
+// hands the binding over in the first place.
+func TestOrderTrackingSweepResolverPairsTheWispStoreWithTheTrackingStores(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	t.Run("split city resolves the graph binding", func(t *testing.T) {
+		cityPath := t.TempDir()
+		graphStore := beads.NewMemStore()
+		resetCLIStorageRoutes(t)
+		entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
+		entry.once.Do(func() { entry.routes = messagingSplitRoutes(graphStore) })
+
+		_, wispStore, _ := orderTrackingSweepStoresForConfigTargets(cityPath, cfg, nil)
+		if wispStore != beads.Store(graphStore) {
+			t.Fatalf("wisp sweep store = %T(%p), want the graph binding %p; --include-wisps would report wispClosed: 0 and exit 0", wispStore, wispStore, graphStore)
+		}
+	})
+
+	t.Run("single-store city resolves none", func(t *testing.T) {
+		cityPath := t.TempDir()
+		resetCLIStorageRoutes(t)
+
+		_, wispStore, _ := orderTrackingSweepStoresForConfigTargets(cityPath, cfg, nil)
+		if wispStore != nil {
+			t.Fatalf("wisp sweep store = %T(%p) for a city with no [storage]; want nil so the sweep stays on the store it always used", wispStore, wispStore)
+		}
+	})
 }
