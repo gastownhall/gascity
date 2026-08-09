@@ -750,3 +750,107 @@ func TestOrderTrackingSweepResolverPairsTheWispStoreWithTheTrackingStores(t *tes
 		}
 	})
 }
+
+// newPouredOrderFixture is newGraphOrderFixture's v1 twin: an order whose
+// formula is a legacy POURED molecule. Its root is a molecule container and its
+// steps are plain assigned tasks — no gc.kind, no gc.root_bead_id — so
+// coordclass.Classify calls every bead it materializes ClassWork.
+func newPouredOrderFixture(t *testing.T) (string, *config.City, orders.Order) {
+	t.Helper()
+	cityPath := t.TempDir()
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "poured.toml"), []byte(`
+formula = "poured"
+version = 1
+pour = true
+
+[[steps]]
+id = "sweep"
+title = "Poured sweep"
+assignee = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	maxOne, maxTwo := 1, 2
+	cfg := &config.City{
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", MaxActiveSessions: &maxTwo},
+			{Name: config.ControlDispatcherAgentName, MaxActiveSessions: &maxOne},
+		},
+	}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	a := orders.Order{
+		Name:         "poured",
+		Formula:      "poured",
+		Trigger:      "cooldown",
+		Interval:     "15m",
+		FormulaLayer: formulaDir,
+	}
+	return cityPath, cfg, a
+}
+
+// TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass pins a KNOWN GAP
+// rather than a desirable behavior — ga-fk1a5.
+//
+// dispatchWisp sends every order molecule to the graph binding. That is right
+// for a graph.v2 pour and a root-only wisp, but a v1 POURED order formula
+// compiles to a molecule container plus plain assigned task steps, and
+// coordclass.Classify calls all of them ClassWork. Relocated, the step assigned
+// to `worker` sits in a binding `gc hook` never scans, so the dispatch produces
+// work nobody can pick up. The CLI twin (doOrderRunWithJSON) is gated on
+// moleculeClassStore and is correct; the dispatcher is not, because this root is
+// a TWO-CLASS object: it also carries the order:/seq: event-cursor labels, and
+// orders.Store unions order-run evidence across the ORDERS and GRAPH legs only.
+// Routing by class alone would fix the steps and lose the cursor. Closing it
+// means moving the cursor onto the orders-class tracking bead first.
+//
+// When ga-fk1a5 lands, this test flips: the molecule moves to workStore and the
+// assertions become the ones its CLI twin already makes
+// (TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity).
+func TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass(t *testing.T) {
+	cityPath, cfg, a := newPouredOrderFixture(t)
+	workStore := beads.NewMemStore()
+	workStore.IDPrefix = "mc"
+	graphStore := beads.NewMemStore()
+	graphStore.IDPrefix = "gcg"
+
+	var rec memRecorder
+	dispatchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &memoryOrderDispatcher{
+		aa:                   []orders.Order{a},
+		storeFn:              func(execStoreTarget) (beads.Store, error) { return workStore, nil },
+		storageRoutes:        messagingSplitRoutes(graphStore),
+		cfg:                  cfg,
+		cityName:             "test-city",
+		cityPath:             cityPath,
+		rec:                  &rec,
+		stderr:               io.Discard,
+		maxDispatchesPerTick: 1,
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       cancel,
+	}
+	dispatchGraphOrder(t, m, cityPath)
+
+	if rec.hasType(events.OrderFailed) || !rec.hasType(events.OrderCompleted) {
+		t.Fatalf("events = %+v, want completed without failure", rec.events)
+	}
+	assigned := false
+	for _, b := range allBeads(t, graphStore) {
+		if b.Assignee == "worker" {
+			assigned = true
+		}
+	}
+	if !assigned {
+		t.Fatalf("no step assigned to `worker` in the graph binding; if it moved to the work store, ga-fk1a5 has landed — flip this test to the assertions its CLI twin makes")
+	}
+	for _, b := range allBeads(t, workStore) {
+		if b.Assignee == "worker" {
+			t.Fatalf("a work-class order step reached the work store; ga-fk1a5 has landed — flip this test")
+		}
+	}
+	t.Logf("KNOWN GAP (ga-fk1a5): a v1 poured order molecule is materialized in the graph binding, where `gc hook`'s work-scope query cannot see its assigned steps")
+}

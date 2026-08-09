@@ -1744,6 +1744,23 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// Everything from here on writes the molecule, which is graph class, so it
 	// goes to the graph store rather than the order-class store the tracking
 	// bead lives in. On a single-store city the two are the same value.
+	//
+	// KNOWN GAP, deliberately not closed here (ga-fk1a5). "Graph class" is true
+	// of a graph.v2 pour and a root-only wisp but NOT of a v1 POURED order
+	// formula, whose molecule container and assigned task steps are all
+	// ClassWork by coordclass.Classify — relocating those hides the assigned
+	// steps from `gc hook`, which reads the work scope. The CLI twin
+	// (doOrderRunWithJSON) gates this on moleculeClassStore and is correct.
+	// The dispatcher cannot simply follow, because this root is a TWO-CLASS
+	// object: it also carries the order:/seq: event-cursor labels, and
+	// orders.Store unions order-run evidence across the ORDERS and GRAPH legs
+	// only. Route the molecule by class and an event-triggered v1 poured order
+	// loses its cursor and re-fires; leave it and its steps stay unreachable.
+	// Closing it means persisting the cursor onto the orders-class tracking
+	// bead the way the exec arm already does (front.SetCursor at the exec
+	// branch above) — a production behavior change rather than wiring, so it is
+	// its own slice. TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass
+	// pins the current answer so that slice has a test to flip.
 	graphStore := m.graphStoreFor(store)
 
 	// Route before instantiation. A routing failure must not leave an

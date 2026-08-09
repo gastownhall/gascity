@@ -413,9 +413,12 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // still runs against a ledger that cannot see the bead. claimByID's own
 // fallback IS that fan-out, so the rows below state both answers side by side:
 // a class id routes, a work id keeps the legacy path byte-for-byte. Rewiring
-// the command is ga-xo8ch (class-routed writes from one-shot commands); when it
+// the command is ga-k8pzw (by-id routing through the shared resolver); when it
 // lands, this paragraph goes and the assertions move from claimByID to the
-// command.
+// command. ga-xo8ch — class-routed WRITES from one-shot commands — landed
+// without touching it: it routes where a coordination-class bead is BORN
+// (`gc order run`'s wisp, `gc formula cook`'s graph pour), and a claim is a
+// by-id mutation of a bead that already exists somewhere.
 //
 // The gap is ASSERTED and not merely described, the way I1, I2 and I10 assert
 // theirs: hookQueryEnv is the production seam that decides which store the
@@ -448,7 +451,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		t.Fatalf("build the hook's work-query env: %v", err)
 	}
 	if got := hookEnv["GC_STORE_SCOPE"]; got != "city" {
-		t.Errorf("`gc hook --claim` resolves store scope %q, want \"city\" — if it now names a coordination class, the ga-xo8ch rewire has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", got)
+		t.Errorf("`gc hook --claim` resolves store scope %q, want \"city\" — if it now names a coordination class, the ga-k8pzw rewire has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", got)
 	}
 	if got := hookEnv["GC_STORE_ROOT"]; got != e.cityPath {
 		t.Errorf("`gc hook --claim` resolves store root %q, want the city work root %q — a claim it issues for a relocated class id runs against the work ledger, and that is the gap this row pins", got, e.cityPath)

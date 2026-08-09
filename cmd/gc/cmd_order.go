@@ -830,25 +830,51 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		}
 	}
 
-	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, genericStore, cityName, cityPath, cfg); err != nil {
+	// Everything from here on writes the molecule, so it goes to the store that
+	// owns the class the molecule's beads belong to rather than to the
+	// order/scope store the tracking bead lives in — the same split dispatchWisp
+	// takes through graphStoreFor. The class is the classifier's verdict on the
+	// compiled recipe, not the formula's compiler version: a graph.v2 pour and a
+	// root-only wisp are graph class and belong in the binding, while a v1
+	// POURED order formula compiles to a molecule container whose every bead is
+	// work class and must stay on the work ledger, which is the only place
+	// `gc hook` looks for the steps it assigns.
+	//
+	// A one-shot command builds no CityRuntime, so the routes come from the
+	// one-shot funnel; on a city that relocates nothing resolveGraphStore hands
+	// back the exact store value it was given, so this stays the single store
+	// `gc order run` always used, including the optional-capability assertions
+	// molecule.Instantiate makes against it.
+	graphStore := resolveGraphStore(cliStorageRoutes(cityPath), genericStore, cfg, cityPath, nil)
+	moleculeStore := moleculeClassStore(recipe, genericStore, graphStore)
+
+	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, moleculeStore, cityName, cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	cookResult, err := molecule.Instantiate(context.Background(), genericStore, recipe, molecule.Options{})
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	rootID := cookResult.RootID
 	if cookResult.GraphWorkflow {
-		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: genericStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
+		// Two classes, two stores: the molecule store owns the root and its
+		// steps, the scope store owns the tracks edges of any input convoy the
+		// root names. Wrapping one store as both legs reads the convoy out of the
+		// ledger it does not live in.
+		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: moleculeStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
 			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
 		}
 	}
 
 	// Track the spawned root in the same store that created it so manual runs
-	// stay provider-aware and do not fall back to ambient bd CLI state.
+	// stay provider-aware and do not fall back to ambient bd CLI state. The
+	// order-run / order: / seq: labels are the run's evidence and they have to
+	// ride the bead they describe, which is resident wherever the molecule was
+	// materialized. cachedOrderStoresResolver reads that binding back, so
+	// `gc order check` still finds this run.
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
@@ -861,7 +887,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := store.Update(rootID, update); err != nil {
+	if err := moleculeStore.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

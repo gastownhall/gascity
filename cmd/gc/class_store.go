@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -313,6 +314,55 @@ func resolveSessionStore(routes *storageRoutes, workStore beads.Store, cfg *conf
 // parity with the other resolve*Store helpers and ignored here).
 func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
+}
+
+// moleculeClassStore returns the store a compiled recipe's molecule must be
+// materialized in: graphStore when the beads instantiating it produces are
+// graph class, and the caller's own scope/work store otherwise.
+//
+// The question is the CLASSIFIER'S, not the compiler's. Routing on "did this
+// formula use the v2 compiler" is wrong in both directions. A v1 formula that
+// is root-only — `phase = "vapor"`, or no [[steps]] at all — compiles to a root
+// carrying gc.kind=wisp (internal/formula/compile.go), and that is the first
+// arm coordclass.Classify tests, so the bead is ClassGraph and belongs in the
+// binding. A v1 POURED formula compiles to a molecule container whose every
+// bead is ClassWork, and work stays on the work ledger even in a split city —
+// relocating it hides the steps from every work-scope reader, `gc hook`
+// included.
+func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Store) beads.Store {
+	if recipeCoordClass(recipe) == coordclass.ClassGraph {
+		return graphStore
+	}
+	return workStore
+}
+
+// recipeCoordClass returns the coordination class of the beads that
+// instantiating recipe produces.
+//
+// molecule.Instantiate materializes a recipe as one atomic plan, so the plan is
+// classified wholesale exactly as coordclass.ClassifyGraphPlan does: a single
+// graph-marked node makes the whole molecule graph class, which keeps its
+// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
+// skipped, matching the instantiate loop's own `if recipe.RootOnly && i > 0`
+// break.
+func recipeCoordClass(recipe *formula.Recipe) coordclass.Class {
+	if recipe == nil {
+		return coordclass.ClassWork
+	}
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		stepType := step.Type
+		if stepType == "" {
+			stepType = "task"
+		}
+		bead := beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}
+		if coordclass.Classify(bead) == coordclass.ClassGraph {
+			return coordclass.ClassGraph
+		}
+	}
+	return coordclass.ClassWork
 }
 
 // graphClassBinding returns the store these routes serve the graph class from,
