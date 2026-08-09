@@ -160,14 +160,66 @@ func TestBdSQLRelocatedClassRefusalOnASplitCity(t *testing.T) {
 		"list":                         {[]string{"list", "--status", "open"}, false},
 		"a flag that looks like an id": {[]string{"sql", "--json", "select 1"}, false},
 		"no args":                      {nil, false},
+
+		// A query about the work ledger that merely mentions a relocated id is
+		// answered correctly and non-emptily by bd, so it must pass.
+		"sql matching work rows that reference a graph id": {[]string{"sql", "select id from issues where metadata like '%gcg-abc%'"}, false},
+
+		// bd root flags are accepted BEFORE the subcommand (beads
+		// cmd/bd/main.go persistent flags) and `gc bd` forwards argv verbatim,
+		// so keying the guard on bdArgs[0] disarmed it on an ordinary
+		// invocation of the one command the guard advertises as protected.
+		"leading --json":                             {[]string{"--json", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"leading -C dir":                             {[]string{"-C", "/tmp/x", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"leading --actor":                            {[]string{"--actor", "me", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"leading -q":                                 {[]string{"-q", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"leading --db inline":                        {[]string{"--db=/tmp/x.db", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"leading --directory":                        {[]string{"--directory", "/d", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"stacked leading globals":                    {[]string{"--actor", "bob", "--json", "-C", "/d", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"a global flag value that looks like a verb": {[]string{"--actor", "sql", "list", "--status", "open"}, false},
+
+		// bd query is the other ad-hoc verb whose text names ids: its DSL
+		// pushes id=<v> down to filter.IDs and id=<v>* to an id LIKE '<v>%',
+		// against the same ledger, and on no match it prints [] and exits 0.
+		"query naming a graph id":            {[]string{"query", "id=gcg-abc123"}, true},
+		"query with a graph wildcard":        {[]string{"query", "--json", "id=gcg-*"}, true},
+		"query on a graph parent":            {[]string{"query", "parent=gcg-root"}, true},
+		"query with spaces around =":         {[]string{"query", "id = gcg-1"}, true},
+		"query compound with a graph id":     {[]string{"query", "status=open AND id=gcg-1"}, true},
+		"query over the work ledger":         {[]string{"query", "status=open AND priority>1"}, false},
+		"query naming a work id":             {[]string{"query", "id=bd-42"}, false},
+		"query text merely mentioning an id": {[]string{"query", `title="fix gcg-1 regression"`}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			msg, blind := bdSQLRelocatedClassRefusal(split, tc.args)
 			if blind != tc.refuse {
 				t.Fatalf("bdSQLRelocatedClassRefusal(%v) refused = %v, want %v (%s)", tc.args, blind, tc.refuse, msg)
 			}
-			if blind && !strings.Contains(msg, "gc bd dep tree <id>") {
-				t.Errorf("refusal does not point at the federated verb: %s", msg)
+			if blind && !strings.Contains(msg, "gc beads show <id>") {
+				t.Errorf("refusal does not point at the class-routed verb: %s", msg)
+			}
+		})
+	}
+}
+
+// TestBdSQLRelocatedClassRefusalFailsClosedOnAnUnrecognizedFlag pins the
+// direction the ambiguity resolves in. An unrecognized leading flag may or may
+// not consume the next token as its value, so the verb cannot be located; the
+// scan then judges every remaining argument rather than disengaging, because a
+// guard that a typo can switch off is not a guard.
+func TestBdSQLRelocatedClassRefusalFailsClosedOnAnUnrecognizedFlag(t *testing.T) {
+	split := splitCityConfig()
+	for name, tc := range map[string]struct {
+		args   []string
+		refuse bool
+	}{
+		"unknown value flag hides the verb": {[]string{"--frobnicate", "x", "sql", "select * from issues where id = 'gcg-abc'"}, true},
+		"unknown flag with no relocated id": {[]string{"--frobnicate", "x", "list", "--status", "open"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg, blind := bdSQLRelocatedClassRefusal(split, tc.args)
+			if blind != tc.refuse {
+				t.Fatalf("bdSQLRelocatedClassRefusal(%v) refused = %v, want %v (%s)", tc.args, blind, tc.refuse, msg)
 			}
 		})
 	}
@@ -177,15 +229,22 @@ func TestBdSQLRelocatedClassRefusalOnASplitCity(t *testing.T) {
 // for the agent surface: the exact query a split city refuses passes through
 // untouched when nothing has been relocated.
 func TestBdSQLRelocatedClassRefusalIsInertOnASingleStoreCity(t *testing.T) {
-	graphSQL := []string{"sql", "select * from issues where id = 'gcg-abc'"}
+	guarded := map[string][]string{
+		"sql":                    {"sql", "select * from issues where id = 'gcg-abc'"},
+		"sql behind a root flag": {"--json", "sql", "select * from issues where id = 'gcg-abc'"},
+		"query":                  {"query", "id=gcg-abc"},
+		"unrecognized flag":      {"--frobnicate", "x", "sql", "select * from issues where id = 'gcg-abc'"},
+	}
 	for name, cfg := range map[string]*config.City{
 		"nil config":         nil,
 		"no storage section": {},
 		"everything on work": allWorkCityConfig(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if msg, blind := bdSQLRelocatedClassRefusal(cfg, graphSQL); blind {
-				t.Fatalf("single-store city refused %v: %s", graphSQL, msg)
+			for shape, args := range guarded {
+				if msg, blind := bdSQLRelocatedClassRefusal(cfg, args); blind {
+					t.Fatalf("single-store city refused %s %v: %s", shape, args, msg)
+				}
 			}
 		})
 	}
@@ -280,13 +339,113 @@ func TestGcBdSQLRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("doBd exited 0 on a graph-blind query; stderr=%q", stderr.String())
 	}
-	for _, want := range []string{"graph-class beads", `"gcg-"`, "gc bd dep tree <id>", "bd has no SQLite backend"} {
+	for _, want := range []string{"graph-class beads", `"gcg-"`, "gc beads show <id>", "holds no row under their reserved id prefixes"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("refusal is missing %q; stderr=%q", want, stderr.String())
 		}
 	}
 	if _, err := os.Stat(capture); err == nil {
 		t.Fatal("bd was invoked despite the refusal")
+	}
+}
+
+// TestGcBdSQLRefusesBehindALeadingRootFlagOnASplitCity drives the fail-open
+// through the real command. A single leading bd root flag used to make the
+// guard return early and hand bd the graph-blind query verbatim.
+func TestGcBdSQLRefusesBehindALeadingRootFlagOnASplitCity(t *testing.T) {
+	for name, args := range map[string][]string{
+		"--json": {"--json", "sql", "select id, status from issues where id = 'gcg-abc123'"},
+		"-C":     {"-C", ".", "sql", "select id, status from issues where id = 'gcg-abc123'"},
+		"-q":     {"-q", "sql", "select id, status from issues where id = 'gcg-abc123'"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd(%v) exited 0 on a graph-blind query; stderr=%q", args, stderr.String())
+			}
+			if _, err := os.Stat(capture); err == nil {
+				data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+				t.Fatalf("bd was invoked despite the refusal: %q", data)
+			}
+		})
+	}
+}
+
+// TestGcBdQueryRefusesAGraphClassQueryOnASplitCity covers the sibling verb: an
+// operator steered off `bd sql` by the refusal lands on `bd query`, whose
+// id=<id> filter names the same relocated namespace and whose no-match answer
+// is `[]` with exit 0 — the original incident, one word away.
+func TestGcBdQueryRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"query", "--json", "id=gcg-abc123"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 on a graph-blind query; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc beads show <id>") {
+		t.Errorf("refusal does not point at the class-routed verb; stderr=%q", stderr.String())
+	}
+	if _, err := os.Stat(capture); err == nil {
+		t.Fatal("bd was invoked despite the refusal")
+	}
+}
+
+// TestGcBdShowIsARawPassthroughOnASplitCity is the fact that made the old
+// refusal message wrong, pinned so it cannot be forgotten again.
+//
+// The message used to end "Use the federated `gc bd show <id>` or `gc bd dep
+// tree <id>`". Neither verb is federated: doBd resolves a scope and then execs
+// the bd binary with the args verbatim and cmd.Dir at that scope root, with no
+// coordination-class routing anywhere on the path. Following the advice ran the
+// blind read the refusal had just prevented. The class-routed read the message
+// names instead is proved by internal/api's TestBeadGetResolvesARelocatedGraphID.
+func TestGcBdShowIsARawPassthroughOnASplitCity(t *testing.T) {
+	for name, args := range map[string][]string{
+		"show":     {"show", "gcg-abc123"},
+		"dep tree": {"dep", "tree", "gcg-abc123"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("bd was not invoked for %v: %v", args, err)
+			}
+			if !strings.Contains(string(data), strings.Join(args, " ")) {
+				t.Fatalf("bd received %q, want the args forwarded verbatim", data)
+			}
+		})
+	}
+}
+
+// TestGcBdSQLOverrideRunsTheQueryLoudly pins the escape hatch. The matcher
+// cannot tell an id-scoped predicate from a work-ledger query that legitimately
+// references a relocated id in a JSON or text column, so an operator must be
+// able to say "I know, run it" — and gc must say so on stderr rather than
+// letting the override be silent.
+func TestGcBdSQLOverrideRunsTheQueryLoudly(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv(bdRelocatedClassOverrideEnvVar, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"sql", "select id from issues where id = 'gcg-abc123'"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd = %d with the override set; stderr=%q", code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("bd was not invoked with the override set: %v", err)
+	}
+	if !strings.Contains(string(data), "gcg-abc123") {
+		t.Fatalf("bd received %q, want the unmodified query", data)
+	}
+	if !strings.Contains(stderr.String(), bdRelocatedClassOverrideEnvVar) {
+		t.Errorf("override was honored silently; stderr=%q", stderr.String())
 	}
 }
 

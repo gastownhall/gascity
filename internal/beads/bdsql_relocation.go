@@ -9,12 +9,13 @@ import (
 
 // Why this guard exists.
 //
-// `bd sql` runs against the bd ledger and nothing else. bd has no SQLite
-// backend at all — its storage layer is Dolt/embedded-Dolt/dbproxy — and the
-// engine a relocated coordination class is served from is never named in
-// .beads/metadata.json, so bd cannot know the file exists. A query that names a
-// relocated class's beads therefore resolves the workspace metadata, runs
-// SUCCESSFULLY against the bd ledger, matches no rows, and returns an empty
+// `bd sql` and `bd query` run against the bd ledger this scope's .beads/ names,
+// and nothing else. A relocated coordination class is served from a store that
+// ledger's metadata never mentions — a SQLite file bd has no backend for
+// (storage: Dolt/embedded-Dolt/dbproxy), or a different beads workspace with a
+// metadata.json of its own — so bd cannot know it exists. A read that names a
+// relocated class's beads therefore resolves this workspace's metadata, runs
+// SUCCESSFULLY against this ledger, matches no rows, and returns an empty
 // result. Nothing errors, because nothing failed.
 //
 // That empty answer is indistinguishable from a true negative, and downstream
@@ -23,25 +24,36 @@ import (
 // instead, and only gc can make it refuse — bd cannot detect that a class was
 // relocated out from under it.
 //
-// The refusal is deliberately narrow. It fires when a bd-ledger SQL read names
-// the id namespace of a class this store does not serve, which is the case
-// where the empty answer is provably wrong. A city that relocates nothing
-// carries no relocated classes, so nothing here can fire.
+// The refusal is deliberately narrow. It fires when a bd-ledger read puts the
+// id namespace of a class this store does not serve in an ID-SHAPED POSITION —
+// a string literal in SQL, the value side of a comparison in bd's query DSL —
+// which is the case where the empty answer is provably wrong. A statement that
+// merely mentions such an id somewhere else (a LIKE-contains over a text
+// column, a JSON metadata comparison, a comment) is a question about the rows
+// THIS ledger holds, and bd answers those correctly and often non-emptily: the
+// work ledger really does carry gcg- strings in its metadata, because
+// ensureDrainUnitConvoy stamps gc.drain_control_id = <graph control id> onto a
+// convoy coordclass deliberately keeps work-class. Refusing those would be a
+// false positive, so the anchoring rules below exist to let them through. A
+// city that relocates nothing carries no relocated classes, so nothing here can
+// fire at all.
 
-// ErrBdSQLClassRelocated is returned when a bd-ledger SQL read targets a
+// ErrBdSQLClassRelocated is returned when a bd-ledger read targets a
 // coordination class that has been relocated to another store. Callers that
 // need to distinguish this from a genuine empty result match it with
 // errors.Is.
-var ErrBdSQLClassRelocated = errors.New("bd sql cannot read a relocated coordination class")
+var ErrBdSQLClassRelocated = errors.New("bd cannot read a relocated coordination class")
 
 // RelocatedClass names a coordination class whose beads are no longer served
 // from a store's bd ledger, and says where they are served from instead.
 //
 // IDPrefix is the reserved, non-configurable id prefix the relocated class
 // mints (graph mints "gcg", messaging "gcm", and so on). It is what makes a
-// blind read detectable: an id under a relocated class's reserved prefix can
-// never be a row in the bd ledger, so a SQL read that names one is asking the
-// wrong store.
+// blind read detectable: only the relocated class engine mints under it, and a
+// migration preserves the ORIGINAL ids of the rows it copies
+// (importInfraSnapshot / CreateWithForeignID), which were minted under the
+// HQ/rig prefix. So no row of the bd ledger carries a reserved class prefix,
+// before or after a cutover, and a read scoped to one is asking the wrong store.
 type RelocatedClass struct {
 	// Class is the coordination class name, e.g. "graph".
 	Class string
@@ -84,44 +96,120 @@ func relocatedClassesForIDs(relocated []RelocatedClass, ids ...string) []Relocat
 }
 
 // RelocatedClassesInSQL returns the relocated classes whose reserved id
-// namespace appears anywhere in a SQL statement — as a literal id, a LIKE
-// pattern, an IN list, anything. It is the ad-hoc-query counterpart of the
+// namespace a SQL statement uses as an ID — a literal id, a LIKE pattern over
+// ids, a member of an IN list. It is the ad-hoc-query counterpart of the
 // id-scoped check: an operator or agent writing SQL by hand names the ids it
 // cares about in the text, and that text is the only thing available to
 // classify the query before bd answers it confidently and emptily.
 //
-// The prefix must start at a token boundary and be followed by "-", so "gcg-"
-// matches and "mygcg-1" does not.
+// The prefix must open a string literal (or the whole statement), so
+// `id = 'gcg-1'`, `id like 'gcg%'` and `id in ('bd-1','gcg-2')` match while
+// `metadata like '%gcg-1%'`, `-- see gcg-1` and `'mygcg-1'` do not. Those last
+// three are questions about the rows this ledger holds, and bd answers them.
 func RelocatedClassesInSQL(relocated []RelocatedClass, sql string) []RelocatedClass {
-	if len(relocated) == 0 || strings.TrimSpace(sql) == "" {
+	return relocatedClassesNamedIn(relocated, sql, atSQLLiteralStart)
+}
+
+// RelocatedClassesInQueryExpr is RelocatedClassesInSQL for bd's query DSL
+// (`bd query "id=gcg-*"`), which names ids without quoting them. bd parses that
+// expression into an IssueFilter and pushes `id=<v>` down to an id equality and
+// `id=<v>*` down to `id LIKE '<v>%'` against the same ledger, then prints `[]`
+// and exits 0 on no match — the same confident empty answer, one word away from
+// the SQL form.
+//
+// An id is anchored to the value side of a comparison or a grouping token
+// (bd's lexer skips whitespace, so `id = gcg-1` is the same query as
+// `id=gcg-1`). Text that merely contains an id — `title="fix gcg-1 regression"`
+// — is a search over this ledger's own rows and passes.
+func RelocatedClassesInQueryExpr(relocated []RelocatedClass, expr string) []RelocatedClass {
+	return relocatedClassesNamedIn(relocated, expr, atQueryValueStart)
+}
+
+// relocatedClassesNamedIn is the shared scan. anchored decides what counts as
+// an id-shaped position for the dialect being scanned; everything else — the
+// case folding, the trailing-boundary rule, the per-class loop — is common.
+func relocatedClassesNamedIn(relocated []RelocatedClass, text string, anchored func(string, int) bool) []RelocatedClass {
+	if len(relocated) == 0 || strings.TrimSpace(text) == "" {
 		return nil
 	}
-	lowered := strings.ToLower(sql)
+	lowered := strings.ToLower(text)
 	var matched []RelocatedClass
 	for _, class := range relocated {
 		if class.IDPrefix == "" {
 			continue
 		}
-		if containsIDNamespace(lowered, strings.ToLower(class.IDPrefix)+"-") {
+		if namesIDNamespace(lowered, strings.ToLower(class.IDPrefix), anchored) {
 			matched = append(matched, class)
 		}
 	}
 	return matched
 }
 
-// containsIDNamespace reports whether token appears in text at a boundary that
-// makes it the start of a bead id rather than the tail of a longer word.
-func containsIDNamespace(text, token string) bool {
-	for offset := 0; ; {
-		idx := strings.Index(text[offset:], token)
+// namesIDNamespace reports whether text uses prefix as the start of a bead id
+// at a position anchored deems id-shaped.
+func namesIDNamespace(text, prefix string, anchored func(string, int) bool) bool {
+	for offset := 0; offset <= len(text)-len(prefix); {
+		idx := strings.Index(text[offset:], prefix)
 		if idx < 0 {
 			return false
 		}
 		at := offset + idx
-		if at == 0 || !isIDBodyByte(text[at-1]) {
+		if anchored(text, at) && opensAnIDNamespace(text, at+len(prefix)) {
 			return true
 		}
 		offset = at + 1
+	}
+	return false
+}
+
+// opensAnIDNamespace reports whether what follows a matched prefix continues it
+// into that namespace rather than into a longer word. "gcg-abc" and "gcg'" do;
+// so do the LIKE patterns that stand in for the same rows ("gcg%", "gcg_%",
+// "gcg*"). "gcgabc" does not — that is a different prefix entirely.
+func opensAnIDNamespace(text string, at int) bool {
+	if at >= len(text) {
+		return true
+	}
+	switch b := text[at]; b {
+	case '-', '_':
+		return true
+	default:
+		return !isIDBodyByte(b)
+	}
+}
+
+// atSQLLiteralStart reports whether at opens a string literal (or the whole
+// statement). It is what separates `id = 'gcg-1'` — a predicate that can only
+// be answered by the store holding gcg- rows — from `metadata like '%gcg-1%'`,
+// a predicate over a column of THIS ledger that happens to contain the id.
+func atSQLLiteralStart(text string, at int) bool {
+	if at == 0 {
+		return true
+	}
+	switch text[at-1] {
+	case '\'', '"', '`':
+		return true
+	default:
+		return false
+	}
+}
+
+// atQueryValueStart reports whether at opens the value side of a comparison in
+// bd's query DSL, whose lexer emits '=', '!=', '<', '<=', '>', '>=', '(' and
+// ',' as tokens and skips the whitespace around them.
+func atQueryValueStart(text string, at int) bool {
+	i := at - 1
+	for i >= 0 && (text[i] == ' ' || text[i] == '\t') {
+		i--
+	}
+	if i < 0 {
+		return true
+	}
+	switch text[i] {
+	case '=', '<', '>', '!', '(', ',', '\'', '"', '`':
+		return true
+	default:
+		return false
 	}
 }
 
@@ -144,8 +232,17 @@ func isIDBodyByte(b byte) bool {
 //
 // The message is written for an operator who hit this at 2am with no source in
 // front of them: it names the class, the id namespace, where the beads actually
-// live, why bd answered emptily rather than failing, and the federated verbs
-// that do resolve them.
+// live, why bd answered emptily rather than failing, and the one read verb that
+// actually routes by class.
+//
+// Two things it deliberately does NOT say. It does not claim the refused query
+// would have returned nothing — that is false for a statement that references a
+// relocated id from a column this ledger does own — only that no row under the
+// reserved prefix is here, so an id-scoped predicate naming one cannot match.
+// And it does not name `gc bd show` / `gc bd dep tree`: those are raw bd
+// passthroughs (doBd ends at exec.Command(bdPath, bdArgs...)) and answer from
+// this same ledger, so recommending them handed the operator the very bug this
+// refusal exists to report.
 func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
@@ -162,9 +259,12 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		parts = append(parts, fmt.Sprintf("%s-class beads (id prefix %q) are served from %s", class.Class, class.IDPrefix+"-", where))
 	}
 
-	return fmt.Errorf("%w: %s: %s. bd has no SQLite backend and the relocated store is not named in .beads/metadata.json, "+
-		"so this query would run successfully against the bd ledger, match nothing, and return an empty result that is "+
-		"indistinguishable from a real one. Use the federated `gc bd show <id>` or `gc bd dep tree <id>` for these beads "+
-		"instead of `bd sql`",
+	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
+		"prefixes, so a read scoped to one cannot match here — and bd does not fail: it runs the read successfully "+
+		"against this ledger and returns an empty result indistinguishable from a real one. Read these beads with "+
+		"`gc beads show <id>`, which routes by class through the controller API (GET /v0/city/{cityName}/bead/{id}). "+
+		"That API lane is the only class-routed by-id read there is: `gc beads show` falls back to a work-store scan "+
+		"when no controller is reachable, and `gc bd show` and `gc bd dep tree` are raw bd passthroughs against this "+
+		"same ledger",
 		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
 }

@@ -361,9 +361,10 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 }
 
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
-// ledger no longer serves, so its SQL-backed reads refuse instead of returning
-// the empty result bd hands back for beads it cannot see. See
-// bdsql_relocation.go for why bd cannot detect this itself.
+// ledger no longer serves, so its SQL-backed reads stop believing the empty
+// result bd hands back for beads it cannot see: a read scoped to one bead
+// refuses, and a read over a set of them drops the ones that moved and answers
+// about the rest. See bdsql_relocation.go for why bd cannot detect this itself.
 //
 // A city that relocates nothing passes no classes and the guard cannot fire.
 func WithBdStoreRelocatedClasses(classes ...RelocatedClass) BdStoreOption {
@@ -374,12 +375,24 @@ func WithBdStoreRelocatedClasses(classes ...RelocatedClass) BdStoreOption {
 
 // guardRelocatedClassIDs returns a refusal when any of ids belongs to a class
 // this store's ledger does not serve. It is the precondition of every
-// id-scoped, SQL-backed BdStore read and write.
+// id-scoped, SQL-backed BdStore read and write whose answer is ABOUT the ids it
+// was given — a CAS on one bead, say. A read that answers about a SET of ids
+// partitions instead (see fetchReadyProjection): refusing a whole batch because
+// one member moved would throw away a correct answer about all the others.
 func (s *BdStore) guardRelocatedClassIDs(op string, ids ...string) error {
 	if s == nil || len(s.relocatedClasses) == 0 {
 		return nil
 	}
 	return RelocatedClassRefusal(op, relocatedClassesForIDs(s.relocatedClasses, ids...))
+}
+
+// relocatedClassesForID reports the relocated classes owning a single id, for
+// the callers that partition a batch rather than refuse it.
+func (s *BdStore) relocatedClassesForID(id string) []RelocatedClass {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return relocatedClassesForIDs(s.relocatedClasses, id)
 }
 
 // NewBdStore creates a BdStore rooted at dir using the given runner.

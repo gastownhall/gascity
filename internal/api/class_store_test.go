@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -176,5 +177,49 @@ func TestBeadStoresForIDShadowingRigPrefixStillWinsOnDefaultCity(t *testing.T) {
 	got := s.beadStoresForID(prefix + "-1")
 	if len(got) != 1 || got[0] != rig {
 		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want only the shadowing rig store %p", prefix, got, len(got), rig)
+	}
+}
+
+// TestBeadGetResolvesARelocatedGraphID is the evidence behind the one command
+// beads.RelocatedClassRefusal tells an operator to run.
+//
+// That refusal fires when a bd-ledger read names a relocated class's id
+// namespace, and it has to name a read that DOES resolve such an id. It used to
+// name `gc bd show` / `gc bd dep tree`, which are raw bd passthroughs against
+// the same blind ledger — following the advice reproduced the bug being
+// reported. The verb it names now, `gc beads show <id>`, routes through this
+// handler (GET /v0/city/{cityName}/bead/{id}), so this test drives the handler
+// end to end against a bead that exists ONLY in the relocated graph store. If it
+// ever stops resolving, the refusal is giving bad advice again.
+func TestBeadGetResolvesARelocatedGraphID(t *testing.T) {
+	work := beads.NewMemStore()
+	graph := beads.NewMemStore()
+
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	graph.IDPrefix = prefix
+	created, err := graph.Create(beads.Bead{Title: "molecule root"})
+	if err != nil {
+		t.Fatalf("seeding the graph store: %v", err)
+	}
+	relocatedID := created.ID
+	if _, err := work.Get(relocatedID); err == nil {
+		t.Fatalf("the work store holds %s; the fixture proves nothing", relocatedID)
+	}
+
+	st := newFakeState(t)
+	st.cityBeadStore = work
+	st.graphBeadStore = graph
+	st.stores = nil
+	st.cfg.Rigs = nil
+
+	out, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: relocatedID})
+	if err != nil {
+		t.Fatalf("GET /v0/city/{cityName}/bead/%s: %v — the verb the refusal recommends cannot resolve a relocated id", relocatedID, err)
+	}
+	if out.Body.ID != relocatedID {
+		t.Fatalf("resolved bead id = %q, want %q", out.Body.ID, relocatedID)
 	}
 }

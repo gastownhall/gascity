@@ -99,22 +99,33 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 	result := make(map[string]bool, len(ids))
 	wanted := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		if id != "" {
-			wanted[id] = struct{}{}
+		if id == "" {
+			continue
 		}
+		// An id under a relocated class's reserved prefix is not a row of this
+		// ledger, so bd's answer about it would be an empty that reads as
+		// "unblocked-unknown". Drop it from the request rather than refusing the
+		// batch: this projection is handed EVERY active bead by cache
+		// prime/reconcile, and a whole-batch refusal cost every other row its
+		// is_blocked on every cycle, permanently — the call sites only
+		// recordProblem and continue, and the refusal is a pure function of
+		// config, so it never healed. A dropped id keeps its last cached value
+		// (preserveCachedReadyProjectionLocked), which is the documented benign
+		// state and exactly what its absence produced before this guard existed.
+		//
+		// The drop is silent on purpose. Nothing should mint a reserved class
+		// prefix into this ledger — only the relocated class engine mints under
+		// one, and a migration preserves the copied rows' original work-prefix
+		// ids — so this is a should-never-happen that costs one row an
+		// optimization, and a per-cycle log for it would be the reconcile-path
+		// noise skipBDReadyProjectionEnrichment above exists to avoid.
+		if len(s.relocatedClassesForID(id)) > 0 {
+			continue
+		}
+		wanted[id] = struct{}{}
 	}
 	if len(wanted) == 0 {
 		return result, nil
-	}
-
-	// The projection's contract is "these are the active rows", so a row that is
-	// simply invisible to this ledger comes back as unblocked-unknown and the
-	// caller keeps the nil fallback forever. Refuse when the requested set names
-	// a class this ledger does not serve: an incomplete active-row answer is the
-	// one thing this projection must never hand back silently. Cities that
-	// relocate nothing carry no relocated classes and never reach the refusal.
-	if err := s.guardRelocatedClassIDs("ready projection", ids...); err != nil {
-		return nil, err
 	}
 
 	// bd exposes this as an active-row projection: the SQL filters out closed
