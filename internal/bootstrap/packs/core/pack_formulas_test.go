@@ -54,6 +54,37 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 	return ""
 }
 
+// TestMolDoWorkDrainClaimsCurrentContinuation pins the distinction between a
+// process's immutable startup bead and the continuation that became ready
+// while that process was running.
+func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+
+	if !strings.Contains(step, "gc bd ready --json --limit=2") {
+		t.Fatal("drain must resolve the current continuation from ready work")
+	}
+	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
+		t.Fatal("drain must select the ready drain step from the current workflow root")
+	}
+	if strings.Contains(step, `DRAIN_BEAD_ID="${GC_BEAD_ID`) {
+		t.Fatal("drain must not treat the immutable startup bead as the continuation bead")
+	}
+	if !strings.Contains(step, "if [ -z \"$ROOT_BEAD_ID\" ]") {
+		t.Fatal("drain must fail closed when the startup bead has no workflow root")
+	}
+	if !strings.Contains(step, "if length == 1") || !strings.Contains(step, "could not resolve one ready continuation bead") {
+		t.Fatal("drain must fail closed unless exactly one matching continuation is ready")
+	}
+	updateAt := strings.Index(step, "gc bd update")
+	drainAckAt := strings.Index(step, "gc runtime drain-ack")
+	if drainAckAt < 0 {
+		t.Fatal("drain must still acknowledge runtime drain after closing its continuation bead")
+	}
+	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
+		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
+	}
+}
+
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
 // contract in the polecat preflight step.
 //
