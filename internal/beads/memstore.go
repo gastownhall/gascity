@@ -35,6 +35,22 @@ type MemStore struct {
 	// Empty keeps the default, so every existing caller mints "gc-<n>".
 	IDPrefix string
 
+	// HonorExplicitIDs keeps a caller-supplied bead ID on Create instead of
+	// clobbering it with the sequence id, matching SQLiteStore.Create (an
+	// explicit id is honored verbatim) and bd's `--id`. It is the companion of
+	// IDPrefix: IDPrefix decides what this store MINTS, HonorExplicitIDs
+	// decides whether it also ACCEPTS. Without it no MemStore can model a
+	// store that round-trips a pinned id — production wisps carry pinned
+	// <prefix>-wisp-<suffix> ids, so a double that clobbers them cannot
+	// express the wisp tier at all.
+	//
+	// Off by default, so every existing caller keeps minting over the id it
+	// passed. A duplicate id is a hard error rather than a silent fallback to
+	// the sequence id: SQLiteStore rejects it, and a double that quietly
+	// renamed the bead would hide exactly the id collision the caller asked
+	// about.
+	HonorExplicitIDs bool
+
 	// localStrings holds clone-local key-value data set via SetLocalString,
 	// keyed by bead ID then key. Deliberately excluded from
 	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
@@ -94,17 +110,26 @@ func cloneBead(b Bead) Bead {
 	return b
 }
 
-// Create persists a new bead in memory with a sequential ID.
+// Create persists a new bead in memory with a sequential ID, or with the
+// caller's own ID when HonorExplicitIDs is set and the ID is free.
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.seq++
-	prefix := m.IDPrefix
-	if prefix == "" {
-		prefix = "gc"
+	explicit := strings.TrimSpace(b.ID)
+	if m.HonorExplicitIDs && explicit != "" {
+		if m.beadExistsLocked(explicit) {
+			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
+		}
+		b.ID = explicit
+	} else {
+		m.seq++
+		prefix := m.IDPrefix
+		if prefix == "" {
+			prefix = "gc"
+		}
+		b.ID = fmt.Sprintf("%s-%d", prefix, m.seq)
 	}
-	b.ID = fmt.Sprintf("%s-%d", prefix, m.seq)
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"
