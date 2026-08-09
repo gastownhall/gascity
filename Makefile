@@ -561,12 +561,36 @@ test-bd-cli-contract:
 ## `--if-assignee`/`--if-status`, so it belongs on the source-built
 ## BD_CURRENT_REF cell. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's
 ## capability skip into a failure, so the cell cannot pass while proving nothing.
+##
+## The existence preflight closes the other way this cell can pass having proven
+## nothing: a `-run` selector that matches no test is not an error to `go test`
+## — it prints "[no tests to run]" and exits 0 — so renaming the row, moving it
+## to another package, or dropping its build tag would leave a permanently green
+## cell guarding nothing. `go test -list` resolves the SAME name, package and
+## tags the run below uses, from the same variables, and must print the name
+## back. Deriving both from one variable is why this guard cannot rot into a
+## false pass: there is no second copy of the selector to drift, and any change
+## to `-list` output that broke the match would fail the cell loudly rather than
+## silently stop catching (which is the failure mode of grepping `go test`'s
+## human-facing "no tests to run" warning instead).
 BD_CONDITIONAL_RELEASE_TIMEOUT ?= 10m
+BD_CONDITIONAL_RELEASE_TEST = TestBdStoreReleaseIfCurrentAgainstRealBd
+BD_CONDITIONAL_RELEASE_PKG = ./internal/beads
 test-bd-conditional-release-contract:
 	@command -v bd >/dev/null 2>&1 || (echo "Error: bd not found; cannot run the conditional-release contract" >&2; exit 1)
+	@listed=$$($(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -tags integration \
+		-list '^$(BD_CONDITIONAL_RELEASE_TEST)$$' $(BD_CONDITIONAL_RELEASE_PKG) 2>&1) || { \
+		printf '%s\n' "$$listed" >&2; \
+		echo "Error: could not list $(BD_CONDITIONAL_RELEASE_TEST) in $(BD_CONDITIONAL_RELEASE_PKG)" >&2; \
+		exit 1; }; \
+	printf '%s\n' "$$listed" | grep -qx '$(BD_CONDITIONAL_RELEASE_TEST)' || { \
+		echo "Error: $(BD_CONDITIONAL_RELEASE_TEST) does not exist in $(BD_CONDITIONAL_RELEASE_PKG) under -tags integration." >&2; \
+		echo "The -run selector below would match nothing, and this cell would pass having run no test." >&2; \
+		echo "Point BD_CONDITIONAL_RELEASE_TEST/_PKG at the row's current name and home." >&2; \
+		exit 1; }
 	$(TEST_ENV) GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 GOFLAGS= GOENV=off GOWORK=off \
 		go test -tags integration -timeout $(BD_CONDITIONAL_RELEASE_TIMEOUT) -count=1 \
-		-run '^TestBdStoreReleaseIfCurrentAgainstRealBd$$' ./internal/beads
+		-run '^$(BD_CONDITIONAL_RELEASE_TEST)$$' $(BD_CONDITIONAL_RELEASE_PKG)
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m

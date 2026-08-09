@@ -1228,9 +1228,13 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // It prefers bd's native conditional-release verb, which evaluates both
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
-// fallback for bd 1.0.4, the contract-tested minimum, which predates the flags:
-// there the sqlite backend refuses raw DB access, so that rejection — and
-// embedded dolt WITHOUT a configured dolt directory — surface
+// fallback for any bd predating the flags (beads#5008) — which today is the LIVE
+// path, not a floor nobody runs: no published beads release carries them, so the
+// installable default (deps.env BD_VERSION) lands here, and that is what every
+// CI job and every operator install obtains. The contract-tested minimum
+// (BD_PREV_VERSION, 1.0.4) lands here too, but it is not what makes the fallback
+// load-bearing. On that path the sqlite backend refuses raw DB access, so that
+// rejection — and embedded dolt WITHOUT a configured dolt directory — surface
 // ErrConditionalReleaseUnsupported (the latter via the
 // releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
 // configured directory services the CAS through that fallback directly. Callers
