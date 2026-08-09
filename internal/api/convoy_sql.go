@@ -600,11 +600,13 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 }
 
 func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
-	// The dedicated graph store lives at its own legacy .gc/ location (or a gcg
-	// Postgres schema), not at a rig/city path derivable here, so it has no
-	// rig-path-derived SQL fast-path candidate. Skip it; the slow store-scan in
-	// buildWorkflowSnapshot consults the graph store directly.
-	if strings.HasPrefix(strings.TrimSpace(info.ref), workflowGraphStoreRefPrefix+":") {
+	// A class ref names a storage binding, not a scope root: the graph and orders
+	// bindings live at their own legacy .gc/ location (or a gcg Postgres schema),
+	// not at a rig/city path derivable here. They carry the city scope as their
+	// fallback, so answering the city path here would run the SQL fast path against
+	// the wrong database. Skip them; the slow store-scan reads the binding directly.
+	ref := strings.TrimSpace(info.ref)
+	if strings.HasPrefix(ref, workflowGraphStoreRefPrefix+":") || strings.HasPrefix(ref, ordersClassStoreRefPrefix+":") {
 		return "", false
 	}
 	switch strings.TrimSpace(info.scopeKind) {

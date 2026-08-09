@@ -627,3 +627,30 @@ func TestOrderRunRecordsItsTrackingBeadInTheOrdersBinding(t *testing.T) {
 		t.Fatalf("scope store holds order-tracking beads %+v, want none", got)
 	}
 }
+
+// TestOrderWispSweepCountsTheWrappedOrdersBindingOnce is the count-once
+// invariant of sweepStaleOrderTrackingAcrossStoresLimitMode reached through the
+// sweep's own store list. The orders binding enters that list wrapped in the
+// scope wrapper carrying its label, so an identity check against the wrapper
+// cannot see the database inside it and sweeps the binding a second time. On the
+// shape this build serves — one binding for graph and orders — that is the same
+// store as the hoisted wisp pass, and `gc order sweep-tracking --dry-run
+// --include-wisps` reports twice as much stale work as there is.
+func TestOrderWispSweepCountsTheWrappedOrdersBindingOnce(t *testing.T) {
+	binding := beads.NewMemStore()
+	root, _ := seedOrderWispSubtreeForTest(t, binding, "dolt-health")
+
+	stores := appendOrdersSweepStore(nil, binding)
+	if len(stores) != 1 {
+		t.Fatalf("sweep stores = %d, want the orders binding alone", len(stores))
+	}
+
+	now := root.CreatedAt.Add(2 * time.Hour)
+	result, err := sweepStaleOrderTrackingAcrossStoresDryRun(stores, binding, now, time.Hour, orderFilterForTest("dolt-health"), true)
+	if err != nil {
+		t.Fatalf("dry-run sweep across the wrapped binding: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("dry-run wispClosed = %d, want 2; the wrapped binding was swept twice and the operator is told twice as much work is stale as there is", result.wispClosed)
+	}
+}

@@ -654,6 +654,23 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 			scopeRef:  cityName,
 			store:     graphStore,
 		}, true
+	case ordersClassStoreRefPrefix:
+		// Round-trip the orders-class ref minted by appendOrdersClassStoreInfo: the
+		// order history list hands it to a client as the store_ref for every
+		// binding-resident tracking bead, and the detail endpoint takes it back. On
+		// a default city (orders == city) there is no orders entry to name, so this
+		// resolves nothing and callers fall back to the store scan.
+		ordersStore := state.OrdersBeadStore().Store
+		cityName := workflowCityScopeRef(state.CityName())
+		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
+			return workflowStoreInfo{}, false
+		}
+		return workflowStoreInfo{
+			ref:       ordersClassStoreRefPrefix + ":" + cityName,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  cityName,
+			store:     ordersStore,
+		}, true
 	case beadmeta.ScopeKindRig:
 		store := state.BeadStore(scopeRef)
 		if store == nil {

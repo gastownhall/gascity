@@ -301,7 +301,12 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	Body orderHistoryDetailResponse
 }, error,
 ) {
-	storeInfos := workflowStores(s.state)
+	// The bead this reads is an order-tracking bead, which on a split city lives in
+	// the orders binding. workflowStores leads with the GRAPH binding, so without
+	// the orders leg this only finds one because the shape this build serves
+	// happens to serve both classes from one store — the co-residency the feed
+	// already refuses to rely on.
+	storeInfos := appendOrdersClassStoreInfo(workflowStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {

@@ -1647,6 +1647,20 @@ func storeListContains(stores []beads.Store, want beads.Store) bool {
 	return false
 }
 
+// sweepStoreListContains is storeListContains for a tracking-sweep store list,
+// whose entries carry a scope label around the store. The comparison has to look
+// through that wrapper: a bare identity check sees the label, decides the
+// binding is absent, and sweeps it a second time — which in dry-run tells the
+// operator twice as much work is stale as there is.
+func sweepStoreListContains(stores []beads.Store, want beads.Store) bool {
+	for _, store := range stores {
+		if unwrapOrderTrackingSweepStore(store) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // dispatchWisp instantiates a wisp from the order's formula.
 func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
 	scoped := a.ScopedName()
@@ -2426,7 +2440,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 			result.sweptStoreKeys[key] = struct{}{}
 		}
 	}
-	if includeWispSubtrees && wispStore != nil && !storeListContains(stores, wispStore) {
+	if includeWispSubtrees && wispStore != nil && !sweepStoreListContains(stores, wispStore) {
 		n, err := sweepStaleOrderWispSubtreesMode(wispStore, now.Add(-staleAfter), onlyOrders, initiator, dryRun)
 		result.wispClosed += n
 		if err != nil {

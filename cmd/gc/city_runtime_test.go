@@ -7338,7 +7338,7 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(200, seed, nil)
 	var buf bytes.Buffer
-	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{store}, &buf)
 	if buf.Len() > 0 {
 		t.Fatalf("got unexpected warning at count=100: %q", buf.String())
 	}
@@ -7356,7 +7356,7 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_FiresAboveThreshold(t *testing.T)
 	}
 	store := beads.NewMemStoreFrom(200, seed, nil)
 	var buf bytes.Buffer
-	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{store}, &buf)
 	got := buf.String()
 	if !strings.Contains(got, "101") {
 		t.Fatalf("warning = %q, want count 101", got)
@@ -7378,7 +7378,7 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_CapFormatAtLimit(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(1100, seed, nil)
 	var buf bytes.Buffer
-	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{store}, &buf)
 	got := buf.String()
 	if !strings.Contains(got, "≥1001") {
 		t.Fatalf("warning = %q, want ≥1001 cap format", got)
@@ -7387,5 +7387,33 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_CapFormatAtLimit(t *testing.T) {
 
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
-	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
+	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{nil}, io.Discard)
+}
+
+// TestWarnIfClosedOrderTrackingBacklogLarge_CountsStoresTogether is the split
+// city: a converged one holds its pre-cutover backlog in the work ledger and
+// everything since in the orders binding. Neither half clears the threshold on
+// its own, so a per-store test stays silent on a city holding 120.
+func TestWarnIfClosedOrderTrackingBacklogLarge_CountsStoresTogether(t *testing.T) {
+	seedClosed := func(prefix string, n int) beads.Store {
+		seed := make([]beads.Bead, n)
+		for i := range seed {
+			seed[i] = beads.Bead{
+				ID:     fmt.Sprintf("%s-%03d", prefix, i),
+				Status: "closed",
+				Labels: []string{labelOrderTracking},
+			}
+		}
+		return beads.NewMemStoreFrom(200, seed, nil)
+	}
+
+	var buf bytes.Buffer
+	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{seedClosed("work", 60), seedClosed("bind", 60)}, &buf)
+	got := buf.String()
+	if !strings.Contains(got, "120") {
+		t.Fatalf("warning = %q, want the combined count 120; a per-store threshold halves the advisory's sensitivity on exactly the split cities it was extended for", got)
+	}
+	if strings.Count(got, "gc start:") != 1 {
+		t.Fatalf("warning = %q, want one advisory line for the city", got)
+	}
 }
