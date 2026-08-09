@@ -392,36 +392,135 @@ func TestGcBdQueryRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
 	}
 }
 
-// TestGcBdShowIsARawPassthroughOnASplitCity is the fact that made the old
-// refusal message wrong, pinned so it cannot be forgotten again.
+// TestGcBdDepTreeIsStillARawPassthroughOnASplitCity is the fact that made the
+// old refusal message wrong, pinned for the verb that still carries it.
 //
 // The message used to end "Use the federated `gc bd show <id>` or `gc bd dep
-// tree <id>`". Neither verb is federated: doBd resolves a scope and then execs
-// the bd binary with the args verbatim and cmd.Dir at that scope root, with no
-// coordination-class routing anywhere on the path. Following the advice ran the
-// blind read the refusal had just prevented. The class-routed read the message
-// names instead is proved by internal/api's TestBeadGetResolvesARelocatedGraphID.
-func TestGcBdShowIsARawPassthroughOnASplitCity(t *testing.T) {
-	for name, args := range map[string][]string{
-		"show":     {"show", "gcg-abc123"},
-		"dep tree": {"dep", "tree", "gcg-abc123"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+// tree <id>`". Neither verb was federated: doBd resolved a scope and then
+// exec'd the bd binary with the args verbatim, with no coordination-class
+// routing anywhere on the path, so following the advice ran the blind read the
+// refusal had just prevented.
+//
+// `gc bd show` is federated now (cmd_bd_by_id.go). `dep tree` is not — it
+// reaches no by-ID routing and is still forwarded verbatim — so the residue is
+// pinned here rather than left to be rediscovered by the next operator who
+// takes the message at its word.
+func TestGcBdDepTreeIsStillARawPassthroughOnASplitCity(t *testing.T) {
+	args := []string{"dep", "tree", "gcg-abc123"}
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
 
-			var stdout, stderr bytes.Buffer
-			if code := doBd(args, &stdout, &stderr); code != 0 {
-				t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
-			}
-			data, err := os.ReadFile(capture)
-			if err != nil {
-				t.Fatalf("bd was not invoked for %v: %v", args, err)
-			}
-			if !strings.Contains(string(data), strings.Join(args, " ")) {
-				t.Fatalf("bd received %q, want the args forwarded verbatim", data)
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	if code := doBd(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
 	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("bd was not invoked for %v: %v", args, err)
+	}
+	if !strings.Contains(string(data), strings.Join(args, " ")) {
+		t.Fatalf("bd received %q, want the args forwarded verbatim", data)
+	}
+}
+
+// TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity is the other half, and
+// the behavior change this pin used to forbid.
+//
+// The split city here serves its binding, and it is empty, so the read is a
+// genuine absence. The old passthrough answered it from the work ledger and
+// exited 0 — a confident wrong answer about a bead that ledger cannot hold. The
+// routed surface reports the absence in bd's own shape and never reaches the
+// subprocess.
+func TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"show", "gcg-abc123"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("doBd exited 0 for a class-owned id the binding does not hold; stdout=%q", stdout.String())
+	}
+	// The capture records every bd invocation this command made, including the
+	// convergence check's own census of the work store — which is a read of the
+	// ledger it is entitled to read. What must not appear is the operator's
+	// read, forwarded verbatim.
+	if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "show gcg-abc123") {
+		t.Fatalf("the by-ID read was forwarded to bd: %q", data)
+	}
+	if !strings.Contains(stderr.String(), "gcg-abc123") {
+		t.Errorf("the answer does not name the bead; stderr=%q", stderr.String())
+	}
+}
+
+// bdUnservableStorage is a class arrangement this build refuses outright: a
+// partial split, with graph moved and the other four classes left on work. It
+// reaches the funnel's refusing store without needing a binding that fails to
+// open, so a test can stand in the state where every relocated-class read
+// carries a standing refusal.
+const bdUnservableStorage = `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "work"
+messaging = "work"
+orders = "work"
+nudges = "work"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+`
+
+// TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs is the boundary of the
+// refusal, and it is the regression the first draft of the routed surface
+// introduced.
+//
+// A city this build must not serve resolves every relocated class at a store
+// whose operations all return the boot refusal. Probing a WORK id against that
+// store returns the refusal too — and reading THAT as "the class binding owns
+// this bead" refused every `gc bd` write on the city, including writes to the
+// work ledger the refusal explicitly leaves alone. A storage misconfiguration
+// must not take a city's work offline.
+//
+// Both halves are asserted together because either one alone is satisfied by a
+// surface that has simply stopped discriminating.
+func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
+	t.Run("work id still reaches bd", func(t *testing.T) {
+		capture := bdSQLRefusalCity(t, bdUnservableStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
+
+		args := []string{"update", "demo-abc123", "--status", "closed"}
+		var stdout, stderr bytes.Buffer
+		if code := doBd(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("doBd(%v) = %d on a work id; stderr=%q", args, code, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatalf("bd was not invoked for a work mutation: %v", err)
+		}
+		if !strings.Contains(string(data), strings.Join(args, " ")) {
+			t.Fatalf("bd received %q, want the work mutation forwarded verbatim", data)
+		}
+	})
+
+	t.Run("class-owned id is refused", func(t *testing.T) {
+		capture := bdSQLRefusalCity(t, bdUnservableStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
+
+		var stdout, stderr bytes.Buffer
+		if code := doBd([]string{"show", "gcg-abc123"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("doBd exited 0 for a class-owned id on a city this build must not serve; stdout=%q", stdout.String())
+		}
+		if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "show gcg-abc123") {
+			t.Fatalf("the by-ID read was forwarded to bd: %q", data)
+		}
+		if !strings.Contains(stderr.String(), storageSupportedTopologyStatement) {
+			t.Errorf("the refusal does not carry the reason this city cannot be served; stderr=%q", stderr.String())
+		}
+	})
 }
 
 // TestGcBdSQLOverrideRunsTheQueryLoudly pins the escape hatch. The matcher

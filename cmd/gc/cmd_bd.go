@@ -251,6 +251,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
 	}
+	// A by-ID operation whose subject a relocated class owns is answered in
+	// process, from the binding that class is served from, and never handed to
+	// the subprocess — which opens the work workspace and cannot see the bead.
+	// It runs BEFORE the release-if-current arm below because that arm resolves
+	// only the work scope: on a split city it would release against the ledger
+	// the bead was moved off. See cmd_bd_by_id.go.
+	if code, handled := maybeRouteBdByID(cityPath, bdArgs, stdout, stderr); handled {
+		return code
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

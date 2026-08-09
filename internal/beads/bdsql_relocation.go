@@ -239,10 +239,16 @@ func isIDBodyByte(b byte) bool {
 // would have returned nothing — that is false for a statement that references a
 // relocated id from a column this ledger does own — only that no row under the
 // reserved prefix is here, so an id-scoped predicate naming one cannot match.
-// And it does not name `gc bd show` / `gc bd dep tree`: those are raw bd
-// passthroughs (doBd ends at exec.Command(bdPath, bdArgs...)) and answer from
-// this same ledger, so recommending them handed the operator the very bug this
-// refusal exists to report.
+// And it does not recommend a verb that answers from this same ledger: doing so
+// handed the operator the very bug this refusal exists to report.
+//
+// Which verbs those are is a fact about gc's by-ID routing and changed once.
+// `gc bd show <id>` and `gc bd dep list <id>` are now answered in process from
+// the binding the class is served from (cmd/gc/cmd_bd_by_id.go), so they are
+// the read this message names first — they need no controller, which the API
+// lane does. `gc bd dep tree <id>` reached no such routing and is still a raw
+// passthrough (doBd ends at exec.Command(bdPath, bdArgs...)), so it is still
+// named as blind rather than offered as an escape.
 func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
@@ -262,9 +268,9 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
 		"prefixes, so a read scoped to one cannot match here — and bd does not fail: it runs the read successfully "+
 		"against this ledger and returns an empty result indistinguishable from a real one. Read these beads with "+
-		"`gc beads show <id>`, which routes by class through the controller API (GET /v0/city/{cityName}/bead/{id}). "+
-		"That API lane is the only class-routed by-id read there is: `gc beads show` falls back to a work-store scan "+
-		"when no controller is reachable, and `gc bd show` and `gc bd dep tree` are raw bd passthroughs against this "+
-		"same ledger",
+		"`gc bd show <id>`, which answers a reserved-prefix id in process from the binding its class is served from "+
+		"and needs no controller, or with `gc beads show <id>`, which routes by class through the controller API "+
+		"(GET /v0/city/{cityName}/bead/{id}) and falls back to a work-store scan when no controller is reachable. "+
+		"`gc bd dep tree <id>` is still a raw bd passthrough against this same ledger",
 		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
 }
