@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -161,35 +162,31 @@ func (s *Server) findStore(rig string) beads.Store {
 // the bead's class+rig store), and the unrouted fallback leads with the
 // city/HQ store ahead of the per-rig work stores. A graph-relocated city is
 // resolved by the class-prefix arm, which runs first so a reserved class prefix
-// can never be captured by a rig/HQ prefix or a routes.jsonl entry.
+// can never be captured by a rig/HQ prefix or a routes.jsonl entry — but that
+// arm returns a probe LIST, not a route, so a work store configured with the
+// reserved prefix keeps its own ids reachable behind the class store.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
+	// Built once and shared by both prefix resolvers below: they answer
+	// different questions about the same set of configured work prefixes, and
+	// this is the walk of cfg.Rigs the pre-seam code already did.
+	configured := s.configuredPrefixStores()
 
 	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
 	// id-prefix "gcg") in a dedicated graph store, which is the only store that
-	// mints and owns that prefix. The arm runs FIRST — ahead of the configured
-	// prefix and routes.jsonl resolvers — because both of those can name the
-	// reserved prefix and would otherwise hand a class id to a work store: a
-	// routed prefix wins unconditionally, and a shadowing rig/HQ prefix is
-	// warned-but-allowed (config.ReservedPrefixWarnings), which documents the
-	// class store as the owner once relocation is active. Return [graph, work] —
-	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
-	// the by-id handlers federates the graph store ahead of work and pins it on
-	// the first probe. Skipped for a default (non-relocated) city, where
-	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path
-	// stays byte-identical.
-	if graph := s.state.GraphBeadStore().Store; graph != nil {
-		if city := s.state.CityBeadStore(); graph != city {
-			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
-				if city != nil {
-					return []beads.Store{graph, city}
-				}
-				return []beads.Store{graph}
-			}
-		}
+	// MINTS that prefix. The arm runs FIRST — ahead of the configured prefix and
+	// routes.jsonl resolvers — because both of those can name the reserved prefix
+	// and would otherwise hand a class id to a work store: a routed prefix wins
+	// unconditionally, and a shadowing rig/HQ prefix is warned-but-allowed
+	// (config.ReservedPrefixWarnings), which documents the class store as the
+	// owner once relocation is active. Skipped for a default (non-relocated)
+	// city, where GraphBeadStore() == CityBeadStore(): the arm never fires and
+	// this path stays byte-identical.
+	if candidates := s.classStoresForID(id, configured); len(candidates) > 0 {
+		return candidates
 	}
 
-	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+	if store := resolveStoreByConfiguredIDPrefix(id, configured); store != nil {
 		return []beads.Store{store}
 	}
 	if prefix := beadPrefix(id); prefix != "" {
@@ -210,55 +207,89 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	return candidates
 }
 
-func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
-	if id == "" {
+// classStoresForID returns the by-id candidate probe list for a relocated
+// coordination class, or nil when id is not a relocated class id.
+//
+// It delegates to storeref.ClassCandidates, the shared resolver: the same
+// question is asked by cmd/gc's one-shot commands, and answering it twice is
+// exactly how the split-store bug class reproduces. The routing is keyed on
+// STORE IDENTITY (GraphBeadStore() != CityBeadStore()) rather than a marker
+// file, so a MIGRATED city — where infra_class_migrate.go deliberately preserves
+// legacy ids, and a relocated bead can still carry its HQ/rig-era prefix — is
+// resolved by probing the returned list rather than by trusting the prefix.
+//
+// GRAPH ONLY. Sessions, orders and nudges have relocated-store accessors on
+// State, but adding them here would change which stores answer for gcs-/gco-/
+// gcn- ids, which is a production routing change and not part of lifting this
+// arm. Messaging has no State accessor at all (mail routes through
+// mail.Provider). The shared resolver takes the prefix as data, so adding a
+// class is a call-site change here, not a change to the resolver.
+func (s *Server) classStoresForID(id string, configured []storeref.PrefixedStore) []beads.Store {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
 		return nil
 	}
+	return storeref.ClassCandidates(id, storeref.ClassRouting{
+		Prefix:  prefix,
+		Class:   s.state.GraphBeadStore().Store,
+		Work:    s.state.CityBeadStore(),
+		Shadows: configured,
+	})
+}
+
+// configuredPrefixStores returns the loaded work stores paired with the id
+// prefixes they were CONFIGURED with — the city/HQ prefix first, then each rig
+// in config order.
+//
+// Only stores that are actually loaded are listed: a configured prefix whose
+// store is missing must not win a slot, so a shorter loaded prefix can still own
+// an id (and otherwise the id is left to the legacy scan).
+func (s *Server) configuredPrefixStores() []storeref.PrefixedStore {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil
 	}
-
-	// Only stores that are actually loaded are candidates: a configured prefix
-	// whose store is missing must not win the slot, so a shorter loaded prefix
-	// can still own the id (and otherwise the id is left to the legacy scan).
-	//
-	// This caller routes on the configured (rig/HQ) prefixes with a
-	// longest-prefix, exact-or-hyphen match (beadIDHasConfiguredPrefix). It
-	// resolves against the configured prefixes (not each store's own IDPrefix)
-	// and requires the longest configured prefix to win, so it keeps the scan
-	// inline rather than using the namespace-only, first-match by-id resolver.
-	var bestStore beads.Store
-	bestLen := -1
-	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			bestStore = cityStore
-			bestLen = len(prefix)
-		}
+	prefixed := make([]storeref.PrefixedStore, 0, len(cfg.Rigs)+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		prefixed = append(prefixed, storeref.PrefixedStore{
+			Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg)),
+			Store:  cityStore,
+		})
 	}
 	for _, rig := range cfg.Rigs {
-		prefix := strings.TrimSpace(rig.EffectivePrefix())
-		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
-			continue
-		}
 		store := s.state.BeadStore(rig.Name)
 		if store == nil {
 			continue
 		}
-		bestStore = store
-		bestLen = len(prefix)
+		prefixed = append(prefixed, storeref.PrefixedStore{
+			Prefix: strings.TrimSpace(rig.EffectivePrefix()),
+			Store:  store,
+		})
 	}
-	return bestStore
+	return prefixed
 }
 
-// beadIDHasConfiguredPrefix reports whether id falls under prefix, matching a
-// bare id == prefix exactly or the "prefix-" namespace. This is the
-// exact-or-hyphen match the configured-prefix resolver uses.
-func beadIDHasConfiguredPrefix(id, prefix string) bool {
-	if prefix == "" {
-		return false
+// resolveStoreByConfiguredIDPrefix routes an id on the configured (rig/HQ)
+// prefixes with a longest-prefix, exact-or-hyphen match
+// (storeref.IDInNamespace). It resolves against the configured prefixes, not
+// each store's own IDPrefix, and requires the longest configured prefix to win
+// — so it is not the namespace-only, first-match storeref.PrefixOwner. Ties keep
+// config order (HQ first), which cannot arise between distinct prefixes: two
+// prefixes of equal length never cover the same id.
+func resolveStoreByConfiguredIDPrefix(id string, configured []storeref.PrefixedStore) beads.Store {
+	if id == "" {
+		return nil
 	}
-	return id == prefix || strings.HasPrefix(id, prefix+"-")
+	var bestStore beads.Store
+	bestLen := -1
+	for _, candidate := range configured {
+		if !storeref.IDInNamespace(id, candidate.Prefix) || len(candidate.Prefix) <= bestLen {
+			continue
+		}
+		bestStore = candidate.Store
+		bestLen = len(candidate.Prefix)
+	}
+	return bestStore
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking

@@ -141,7 +141,13 @@ func TestBeadStoresForIDClassArmBeatsCityRouteCapture(t *testing.T) {
 // the other way a work store can name a reserved prefix: a rig configured with
 // the class prefix itself. config.ReservedPrefixWarnings allows that today but
 // documents the class store as the owner once relocation is active, so on a
-// relocated city the class arm — not the shadowing rig — answers.
+// relocated city the class arm — not the shadowing rig — answers FIRST.
+//
+// The shadowing rig store still has to be IN the list, behind the class store.
+// The prefix is warned-and-allowed, not rejected (config.ValidateRigs lets it
+// through), so that rig's beads are real; a list that dropped it made every one
+// of them unreachable by id the moment graph relocated. That was carried minor
+// (a) from PR #5128's council, and this is where it is closed.
 func TestBeadStoresForIDClassArmBeatsShadowingRigPrefix(t *testing.T) {
 	st, graph, city, rig := relocatedGraphRouteState(t)
 	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
@@ -152,8 +158,72 @@ func TestBeadStoresForIDClassArmBeatsShadowingRigPrefix(t *testing.T) {
 
 	s := New(st)
 	got := s.beadStoresForID(prefix + "-1")
-	if len(got) != 2 || got[0] != graph || got[1] != city {
-		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, city]; shadowing rig store is %p", prefix, got, len(got), rig)
+	if len(got) != 3 || got[0] != graph || got[1] != rig || got[2] != city {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, rig, city]; graph is %p, rig is %p, city is %p", prefix, got, len(got), graph, rig, city)
+	}
+}
+
+// TestBeadStoresForIDClassArmKeepsLongerRigPrefix closes carried minor (b): an
+// id under a LONGER configured prefix that starts with the reserved one is
+// inside the class namespace by the exact-or-hyphen rule, so the class arm
+// fires — and used to return [graph, city], silently losing the rig store that
+// declares the longer prefix and actually mints the id.
+//
+// The rig sorts ahead of the city store because it is the more specific
+// declared owner, and behind the class store, which is never captured.
+func TestBeadStoresForIDClassArmKeepsLongerRigPrefix(t *testing.T) {
+	st, graph, city, rig := relocatedGraphRouteState(t)
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	longer := prefix + "-alpha"
+	st.cfg.Rigs[0].Prefix = longer
+
+	s := New(st)
+	got := s.beadStoresForID(longer + "-1")
+	if len(got) != 3 || got[0] != graph || got[1] != rig || got[2] != city {
+		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, rig, city]; graph is %p, rig is %p, city is %p", longer, got, len(got), graph, rig, city)
+	}
+}
+
+// TestBeadGetResolvesAShadowingRigID is the mutation proof behind the two
+// carried minors: a bead that exists ONLY in a rig whose configured prefix sits
+// inside the relocated class namespace must still resolve through the handler
+// the by-id candidate list feeds. Before the fix the rig store was not a
+// candidate at all, so this read 404'd.
+func TestBeadGetResolvesAShadowingRigID(t *testing.T) {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	for _, rigPrefix := range []string{prefix, prefix + "-alpha"} {
+		t.Run(rigPrefix, func(t *testing.T) {
+			st, graph, city, rig := relocatedGraphRouteState(t)
+			st.cfg.Rigs[0].Prefix = rigPrefix
+			memRig, isMem := rig.(*beads.MemStore)
+			if !isMem {
+				t.Fatalf("fixture rig store is %T, want *beads.MemStore so the test can pin its minted prefix", rig)
+			}
+			memRig.IDPrefix = rigPrefix
+			created, err := memRig.Create(beads.Bead{Title: "rig work bead in the class namespace"})
+			if err != nil {
+				t.Fatalf("seeding the rig store: %v", err)
+			}
+			for name, other := range map[string]beads.Store{"graph": graph, "city": city} {
+				if _, err := other.Get(created.ID); err == nil {
+					t.Fatalf("the %s store also holds %s; the fixture proves nothing", name, created.ID)
+				}
+			}
+
+			out, err := New(st).humaHandleBeadGet(context.Background(), &BeadGetInput{ID: created.ID})
+			if err != nil {
+				t.Fatalf("GET bead %s: %v — a shadowing rig's bead is unreachable by id on a relocated city", created.ID, err)
+			}
+			if out.Body.ID != created.ID {
+				t.Fatalf("resolved bead id = %q, want %q", out.Body.ID, created.ID)
+			}
+		})
 	}
 }
 

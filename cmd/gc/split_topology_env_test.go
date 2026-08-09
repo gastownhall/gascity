@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // This file is the two-topology fixture the split-store conformance suite
@@ -895,15 +896,99 @@ func assertRigPrefixDisjoint(t *testing.T, e splitEnv) {
 	}
 }
 
+// classCandidatesForID answers "which stores could hold this id" through the
+// SHARED by-id class resolver, storeref.ClassCandidates.
+//
+// The routing is keyed on the resolveClassStore identity this fixture already
+// derives everything from — graphStore() vs work — so the single-store topology
+// gets nil back and its by-id resolution stays byte-identical. The shadows are
+// the configured work prefixes (HQ, then each rig), which is what keeps a rig
+// whose prefix sits inside the class namespace reachable by id.
+func (e splitEnv) classCandidatesForID(id string) []beads.Store {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		return nil
+	}
+	shadows := []storeref.PrefixedStore{{Prefix: config.EffectiveHQPrefix(e.cfg), Store: e.work}}
+	for _, rig := range e.cfg.Rigs {
+		if store := e.rigStores[rig.Name]; store != nil {
+			shadows = append(shadows, storeref.PrefixedStore{Prefix: rig.EffectivePrefix(), Store: store})
+		}
+	}
+	return storeref.ClassCandidates(id, storeref.ClassRouting{
+		Prefix:  prefix,
+		Class:   e.graphStore(),
+		Work:    e.work,
+		Shadows: shadows,
+	})
+}
+
+// claimByID runs the by-id claim MUTATION the way a class-aware caller has to:
+// take the candidate list from the shared resolver, PROBE it in order, and write
+// through the store that answered. An id the resolver does not claim falls back
+// to the work fan-out `gc hook --claim` uses today — city store then rig stores,
+// all work scopes — which is also the whole of the single-store path.
+//
+// It returns the store the claim landed in, so the caller can assert residence
+// rather than assert that some write succeeded somewhere.
+func (e splitEnv) claimByID(t *testing.T, id, assignee string) beads.Store {
+	t.Helper()
+	candidates := e.classCandidatesForID(id)
+	if len(candidates) == 0 {
+		candidates = append(candidates, e.work)
+		for _, rig := range e.cfg.Rigs {
+			if store := e.rigStores[rig.Name]; store != nil {
+				candidates = append(candidates, store)
+			}
+		}
+	}
+	inProgress := "in_progress"
+	for _, store := range candidates {
+		if _, err := store.Get(id); err != nil {
+			continue
+		}
+		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &inProgress}); err != nil {
+			t.Fatalf("claiming %s through the resolved store: %v", id, err)
+		}
+		return store
+	}
+	t.Fatalf("no candidate store held %s: the by-id claim had nowhere to run (candidates %d)", id, len(candidates))
+	return nil
+}
+
+// assertClaimedIn asserts the claim on id is visible in want and in no other
+// leg — the residence half of a routed mutation, which a write that merely
+// "succeeded" does not establish.
+func (e splitEnv) assertClaimedIn(t *testing.T, id, assignee string, want beads.Store) {
+	t.Helper()
+	legs := map[string]beads.Store{"work": e.work}
+	if e.split {
+		legs["class"] = e.class
+	}
+	for name, store := range legs {
+		got, err := store.Get(id)
+		if err != nil {
+			continue
+		}
+		holds := strings.TrimSpace(got.Assignee) == assignee
+		if sameStorePtr(store, want) && !holds {
+			t.Errorf("%s store holds %s with assignee %q, want %q — the claim did not land in the store that owns the bead", name, id, got.Assignee, assignee)
+		}
+		if !sameStorePtr(store, want) && holds {
+			t.Errorf("%s store holds %s claimed for %q; the mutation ran against a store that does not own the bead", name, id, assignee)
+		}
+	}
+}
+
 // reservedClassNamespace reports whether an id sits inside a reserved
 // coordination class's id namespace.
 //
 // It applies the prefix+"-" SEGMENT rule — the same one storeref.PrefixOwner
-// routes on and internal/api's beadIDHasConfiguredPrefix matches on — and
-// deliberately NOT the config-free sling.BeadPrefix heuristic, which answers
-// "gcg-wisp" for a gcg-wisp-0042 id and would call it unreserved. That
-// divergence is real and is pinned as a negative by I5; a residence assertion
-// built on the heuristic would report every wisp as a boundary violation.
+// routes on — and deliberately NOT the config-free sling.BeadPrefix heuristic,
+// which answers "gcg-wisp" for a gcg-wisp-0042 id and would call it unreserved.
+// That divergence is real and is pinned as a negative by I5; a residence
+// assertion built on the heuristic would report every wisp as a boundary
+// violation.
 func reservedClassNamespace(id string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, prefix := range config.ReservedClassPrefixes() {

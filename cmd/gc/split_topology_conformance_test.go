@@ -43,15 +43,18 @@ import (
 // Some invariants name a capability main does not have yet. Those SKIP with the
 // reason and the seam that is missing, rather than being quietly omitted or
 // asserted against a seam that does not exist. The skip list is this program's
-// verified remaining work.
+// verified remaining work, and it is currently EMPTY: I5's claim-mutation half
+// was the last entry, and it closed when the shared by-id class resolver landed
+// (storeref.ClassCandidates, ga-ia7li). A new gap gets a skip, not a deletion.
 //
 // Others pin behavior main HAS but should not keep. Those carry a KNOWN GAP
 // paragraph naming the divergence, the assertions that move when it closes, and
 // the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
-// the controller's cross-store scan on a split city) and I10 (the wake filter
-// has no coordination-class reachability arm). Leaving such a leg UNSEEDED is
-// the failure mode this convention exists to prevent: the invariant then reads
-// as coverage of a path it never touches.
+// the controller's cross-store scan on a split city), I5 (`gc hook --claim`
+// does not consume the shared resolver yet) and I10 (the wake filter has no
+// coordination-class reachability arm). Leaving such a leg UNSEEDED is the
+// failure mode this convention exists to prevent: the invariant then reads as
+// coverage of a path it never touches.
 //
 // # Which authority an invariant is pinning
 //
@@ -391,14 +394,27 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // asserted as a negative here so it cannot change silently under a future
 // resolver.
 //
-// The CLAIM-MUTATION half is SKIPPED — the seam does not exist on main.
-// `gc hook --claim` resolves its stores as hookStore{dir, env} pairs
-// (hook_cross_store.go) and execs bd in a work directory; the fan-out is city +
-// rigs, all of them WORK scopes, with no coordination-class arm anywhere on the
-// path. The only by-id class resolver in the tree is Server.beadStoresForID
-// (internal/api/handler_beads.go), method-bound to the API server and graph-only.
-// Lifting it into a shared resolver is the next slice in this program (ga-ia7li,
-// which this work blocks).
+// The CLAIM-MUTATION half runs on the SHARED resolver, storeref.ClassCandidates
+// (ga-ia7li), which is the seam this invariant was waiting on: a candidate list
+// keyed on the resolveClassStore identity, probed in order, with the mutation
+// written through the store that answered. splitEnv.claimByID is that shape, and
+// the assertion is residence — the claim is visible in the owning store and in
+// no other leg.
+//
+// KNOWN GAP, pinned rather than asserted as desirable — `gc hook --claim` does
+// not consume the resolver yet. It resolves its stores as hookStore{dir, env}
+// pairs (hook_cross_store.go) and execs bd in a work directory; the fan-out is
+// city + rigs, all WORK scopes, so a claim it issues for a relocated class id
+// still runs against a ledger that cannot see the bead. claimByID's own
+// fallback IS that fan-out, so the rows below state both answers side by side:
+// a class id routes, a work id keeps the legacy path byte-for-byte. Rewiring
+// the command is ga-xo8ch (class-routed writes from one-shot commands); when it
+// lands, this paragraph goes and the assertions move from claimByID to the
+// command.
+//
+// `gc bd update --claim` is already routed (#5132, cmd_bd_by_id.go) and probes
+// the same way, so the resolver is not the only class-aware claim path — it is
+// the one a caller holding just an id and a set of stores can use.
 func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	workBead, err := e.work.Create(beads.Bead{Title: "claim-routing work bead", Type: "task"})
 	if err != nil {
@@ -426,7 +442,24 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		if reservedClassNamespace(wisp.ID) {
 			t.Fatalf("single-store wisp %q sits in a reserved class namespace; a legacy city mints work-store ids", wisp.ID)
 		}
-		t.Skip("single-store collapse: there is no second store to route a claim to, and no coordination-class claim arm to route it with (ga-ia7li)")
+		// The single-store statement about the shared resolver: its identity
+		// gate (class store IS the work store) means it claims NOTHING here, so
+		// every by-id claim keeps running on the one store exactly as it does
+		// today. A resolver that answered on a legacy city would be routing a
+		// city with nowhere to route to.
+		for _, id := range []string{workBead.ID, wisp.ID} {
+			if got := e.classCandidatesForID(id); got != nil {
+				t.Fatalf("classCandidatesForID(%q) returned %d candidates on a single-store city; the resolver must be inert where the class store IS the work store", id, len(got))
+			}
+		}
+		for _, id := range []string{workBead.ID, wisp.ID} {
+			landed := e.claimByID(t, id, "single-store-claimant")
+			if !sameStorePtr(landed, e.work) {
+				t.Errorf("claim of %s landed in %p, want the single work store %p", id, landed, e.work)
+			}
+			e.assertClaimedIn(t, id, "single-store-claimant", e.work)
+		}
+		return
 	}
 
 	durable := mintDurableGraphBead(t, e, "claim-routing durable control bead", "")
@@ -472,7 +505,32 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		t.Errorf("sling.BeadPrefixForCity(%q) = %q, want the reserved class prefix — the heuristic must at least agree with the namespace rule on the ORDINARY class id shape", durable.ID, got)
 	}
 
-	t.Skip("gc hook --claim has no coordination-class arm: hookStore is a (dir, env) bd scope pair over city+rigs, all work scopes. The shared by-id class resolver is ga-ia7li; until it lands there is no cmd/gc seam that routes a claim MUTATION by class.")
+	// The CLAIM MUTATION, through the shared resolver. Both class id shapes must
+	// route to the class store — including the wisp shape, which is where the
+	// heuristic pinned above disagrees — and the work id must keep the legacy
+	// work-scope fan-out. The negative matters more than the positive: a claim
+	// that ran against the store not holding the bead is the silent-no-op the
+	// work-scope fan-out performs on a split city today.
+	for _, tt := range []struct {
+		name, id  string
+		wantClass bool
+	}{
+		{"durable graph bead", durable.ID, true},
+		{"wisp (the -wisp- suffix shape)", wisp.ID, true},
+		{"work bead", workBead.ID, false},
+	} {
+		assignee := "claimant-" + tt.id
+		want := e.work
+		if tt.wantClass {
+			want = e.class
+		}
+		landed := e.claimByID(t, tt.id, assignee)
+		if !sameStorePtr(landed, want) {
+			t.Errorf("%s: the by-id claim of %s landed in %p, want %p (class store %p, work store %p)", tt.name, tt.id, landed, want, e.class, e.work)
+			continue
+		}
+		e.assertClaimedIn(t, tt.id, assignee, want)
+	}
 }
 
 // conformanceStrictCrossStoreDeps (I6) guards the cross-store dependency class:
