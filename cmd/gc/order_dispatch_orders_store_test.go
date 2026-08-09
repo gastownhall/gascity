@@ -476,6 +476,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 // whose orders fire every few minutes as never having run.
 func TestOneShotOrderReadsReachTheOrdersBinding(t *testing.T) {
 	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	binding := beads.NewMemStore()
 	binding.IDPrefix = "gcg"
@@ -517,6 +518,7 @@ func TestOneShotOrderReadsReachTheOrdersBinding(t *testing.T) {
 // operator is trying to unwedge a city.
 func TestOrderSweepTrackingReachesTheOrdersBinding(t *testing.T) {
 	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	binding := beads.NewMemStore()
 	binding.IDPrefix = "gcg"
