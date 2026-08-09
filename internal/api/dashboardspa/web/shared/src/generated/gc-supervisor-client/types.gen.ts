@@ -262,6 +262,16 @@ export type AsyncAcceptedResponse = {
     request_id: string;
 };
 
+export type BackendCredentialResolvedPayload = {
+    backend: string;
+    host: string;
+    port: string;
+    scope_kind: string;
+    scope_name: string;
+    source: string;
+    user: string;
+};
+
 export type Bead = {
     assignee?: string;
     created_at: string;
@@ -845,7 +855,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2228,15 +2238,6 @@ export type PoolOverride = {
     Min: number | null;
     OnBoot: string | null;
     OnDeath: string | null;
-};
-
-export type PostgresCredentialResolvedPayload = {
-    host: string;
-    port: string;
-    scope_kind: string;
-    scope_name: string;
-    source: string;
-    user: string;
 };
 
 export type ProjectIdentityStampedPayload = {
@@ -5118,6 +5119,8 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
+    type: 'backend.credential_resolved';
+} & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
 } & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
@@ -5212,8 +5215,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
-    type: 'pg.credential_resolved';
-} & TypedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
@@ -5290,6 +5291,24 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
+
+/**
+ * TypedEventStreamEnvelope backend.credential_resolved
+ */
+export type TypedEventStreamEnvelopeBackendCredentialResolved = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BackendCredentialResolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedEventStreamEnvelope bead.claim_rejected
@@ -6156,24 +6175,6 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
- * TypedEventStreamEnvelope pg.credential_resolved
- */
-export type TypedEventStreamEnvelopePgCredentialResolved = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'pg.credential_resolved';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope project.identity.stamped
  */
 export type TypedEventStreamEnvelopeProjectIdentityStamped = {
@@ -6845,6 +6846,8 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
+    type: 'backend.credential_resolved';
+} & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
 } & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.closed';
@@ -6939,8 +6942,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
-    type: 'pg.credential_resolved';
-} & TypedTaggedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
@@ -7017,6 +7018,25 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
+
+/**
+ * TypedTaggedEventStreamEnvelope backend.credential_resolved
+ */
+export type TypedTaggedEventStreamEnvelopeBackendCredentialResolved = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BackendCredentialResolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedTaggedEventStreamEnvelope bead.claim_rejected
@@ -7927,25 +7947,6 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope pg.credential_resolved
- */
-export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'pg.credential_resolved';
     workflow?: WorkflowEventProjection;
 };
 

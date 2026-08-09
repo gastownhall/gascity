@@ -73,16 +73,16 @@ func TestScopeBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
 	}
 }
 
-// TestCityPostgresBackendEnvRefusalEnumeratesRegisteredBackends covers the
+// TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends covers the
 // second projection entry point — the one an inherited-city scope takes — which
 // has its own switch and therefore its own chance to fall through silently.
-func TestCityPostgresBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
+func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
 	cityPath := writeUnregisteredBackendScope(t, "mysql")
 
 	env := map[string]string{}
-	used, err := applyCityPostgresBackendEnv(env, cityPath)
+	used, err := applyCityStorageBindingEnv(env, cityPath)
 	if err == nil {
-		t.Fatal("applyCityPostgresBackendEnv accepted an unregistered backend")
+		t.Fatal("applyCityStorageBindingEnv accepted an unregistered backend")
 	}
 	if !used {
 		t.Error("used = false, want true — an unregistered backend must not fall through to the dolt path")
@@ -123,7 +123,6 @@ func TestEveryRegisteredBackendHasAnEnvironmentProjection(t *testing.T) {
 	valid := map[string]string{
 		"dolt":     `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`,
 		"doltlite": `{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`,
-		"postgres": `{"database":"beads","backend":"postgres","postgres_host":"db.example.com","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads"}`,
 	}
 	for _, backend := range registered {
 		t.Run(backend, func(t *testing.T) {

@@ -1,6 +1,0 @@
-{
-  "database": "beads",
-  "backend": "postgres",
-  "postgres_dsn": "postgres://gc_city@pg.example.test:6543/gascity_infra",
-  "postgres_schema": "city_x"
-}

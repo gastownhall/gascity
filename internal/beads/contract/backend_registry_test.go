@@ -149,18 +149,30 @@ func TestCompiledBackendBundleIsWellFormed(t *testing.T) {
 	}
 }
 
-// TestCompiledBackendBundleStillCarriesPostgres pins slice E0's deliberate
-// scope: the hardcoded allowlist becomes a registry and nothing else changes.
-// Removing postgres from OSS is a later slice that waits on the enterprise
-// registration hook existing, and doing it here would break every OSS city
-// whose metadata names it.
-func TestCompiledBackendBundleStillCarriesPostgres(t *testing.T) {
+// TestCompiledBackendBundleCarriesOnlyTheBackendsGCImplements replaces the
+// pin that held the opposite while E0 was in flight.
+//
+// E0 kept postgres registered deliberately, because removing it before an
+// assembly could add it back would have left OSS unable to read a city whose
+// metadata named it. That reason is gone: a city served by a backend gc does
+// not implement now names an opaque storage binding, which is recognized
+// before metadata parsing and served by withholding the projected environment
+// whole. A name belongs in this bundle only when gc reads its metadata shape,
+// projects its environment and manages its runtime — and postgres is now an
+// assembly's registration, not OSS's.
+//
+// The exact-equality assertion is the point. A registry that quietly grew a
+// name would make every refusal message in gc describe a binary nobody built.
+func TestCompiledBackendBundleCarriesOnlyTheBackendsGCImplements(t *testing.T) {
 	names, err := RegisteredBackends()
 	if err != nil {
 		t.Fatalf("RegisteredBackends() error = %v, want nil", err)
 	}
-	if want := []string{"dolt", "doltlite", "postgres"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"dolt", "doltlite"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("RegisteredBackends() = %v, want %v", names, want)
+	}
+	if err := RecognizeBackend("postgres"); !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("RecognizeBackend(postgres) error = %v, want ErrUnknownBackend", err)
 	}
 }
 

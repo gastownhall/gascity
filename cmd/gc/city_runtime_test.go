@@ -5031,7 +5031,7 @@ func TestCityRuntimeReloadSameRevisionRefreshesStoresWhenMetadataChanges(t *test
 	})
 	cr.setControllerState(cs)
 
-	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	lastProviderName := "fake"
 	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
 

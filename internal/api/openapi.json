@@ -843,6 +843,42 @@
         ],
         "type": "object"
       },
+      "BackendCredentialResolvedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "string"
+          },
+          "scope_kind": {
+            "type": "string"
+          },
+          "scope_name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "scope_kind",
+          "scope_name",
+          "source",
+          "host",
+          "port",
+          "user"
+        ],
+        "type": "object"
+      },
       "Bead": {
         "additionalProperties": false,
         "properties": {
@@ -2347,6 +2383,9 @@
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BackendCredentialResolvedPayload"
+          },
+          {
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
           {
@@ -2396,9 +2435,6 @@
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
-          },
-          {
-            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
           },
           {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
@@ -5480,38 +5516,6 @@
           "DrainTimeout",
           "OnDeath",
           "OnBoot"
-        ],
-        "type": "object"
-      },
-      "PostgresCredentialResolvedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "host": {
-            "type": "string"
-          },
-          "port": {
-            "type": "string"
-          },
-          "scope_kind": {
-            "type": "string"
-          },
-          "scope_name": {
-            "type": "string"
-          },
-          "source": {
-            "type": "string"
-          },
-          "user": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "scope_kind",
-          "scope_name",
-          "source",
-          "host",
-          "port",
-          "user"
         ],
         "type": "object"
       },
@@ -11907,6 +11911,7 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
@@ -11954,7 +11959,6 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
-            "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
@@ -11996,6 +12000,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
           },
@@ -12138,9 +12145,6 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved"
-          },
-          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
@@ -12256,6 +12260,63 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeBackendCredentialResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BackendCredentialResolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "backend.credential_resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope backend.credential_resolved",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClaimRejected": {
         "additionalProperties": false,
@@ -13343,7 +13404,7 @@
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
-                "pg.credential_resolved",
+                "backend.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
@@ -15077,63 +15138,6 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
-        "type": "object"
-      },
-      "TypedEventStreamEnvelopePgCredentialResolved": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "depends_on_step_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
-          },
-          "run_id": {
-            "type": "string"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "session_id": {
-            "type": "string"
-          },
-          "step_id": {
-            "type": "string"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "pg.credential_resolved",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope pg.credential_resolved",
         "type": "object"
       },
       "TypedEventStreamEnvelopeProjectIdentityStamped": {
@@ -17249,6 +17253,7 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
@@ -17296,7 +17301,6 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
-            "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
@@ -17338,6 +17342,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
           },
@@ -17480,9 +17487,6 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved"
-          },
-          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
@@ -17598,6 +17602,67 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeBackendCredentialResolved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BackendCredentialResolvedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "backend.credential_resolved",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope backend.credential_resolved",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClaimRejected": {
         "additionalProperties": false,
@@ -18756,7 +18821,7 @@
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
-                "pg.credential_resolved",
+                "backend.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
@@ -20611,67 +20676,6 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopePgCredentialResolved": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "depends_on_step_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/PostgresCredentialResolvedPayload"
-          },
-          "run_id": {
-            "type": "string"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "session_id": {
-            "type": "string"
-          },
-          "step_id": {
-            "type": "string"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "pg.credential_resolved",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope pg.credential_resolved",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeProjectIdentityStamped": {

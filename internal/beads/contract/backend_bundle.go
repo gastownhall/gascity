@@ -31,12 +31,17 @@ import (
 // and that has always been legal at the parse layer. It is registered rather
 // than special-cased so "does this build recognize this backend?" has exactly
 // one answer, in one place.
+//
+// The list is short on purpose. A backend belongs here only when gc itself
+// implements it — reads its metadata shape, projects its environment, and
+// manages its runtime. A workspace served by the linked beads library through
+// an opaque storage binding needs none of that and is not listed: gc withholds
+// the whole projected namespace for it and never learns the name.
 func compiledBackendNames() []BackendName {
 	return []BackendName{
 		UnsetBackend,
 		"dolt",
 		"doltlite",
-		"postgres",
 	}
 }
 

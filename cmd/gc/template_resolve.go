@@ -775,46 +775,39 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
-	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
-				// On PG projection errors, keep explicit empty keys so tmux
+			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
-				clearProjectedPostgresEnv(env)
 				mirrorBeadsDoltEnv(env)
 				ensureProjectedDoltEnvExplicit(env)
-				ensureProjectedPostgresEnvExplicit(env)
 				return env, err
-			} else if usedPostgres {
+			} else if bound {
 				ensureProjectedDoltEnvExplicit(env)
 				return env, nil
 			}
 		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
-			ensureProjectedPostgresEnvExplicit(env)
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
 		}
-		ensureProjectedPostgresEnvExplicit(env)
 		return env, nil
 	}
 
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
-		ensureProjectedPostgresEnvExplicit(env)
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
 	}
-	ensureProjectedPostgresEnvExplicit(env)
 	return env, nil
 }
 

@@ -182,14 +182,13 @@ func TestOrderDispatchWispOutcomeLandsOnTheOrdersResidentBead(t *testing.T) {
 // sweep retries. That bead is the most damaging one to misplace — it is designed
 // to stay open, so a sweep that cannot see it never gives the order another try.
 func TestOrderDispatchTriggerEnvFailureTrackingBeadLandsInTheOrdersBinding(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	// A scope whose beads metadata names a Postgres backend with no reachable
 	// password: building the trigger env fails before dispatch, which is the arm
 	// that mints an open tracking bead of its own.
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified

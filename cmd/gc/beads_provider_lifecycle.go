@@ -582,7 +582,8 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 }
 
 // scopeSkipsManagedDoltForInit reports whether this scope owns a complete
-// external binding or uses Postgres, so callers avoid managed-Dolt setup.
+// storage binding — its own or, when it inherits, the city's — so callers
+// avoid managed-Dolt setup for a store gc does not serve.
 func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 	path := scopeMetadataJSONPath(dir)
 	if completeBinding, err := scopeHasCompleteStorageBinding(path); err != nil {
@@ -600,13 +601,8 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		}
 		return false, err
 	}
-	if ok {
-		switch state.Backend {
-		case "postgres":
-			return true, nil
-		case "dolt":
-			return false, nil
-		}
+	if ok && state.Backend == "dolt" {
+		return false, nil
 	}
 	if !samePath(cityPath, dir) {
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, "")
@@ -621,8 +617,7 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 			}
 		}
 	}
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, dir)
-	return usesPostgres, err
+	return false, nil
 }
 
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding
@@ -667,6 +662,15 @@ func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	return false, fmt.Errorf("partial beads storage binding %s: backend, storage_endpoint, and storage_database must all be non-empty", path)
 }
 
+// allowLegacyDoltMetadataRepair reports whether a metadata rejection may be
+// repaired in place rather than surfaced. It admits exactly one shape:
+// backend="legacy", the marker a pre-registry gc wrote, which names no backend
+// this build can serve and no backend anything else can either.
+//
+// It is deliberately not a general "unknown backend" escape hatch. Every
+// caller probes for a complete storage binding first, so a scope served by a
+// backend gc does not implement never reaches here; a name that is neither is
+// an operator-facing refusal, not something to silently rewrite to dolt.
 func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 	var parseErr *contract.MetadataParseError
 	if !errors.As(err, &parseErr) {
@@ -677,22 +681,12 @@ func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 		return false
 	}
 	var raw struct {
-		Backend          string `json:"backend"`
-		PostgresHost     string `json:"postgres_host"`
-		PostgresPort     string `json:"postgres_port"`
-		PostgresUser     string `json:"postgres_user"`
-		PostgresDatabase string `json:"postgres_database"`
+		Backend string `json:"backend"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(raw.Backend), "legacy") {
-		return false
-	}
-	return strings.TrimSpace(raw.PostgresHost) == "" &&
-		strings.TrimSpace(raw.PostgresPort) == "" &&
-		strings.TrimSpace(raw.PostgresUser) == "" &&
-		strings.TrimSpace(raw.PostgresDatabase) == ""
+	return strings.EqualFold(strings.TrimSpace(raw.Backend), "legacy")
 }
 
 // verifyManagedDoltDatabaseExistsAfterInit confirms the named database is
@@ -867,10 +861,10 @@ func ensureBeadsProvider(cityPath string) error {
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+		return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
-		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+		return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
@@ -880,7 +874,7 @@ func shutdownBeadsProvider(cityPath string) error {
 				return err
 			}
 			if !owned {
-				return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+				return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 			}
 		}
 		script := strings.TrimPrefix(provider, "exec:")
@@ -1634,12 +1628,10 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	preserveReservedExisting := false
 	if preserveExisting {
-		if existing, ok, err := contract.LoadMetadataState(fs, path); err != nil {
+		if _, _, err := contract.LoadMetadataState(fs, path); err != nil {
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
 				return err
 			}
-		} else if ok && existing.Backend == "postgres" {
-			return nil
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
 			return err
@@ -1675,12 +1667,10 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 func ensureCanonicalDoltliteScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	if preserveExisting {
-		if existing, ok, err := contract.LoadMetadataState(fs, path); err != nil {
+		if _, _, err := contract.LoadMetadataState(fs, path); err != nil {
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
 				return err
 			}
-		} else if ok && existing.Backend == "postgres" {
-			return nil
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
 			return err
@@ -1780,19 +1770,12 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	cityHasCompleteStorageBinding := false
-	cityUsesPostgres := false
 	if cityUsesBd {
 		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		}
 		cityHasCompleteStorageBinding = completeBinding
-		if !completeBinding {
-			_, cityUsesPostgres, err = postgresMetadataForScope(cityPath, cityPath)
-			if err != nil {
-				return fmt.Errorf("classifying city backend: %w", err)
-			}
-		}
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
@@ -1815,19 +1798,21 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		return err
 	}
 	managedPort := ""
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesPostgres {
+	// currentDoltPort removes the raw-bd compatibility mirror when it cannot
+	// resolve a managed port, so it must not be asked about a city whose store
+	// gc does not serve: there is no managed port to find and the mirror is not
+	// gc's to delete.
+	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd && !cityHasCompleteStorageBinding {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
 			return err
 		}
-		if !cityUsesPostgres {
-			if managedPort != "" {
-				writeDoltPortFile(cityPath, managedPort, "city", warn)
-			} else {
-				removeDoltPortFile(cityPath)
-			}
+		if managedPort != "" {
+			writeDoltPortFile(cityPath, managedPort, "city", warn)
+		} else {
+			removeDoltPortFile(cityPath)
 		}
 	} else if !cityUsesBd {
 		removeDoltPortFile(cityPath)
@@ -2151,31 +2136,26 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, env), nil
 }
 
+// providerLifecycleProcessEnvForScopeInitWithError builds the process env a
+// provider's per-scope init runs under. A city-projection failure is fatal: gc
+// owns the projection for every backend it implements, so an error here means
+// the city's own store is unresolvable and initializing a scope against a
+// half-built environment would put beads somewhere nobody chose.
 func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider string) ([]string, error) {
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
-	if err == nil {
-		if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
-			env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
-		}
-		return env, nil
-	}
-	if !providerUsesBdStoreContract(provider) || !cityPostgresProjectionErrorCanBeBypassed(cityPath, err) || !scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+	if err != nil {
 		return nil, err
 	}
-	cityPath = normalizePathForCompare(cityPath)
-	overrides := cityRuntimeEnvMapForCity(cityPath)
-	setExecProjectedBackendEnvEmpty(overrides)
-	overrides["BEADS_DOLT_AUTO_START"] = "0"
-	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
-	baseEnv := mergeRuntimeEnv(os.Environ(), overrides)
-	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
+	if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+		env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
+	}
+	return env, nil
 }
 
 func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := map[string]string{}
 	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
-	ensureProjectedPostgresEnvExplicit(overrides)
 	return overlayEnvEntries(env, overrides)
 }
 
@@ -2199,7 +2179,6 @@ func applyLegacyRigScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot s
 	if explicitRig == nil || (explicitRig.DoltHost == "" && explicitRig.DoltPort == "") {
 		return
 	}
-	clearProjectedPostgresEnv(env)
 	target := applyLegacyRigExternalTarget(env, *explicitRig)
 	clearProjectedDoltPasswordEnv(env)
 	applyResolvedDoltAuthEnv(env, scopeRoot, "")
@@ -2216,7 +2195,6 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		env = append(env, "GC_BEADS_BACKEND=doltlite", "BEADS_BACKEND=doltlite")
 		envMap := runtimeEnvEntriesToMap(env)
 		clearProjectedDoltEnv(envMap)
-		clearProjectedPostgresEnv(envMap)
 		return mergeRuntimeEnv(nil, envMap)
 	}
 	for _, key := range []string{

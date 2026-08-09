@@ -771,7 +771,7 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 		t.Fatal("precondition: matching metadata should allow store reuse")
 	}
 
-	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	nextProvider := runtime.NewFake()
 	cs.updateFromRuntime(current, nextProvider, "")
 

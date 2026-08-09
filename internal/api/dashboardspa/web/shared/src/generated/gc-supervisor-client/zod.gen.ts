@@ -87,6 +87,16 @@ export const zAsyncAcceptedResponse = z.object({
     request_id: z.string()
 });
 
+export const zBackendCredentialResolvedPayload = z.object({
+    backend: z.string(),
+    host: z.string(),
+    port: z.string(),
+    scope_kind: z.string(),
+    scope_name: z.string(),
+    source: z.string(),
+    user: z.string()
+});
+
 export const zBeadAssignInputBody = z.object({
     assignee: z.string().optional()
 });
@@ -1081,15 +1091,6 @@ export const zListBodyAgentPatch = z.object({
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
-});
-
-export const zPostgresCredentialResolvedPayload = z.object({
-    host: z.string(),
-    port: z.string(),
-    scope_kind: z.string(),
-    scope_name: z.string(),
-    source: z.string(),
-    user: z.string()
 });
 
 export const zProjectIdentityStampedPayload = z.object({
@@ -3211,6 +3212,7 @@ export const zWorkerOperationEventPayload = z.object({
 
 export const zEventPayload = z.union([
     zAdapterEventPayload,
+    zBackendCredentialResolvedPayload,
     zBeadClaimRejectedPayload,
     zBeadDeadAssigneeReopenedPayload,
     zBeadEventPayload,
@@ -3228,7 +3230,6 @@ export const zEventPayload = z.union([
     zNoPayload,
     zOutboundChannelMismatchPayload,
     zOutboundEventPayload,
-    zPostgresCredentialResolvedPayload,
     zProjectIdentityStampedPayload,
     zRecord,
     zRequestFailedPayload,
@@ -3344,6 +3345,24 @@ export const zTaggedEventStreamEnvelope = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.string(),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope backend.credential_resolved
+ */
+export const zTypedEventStreamEnvelopeBackendCredentialResolved = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zBackendCredentialResolvedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('backend.credential_resolved'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -4212,24 +4231,6 @@ export const zTypedEventStreamEnvelopeOrderFired = z.object({
 });
 
 /**
- * TypedEventStreamEnvelope pg.credential_resolved
- */
-export const zTypedEventStreamEnvelopePgCredentialResolved = z.object({
-    actor: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zPostgresCredentialResolvedPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('pg.credential_resolved'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
  * TypedEventStreamEnvelope project.identity.stamped
  */
 export const zTypedEventStreamEnvelopeProjectIdentityStamped = z.object({
@@ -4901,6 +4902,7 @@ export const zTypedEventStreamEnvelopeWorkerOperation = z.object({
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
+    zTypedEventStreamEnvelopeBackendCredentialResolved.extend({ type: z.literal('backend.credential_resolved') }),
     zTypedEventStreamEnvelopeBeadClaimRejected.extend({ type: z.literal('bead.claim_rejected') }),
     zTypedEventStreamEnvelopeBeadClosed.extend({ type: z.literal('bead.closed') }),
     zTypedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
@@ -4948,7 +4950,6 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
-    zTypedEventStreamEnvelopePgCredentialResolved.extend({ type: z.literal('pg.credential_resolved') }),
     zTypedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
     zTypedEventStreamEnvelopeProviderSwapped.extend({ type: z.literal('provider.swapped') }),
     zTypedEventStreamEnvelopeRequestFailed.extend({ type: z.literal('request.failed') }),
@@ -4995,6 +4996,25 @@ export const zListBodyWireEvent = z.object({
     partial: z.boolean().optional(),
     partial_errors: z.array(z.string()).nullish(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope backend.credential_resolved
+ */
+export const zTypedTaggedEventStreamEnvelopeBackendCredentialResolved = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zBackendCredentialResolvedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('backend.credential_resolved'),
+    workflow: zWorkflowEventProjection.optional()
 });
 
 /**
@@ -5910,25 +5930,6 @@ export const zTypedTaggedEventStreamEnvelopeOrderFired = z.object({
 });
 
 /**
- * TypedTaggedEventStreamEnvelope pg.credential_resolved
- */
-export const zTypedTaggedEventStreamEnvelopePgCredentialResolved = z.object({
-    actor: z.string(),
-    city: z.string(),
-    depends_on_step_ids: z.array(z.string()).optional(),
-    message: z.string().optional(),
-    payload: zPostgresCredentialResolvedPayload,
-    run_id: z.string().optional(),
-    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    session_id: z.string().optional(),
-    step_id: z.string().optional(),
-    subject: z.string().optional(),
-    ts: z.iso.datetime(),
-    type: z.literal('pg.credential_resolved'),
-    workflow: zWorkflowEventProjection.optional()
-});
-
-/**
  * TypedTaggedEventStreamEnvelope project.identity.stamped
  */
 export const zTypedTaggedEventStreamEnvelopeProjectIdentityStamped = z.object({
@@ -6637,6 +6638,7 @@ export const zTypedTaggedEventStreamEnvelopeWorkerOperation = z.object({
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
+    zTypedTaggedEventStreamEnvelopeBackendCredentialResolved.extend({ type: z.literal('backend.credential_resolved') }),
     zTypedTaggedEventStreamEnvelopeBeadClaimRejected.extend({ type: z.literal('bead.claim_rejected') }),
     zTypedTaggedEventStreamEnvelopeBeadClosed.extend({ type: z.literal('bead.closed') }),
     zTypedTaggedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
@@ -6684,7 +6686,6 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
-    zTypedTaggedEventStreamEnvelopePgCredentialResolved.extend({ type: z.literal('pg.credential_resolved') }),
     zTypedTaggedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
     zTypedTaggedEventStreamEnvelopeProviderSwapped.extend({ type: z.literal('provider.swapped') }),
     zTypedTaggedEventStreamEnvelopeRequestFailed.extend({ type: z.literal('request.failed') }),

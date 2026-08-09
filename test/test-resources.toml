@@ -77,7 +77,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 128
+baseline_calls = 122
 baseline_files = 13
 reported_calls = 3960
 reported_files = 184
@@ -381,7 +381,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 122
+baseline_calls = 116
 baseline_files = 13
 reported_calls = 4348
 reported_files = 200

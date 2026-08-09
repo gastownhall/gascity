@@ -222,7 +222,6 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
-	ensureProjectedPostgresEnvExplicit(env)
 	// Carry the controller's GitHub CLI auth token into the exec order so its
 	// `gh` calls authenticate. Projected before the [order.env] loop below so an
 	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
@@ -285,7 +284,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
 	}
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot) {
 		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
@@ -311,7 +310,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")

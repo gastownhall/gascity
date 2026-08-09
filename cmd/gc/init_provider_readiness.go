@@ -728,11 +728,11 @@ func initNeedsLocalDoltIdentity(cityPath string) bool {
 }
 
 func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, scopeRoot)
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return true
 	}
-	if usesPostgres {
+	if bound {
 		return false
 	}
 	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)

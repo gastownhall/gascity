@@ -1317,13 +1317,11 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
-gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
-| `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |

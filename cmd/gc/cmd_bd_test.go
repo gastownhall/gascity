@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -570,8 +569,7 @@ dolt.auto-start: false
 	}
 }
 
-func TestBdCommandEnvSurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -586,7 +584,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "")
+	writeUnregisteredBackendMetadata(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -602,12 +600,7 @@ dolt.auto-start: false
 		Prefix:    "pg",
 		RigName:   "pg",
 	})
-	if err == nil {
-		t.Fatal("bdCommandEnv err = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
 func TestBdCommandRunnerForCityDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {

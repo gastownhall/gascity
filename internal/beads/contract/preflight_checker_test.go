@@ -11,7 +11,14 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
+// TestPreflightBlocksNativeOnABackendGCDoesNotImplement pins the native-store
+// gate for the shape that replaced postgres: the metadata names a backend gc
+// has no vocabulary for, and every check that can decide says so by name.
+//
+// The connection keys in the fixture are deliberate. They are the shape a
+// linked beads library reads and gc does not, and their presence must change
+// nothing here — the verdict comes from the backend name alone.
+func TestPreflightBlocksNativeOnABackendGCDoesNotImplement(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
 		"backend": "postgres",
@@ -31,69 +38,35 @@ func TestPreflightBlocksNativeOnMetadataPostgres(t *testing.T) {
 	assertCheckOrder(t, result)
 	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
+	for _, id := range []PreflightCheckID{PreflightCheckMetadataBackend, PreflightCheckContractShape} {
+		if summary := findPreflightCheck(t, result, id).Summary; !strings.Contains(summary, `"postgres"`) {
+			t.Errorf("%s summary = %q, want it to name the backend", id, summary)
+		}
+	}
 	assertPreflightReadOnly(t, checker.FS.(*fsys.Fake))
 }
 
-func TestPreflightRedactsPostgresDSN(t *testing.T) {
-	scope := "/city"
-	checker := testPreflightChecker(preflightMetadataJSON(`{
-		"backend": "postgres",
-		"postgres_dsn": "postgres://operator:swordfish@db.example.com/gascity",
-		"project_id": "gc-local"
-	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
-
-	result, err := checker.Check(scope)
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
+// TestPreflightRedactsADSNDiagnostic keeps the redaction rule keyed on the
+// shape of the value rather than on any one backend's name: a *_dsn diagnostic
+// is a connection string with a userinfo section whoever wrote it.
+func TestPreflightRedactsADSNDiagnostic(t *testing.T) {
+	details := PreflightDetails{
+		MetadataBackend: "postgres",
+		AdditionalDiagnostics: []PreflightDetailField{
+			{Key: "storage_dsn", Value: "postgres://operator:swordfish@db.example.com/gascity"},
+		},
 	}
-
-	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
-	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
-	// Gas City derives the endpoint from postgres_dsn, so the DSN form is a
-	// shape gc understands — the contract-shape check must not nag operators
-	// to convert it back to the discrete fields.
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
-	check := findPreflightCheck(t, result, PreflightCheckMetadataBackend)
-	if check.Details.PostgresDSNRedacted != "postgres://[REDACTED]" {
-		t.Fatalf("PostgresDSNRedacted = %q, want redacted DSN", check.Details.PostgresDSNRedacted)
+	check := NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "shape refused", details)
+	if got := check.Details.AdditionalDiagnostics[0].Value; got != "postgres://[REDACTED]" {
+		t.Fatalf("dsn diagnostic = %q, want %q", got, "postgres://[REDACTED]")
 	}
-	data, err := json.Marshal(result)
+	data, err := json.Marshal(check)
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
-	if strings.Contains(string(data), "swordfish") || strings.Contains(string(data), "operator:swordfish") {
-		t.Fatalf("serialized result leaked DSN secret: %s", data)
-	}
-}
-
-// TestPreflightFailsContractShapeOnUnderivablePostgresDSN pins the other half
-// of the postgres_dsn widening: gc accepts the DSN form, so the shape check
-// only fires for a DSN it cannot derive an endpoint from — and it fails hard,
-// because such a scope has no usable endpoint at all.
-func TestPreflightFailsContractShapeOnUnderivablePostgresDSN(t *testing.T) {
-	scope := "/city"
-	checker := testPreflightChecker(preflightMetadataJSON(`{
-		"backend": "postgres",
-		"postgres_dsn": "host=db.example.com port=5432 user=operator dbname=gascity",
-		"project_id": "gc-local"
-	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
-
-	result, err := checker.Check(scope)
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
-	}
-
-	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
-	check := findPreflightCheck(t, result, PreflightCheckContractShape)
-	if !strings.Contains(check.Summary, "postgres_dsn") {
-		t.Errorf("Summary = %q, want it to name postgres_dsn", check.Summary)
-	}
-	// The summary must never echo the DSN: only PostgresDSNRedacted is
-	// sanitized on the way out.
-	if strings.Contains(check.Summary, "db.example.com") {
-		t.Errorf("Summary = %q, leaked the raw DSN", check.Summary)
+	if strings.Contains(string(data), "swordfish") {
+		t.Fatalf("serialized check leaked the DSN secret: %s", data)
 	}
 }
 

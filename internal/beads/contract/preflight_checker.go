@@ -133,27 +133,14 @@ func ProviderUsesBDContract(provider string) bool {
 }
 
 func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) PreflightCheckResult {
-	hasDSN := metadata.hasPostgresDSN()
-	hasSplit := metadata.hasPostgresSplitFields()
-	details := PreflightDetails{
-		MetadataBackend:     metadata.Backend,
-		HasPostgresDSN:      boolPtr(hasDSN),
-		HasSplitFields:      boolPtr(hasSplit),
-		PostgresDSNRedacted: metadata.PostgresDSN,
-		PostgresPassword:    metadata.PostgresPassword,
-	}
+	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	switch metadata.Backend {
 	case "dolt":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
-	case "postgres":
-		if hasDSN && !hasSplit {
-			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is postgres; native store supports dolt only", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is missing", details)
 	default:
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported", metadata.Backend), details)
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported; the native store serves dolt only", metadata.Backend), details)
 	}
 }
 
@@ -284,53 +271,10 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
-	hasDSN := metadata.hasPostgresDSN()
-	hasSplit := metadata.hasPostgresSplitFields()
-	details := PreflightDetails{
-		MetadataBackend:     metadata.Backend,
-		HasPostgresDSN:      boolPtr(hasDSN),
-		HasSplitFields:      boolPtr(hasSplit),
-		PostgresDSNRedacted: metadata.PostgresDSN,
-		PostgresPassword:    metadata.PostgresPassword,
-		PostgresHost:        metadata.PostgresHost,
-		PostgresPort:        metadata.PostgresPort,
-		PostgresUser:        metadata.PostgresUser,
-		PostgresDatabase:    metadata.PostgresDatabase,
-	}
-	if hasDSN && hasSplit {
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn and split postgres fields are both present", details)
-	}
+	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	switch metadata.Backend {
 	case "dolt":
-		if hasDSN || hasSplit {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "dolt metadata contains postgres fields", details)
-		}
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
-	case "postgres":
-		if hasDSN {
-			// Gas City derives the endpoint from postgres_dsn (see
-			// MetadataState.PostgresEndpoint), so the DSN form is a shape gc
-			// understands rather than one to convert. The gate is
-			// validatePostgresEndpoint — the one LoadMetadataState uses — so a
-			// PASS here means the loader will accept the scope. Gating on
-			// ParsePostgresDSNEndpoint alone would PASS a DSN that parses but
-			// supplies no database, or a port outside 1..65535, both of which
-			// the loader hard-rejects.
-			//
-			// The summary stays free of the DSN itself: only
-			// PostgresDSNRedacted is sanitized on the way out, so echoing a
-			// parse error that quotes the DSN would leak a hand-written
-			// password past Redacted().
-			state := MetadataState{Backend: "postgres", PostgresDSN: metadata.PostgresDSN}
-			if err := state.validatePostgresEndpoint(); err != nil {
-				return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn does not resolve to a complete postgres endpoint", details)
-			}
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses postgres_dsn shape", details)
-		}
-		if metadata.hasCompletePostgresSplitFields() {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres metadata split fields are incomplete", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "metadata backend is missing", details)
 	default:
@@ -369,42 +313,18 @@ func beadsModuleVersion() string {
 }
 
 type preflightMetadata struct {
-	Backend          string `json:"backend"`
-	DoltMode         string `json:"dolt_mode"`
-	DoltDatabase     string `json:"dolt_database"`
-	PostgresDSN      string `json:"postgres_dsn"`
-	PostgresPassword string `json:"postgres_password"`
-	PostgresHost     string `json:"postgres_host"`
-	PostgresPort     string `json:"postgres_port"`
-	PostgresUser     string `json:"postgres_user"`
-	PostgresDatabase string `json:"postgres_database"`
-	ProjectID        string `json:"project_id"`
+	Backend      string `json:"backend"`
+	DoltMode     string `json:"dolt_mode"`
+	DoltDatabase string `json:"dolt_database"`
+	ProjectID    string `json:"project_id"`
 }
 
 func (m preflightMetadata) trimmed() preflightMetadata {
 	m.Backend = strings.TrimSpace(m.Backend)
 	m.DoltMode = strings.TrimSpace(m.DoltMode)
 	m.DoltDatabase = strings.TrimSpace(m.DoltDatabase)
-	m.PostgresDSN = strings.TrimSpace(m.PostgresDSN)
-	m.PostgresPassword = strings.TrimSpace(m.PostgresPassword)
-	m.PostgresHost = strings.TrimSpace(m.PostgresHost)
-	m.PostgresPort = strings.TrimSpace(m.PostgresPort)
-	m.PostgresUser = strings.TrimSpace(m.PostgresUser)
-	m.PostgresDatabase = strings.TrimSpace(m.PostgresDatabase)
 	m.ProjectID = strings.TrimSpace(m.ProjectID)
 	return m
-}
-
-func (m preflightMetadata) hasPostgresDSN() bool {
-	return m.PostgresDSN != ""
-}
-
-func (m preflightMetadata) hasPostgresSplitFields() bool {
-	return m.PostgresHost != "" || m.PostgresPort != "" || m.PostgresUser != "" || m.PostgresDatabase != ""
-}
-
-func (m preflightMetadata) hasCompletePostgresSplitFields() bool {
-	return m.PostgresHost != "" && m.PostgresPort != "" && m.PostgresUser != "" && m.PostgresDatabase != ""
 }
 
 func preflightVerdictForChecks(checks []PreflightCheckResult) PreflightVerdict {
@@ -470,7 +390,7 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 					CheckID:  check.ID,
 					Priority: PreflightRepairRecommended,
 					Command:  "bd bootstrap",
-					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for postgres scopes.",
+					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for a scope the native store cannot serve.",
 				})
 			}
 		case PreflightCheckBDContextAgreement:
@@ -521,8 +441,4 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 		}
 	}
 	return steps
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }
