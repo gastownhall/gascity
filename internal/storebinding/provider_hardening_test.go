@@ -71,6 +71,31 @@ func TestPersistedProviderFieldsRejectSecretMaterialWithoutEchoingIt(t *testing.
 		validate func() error
 	}{
 		{
+			// The URL shape rule permits a path prefix — an edge may mount the
+			// service below the root — so this is exactly the material the
+			// shape rule cannot see and the shared scan must.
+			name: "binding url path credential",
+			validate: func() error {
+				return BindingSpec{
+					Name:      BindingName("hardening-url"),
+					Provider:  ProviderID("builtin-hardening"),
+					ConfigRef: ConfigRef("hardening"),
+					URL:       "https://beads.example/token=" + secret,
+				}.Validate()
+			},
+		},
+		{
+			name: "binding url encoded path credential",
+			validate: func() error {
+				return BindingSpec{
+					Name:      BindingName("hardening-url-encoded"),
+					Provider:  ProviderID("builtin-hardening"),
+					ConfigRef: ConfigRef("hardening"),
+					URL:       "https://beads.example/password%3D" + secret,
+				}.Validate()
+			},
+		},
+		{
 			name: "descriptor semantic contract",
 			validate: func() error {
 				descriptor := testDescriptor(t, ProviderID("builtin-hardening"), PhysicalIdentity("hardening-descriptor"), coordclass.ClassGraph)
@@ -300,5 +325,57 @@ func TestSecretAndCGOErrorsDoNotEchoUntrustedConstructionFields(t *testing.T) {
 	}
 	if strings.Contains(cgo.Error(), secret) {
 		t.Fatalf("CGOUnavailableError leaked construction field: %q", cgo)
+	}
+}
+
+// TestEndpointRejectionsDoNotEchoTheRejectedValue covers the endpoint pair's
+// SHAPE rejections, which fail as ErrInvalidBindingSpec and so never reach the
+// ErrSecretMaterial table above.
+//
+// That gap is the whole risk. A value rejected here is credential-shaped by
+// assumption — refusing userinfo, a query, and everything outside the closed
+// set of auth references is the entire point of these rules — and the closed
+// set means a pasted token lands on the "not one of the accepted forms" arm,
+// the one most tempting to write as `got %q`. The url arm has the same trap
+// one level down: *url.Error renders as `parse "<the whole input>": <reason>`,
+// so wrapping it echoes userinfo whenever the parse fails before the userinfo
+// check can run.
+func TestEndpointRejectionsDoNotEchoTheRejectedValue(t *testing.T) {
+	const secret = "hunter2" // oss-leak-allow:fixture — negative-path input proving the validator rejects credential-shaped material.
+
+	spec := func(url, auth string) BindingSpec {
+		return BindingSpec{
+			Name:      BindingName("hardening-endpoint"),
+			Provider:  ProviderID("builtin-hardening"),
+			ConfigRef: ConfigRef("hardening"),
+			URL:       url,
+			Auth:      auth,
+		}
+	}
+	for _, test := range []struct {
+		name string
+		spec BindingSpec
+	}{
+		{"url userinfo", spec("https://"+secret+"@beads.example", "")},
+		{"url query", spec("https://beads.example?token="+secret, "")},
+		{"url fragment", spec("https://beads.example#"+secret, "")},
+		{"url scheme", spec("ftp://"+secret+".example", "")},
+		// Parse fails on the control byte, which happens BEFORE the userinfo
+		// check — the exact path on which a wrapped *url.Error would print the
+		// credential.
+		{"url unparseable with userinfo", spec("https://"+secret+"@beads.example/\x7f", "")},
+		{"auth unknown form", spec("https://beads.example", secret)},
+		{"auth env name", spec("https://beads.example", "env:1"+secret)},
+		{"auth over length", spec("https://beads.example", "env:"+strings.Repeat(secret, 10))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.spec.Validate()
+			if !errors.Is(err, ErrInvalidBindingSpec) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidBindingSpec", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("Validate() echoed the rejected value: %q", err)
+			}
+		})
 	}
 }

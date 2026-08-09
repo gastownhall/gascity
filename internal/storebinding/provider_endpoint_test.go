@@ -56,11 +56,14 @@ func TestBindingSpecRejectsUnsafeRemoteEndpoint(t *testing.T) {
 		{"query", remoteSpec("https://beads.example?token=abc", ""), "url must not carry a query"},
 		{"fragment", remoteSpec("https://beads.example#frag", ""), "url must not carry a fragment"},
 		{"auth without url", remoteSpec("", AuthCredentialProvider), "auth requires url"},
-		{"auth form", remoteSpec("https://beads.example", "bearer"), `auth must be "gasworks" or "env:<VARNAME>"`},
-		{"auth env name", remoteSpec("https://beads.example", "env:1BAD"), "does not name an environment variable"},
+		// Built from the constant, not from a second spelling of it: a literal
+		// here would keep passing after someone renamed the token, which is
+		// precisely the one-spelling invariant the constant exists to hold.
+		{"auth form", remoteSpec("https://beads.example", "bearer"), `auth must be "` + AuthCredentialProvider + `"`},
+		{"auth env name", remoteSpec("https://beads.example", "env:1BAD"), "must be followed by an environment variable name"},
 		{"auth material", remoteSpec("https://beads.example", "https://beads.example/t"), "credential reference, not credential material"},
 		{"auth whitespace", remoteSpec("https://beads.example", "env: TOKEN"), "credential reference, not credential material"},
-		{"auth length", remoteSpec("https://beads.example", "env:"+strings.Repeat("A", 64)), "credential reference, not credential material"},
+		{"auth length", remoteSpec("https://beads.example", "env:"+strings.Repeat("A", 64)), "auth is longer than 64 bytes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.spec.Validate()

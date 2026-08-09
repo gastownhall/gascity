@@ -18,9 +18,22 @@ const AuthCredentialProvider = config.StorageAuthCredentialProvider
 // the credential that authenticates to it.
 //
 // This is the last gate before a provider is constructed from a specification,
-// so it re-applies the authoring surface's rules rather than trusting that
-// every specification came from a parsed city.toml. It applies the rules
-// themselves, from the package that owns them, so the two gates cannot drift.
+// and it is COMPLEMENTARY to the authoring gate in internal/config, not a
+// mirror of it. The two share the value-shape rules — this calls them, so a
+// shape accepted in city.toml is the shape accepted here — but each also
+// enforces what only it can:
+//
+//   - only the authoring gate knows the binding's provider and config_ref, so
+//     "url is only supported by beads-workspace" and "url requires config_ref"
+//     live there and are not repeated here;
+//   - only this gate runs validateSecretFree, the deep credential scan the
+//     whole plan envelope shares.
+//
+// The consequence is worth stating plainly: a URL whose PATH PREFIX carries
+// credential-shaped material — `https://beads.example/token=abc123` — passes
+// city.toml load, because the shape rule allows a path prefix, and is refused
+// here at plan resolution. Config is not the only gate, and neither is this
+// one.
 func validateEndpoint(endpoint, auth string) error {
 	if endpoint == "" {
 		if auth != "" {
@@ -30,9 +43,12 @@ func validateEndpoint(endpoint, auth string) error {
 	}
 	// Shape first, then the shared secret scan. Both run; ordering them this
 	// way means a URL that carries userinfo or a query — the shapes the rule
-	// names — is refused with the reason it was refused, and the scan stays
-	// the backstop for a credential hiding somewhere the shape rule allows,
-	// such as a token pasted into the path prefix.
+	// names — is refused for that reason rather than as generic "secret
+	// material". The scan then catches what the shape rule permits: it reads
+	// the path for credential ASSIGNMENTS (`token=…`, `password=…`), decodes
+	// nested URL and JSON encodings, and spots PEM private keys. A bare
+	// high-entropy path segment is not credential-shaped to it and stays
+	// legal — a path prefix is a legitimate mount point.
 	if err := config.ValidateStorageEndpointURL(endpoint); err != nil {
 		return err
 	}

@@ -627,7 +627,7 @@ url = "https://beads.example"
 		{
 			name:    "auth env name",
 			input:   remoteWorkspaceCity(`url = "https://beads.example"`, `auth = "env:1BAD"`),
-			wantErr: `auth "env:1BAD" does not name an environment variable`,
+			wantErr: `auth "env:" must be followed by an environment variable name`,
 		},
 		{
 			name:    "auth carries a URL",
@@ -642,7 +642,21 @@ url = "https://beads.example"
 		{
 			name:    "auth carries a pasted token",
 			input:   remoteWorkspaceCity(`url = "https://beads.example"`, `auth = "env:`+strings.Repeat("A", 64)+`"`),
-			wantErr: `auth is a credential reference, not credential material`,
+			wantErr: `auth is longer than 64 bytes`,
+		},
+		{
+			// The rule this pins fires BEFORE the generic "config_ref is
+			// required for provider" rule, which would otherwise shadow it and
+			// report the wrong reason: the binding is not missing config_ref
+			// because its provider needs one, it is missing the on-disk anchor
+			// the endpoint is relative to.
+			name: "url without config ref",
+			input: strings.Replace(completeClasses, `graph = "work"`, `graph = "remote"`, 1) + `
+[storage.bindings.remote]
+provider = "beads-workspace"
+url = "https://beads.example"
+`,
+			wantErr: `storage.bindings.remote: url requires config_ref`,
 		},
 	}
 
