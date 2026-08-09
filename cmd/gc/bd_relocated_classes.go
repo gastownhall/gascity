@@ -71,6 +71,16 @@ func relocatedBeadClasses(cfg *config.City) []beads.RelocatedClass {
 // automated reads, where no human is present to judge and an override would be
 // a silent correctness hole. And honoring it is never quiet: doBd prints what
 // it is letting through.
+//
+// Deliberately NOT an internal/rollout gate, which is where the GC_* vocabulary
+// ratchet in internal/testenv steers a new env read. A Spec must name two
+// mechanical code paths it selects between and must bind to a config.City field
+// (Spec.ConfigPath is reflection-verified), and rollout precedence is
+// builtin < config < env — so registering this knob means minting a city.toml
+// field whose presence disarms the guard for every operator and every later
+// invocation. What makes the override safe is that it is per-invocation and
+// persists nowhere. GC_WORK_RECORD_ENFORCE is the in-tree precedent for the
+// shape: same CLI seam, same truthy switch, same operator-facing scope.
 const bdRelocatedClassOverrideEnvVar = "GC_BD_ALLOW_RELOCATED_CLASS_READ"
 
 // bdRelocatedClassOverrideEnabled reports whether the operator has explicitly
