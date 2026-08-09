@@ -224,6 +224,7 @@ func routeCityStatus(
 			if code != 0 {
 				return code
 			}
+			store = statusStoreForFallback(store, diagnostic)
 			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
 			if jsonOutput {
 				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
@@ -288,6 +289,7 @@ func doCityStatusLocalFallback(cityPath string, cfg *config.City, jsonOutput boo
 		}
 		return code
 	}
+	store = statusStoreForFallback(store, diagnostic)
 	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
 	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	if err != nil {
@@ -584,10 +586,11 @@ func doCityStatus(
 	cityPath string,
 	stdout, stderr io.Writer,
 ) int {
-	store, _, code := openCityStatusStore(cityPath, stderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, stderr)
 	if code != 0 {
 		return code
 	}
+	store = statusStoreForFallback(store, diagnostic)
 	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 
@@ -638,6 +641,7 @@ func doCityStatusJSON(
 	if code != 0 {
 		return code
 	}
+	store = statusStoreForFallback(store, diagnostic)
 	return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stdout, stderr)
 }
 

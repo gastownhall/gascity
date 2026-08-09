@@ -48,6 +48,17 @@ func TestCityStatusSnapshotOmitsStoreHealthWhenControllerStopped(t *testing.T) {
 	}
 }
 
+func TestStatusStoreForFallbackSkipsReadOnlyFastStore(t *testing.T) {
+	store := beads.NewMemStore()
+	fast := &beads.BeadsDiagnostic{PreflightGate: "read_only_fast_path"}
+	if got := statusStoreForFallback(store, fast); got != nil {
+		t.Fatalf("statusStoreForFallback(read-only fast) = %T, want nil", got)
+	}
+	if got := statusStoreForFallback(store, nil); got != store {
+		t.Fatalf("statusStoreForFallback(normal) = %T, want original store", got)
+	}
+}
+
 func registerCityForSnapshot(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))

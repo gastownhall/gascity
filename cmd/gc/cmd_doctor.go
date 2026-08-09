@@ -383,7 +383,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
-	storeFactory := openStoreForCityReadOnlyFast(cityPath)
+	storeFactory := openStoreForCityReadOnlyFastBounded(cityPath)
 
 	// Data checks.
 	if cfgErr == nil && cfg != nil {

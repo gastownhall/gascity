@@ -127,3 +127,33 @@ func TestBacklogDepthCheckStoreErrorIsGraceful(t *testing.T) {
 		t.Errorf("CanFix = true, want false (read-only observability check)")
 	}
 }
+
+type blockingBacklogDepthStore struct {
+	beads.Store
+	release <-chan struct{}
+}
+
+func (s blockingBacklogDepthStore) ListOpen(...string) ([]beads.Bead, error) {
+	<-s.release
+	return nil, nil
+}
+
+func TestBacklogDepthCheckBoundsBlockedStoreRead(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	oldTimeout := backlogDepthDoctorTimeout
+	backlogDepthDoctorTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { backlogDepthDoctorTimeout = oldTimeout })
+
+	check := newBacklogDepthCheck("/city", func(string) (beads.Store, error) {
+		return blockingBacklogDepthStore{release: release}, nil
+	})
+	start := time.Now()
+	res := check.Run(&doctor.CheckContext{})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded completion", elapsed)
+	}
+	if res.Status != doctor.StatusWarning || !res.TimedOut {
+		t.Fatalf("result = %#v, want advisory timeout warning", res)
+	}
+}

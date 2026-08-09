@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -27,6 +28,11 @@ type backlogDepthCheck struct {
 	cityPath string
 	newStore func(string) (beads.Store, error)
 }
+
+// backlogDepthDoctorTimeout is intentionally shorter than the generic doctor
+// check timeout. This is advisory queue telemetry; a blocked BD CLI list must
+// not turn `gc doctor` into a minute-long tail latency.
+var backlogDepthDoctorTimeout = 5 * time.Second
 
 func newBacklogDepthCheck(cityPath string, newStore func(string) (beads.Store, error)) *backlogDepthCheck {
 	return &backlogDepthCheck{cityPath: cityPath, newStore: newStore}
@@ -94,6 +100,23 @@ func classifyBacklog(open []beads.Bead, readyIDs map[string]bool) backlogBreakdo
 }
 
 func (c *backlogDepthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	done := make(chan *doctor.CheckResult, 1)
+	go func() { done <- c.run() }()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(backlogDepthDoctorTimeout):
+		return &doctor.CheckResult{
+			Name:     c.Name(),
+			Status:   doctor.StatusWarning,
+			Severity: doctor.SeverityAdvisory,
+			TimedOut: true,
+			Message:  fmt.Sprintf("backlog depth unknown: listing city beads timed out after %s", backlogDepthDoctorTimeout),
+		}
+	}
+}
+
+func (c *backlogDepthCheck) run() *doctor.CheckResult {
 	res := &doctor.CheckResult{Name: c.Name(), Severity: doctor.SeverityAdvisory}
 	if c.newStore == nil || strings.TrimSpace(c.cityPath) == "" {
 		res.Status = doctor.StatusWarning

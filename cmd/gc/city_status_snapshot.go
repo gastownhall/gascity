@@ -157,6 +157,18 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads
 	return opened.Store, diagnosticPtr(opened.Diagnostic), 0
 }
 
+// statusStoreForFallback returns nil for the explicitly read-only fast store
+// opener. That opener proves only that a BD command can be constructed; its
+// List operations can still block behind Dolt during patrol. Local fallback
+// status is therefore intentionally runtime/config-only in this case instead
+// of emitting a partial response after a bounded store query times out.
+func statusStoreForFallback(store beads.Store, diagnostic *beads.BeadsDiagnostic) beads.Store {
+	if diagnostic != nil && diagnostic.PreflightGate == "read_only_fast_path" {
+		return nil
+	}
+	return store
+}
+
 func cityStatusStorePresent(cityPath string) bool {
 	for _, candidate := range []string{
 		filepath.Join(cityPath, ".beads"),
@@ -224,7 +236,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
-	if snapshot.Controller.Running && cityPath != "" {
+	if snapshot.Controller.Running && cityPath != "" && store != nil {
 		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, stderr)
 	}
 	if cfg == nil {
