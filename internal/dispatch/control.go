@@ -1322,7 +1322,7 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	}
 	stepRef := control.Metadata[beadmeta.StepRefMetadataKey]
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1402,7 +1402,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 	if rootID == "" {
 		rootID = control.ID
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1434,7 +1434,7 @@ func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error
 	if len(wanted) == 0 {
 		return nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1478,7 +1478,7 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 		rootID = control.ID
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {
@@ -1775,6 +1775,6 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 	return store.Close(beadID)
 }
 
-// Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,
+// Note: setOutcomeAndClose, propagateRetrySubjectMetadata,
 // classifyRetryAttempt, retryPreservedAssigneeWithConfig, and runRalphCheck are
 // defined in runtime.go, retry.go, and ralph.go respectively.

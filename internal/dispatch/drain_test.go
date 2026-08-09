@@ -1824,9 +1824,9 @@ func TestProcessDrainFailureCloseAbortsEnclosingScope(t *testing.T) {
 
 func mustFindDrainItemWorkStep(t *testing.T, store beads.Store, rootID string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot(%s): %v", rootID, err)
+		t.Fatalf("beads.DirectMembers(%s): %v", rootID, err)
 	}
 	for _, bead := range all {
 		if bead.ID != rootID && strings.HasPrefix(bead.Title, "Work ") {
@@ -2201,9 +2201,9 @@ func TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary(t *testing.T
 // which step carries the projection.
 func itemWorkflowBeadIDs(t *testing.T, store beads.Store, rootID string) []string {
 	t.Helper()
-	workflowBeads, err := listByWorkflowRoot(store, rootID)
+	workflowBeads, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot(%s): %v", rootID, err)
+		t.Fatalf("beads.DirectMembers(%s): %v", rootID, err)
 	}
 	ids := make([]string, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {

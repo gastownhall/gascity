@@ -615,7 +615,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
-	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
+	graphBeads, parentEdges, membership, err := collectBeadGraph(foundStore, root)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -633,9 +633,10 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
 		Body: BeadGraphResponse{
-			Root:  root,
-			Beads: graphBeads,
-			Deps:  deps,
+			Root:       root,
+			Beads:      graphBeads,
+			Deps:       deps,
+			Membership: membership,
 		},
 	}, nil
 }

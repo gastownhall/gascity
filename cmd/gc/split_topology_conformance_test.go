@@ -82,6 +82,7 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I9-warm-tick-demand", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWarmTickDemand) })
 	t.Run("I10-wake-ownership-fast-path", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWakeOwnershipFastPath) })
 	t.Run("I11-read-path-consistency", func(t *testing.T) { forEachTopology(t, conformanceReadPathConsistency) })
+	t.Run("I12-molecule-membership", func(t *testing.T) { forEachTopology(t, conformanceMoleculeMembership) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -1143,4 +1144,105 @@ func splitEnvPoolSessionBead(qualified, sessionName string) beads.Bead {
 			"state":        "active",
 		},
 	}
+}
+
+// conformanceMoleculeMembership (I12) pins WHICH beads a molecule's member set
+// contains and WHICH store has to be asked for it.
+//
+// beads.DirectMembers is the declared fan-out membership
+// (beads.MembershipDirectRootID): the root plus everything carrying
+// gc.root_bead_id. The rule is complete by construction — materialization
+// stamps the key on every step — where a dependency walk is not: a gc.kind=spec
+// sidecar is built with no DependsOn, Needs or WaitsFor, so no dep walk reaches
+// it, and on the measured live molecule gcg-arn a dep walk returned 48 of the
+// 61 beads the root-id scan returned, dropping exactly the 13 specs.
+// internal/beads/membership_test.go pins those numbers; this invariant pins
+// that the answer does not depend on the topology, only on the front door.
+//
+// The graph class is the owner, so both topologies must return the same member
+// set through e.graphStore(). A projection that resolved the store any other
+// way gets a shorter, entirely plausible answer on a split city.
+//
+// KNOWN GAP, pinned rather than asserted as desirable — the SILENT EMPTY.
+// Asked for the same root, the WORK store on a split city answers with an empty
+// member set rather than an error: the root does not resolve there (a
+// deliberate non-error, so a relocated root does not read as an empty molecule)
+// and no member carries the id, so the two absences compose into a confident
+// "this molecule has no members". That is Invariant 0 of ga-iaj7k — a
+// projection that cannot see a class must ERROR, not return [] — and it is not
+// closed. When it closes, the split arm below flips from "0 members" to "an
+// error naming the class", and both arms move together.
+func conformanceMoleculeMembership(t *testing.T, e splitEnv) {
+	front := e.graphStore()
+	root := mintDurableGraphBead(t, e, "membership molecule root", "")
+
+	step, err := front.Create(beads.Bead{
+		Title: "dependency-linked step",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.StepRefMetadataKey:    "mol.work",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create linked step: %v", err)
+	}
+	if err := front.DepAdd(root.ID, step.ID, "blocks"); err != nil {
+		t.Fatalf("wire root -> step: %v", err)
+	}
+	// The sidecar with no edges: the member only the root-id rule can reach.
+	spec, err := front.Create(beads.Bead{
+		Title: "Step spec for the linked step",
+		Type:  "spec",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.KindMetadataKey:       beadmeta.KindSpec,
+			beadmeta.SpecForRefMetadataKey: "mol.work",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create spec sidecar: %v", err)
+	}
+
+	members, err := beads.DirectMembers(front, root.ID)
+	if err != nil {
+		t.Fatalf("beads.DirectMembers through the graph front door: %v", err)
+	}
+	got := make(map[string]bool, len(members))
+	for _, m := range members {
+		got[m.ID] = true
+	}
+	for _, want := range []beads.Bead{root, step, spec} {
+		if !got[want.ID] {
+			t.Errorf("the molecule member set is missing %s (%q); %s is complete by construction on both topologies, and a short answer here is the shape that reads as a finished molecule",
+				want.ID, want.Title, beads.MembershipDirectRootID)
+		}
+	}
+	if len(members) != 3 {
+		t.Errorf("member set = %d beads, want 3 (root + step + spec); got %v", len(members), beadIDsOf(members))
+	}
+
+	// The store the projection asks decides the answer. On a split city the
+	// work store is not merely wrong, it is quietly wrong.
+	if e.split {
+		fromWork, err := beads.DirectMembers(e.work, root.ID)
+		if err != nil {
+			t.Fatalf("beads.DirectMembers through the WORK store: %v", err)
+		}
+		if len(fromWork) != 0 {
+			t.Fatalf("the WORK store answered with %d members on a split city (%v); it holds none of them, so anything but an empty set means a shadow row was minted",
+				len(fromWork), beadIDsOf(fromWork))
+		}
+		// Restate the gap as an assertion so it moves when Invariant 0 lands.
+		t.Logf("KNOWN GAP (ga-iaj7k Invariant 0): the WORK store returned an empty member set for %s instead of an error naming the graph class", root.ID)
+	}
+}
+
+// beadIDsOf renders a bead slice as ids for a failure message.
+func beadIDsOf(list []beads.Bead) []string {
+	ids := make([]string, 0, len(list))
+	for _, b := range list {
+		ids = append(ids, b.ID)
+	}
+	return ids
 }

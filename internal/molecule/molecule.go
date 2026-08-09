@@ -250,10 +250,11 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
 	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
 	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong
-	// root>) and burned ralph attempts (maintainer-city incident,
-	// gcg-wisp-y785sz). A genuine top-level head with no run chain still
-	// self-roots via its own id (ResolveRunID's selfID fallback).
+	// reconciliation then enumerated siblings via
+	// beads.DirectMembers(<wrong root>) and burned ralph attempts
+	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
+	// with no run chain still self-roots via its own id (ResolveRunID's
+	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 

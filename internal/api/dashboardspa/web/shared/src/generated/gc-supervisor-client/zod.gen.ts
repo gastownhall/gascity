@@ -3295,6 +3295,7 @@ export const zWorkflowDepResponse = z.object({
 export const zBeadGraphResponse = z.object({
     beads: z.array(zBead).nullable(),
     deps: z.array(zWorkflowDepResponse).nullable(),
+    membership: z.enum(['direct-root-id+parent-closure', 'direct-root-id+parent-closure+convoy-members']),
     root: zBead
 });
 

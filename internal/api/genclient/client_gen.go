@@ -18,6 +18,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for BeadGraphResponseMembership.
+const (
+	DirectRootIdParentClosure              BeadGraphResponseMembership = "direct-root-id+parent-closure"
+	DirectRootIdParentClosureConvoyMembers BeadGraphResponseMembership = "direct-root-id+parent-closure+convoy-members"
+)
+
+// Valid indicates whether the value is a known member of the BeadGraphResponseMembership enum.
+func (e BeadGraphResponseMembership) Valid() bool {
+	switch e {
+	case DirectRootIdParentClosure:
+		return true
+	case DirectRootIdParentClosureConvoyMembers:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BindingStatus.
 const (
 	BindingStatusActive BindingStatus = "active"
@@ -1229,8 +1247,14 @@ type BeadEventPayload struct {
 type BeadGraphResponse struct {
 	Beads *[]Bead                `json:"beads"`
 	Deps  *[]WorkflowDepResponse `json:"deps"`
-	Root  Bead                   `json:"root"`
+
+	// Membership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+	Membership BeadGraphResponseMembership `json:"membership"`
+	Root       Bead                        `json:"root"`
 }
+
+// BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+type BeadGraphResponseMembership string
 
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {

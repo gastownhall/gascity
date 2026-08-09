@@ -11,6 +11,8 @@ import (
 )
 
 // beadGraphResponse mirrors the handler's response struct for test decoding.
+// Membership is decoded as a plain string rather than beads.Membership so a
+// test can catch a spelling the vocabulary does not define.
 type beadGraphResponse struct {
 	Root  beads.Bead   `json:"root"`
 	Beads []beads.Bead `json:"beads"`
@@ -19,6 +21,7 @@ type beadGraphResponse struct {
 		To   string `json:"to"`
 		Kind string `json:"kind"`
 	} `json:"deps"`
+	Membership string `json:"membership"`
 }
 
 func createBeadWithMeta(t *testing.T, store beads.Store, title string, meta map[string]string) beads.Bead {
@@ -515,5 +518,83 @@ func TestBeadGraphDedupsDeps(t *testing.T) {
 	}
 	if len(resp.Deps) != 1 {
 		t.Errorf("len(deps) = %d, want 1 (deduplicated)", len(resp.Deps))
+	}
+}
+
+// TestBeadGraphDeclaresItsMembershipOnTheWire pins the contract the graph
+// endpoint now states about itself. The response says which rule chose Beads,
+// because a consumer cannot tell one rule's answer from another's by looking
+// at the result: on the measured live molecule gcg-arn a root-id scan and a
+// dependency walk returned 61 and 48 beads, and 48 happened to be exactly what
+// the adopt-pr driver wanted. The membership field is what makes that
+// difference legible without reading the handler.
+func TestBeadGraphDeclaresItsMembershipOnTheWire(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	root := createBeadWithMeta(t, store, "Workflow Root", map[string]string{
+		"gc.kind": "workflow",
+	})
+	// A spec sidecar: carries the root id, has no dependency edge of any kind.
+	// A dep walk cannot reach it; this endpoint must return it.
+	spec := createBeadWithMeta(t, store, "Step spec for work", map[string]string{
+		"gc.root_bead_id": root.ID,
+		"gc.kind":         "spec",
+	})
+	// An out-of-molecule bead the root merely blocks on. A dep walk reaches
+	// it; this endpoint must not return it.
+	outsider := createBeadWithMeta(t, store, "Blocker outside the molecule", nil)
+	if err := store.DepAdd(root.ID, outsider.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(root -> outsider): %v", err)
+	}
+
+	rec, resp := getGraph(t, h, state, root.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if resp.Membership != string(beads.MembershipRootIDAndParentClosure) {
+		t.Errorf("membership = %q, want %q — the wire must name the rule that produced beads, not leave a consumer to infer it",
+			resp.Membership, beads.MembershipRootIDAndParentClosure)
+	}
+
+	got := map[string]bool{}
+	for _, b := range resp.Beads {
+		got[b.ID] = true
+	}
+	if !got[spec.ID] {
+		t.Errorf("graph is missing the dependency-isolated spec sidecar %s; the endpoint would then be answering %q while declaring %q",
+			spec.ID, beads.MembershipDepReachable, resp.Membership)
+	}
+	if got[outsider.ID] {
+		t.Errorf("graph contains %s, which carries no gc.root_bead_id and is only reachable by following a blocks edge out of the molecule", outsider.ID)
+	}
+}
+
+// TestBeadGraphDeclaresConvoyMembershipOnTheWire pins the widened value: a
+// convoy root pulls in tracks-linked members, which is a different rule from
+// the root-id/parent one and is spelled differently on the wire so a consumer
+// is never told the narrower rule was applied.
+func TestBeadGraphDeclaresConvoyMembershipOnTheWire(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	member := createBeadWithMeta(t, store, "Convoy member", nil)
+	if err := store.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	rec, resp := getGraph(t, h, state, convoy.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if resp.Membership != string(beads.MembershipRootIDParentClosureAndConvoy) {
+		t.Errorf("membership = %q, want %q — a convoy root applies a rule the narrower spelling does not describe",
+			resp.Membership, beads.MembershipRootIDParentClosureAndConvoy)
 	}
 }

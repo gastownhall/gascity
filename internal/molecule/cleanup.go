@@ -18,9 +18,17 @@ import (
 // incomplete.
 const SubtreeClosedReason = "molecule cleanup: subtree force-closed by CloseSubtree"
 
-// ListSubtree returns the root bead and all transitive parent-child
-// descendants, including already-closed beads so nested open descendants are
-// still reachable through a closed intermediate node.
+// ListSubtree returns the beads.MembershipRootIDAndParentClosure member set of
+// the molecule rooted at rootID: the root, every bead carrying
+// gc.root_bead_id == rootID, and the transitive parent-child closure of all of
+// them. Closed beads are included so a nested open descendant is still
+// reachable through a closed intermediate node.
+//
+// The root-id arm is load-bearing, not decorative. Teardown callers
+// (CloseSubtree, sling.CloseAttachedSubtree, formula teardown) must reach the
+// dependency-isolated members — gc.kind=spec sidecars carry no dep edges and,
+// when materialization set no parent, no parent edge either — or the subtree
+// stays half-open and cleanup reports success on an incomplete close.
 func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 	rootID = strings.TrimSpace(rootID)
 	if store == nil || rootID == "" {

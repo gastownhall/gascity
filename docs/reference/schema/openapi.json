@@ -1140,6 +1140,14 @@
               "null"
             ]
           },
+          "membership": {
+            "description": "Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.",
+            "enum": [
+              "direct-root-id+parent-closure",
+              "direct-root-id+parent-closure+convoy-members"
+            ],
+            "type": "string"
+          },
           "root": {
             "$ref": "#/components/schemas/Bead"
           }
@@ -1147,7 +1155,8 @@
         "required": [
           "root",
           "beads",
-          "deps"
+          "deps",
+          "membership"
         ],
         "type": "object"
       },

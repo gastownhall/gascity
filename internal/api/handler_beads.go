@@ -437,13 +437,31 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 
 // BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.
 // Returns raw beads and deps — no status mapping, no presentation logic.
+//
+// Membership states which rule produced Beads. It is on the wire because a
+// consumer cannot tell one rule's answer from another's by looking at the
+// result: a dependency walk and a root-id scan return the same count on many
+// molecules and different counts on the next one. A client that needs
+// beads.MembershipDirectRootID should assert on this field rather than assume.
 type BeadGraphResponse struct {
-	Root  beads.Bead            `json:"root"`
-	Beads []beads.Bead          `json:"beads"`
-	Deps  []workflowDepResponse `json:"deps"`
+	Root       beads.Bead            `json:"root"`
+	Beads      []beads.Bead          `json:"beads"`
+	Deps       []workflowDepResponse `json:"deps"`
+	Membership beads.Membership      `json:"membership" enum:"direct-root-id+parent-closure,direct-root-id+parent-closure+convoy-members" doc:"Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars."`
 }
 
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+// collectBeadGraph resolves the member set of the graph rooted at root and the
+// parent-child edges within it. The membership rule it applied is returned
+// alongside, so the handler reports it on the wire instead of the caller
+// inferring it: beads.MembershipRootIDAndParentClosure, widened to
+// beads.MembershipRootIDParentClosureAndConvoy when the root is a convoy.
+//
+// The root-id arm is what makes this NOT beads.MembershipDepReachable, and the
+// difference is not cosmetic — on the measured live molecule gcg-arn a
+// dependency walk returns 48 of the 61 beads this returns, dropping every
+// gc.kind=spec sidecar, because spec steps are built with no dependency edges.
+// See beads.Membership.
+func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -469,21 +487,24 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 	upsert(root)
 
+	membership := beads.MembershipRootIDAndParentClosure
+
 	metadataChildren, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
+		return nil, nil, "", fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
 	}
 	for _, child := range metadataChildren {
 		upsert(child)
 	}
 
 	if root.Type == "convoy" {
+		membership = beads.MembershipRootIDParentClosureAndConvoy
 		members, err := convoycore.Members(store, root.ID, true)
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
+			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}
 		for _, member := range members {
 			upsert(member)
@@ -529,7 +550,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 			Sort:          beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
+			return nil, nil, "", fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
 		}
 		var next []string
 		for _, child := range children {
@@ -545,7 +566,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		frontier = next
 	}
 
-	return graphBeads, parentEdges, nil
+	return graphBeads, parentEdges, membership, nil
 }
 
 func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {
