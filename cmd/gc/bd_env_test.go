@@ -4367,6 +4367,32 @@ func TestApplyResolvedScopePostgresEnv_RefusesUnderivableDSN(t *testing.T) {
 	}
 }
 
+// TestApplyResolvedScopePostgresEnv_RefusalOmitsDSN keeps the projection
+// boundary's "deriving postgres endpoint for %s: %w" wrap clean. It re-emits
+// whatever the contract layer returns, and this error reaches stderr and
+// `gc --json` failure payloads, so a hand-written password in a malformed DSN
+// must not ride out with it.
+func TestApplyResolvedScopePostgresEnv_RefusalOmitsDSN(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
+	scopeRoot := t.TempDir()
+	writePGScopeFixture(t, scopeRoot, "devpw")
+
+	const dsn = "postgres://operator:sw%ordfish@db.example.com:5432/gascity"
+	err := applyResolvedScopePostgresEnv(map[string]string{}, cityPath, scopeRoot, contract.MetadataState{
+		Backend:     "postgres",
+		PostgresDSN: dsn,
+	})
+	if err == nil {
+		t.Fatalf("applyResolvedScopePostgresEnv = nil error, want refusal")
+	}
+	for _, leak := range []string{dsn, "ordfish"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error leaks %q: %q", leak, err.Error())
+		}
+	}
+}
+
 func TestEmitPostgresCredentialResolved_DedupsWithinProcess(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 

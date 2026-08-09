@@ -4,14 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
 // ErrPostgresDSNUnsupportedForm reports a postgres_dsn gc cannot derive an
 // endpoint from. Errors from ParsePostgresDSNEndpoint wrap it when the DSN is
-// not a postgres:// URL — most often because it uses libpq's keyword/value
-// form ("host=... port=..."), which bd accepts at init time but gc does not.
-// Callers match with errors.Is.
+// not a single-host postgres:// URL — most often because it uses libpq's
+// keyword/value form ("host=... port=..."), which bd accepts at init time but
+// gc does not. Callers match with errors.Is.
 var ErrPostgresDSNUnsupportedForm = errors.New("postgres_dsn must be a postgres:// (or postgresql://) URL")
 
 // PostgresEndpoint is the effective connection tuple for a postgres-backed
@@ -30,16 +31,25 @@ type PostgresEndpoint struct {
 }
 
 // ParsePostgresDSNEndpoint derives the endpoint from a postgres:// (or
-// postgresql://) URL — the password-free shape bd persists to metadata.json
-// as postgres_dsn (`bd init --backend=postgres`). A missing port defaults to
-// 5432. Query parameters (sslmode etc.) are bd's business and are ignored. A
-// userinfo password is ignored: bd never persists one, and the password
-// reaches bd via BEADS_PG_PASSWORD at command time.
+// postgresql://) URL — the password-free shape the Postgres add-on's
+// `bd init --backend=postgres --pg-url --pg-schema` persists to metadata.json
+// as postgres_dsn. A missing port defaults to 5432. Query parameters (sslmode
+// etc.) are bd's business and are ignored. A userinfo password is ignored: bd
+// strips it before persisting (pgdialect.RedactPassword, fail-closed) and
+// re-supplies it at command time from its credential ladder.
 //
-// libpq's keyword/value form ("host=... port=...") is not supported. bd
-// accepts it at init time, but gc requires the URL form to derive an endpoint
-// deterministically, and fails with ErrPostgresDSNUnsupportedForm rather than
-// deriving a partial one.
+// Three shapes are refused rather than guessed at, all wrapping
+// ErrPostgresDSNUnsupportedForm: libpq's keyword/value form ("host=..."),
+// libpq's multi-host form, and an unbracketed IPv6 literal. url.Parse splits
+// the latter two into a host that is not a host, and gc projects that host to
+// bd and keys credential lookups on it — a silently wrong endpoint is worse
+// than a refusal.
+//
+// No error returned here may quote the DSN. net/url's *url.Error renders as
+// `%s %q: %s` with the raw input, so wrapping it publishes a hand-written
+// password to stderr, `gc --json` failure payloads and CI logs. Unwrapping to
+// url.Error.Err is not sufficient either: `invalid port ":sword" after host`
+// and `invalid URL escape "%or"` still quote password fragments.
 func ParsePostgresDSNEndpoint(dsn string) (PostgresEndpoint, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
@@ -50,7 +60,7 @@ func ParsePostgresDSNEndpoint(dsn string) (PostgresEndpoint, error) {
 	}
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return PostgresEndpoint{}, fmt.Errorf("parse postgres_dsn: %w", err)
+		return PostgresEndpoint{}, fmt.Errorf("%w: not a parseable URL", ErrPostgresDSNUnsupportedForm)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "postgres", "postgresql":
@@ -60,6 +70,15 @@ func ParsePostgresDSNEndpoint(dsn string) (PostgresEndpoint, error) {
 	host := u.Hostname()
 	if host == "" {
 		return PostgresEndpoint{}, errors.New("postgres_dsn has no host")
+	}
+	if strings.Contains(host, ",") {
+		return PostgresEndpoint{}, fmt.Errorf("%w: libpq multi-host form is not supported", ErrPostgresDSNUnsupportedForm)
+	}
+	// url.Hostname strips the brackets from an IPv6 literal, so a colon here
+	// with no bracket in the raw authority means url.Parse split somewhere
+	// other than a port separator.
+	if strings.Contains(host, ":") && !strings.HasPrefix(u.Host, "[") {
+		return PostgresEndpoint{}, fmt.Errorf("%w: an IPv6 host must be bracketed, as postgres://user@[::1]:5432/db", ErrPostgresDSNUnsupportedForm)
 	}
 	port := u.Port()
 	if port == "" {
@@ -138,6 +157,40 @@ func (s MetadataState) PostgresEndpoint() (PostgresEndpoint, error) {
 		ep.Database = derived.Database
 	}
 	return ep, nil
+}
+
+// validatePostgresEndpoint is the single gate every postgres scope passes: it
+// applies the derivation, completeness and port-range rules that decide
+// whether gc can open the scope at all. LoadMetadataState and preflight's
+// contract_shape check both call it, so a preflight PASS and a successful load
+// mean the same thing — a preflight that blessed a scope the loader then
+// refused would be worse than no check. Callers that need the tuple itself
+// call PostgresEndpoint, which this guarantees will succeed.
+//
+// The returned error is a plain error with a DSN-free message; callers that
+// need a typed rejection wrap it.
+func (s MetadataState) validatePostgresEndpoint() error {
+	hasDSN := strings.TrimSpace(s.PostgresDSN) != ""
+	hasAllDiscrete := len(missingPostgresEndpointFields(PostgresEndpoint{
+		Host:     strings.TrimSpace(s.PostgresHost),
+		Port:     strings.TrimSpace(s.PostgresPort),
+		User:     strings.TrimSpace(s.PostgresUser),
+		Database: strings.TrimSpace(s.PostgresDatabase),
+	})) == 0
+	if !hasDSN && !hasAllDiscrete {
+		return errors.New("backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database")
+	}
+	endpoint, err := s.PostgresEndpoint()
+	if err != nil {
+		return err
+	}
+	if missing := missingPostgresEndpointFields(endpoint); len(missing) > 0 {
+		return fmt.Errorf("backend=postgres resolves to an incomplete endpoint: postgres_dsn supplies no %s", strings.Join(missing, ", "))
+	}
+	if port, err := strconv.Atoi(endpoint.Port); err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("postgres_port must be a TCP port (1..65535), got %q", endpoint.Port)
+	}
+	return nil
 }
 
 // missingPostgresEndpointFields names the metadata fields an endpoint still

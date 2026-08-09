@@ -310,17 +310,20 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 		if hasDSN {
 			// Gas City derives the endpoint from postgres_dsn (see
 			// MetadataState.PostgresEndpoint), so the DSN form is a shape gc
-			// understands rather than one to convert. Only a DSN gc cannot
-			// derive from — libpq's keyword/value form, a non-postgres scheme,
-			// a hostless URL — is a shape problem, and it is a hard one: the
-			// scope has no usable endpoint at all.
+			// understands rather than one to convert. The gate is
+			// validatePostgresEndpoint — the one LoadMetadataState uses — so a
+			// PASS here means the loader will accept the scope. Gating on
+			// ParsePostgresDSNEndpoint alone would PASS a DSN that parses but
+			// supplies no database, or a port outside 1..65535, both of which
+			// the loader hard-rejects.
 			//
 			// The summary stays free of the DSN itself: only
 			// PostgresDSNRedacted is sanitized on the way out, so echoing a
 			// parse error that quotes the DSN would leak a hand-written
 			// password past Redacted().
-			if _, err := ParsePostgresDSNEndpoint(metadata.PostgresDSN); err != nil {
-				return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn is not a derivable postgres:// URL", details)
+			state := MetadataState{Backend: "postgres", PostgresDSN: metadata.PostgresDSN}
+			if err := state.validatePostgresEndpoint(); err != nil {
+				return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn does not resolve to a complete postgres endpoint", details)
 			}
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses postgres_dsn shape", details)
 		}

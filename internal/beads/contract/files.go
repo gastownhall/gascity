@@ -94,12 +94,24 @@ type MetadataState struct {
 	PostgresPort     string `json:"postgres_port,omitempty"`
 	PostgresUser     string `json:"postgres_user,omitempty"`
 	PostgresDatabase string `json:"postgres_database,omitempty"`
-	// PostgresDSN and PostgresSchema are bd's postgres shape:
-	// `bd init --backend=postgres` persists a password-free connection URL
-	// plus the per-workspace search_path schema instead of the discrete
-	// host/port/user/database fields above. The password never lands on
-	// disk — bd reads BEADS_PG_PASSWORD (or a credential command) at
-	// command time.
+	// PostgresDSN and PostgresSchema are bd's postgres shape, and the only
+	// shape any bd writes: the Postgres add-on's
+	// `bd init --backend=postgres --pg-url --pg-schema` persists a
+	// password-free connection URL plus the per-workspace search_path schema
+	// (bd-enterprise cmd/bd/backend_init_distribution_enterprise.go,
+	// runInitPostgres), and reads them back through
+	// internal/storage/postgres/fromconfig.go. The discrete
+	// host/port/user/database fields above are gc's own draft-era shape; no
+	// bd writes or reads them. The password never lands on disk —
+	// pgdialect.RedactPassword strips it fail-closed before the write, and bd
+	// re-supplies it at command time from BEADS_PG_PASSWORD_COMMAND or
+	// BEADS_PG_PASSWORD.
+	//
+	// OSS bd carries these two fields as deprecated round-trip-only storage
+	// and refuses backend=postgres outright; only the add-on build can open
+	// such a workspace. gc must therefore preserve the keys it finds and
+	// never force an operator to hand-convert away from a shape bd will
+	// write back.
 	PostgresDSN    string `json:"postgres_dsn,omitempty"`
 	PostgresSchema string `json:"postgres_schema,omitempty"`
 }
@@ -399,30 +411,12 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	}
 
 	if state.Backend == "postgres" {
-		hasDSN := strings.TrimSpace(state.PostgresDSN) != ""
-		hasAllDiscrete := state.PostgresHost != "" && state.PostgresPort != "" && state.PostgresUser != "" && state.PostgresDatabase != ""
-		if !hasDSN && !hasAllDiscrete {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: "backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database",
-			}
-		}
-		endpoint, err := state.PostgresEndpoint()
-		if err != nil {
+		// validatePostgresEndpoint is shared with preflight's contract_shape
+		// check, and its messages never quote postgres_dsn: this Reason is
+		// rendered to stderr and into `gc --json` failure payloads, where a
+		// hand-written password would outlive the file it came from.
+		if err := state.validatePostgresEndpoint(); err != nil {
 			return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error()}
-		}
-		if missing := missingPostgresEndpointFields(endpoint); len(missing) > 0 {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: fmt.Sprintf("backend=postgres resolves to an incomplete endpoint: postgres_dsn supplies no %s", strings.Join(missing, ", ")),
-			}
-		}
-		port, err := strconv.Atoi(endpoint.Port)
-		if err != nil || port < 1 || port > 65535 {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", endpoint.Port),
-			}
 		}
 	}
 
@@ -434,12 +428,21 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 // the opposite backend is mixed. For empty or unknown backends, mixed still
 // means both Dolt-shaped and Postgres-shaped fields are populated.
 //
+// postgres_dsn and postgres_schema are deliberately absent: they are bd's own
+// fields, retained across a re-init, so a Postgres workspace flipped to Dolt
+// carries them with no operator involvement. A declared backend is not
+// ambiguous and the residue is inert, so it is scrubbed by
+// crossBackendKeysToScrub on the next canonicalise rather than made fatal —
+// this guard exists to catch configurations gc cannot interpret, not to brick
+// a bootable city over keys it knows how to remove. The discrete
+// postgres_host/port/user/database fields have no such producer and stay
+// fatal.
+//
 // Field-iteration order is the JSON-key declaration order on MetadataState
 // (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database, postgres_dsn, postgres_schema). When state.Backend is
-// empty or unknown and both backend families appear, the first populated
-// field across both backends wins (with Dolt fields preferred per
-// declaration order).
+// postgres_database). When state.Backend is empty or unknown and both backend
+// families appear, the first populated field across both backends wins (with
+// Dolt fields preferred per declaration order).
 func mixedBackendField(state MetadataState) (string, bool) {
 	type entry struct {
 		name    string
@@ -453,8 +456,6 @@ func mixedBackendField(state MetadataState) (string, bool) {
 		{"postgres_port", state.PostgresPort, "postgres"},
 		{"postgres_user", state.PostgresUser, "postgres"},
 		{"postgres_database", state.PostgresDatabase, "postgres"},
-		{"postgres_dsn", state.PostgresDSN, "postgres"},
-		{"postgres_schema", state.PostgresSchema, "postgres"},
 	}
 	var firstDolt, firstPostgres string
 	for _, f := range fields {

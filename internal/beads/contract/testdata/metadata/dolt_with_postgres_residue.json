@@ -3,5 +3,6 @@
   "backend": "dolt",
   "dolt_mode": "server",
   "dolt_database": "hq",
-  "postgres_dsn": "postgres://bd@db.example.test:5432/beads"
+  "postgres_dsn": "postgres://bd@db.example.test:5432/beads",
+  "postgres_schema": "city_x"
 }
