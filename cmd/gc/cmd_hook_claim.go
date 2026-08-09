@@ -33,7 +33,7 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
-var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
+var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithExactEnvContext
 
 type hookClaimOptions struct {
 	Assignee           string

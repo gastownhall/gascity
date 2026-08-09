@@ -71,10 +71,21 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // budget (for example the claim-time gc.current_run_id decoration) use this so a
 // slow or stuck bd child cannot outlast that budget.
 func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(ctx, env)
+	return execCommandRunner(ctx, env, processEnvSnapshotExcludingNativeDoltOpen)
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(parent, env, processEnvSnapshotExcludingNativeDoltOpen)
+}
+
+// ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
+// but replaces the child environment instead of layering overrides onto the
+// parent process. Use it when env is a complete, already-scrubbed projection.
+func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunner(ctx, env, func() []string { return nil })
+}
+
+func execCommandRunner(parent context.Context, env map[string]string, baseEnv func() []string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		execName := name
 		if name == "bd" {
@@ -106,7 +117,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		cmd.Env = execEnvFor(name, baseEnv(), env)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
