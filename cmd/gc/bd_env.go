@@ -140,9 +140,10 @@ func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 // taking the scope offline. Only the scope's own binding surfaces an error.
 //
 // This is the single predicate for "gc does not own this store": which bd
-// binary to run, whether to project a Dolt environment, whether to manage a
-// Dolt runtime, and whether the scope needs a local Dolt identity are all the
-// same question asked from four places.
+// binary to run, whether to project a Dolt environment, whether to manage or
+// recover a Dolt runtime, and whether the scope needs a local Dolt identity are
+// all the same question asked from different places. A site that answers it
+// some other way is how the store gc does not serve acquires a Dolt server.
 func scopeStoreIsExternallyBound(cityPath, scopeRoot string) (bool, error) {
 	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
 	if err != nil || completeBinding {
@@ -153,6 +154,15 @@ func scopeStoreIsExternallyBound(cityPath, scopeRoot string) (bool, error) {
 	}
 	inherited, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 	return err == nil && inherited, nil
+}
+
+// scopeStoreIsExternallyBoundBestEffort answers scopeStoreIsExternallyBound for
+// callers that have no way to report a read failure. A scope whose binding
+// cannot be read is treated as gc's own, which is the conservative answer: the
+// paths that would then run all fail loudly on their own metadata read.
+func scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot string) bool {
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
+	return err == nil && bound
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
@@ -393,13 +403,20 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 }
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
-// Dolt projection would resolve auth for the city scope — the same
-// ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv and its
+// Dolt projection would resolve auth for the city scope: the city's store
+// is gc's to project, and the scope config resolves authoritative — the
+// same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv and its
 // managed fallback apply before calling applyCanonicalDoltAuthEnv.
 // Callers that feed ambient environments into the projection use this
 // to strip untrusted password mirrors from the resolution input without
 // breaking the strict no-op pass-through for non-authoritative scopes.
+// A city served by a storage binding gets no projection at all, so
+// stripping its operator-set password mirrors would remove auth nothing
+// downstream restores.
 func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, cityPath) {
+		return false
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
 	if err != nil {
 		return false
@@ -506,7 +523,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		return true, metaErr
 	}
 	if resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity && meta.Backend == "" {
-		if inherited, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
+		if inherited, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 			return true, err
 		} else if inherited {
 			return true, nil
@@ -631,15 +648,6 @@ func scopeOverridesCityBackend(cityPath, scopeRoot string) bool {
 // scopeMetadataJSONPath returns the absolute path to a scope's
 // .beads/metadata.json. Centralized so the dispatcher and the recovery
 // hook helpers agree on the file location.
-// scopeStoreIsExternallyBoundBestEffort answers scopeStoreIsExternallyBound for
-// callers that have no way to report a read failure. A scope whose binding
-// cannot be read is treated as gc's own, which is the conservative answer: the
-// paths that would then run all fail loudly on their own metadata read.
-func scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot string) bool {
-	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
-	return err == nil && bound
-}
-
 func scopeMetadataJSONPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", "metadata.json")
 }
@@ -988,9 +996,23 @@ func managedLocalDoltEnv(env map[string]string) bool {
 	return managedLocalDoltHost(env["GC_DOLT_HOST"])
 }
 
+// managedBDRecoveryAllowed is the one place that answers "may gc recover this
+// scope's store?" — both the retry and the recovery classifier ask it.
+//
+// A scope served by a storage binding is answered first and unconditionally.
+// The projection for such a scope withholds the whole backend namespace, so
+// GC_DOLT_HOST arrives empty and every question below it reads a withheld
+// projection as managed-local Dolt: canonicalScopeDoltTarget reports no managed
+// runtime, and managedLocalDoltEnv agrees with an empty host. Recovering on
+// that answer would start a managed Dolt server for a store gc does not serve.
+// A binding that cannot be read is answered the same way, because a scope whose
+// ownership is unknown is not a scope to start servers for.
 func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string) bool {
 	if scopeRoot == "" {
 		scopeRoot = cityPath
+	}
+	if bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot); err != nil || bound {
+		return false
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot); err != nil {
 		return contract.IsManagedRuntimeUnavailable(err) && managedLocalDoltEnv(env)

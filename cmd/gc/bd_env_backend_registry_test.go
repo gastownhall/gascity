@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // writeUnregisteredBackendScope writes an authoritative scope whose metadata
@@ -95,6 +96,69 @@ func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), `"mysql"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
 		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
+	}
+}
+
+// TestInheritedRigSessionEnvRefusesUnregisteredCityBackend pins the refusal on
+// the projection path an agent session actually takes.
+//
+// A rig that inherits its city's endpoint reads the city's backend, so it must
+// meet the same refusal the city scope meets. The alternative is the one thing
+// unprojectableBackendError's guarantee forbids: an agent session pointed at a
+// Dolt endpoint left over in the city's config for a city gc just refused to
+// classify, with bd in that session writing there.
+func TestInheritedRigSessionEnvRefusesUnregisteredCityBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "rigs", "fe")
+	for _, dir := range []string{cityPath, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A city mid-migration: the backend flipped to a name this build does not
+	// register while the previous Dolt endpoint outlived it in the config.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: leftover-dolt.example.test
+dolt.port: 3306
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"mysql"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.host: leftover-dolt.example.test
+dolt.port: 3306
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigs := []config.Rig{{Name: "fe", Path: rigDir, Prefix: "fe"}}
+
+	_, cityErr := sessionBackendEnvWithError(cityPath, "", rigs)
+	if cityErr == nil {
+		t.Fatal("city session env accepted an unregistered backend")
+	}
+
+	env, err := sessionBackendEnvWithError(cityPath, rigDir, rigs)
+	if err == nil {
+		t.Fatalf("inherited rig session env = %v, want the refusal the city session gets: %v", env, cityErr)
+	}
+	if !errors.Is(err, contract.ErrUnknownBackend) {
+		t.Fatalf("refusal = %v, want it to wrap ErrUnknownBackend", err)
+	}
+	if !strings.Contains(err.Error(), `"mysql"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if got := env[key]; got != "" {
+			t.Errorf("env[%q] = %q, want no endpoint projected for a refused backend", key, got)
+		}
 	}
 }
 

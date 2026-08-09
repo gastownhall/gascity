@@ -76,11 +76,19 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 }
 
+// TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry runs a real
+// bd shim that fails the way an unreachable external store fails, because that
+// is the only failure shape bdTransportRetryableError matches. Anything else
+// leaves the retry branch unreached and the assertion vacuous no matter what
+// the guard does.
 func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testing.T) {
 	cityPath := t.TempDir()
 	binDir := t.TempDir()
 	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho clean-runner-sentinel credentials=$BEADS_CREDENTIALS_FILE >&2\nexit 17\n"), 0o755); err != nil {
+	invocations := filepath.Join(t.TempDir(), "bd-invocations")
+	shim := fmt.Sprintf("#!/bin/sh\necho run >> %q\n"+
+		"echo clean-runner-sentinel credentials=$BEADS_CREDENTIALS_FILE: dial tcp 10.0.0.5:5432: connect: connection refused >&2\nexit 17\n", invocations)
+	if err := os.WriteFile(bdPath, []byte(shim), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
@@ -96,6 +104,14 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	credentialsPath := filepath.Join(t.TempDir(), "custom-credentials")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() { recoverManagedBDCommand = origRecover })
+	recoverCalls := 0
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
 	_, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
 	if err == nil {
 		t.Fatal("runner error = nil, want fake bd failure")
@@ -106,9 +122,199 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	if !strings.Contains(err.Error(), "credentials="+credentialsPath) {
 		t.Fatalf("runner error = %q, want preserved credential file", err)
 	}
-	if strings.Contains(err.Error(), "managed recovery") {
-		t.Fatalf("runner error = %q, managed retry path must not run", err)
+	if recoverCalls != 0 {
+		t.Errorf("recoverCalls = %d, want 0: gc must not run managed-Dolt recovery for a store it does not manage", recoverCalls)
 	}
+	if got := countBdShimInvocations(t, invocations); got != 1 {
+		t.Errorf("bd invocations = %d, want 1: a bound scope's failed command must not be retried", got)
+	}
+}
+
+func countBdShimInvocations(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "run\n")
+}
+
+// boundScopeTransportProbe stubs the bd exec layer and the managed-recovery
+// hook and counts both. The stubbed bd fails with a transport-shaped error
+// because that is the one shape that reaches the managed-Dolt retry — the work
+// a scope served by a storage binding gc does not manage must never trigger.
+type boundScopeTransportProbe struct {
+	attempts     int
+	recoverCalls int
+	bdErr        error
+}
+
+func newBoundScopeTransportProbe(t *testing.T) *boundScopeTransportProbe {
+	t.Helper()
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+	probe := &boundScopeTransportProbe{
+		bdErr: errors.New("dial tcp 10.0.0.5:5432: connect: connection refused"),
+	}
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			probe.attempts++
+			return nil, probe.bdErr
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		probe.recoverCalls++
+		return nil
+	}
+	return probe
+}
+
+func (p *boundScopeTransportProbe) assertNoManagedRecovery(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("runner err = nil, want the bd transport failure surfaced")
+	}
+	if !errors.Is(err, p.bdErr) {
+		t.Fatalf("err = %q, want the bd transport error preserved", err)
+	}
+	if p.attempts != 1 {
+		t.Errorf("attempts = %d, want 1: a store gc does not manage is not gc's to retry", p.attempts)
+	}
+	if p.recoverCalls != 0 {
+		t.Errorf("recoverCalls = %d, want 0: managed-Dolt recovery must not run for a store gc does not manage", p.recoverCalls)
+	}
+}
+
+// writeBoundCityFixture gives a city a complete storage binding naming a
+// backend this build has never registered, so the assertions below pin the
+// binding shape rather than a backend name.
+func writeBoundCityFixture(t *testing.T, cityPath string) {
+	t.Helper()
+	writeOpaqueBindingScopeFixtureWithBackend(t, cityPath, "acme")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeInheritingRigFixture(t *testing.T, cityPath, name string) string {
+	t.Helper()
+	rigDir := filepath.Join(cityPath, "rigs", name)
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: rig
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return rigDir
+}
+
+// TestControlBdCommandRunnerForCityBoundCitySkipsManagedRecovery pins the
+// control dispatcher's city runner, which has no equivalent of the
+// bdContextCommandRunnerForCity short-circuit that protects `gc bd`.
+//
+// A transient outage of the bound store must surface as the bd error it is.
+// Recovering here would start a managed Dolt server for a city gc explicitly
+// does not own, and retrying would double the load on a backend already down.
+func TestControlBdCommandRunnerForCityBoundCitySkipsManagedRecovery(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	writeBoundCityFixture(t, cityPath)
+
+	probe := newBoundScopeTransportProbe(t)
+	_, err := controlBdCommandRunnerForCity(cityPath)(cityPath, "bd", "list", "--json")
+	probe.assertNoManagedRecovery(t, err)
+}
+
+// TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery covers both ways a
+// rig ends up on a store gc does not manage: its own binding, and the city's
+// binding inherited.
+func TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery(t *testing.T) {
+	t.Run("rig inherits the city binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "inherited")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "inherited", Path: "rigs/inherited", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := bdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+
+	t.Run("rig carries its own binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "own")
+		writeOpaqueBindingScopeFixtureWithBackend(t, rigDir, "acme")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "own", Path: "rigs/own", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := bdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+}
+
+// TestCanonicalScopeDoltProjectionAuthoritativeSkipsABoundCity pins the last
+// consumer of "is this store gc's to project?".
+//
+// The answer feeds mergeCanonicalScopeDoltEnv, which strips password mirrors
+// from the resolution input because the projection is about to supply the
+// resolved auth itself. A bound city gets no projection, so stripping there
+// removes an operator's credential and puts nothing back.
+func TestCanonicalScopeDoltProjectionAuthoritativeSkipsABoundCity(t *testing.T) {
+	cityPath := t.TempDir()
+	writeBoundCityFixture(t, cityPath)
+
+	if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+		t.Fatal("canonicalScopeDoltProjectionAuthoritative = true for a city gc does not project")
+	}
+}
+
+// TestControlBdCommandRunnerForRigBoundScopeSkipsManagedRecovery is the
+// control-dispatcher companion to
+// TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery. Every rig store the
+// controller opens runs through this runner.
+func TestControlBdCommandRunnerForRigBoundScopeSkipsManagedRecovery(t *testing.T) {
+	t.Run("rig inherits the city binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "inherited")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "inherited", Path: "rigs/inherited", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := controlBdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+
+	t.Run("rig carries its own binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "own")
+		writeOpaqueBindingScopeFixtureWithBackend(t, rigDir, "acme")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "own", Path: "rigs/own", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := controlBdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
 }
 
 // TestRuntimeEnvDelegatesCompleteStorageBindingToBd is the end-to-end proof
@@ -4305,10 +4511,19 @@ func assertRefusesUnregisteredBackend(t *testing.T, err error) {
 
 func writeOpaqueBindingScopeFixture(t *testing.T, scopeRoot string) {
 	t.Helper()
+	writeOpaqueBindingScopeFixtureWithBackend(t, scopeRoot, "postgres")
+}
+
+// writeOpaqueBindingScopeFixtureWithBackend writes a complete storage binding
+// naming an arbitrary backend. Tests that pin the binding shape rather than a
+// particular vocabulary pass a name this build has never registered, so a
+// regression cannot hide behind a leftover special case for a known name.
+func writeOpaqueBindingScopeFixtureWithBackend(t *testing.T, scopeRoot, backend string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta := `{"backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads"}`
+	meta := fmt.Sprintf(`{"backend":%q,"storage_endpoint":"%s://bd@db.example.test:5432","storage_database":"beads"}`, backend, backend)
 	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}

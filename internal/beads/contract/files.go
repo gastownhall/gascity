@@ -95,7 +95,7 @@ type MetadataState struct {
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
 //
-// Returned by LoadMetadataState for JSON parse failures and for every E1–E5
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E2
 // rejection in the metadata contract. Callers may use errors.As to
 // discriminate parse failures from I/O failures (which surface as plain OS
 // errors).
@@ -333,7 +333,7 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 // Returns (zero, false, nil) when the file does not exist — callers decide
 // whether absence is an error in their context (mirrors ReadIssuePrefix and
 // ReadDoltDatabase). Returns a non-nil error for read failures other than
-// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
+// ENOENT and for any of the E1–E2 rejection cases. Validation failures are
 // wrapped in *MetadataParseError; callers may use errors.As to discriminate.
 //
 // Validation order is deterministic: the operator always sees the same
