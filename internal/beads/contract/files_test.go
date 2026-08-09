@@ -1642,6 +1642,119 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 	}
 }
 
+// TestLoadMetadataStateRejectionOrderIsPinned holds the documented E1 → E3 → E2
+// → E4 → E5 ladder in place.
+//
+// The order is a contract, not an accident: an operator whose metadata is wrong
+// in several ways must see the same top-most message on every gc invocation, or
+// the fix they are told to make changes between two runs of the same command.
+// Each case below violates two adjacent rungs at once and asserts which one
+// speaks, so swapping any pair of checks in LoadMetadataState fails here.
+func TestLoadMetadataStateRejectionOrderIsPinned(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name     string
+		metadata string
+		want     string
+		loses    string
+	}{
+		{
+			name:     "E1 parse beats everything downstream",
+			metadata: `{"backend":"postgress","dolt_database":"hq","postgres_host":"h"`,
+			want:     "invalid metadata.json:",
+			loses:    "unsupported backend",
+		},
+		{
+			name:     "E3 mixed backends beats E2 unknown backend",
+			metadata: `{"backend":"postgress","dolt_database":"hq","postgres_host":"h"}`,
+			want:     "cannot mix dolt and postgres fields in a single scope (backend=postgress but dolt_database is also set)",
+			loses:    "unsupported backend",
+		},
+		{
+			name:     "E2 unknown backend speaks once nothing is mixed",
+			metadata: `{"backend":"postgress","database":"beads"}`,
+			want:     `unsupported backend "postgress"`,
+			loses:    "cannot mix dolt and postgres fields",
+		},
+		{
+			name:     "E3 mixed backends beats E4 postgres-required",
+			metadata: `{"backend":"postgres","dolt_database":"hq"}`,
+			want:     "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
+			loses:    "backend=postgres requires",
+		},
+		{
+			name:     "E4 postgres-required beats E5 port format",
+			metadata: `{"backend":"postgres","postgres_host":"h","postgres_port":"abc","postgres_database":"d"}`,
+			want:     "backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database",
+			loses:    "must be a TCP port",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			if err := fs.WriteFile(path, []byte(tc.metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, ok, err := LoadMetadataState(fs, path)
+			if err == nil || ok {
+				t.Fatalf("LoadMetadataState() = ok %v, err %v, want a rejection", ok, err)
+			}
+			var parseErr *MetadataParseError
+			if !errors.As(err, &parseErr) {
+				t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+			}
+			if !strings.Contains(parseErr.Reason, tc.want) {
+				t.Fatalf("top-most rejection = %q, want substring %q", parseErr.Reason, tc.want)
+			}
+			if strings.Contains(parseErr.Reason, tc.loses) {
+				t.Fatalf("rejection %q reports the later check %q — the ladder was reordered", parseErr.Reason, tc.loses)
+			}
+		})
+	}
+}
+
+// TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet asserts the
+// content of the E2 refusal, not just that one happened.
+//
+// The message is the deliverable. gc is assembled in more than one shape, and a
+// refusal that recites a list some other assembly's author typed sends the
+// operator to debug a build they do not have. Reading the enumeration back out
+// of the registry is what keeps the sentence true wherever it is printed.
+func TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet(t *testing.T) {
+	fs := fsys.OSFS{}
+	path, _ := copyMetadataFixture(t, fs, "reject_unknown_backend.json")
+
+	_, _, err := LoadMetadataState(fs, path)
+	if err == nil {
+		t.Fatal("LoadMetadataState() accepted an unregistered backend")
+	}
+	if !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("LoadMetadataState() error = %v, want ErrUnknownBackend", err)
+	}
+
+	registered, regErr := RegisteredBackends()
+	if regErr != nil {
+		t.Fatal(regErr)
+	}
+	var parseErr *MetadataParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+	}
+	want := `unsupported backend "postgress" (supported: ` + strings.Join(registered, ", ") + `); ` + BackendNotOpenedGuarantee
+	if parseErr.Reason != want {
+		t.Fatalf("E2 reason = %q, want %q", parseErr.Reason, want)
+	}
+	for _, name := range registered {
+		if !strings.Contains(parseErr.Reason, name) {
+			t.Fatalf("E2 reason %q omits registered backend %q", parseErr.Reason, name)
+		}
+	}
+	if !strings.Contains(parseErr.Reason, BackendNotOpenedGuarantee) {
+		t.Fatalf("E2 reason %q drops the data-safety guarantee", parseErr.Reason)
+	}
+}
+
 func TestLoadMetadataStateSurfacesIOErrors(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

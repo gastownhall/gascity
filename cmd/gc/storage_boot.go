@@ -57,6 +57,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
@@ -247,8 +248,8 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// recorded, keeps the event stream honest: a permanently unservable
 		// binding must not publish converged on every boot.
 		if opener := plannedBindingOpener(plan, binding); opener == nil {
-			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
-				logPrefix, binding, storage.Bindings[binding].Provider)
+			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
+				logPrefix, binding, storage.Bindings[binding].Provider, contract.BackendNotOpenedGuarantee)
 		}
 		location, err := servedBindingLocation(plan, binding, storage.Bindings[binding])
 		if err != nil {
@@ -618,8 +619,8 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	opener, ok := storebinding.EngineOpenerFor(planned)
 	if !ok {
-		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served",
-			target.Binding, planned.ProviderID)
+		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
+			target.Binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
 	}
 	store, closer, err := opener.OpenEngine(planned.Spec, planned.AssignedClasses)
 	if err != nil {

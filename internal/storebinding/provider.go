@@ -1565,9 +1565,25 @@ func (r *ProviderRegistry) Lookup(id ProviderID) (ProviderFactory, error) {
 	}
 	factory, ok := r.factories[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownProvider, id)
+		return nil, fmt.Errorf("%w: %q (compiled in: %s)", ErrUnknownProvider, id, strings.Join(r.registeredIDsLocked(), ", "))
 	}
 	return factory, nil
+}
+
+// registeredIDsLocked lists the provider IDs compiled into this registry so a
+// refusal can enumerate them. "Provider not found" is only actionable next to
+// the list it was not found in — otherwise the operator cannot tell a typo from
+// a build that never carried the provider.
+func (r *ProviderRegistry) registeredIDsLocked() []string {
+	ids := make([]string, 0, len(r.factories))
+	for id := range r.factories {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return []string{"none"}
+	}
+	return ids
 }
 
 // New validates a binding and constructs only its exact registered provider.

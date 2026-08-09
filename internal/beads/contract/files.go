@@ -127,11 +127,19 @@ type MetadataParseError struct {
 	Path string
 	// Reason is the verbatim rejection reason text (the part after `: `).
 	Reason string
+	// Err is the typed cause, when the rejection has one. E2 carries
+	// *UnknownBackendError so a caller can ask whether this build simply does
+	// not register the backend — a fact worth acting on differently from
+	// malformed metadata — without matching on Reason.
+	Err error
 }
 
 func (e *MetadataParseError) Error() string {
 	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
 }
+
+// Unwrap exposes the typed cause for errors.Is and errors.As.
+func (e *MetadataParseError) Unwrap() error { return e.Err }
 
 var deprecatedMetadataKeys = []string{
 	"dolt_host",
@@ -368,9 +376,13 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 // Validation order is deterministic: the operator always sees the same
 // top-most message when several things are wrong. Order is JSON parse (E1) →
 // mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5). An empty Backend is permitted at the parse
-// layer; downstream consumers that need a backend must check
-// state.Backend != "" themselves.
+// postgres-port-format (E5). E2 asks the compiled backend-name registry
+// (backend_bundle.go) rather than a literal allowlist, so its refusal
+// enumerates what this build actually registers; the position of the question
+// in the ladder is unchanged and pinned by
+// TestLoadMetadataStateRejectionOrderIsPinned. An empty Backend is permitted at
+// the parse layer — it is a registered name — and downstream consumers that
+// need a backend must check state.Backend != "" themselves.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -400,14 +412,8 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres":
-		// allowed
-	default:
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres)", state.Backend),
-		}
+	if err := RecognizeBackend(state.Backend); err != nil {
+		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
 	}
 
 	if state.Backend == "postgres" {

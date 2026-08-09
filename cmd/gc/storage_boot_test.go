@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
@@ -776,6 +777,9 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 	if !strings.Contains(err.Error(), string(planned.ProviderID)) {
 		t.Errorf("the refusal does not name the provider %q: %v", planned.ProviderID, err)
 	}
+	if !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+		t.Errorf("the refusal does not tell the operator their storage is untouched: %v", err)
+	}
 	// Positive evidence that the refusal opened nothing: the binding parent is
 	// listed and the root is not among its entries. A stat of the database
 	// path would report "absent" just as readily for a path typo.
@@ -898,15 +902,29 @@ func TestStorageGateChecksTheRollbackSpelling(t *testing.T) {
 // TestStorageGateRefusesAnUnknownProvider proves the plan's structural refusals
 // reach boot: a binding naming a provider this binary does not compile in stops
 // the city instead of being ignored.
+//
+// The refusal also enumerates the providers this binary does carry. "Provider
+// not found" alone cannot tell an operator whether they typed the ID wrong or
+// are running a build that never had it, and those have different fixes.
 func TestStorageGateRefusesAnUnknownProvider(t *testing.T) {
 	root := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(root, "store"))
 	cfg.Storage.Bindings["infra"] = config.StorageBindingConfig{Provider: "not-compiled-in", Path: filepath.Join(root, "store")}
 
-	if _, err := storageBootGate(root, cfg, "gc start", nil, io.Discard); err == nil {
+	_, err := storageBootGate(root, cfg, "gc start", nil, io.Discard)
+	if err == nil {
 		t.Fatal("a binding naming an uncompiled provider started the city")
-	} else if !errors.Is(err, storebinding.ErrUnknownProvider) {
-		t.Errorf("the refusal is %v, want an %v", err, storebinding.ErrUnknownProvider)
+	}
+	if !errors.Is(err, storebinding.ErrUnknownProvider) {
+		t.Fatalf("the refusal is %v, want an %v", err, storebinding.ErrUnknownProvider)
+	}
+	if !strings.Contains(err.Error(), `"not-compiled-in"`) {
+		t.Errorf("the refusal does not name the provider: %v", err)
+	}
+	for _, factory := range compiledStorageProviderFactories() {
+		if !strings.Contains(err.Error(), string(factory.ID())) {
+			t.Errorf("the refusal omits compiled provider %q: %v", factory.ID(), err)
+		}
 	}
 }
 

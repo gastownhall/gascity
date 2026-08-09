@@ -555,8 +555,31 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		}
 		return true, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
+		return true, unprojectableBackendError(meta.Backend, scopeRoot)
 	}
+}
+
+// unprojectableBackendError refuses a backend this projector has no arm for.
+//
+// It reports the same four facts the metadata loader reports — the name, where
+// it was found, what this build registers, and that nothing was opened —
+// because an operator who meets one backend refusal must not have to learn a
+// second vocabulary to read the next one. This is the last guard before a bd
+// subprocess would inherit the ambient environment, so it never returns nil.
+//
+// A registered backend arriving here is a composition defect rather than bad
+// metadata (a registrar added a name without an env-projection arm), and the
+// message says so instead of telling the operator their metadata is wrong.
+func unprojectableBackendError(backend, scopeRoot string) error {
+	if err := contract.RecognizeBackend(backend); err != nil {
+		return fmt.Errorf("%w (scope %s)", err, scopeRoot)
+	}
+	supported, err := contract.RegisteredBackends()
+	if err != nil {
+		return fmt.Errorf("backend %q for scope %s cannot be projected: %w; %s", backend, scopeRoot, err, contract.BackendNotOpenedGuarantee)
+	}
+	return fmt.Errorf("backend %q for scope %s is registered by this build but has no environment projection (registered: %s); %s",
+		backend, scopeRoot, strings.Join(supported, ", "), contract.BackendNotOpenedGuarantee)
 }
 
 func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, error) {
@@ -585,7 +608,7 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 	case "", "dolt", "doltlite":
 		return false, nil
 	default:
-		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
+		return true, unprojectableBackendError(meta.Backend, cityPath)
 	}
 }
 
