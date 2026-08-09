@@ -676,7 +676,7 @@ func TestSnapshotDoltProcessesForConfigRootsCatchesSourceTreeLeak(t *testing.T) 
 		t.Errorf("real city server PID 1003 must not be snapshotted (the reaper kills these): %#v", got)
 	}
 
-	// The pre-fix behaviour, pinned so a regression to a single root is caught.
+	// The pre-fix behavior, pinned so a regression to a single root is caught.
 	tempOnly, err := snapshotDoltProcessesForConfigRoots(enumerate, []string{tempRoot})
 	if err != nil {
 		t.Fatalf("snapshotDoltProcessesForConfigRoots(tempRoot only): %v", err)

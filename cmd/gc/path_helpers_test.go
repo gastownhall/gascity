@@ -123,7 +123,7 @@ type doltLeakGuardedTestingM struct {
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
 	// A failure here must not be fatal: os.Getwd only fails in exotic cases
 	// (an unlinked cwd), and losing the second root degrades the guard to its
-	// previous tempRoot-only behaviour rather than breaking every test run.
+	// previous tempRoot-only behavior rather than breaking every test run.
 	sourceRoot, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: resolving source root: %v\n", err) //nolint:errcheck
