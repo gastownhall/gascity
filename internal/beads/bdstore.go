@@ -1197,6 +1197,14 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // treat ErrConditionalReleaseUnsupported as "take a conditional recheck
 // fallback" (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb
 // path never returns it for a precondition miss.
+//
+// id must be a canonical full bead ID, the same requirement Update documents.
+// bd's resolver prefix/substring-matches an id with no exact hit, and the
+// preconditions are then evaluated against whatever it resolved, so the verb
+// path verifies the id names exactly one existing bead before it mutates
+// anything and returns an error wrapping ErrIDCollision when bd resolved a
+// different one (gcy-g4o). The raw-SQL fallback matches id literally and needs
+// no such check.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	if !s.conditionalReleaseUnsupported() {
 		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)

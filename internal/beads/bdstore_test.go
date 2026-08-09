@@ -3413,11 +3413,16 @@ esac
 // legacyBdReleaseRunner adapts a runner that only understands the raw-SQL
 // release path to bd 1.0.4 semantics: the native conditional-release verb is
 // rejected as an unknown flag, exactly as a bd predating gastownhall/beads#5364
-// rejects it, so the store latches its fallback. Every test that pins the
-// generated SQL is a FALLBACK-path test — the minimum supported bd
+// rejects it, so the store latches its fallback. It also answers the verb path's
+// exact-ID preflight by resolving the id to itself, so a test that pins the
+// generated SQL still sees only the SQL. Every test that pins the generated SQL
+// is a FALLBACK-path test — the minimum supported bd
 // (deps.env BD_PREV_VERSION=v1.0.4) still takes it — and must go through this.
 func legacyBdReleaseRunner(inner beads.CommandRunner) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "show" && args[1] == "--json" {
+			return []byte(`[{"id":"` + args[2] + `"}]`), nil
+		}
 		if len(args) > 0 && args[0] == "update" {
 			for _, arg := range args {
 				if arg == "--if-assignee" {

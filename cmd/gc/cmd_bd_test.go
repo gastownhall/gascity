@@ -2562,6 +2562,80 @@ prefix = "fe"
 	}
 }
 
+// TestDoBdReleaseIfCurrentRefusesAFuzzyIDCollision covers the one `gc bd` write
+// that never reaches the pre-flight exact-ID guard: release-if-current is
+// dispatched before that block and bdMutationWriteIDs does not recognize it, so
+// the store-level guard is the only thing standing between an operator's
+// abbreviated id and bd's substring resolver. Without it the command prints
+// "released", exits 0, and revokes a live claim on a bead nobody named (gcy-g4o:
+// "gcy-dv7" → "gcy-wisp-dv78").
+func TestDoBdReleaseIfCurrentRefusesAFuzzyIDCollision(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	origCityFlag, origRigFlag := cityFlag, rigFlag
+	defer func() { cityFlag, rigFlag = origCityFlag, origRigFlag }()
+	cityFlag, rigFlag = "", ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatalf("write rig metadata: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	argvLog := filepath.Join(fakeBin, "argv.log")
+	// A capable bd whose resolver prefix-matches "fe-abc" onto the wisp
+	// "fe-wisp-abc9" — and which would happily perform the write.
+	fakeBD := "#!/bin/sh\n" +
+		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
+		"if [ \"$1\" = \"show\" ]; then\n" +
+		"  printf '[{\"id\":\"fe-wisp-abc9\",\"status\":\"in_progress\",\"assignee\":\"worker-1\"}]\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+
+	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
+	var stdout, stderr bytes.Buffer
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 1 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 1 (a substring collision must not be reported as a release); stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("output = %q, want nothing on stdout", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "fe-wisp-abc9") {
+		t.Fatalf("stderr = %q, want the bead bd actually resolved", stderr.String())
+	}
+	argv, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	if strings.Contains(string(argv), "--if-assignee") {
+		t.Fatalf("the release still reached bd for a colliding id: %q", string(argv))
+	}
+}
+
 // TestGcBdPassthroughResolvesBdBinary pins the binary the `gc bd`
 // passthrough execs. A city whose scope carries a complete storage binding
 // runs the bd its workspace PATH pins — an ambient bd that cannot speak the
