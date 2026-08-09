@@ -60,6 +60,13 @@ import (
 // expansion. splitEnv.policyWrapped reports which leg a topology's front door is
 // on, and the invariants that care assert through it rather than assuming.
 //
+// That claim is ENFORCED, not just stated:
+// TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes opens routes through
+// the real seam and fails if openStorageRoutes ever hands back a policy-wrapped
+// class store. Without it the fixture would be free to keep modeling a topology
+// production no longer serves, because nothing else in cmd/gc asserts the
+// wrapping of the store that function returns.
+//
 // Accepted fidelity gap, the same one every cmd/gc split fixture takes: the
 // leaves are in-memory, not real Dolt/SQLite behind CachingStore. The real
 // openers are covered by the managed-Dolt and storage-boot integration tests.
@@ -511,6 +518,70 @@ func TestSplitEnvTopologiesWithRigLeg(t *testing.T) {
 		assertSplitEnvPins(t, e)
 		assertRigLeg(t, e)
 	})
+}
+
+// TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes anchors the fixture's
+// central asymmetry to the production seam that creates it.
+//
+// newSplitEnvWith assigns the class leaf RAW (e.class = classLeaf) while every
+// work store goes through wrapStoreWithBeadPolicies, and the file header claims
+// "the asymmetry is production's, not the fixture's". Nothing in the fixture can
+// check that claim: splitEnv never calls openStorageRoutes, so a change that
+// started wrapping the class map would leave the fixture modeling a topology
+// production no longer serves — silently, because every conformance invariant
+// asks the fixture rather than the seam.
+//
+// This test asks the seam. It opens routes the way boot opens them — a real
+// resolved plan, the compiled provider's own OpenEngine — and pins that the
+// store openStorageRoutes hands back for every relocated class carries NO
+// bead-policy layer. Wrap the class map in openStorageRoutes and this is the
+// first thing that fails, which is what the fixture's model is entitled to
+// assume.
+//
+// This pins TODAY's behavior, not desired behavior: giving the coordination
+// classes a policy layer is a live design question (it would move wisp creates
+// on a split city from the durable tier to the ephemeral one). The slice that
+// makes that call updates this pin, splitEnv's `e.class = classLeaf`, and
+// I11's wrapped/unwrapped branch together.
+func TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan for a converged split city: %v", err)
+	}
+	target := mustResolveInfraTarget(t, root, cfg)
+	routes, err := openStorageRoutes(plan, target)
+	if err != nil {
+		t.Fatalf("openStorageRoutes: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	relocated := 0
+	for _, class := range coordclass.Classes() {
+		if !class.IsInfrastructure() {
+			continue
+		}
+		store, ok := routes.storeFor(class)
+		if !ok {
+			t.Errorf("openStorageRoutes relocated no store for infrastructure class %v; the converged split assigns all five", class)
+			continue
+		}
+		relocated++
+		if _, _, wrapped := unwrapBeadPolicyStore(store); wrapped {
+			t.Errorf("openStorageRoutes returned a POLICY-WRAPPED store for class %v. splitEnv models the relocated class store as the raw engine value (e.class = classLeaf, split_topology_env_test.go), and I11 branches on that asymmetry. Wrapping the class map changes wisp storage on a split city from a durable row to an ephemeral one — update this pin, splitEnv's class leg, and I11's wrapped/unwrapped branch together.", class)
+		}
+	}
+	if relocated == 0 {
+		t.Fatal("openStorageRoutes relocated no classes at all; this pin is evaluating nothing")
+	}
+
+	// The work class is NOT relocated, and the work store the caller keeps
+	// holding is the policy-wrapped one — the other half of the asymmetry.
+	if _, ok := routes.storeFor(coordclass.ClassWork); ok {
+		t.Error("openStorageRoutes relocated the WORK class; work stays on the reserved work binding, and splitEnv's work leg would be modeling a store production does not open")
+	}
 }
 
 // assertSplitEnvPins runs the topology-appropriate base pins shared by the plain

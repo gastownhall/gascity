@@ -44,6 +44,24 @@ import (
 // reason and the seam that is missing, rather than being quietly omitted or
 // asserted against a seam that does not exist. The skip list is this program's
 // verified remaining work.
+//
+// Others pin behavior main HAS but should not keep. Those carry a KNOWN GAP
+// paragraph naming the divergence, the assertions that move when it closes, and
+// the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
+// the controller's cross-store scan on a split city) and I10 (the wake filter
+// has no coordination-class reachability arm). Leaving such a leg UNSEEDED is
+// the failure mode this convention exists to prevent: the invariant then reads
+// as coverage of a path it never touches.
+//
+// # Which authority an invariant is pinning
+//
+// Some assertions are about a production backend (bd/Dolt, SQLite), some are
+// about the splittest kit's deliberate domain rules, and some are about cmd/gc's
+// own wrappers. They do not agree, so an invariant states which one it pins —
+// see I6, where the cross-prefix dep refusal is the KIT's co-residence rule and
+// neither backend refuses the write, and I5, where the negative is stated
+// against the class store's namespace rather than against a wrapper's
+// capability opacity.
 
 // TestSplitTopologyConformance drives every conformance invariant over both
 // store topologies. Run one invariant with e.g.
@@ -74,6 +92,20 @@ func TestSplitTopologyConformance(t *testing.T) {
 // durable control shape AND in the wisp shape must both surface there, with the
 // rig store's own routed work alongside it. A leading store resolved to the WORK
 // class instead would read zero and drain the fleet.
+//
+// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg.
+// The scan's arms are the leading store plus the RIG stores, and production
+// builds the rig arm as rigBeadStores(), which deletes the city entry
+// (city_runtime.go). On a split city the leading store is the class store, so
+// the HQ work store is in NEITHER arm and a city-scope routed WORK bead is
+// invisible to controller-tick demand — the same "no work" fail-open this
+// invariant is named for, live today. cmd_start.go already names the dual role
+// as a shared E2 two-store split. `gc session close` still reaches the HQ store
+// through unclaimWorkAssignedToRetiredSessionBead, so the bead is not lost
+// forever; the controller tick is what is blind. The hqWork row below asserts
+// today's asymmetric answer on both topologies. When the coordination-class /
+// HQ-work arm lands, that row's expectation flips to found-on-both and this
+// paragraph goes with it.
 func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "routed ready control bead", e.qualified)
 	wisp := e.mintWispWith(t, wispOpts{title: "routed ready wisp", routedTo: e.qualified})
@@ -84,6 +116,20 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	})
 	if err != nil {
 		t.Fatalf("create routed rig work bead: %v", err)
+	}
+	// The HQ work-store leg: a city-scope routed WORK bead, the shape
+	// order dispatch stamps gc.routed_to on. It is the one leg whose
+	// reachability actually changes with the topology.
+	hqWork, err := e.work.Create(beads.Bead{
+		Title:    "routed HQ work bead",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: e.qualified},
+	})
+	if err != nil {
+		t.Fatalf("create routed HQ work bead: %v", err)
+	}
+	if coordclass.Classify(hqWork).IsInfrastructure() {
+		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
 	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
@@ -118,6 +164,27 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 			t.Errorf("%s %s captured under store-ref %q, want %q", tc.name, tc.id, refs[i], tc.wantRef)
 		}
 	}
+
+	// The HQ work leg, stated per topology because the answer really differs.
+	// See the KNOWN GAP paragraph above: this pins what main does, not what it
+	// should do.
+	hqIndex := beadIndexOf(found, hqWork.ID)
+	if e.split {
+		if hqIndex >= 0 {
+			t.Errorf("routed HQ work bead %s IS in the split-city demand scan (store-ref %q). Two things produce this and they need opposite responses: the HQ-work arm landed (flip this row to expect it on both topologies, drop this invariant's KNOWN GAP paragraph, and update I2's hq leg with it) — or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the durable/wisp rows going missing above", hqWork.ID, refs[hqIndex])
+		}
+		return
+	}
+	if hqIndex < 0 {
+		t.Errorf("routed HQ work bead %s is missing from the single-store demand scan — on a legacy city the HQ work store IS the leading store, so this is the \"no work\" fail-open with nothing topological to blame", hqWork.ID)
+		return
+	}
+	if !sameStorePtr(stores[hqIndex], e.work) {
+		t.Errorf("routed HQ work bead %s was captured under a store that does not hold it", hqWork.ID)
+	}
+	if refs[hqIndex] != leadingRef {
+		t.Errorf("routed HQ work bead %s captured under store-ref %q, want %q", hqWork.ID, refs[hqIndex], leadingRef)
+	}
 }
 
 // conformanceAssignedWorkCapture (I2) guards the post-claim half of the
@@ -129,13 +196,24 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 // outcome — release exactly the dead claim — which on a split city means the
 // capture and the release both have to reach the CLASS store, because that is
 // the leading store the reconciler is handed.
+//
+// KNOWN GAP, pinned rather than asserted as desirable — the HQ WORK store leg,
+// the same one I1 names. The capture arms are the leading store plus the rig
+// stores, and rigBeadStores() deletes the city entry, so on a split city a dead
+// claim on a city-scope WORK bead is captured by nothing and released by
+// nothing: the bead stays in_progress against a session that is gone until some
+// other path (`gc session close`'s unclaimWorkAssignedToRetiredSessionBead)
+// happens to reach it. The hqDead leg below asserts that asymmetry on both
+// topologies. When the HQ-work arm lands, it flips to released-on-both, together
+// with I1's hqWork row.
 func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 	sess, err := e.sessionsStore().Create(splitEnvPoolSessionBead(e.qualified, "executor-1"))
 	if err != nil {
 		t.Fatalf("create live pool session bead: %v", err)
 	}
 	live := e.mintWispWith(t, wispOpts{title: "live-held claimed wisp", routedTo: e.qualified, status: "in_progress", assignee: sess.ID})
-	dead := e.mintWispWith(t, wispOpts{title: "dead-held claimed wisp", routedTo: e.qualified, status: "in_progress", assignee: "s-dead99"})
+	dead := e.mintWispWith(t, wispOpts{title: "dead-held claimed wisp", routedTo: e.qualified, status: "in_progress", assignee: splitEnvDeadAssignee})
+	hqDead := splitEnvDeadClaimedWorkBead(t, e.work, e.qualified)
 
 	got, stores, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cfg, e.sessionsStore(), e.rigStores, nil, nil)
 	if partial {
@@ -154,15 +232,53 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		}
 	}
 
+	// The HQ leg's capture half, per topology. See the KNOWN GAP paragraph.
+	hqCaptured := beadIndexOf(got, hqDead.ID) >= 0
+	if hqCaptured != !e.split {
+		if e.split {
+			t.Errorf("dead-claimed HQ work bead %s IS captured on a split city. Either the HQ-work arm landed (flip this leg and I1's hqWork row to expect capture and release on both topologies, and drop both KNOWN GAP paragraphs) or the LEADING store regressed to the work class, which is the #5127/#5125 bug and shows up as the wisp rows above failing too", hqDead.ID)
+		} else {
+			t.Errorf("dead-claimed HQ work bead %s is NOT captured on a legacy city, where the HQ work store IS the leading store — post-claim HQ work has gone invisible to the reconciler", hqDead.ID)
+		}
+	}
+
 	released := releaseOrphanedPoolAssignments(
 		e.sessionsStore(), e.cfg, e.cityPath,
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
 	)
-	if len(released) != 1 || released[0].ID != dead.ID {
-		t.Errorf("released = %v, want exactly the dead-assignee wisp %s (the live holder's claim must survive; the dead claim must recover)", released, dead.ID)
+	// On a legacy city the HQ work store IS the leading store, so the dead HQ
+	// claim recovers alongside the dead wisp. On a split city it is in neither
+	// arm, so only the wisp does.
+	wantReleased := []string{dead.ID}
+	if !e.split {
+		wantReleased = append(wantReleased, hqDead.ID)
 	}
+	releasedIDs := make(map[string]bool, len(released))
+	for _, b := range released {
+		releasedIDs[b.ID] = true
+	}
+	if len(released) != len(wantReleased) {
+		t.Errorf("released = %v, want exactly %v (the live holder's claim must survive; every reachable dead claim must recover)", released, wantReleased)
+	}
+	for _, want := range wantReleased {
+		if !releasedIDs[want] {
+			t.Errorf("dead claim %s was not released; it stays assigned to a session that is gone", want)
+		}
+	}
+	if e.split {
+		// The gap, asserted rather than assumed: the HQ dead claim is still
+		// stranded after the release pass a split-city controller tick runs.
+		stranded, err := e.work.Get(hqDead.ID)
+		if err != nil {
+			t.Fatalf("reload HQ dead-claimed work bead: %v", err)
+		}
+		if stranded.Status != "in_progress" || stranded.Assignee != splitEnvDeadAssignee {
+			t.Errorf("HQ dead claim %s = status %q assignee %q, want it still stranded at in_progress/%s. If a controller-tick path now recovers it, the HQ-work arm has landed: update this leg, the capture check above and I1's hqWork row together", hqDead.ID, stranded.Status, stranded.Assignee, splitEnvDeadAssignee)
+		}
+	}
+
 	reloaded, err := e.graphStore().Get(live.ID)
 	if err != nil {
 		t.Fatalf("reload live-held wisp: %v", err)
@@ -293,11 +409,22 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	}
 	if !e.split {
 		wisp := e.mintWisp(t, "claim-routing wisp")
+		// A legacy city mints no reserved-class ids at all, so there is nothing
+		// for a by-id router to route ON. That is the whole single-store
+		// statement, and reservedClassNamespace is the rule that expresses it.
+		//
+		// Deliberately NOT asserted: that storeref.PrefixOwner returns nil over
+		// the single leg. It does today — but only because e.work is
+		// wrapStoreWithBeadPolicies(...) and beadPolicyStore embeds beads.Store
+		// as an interface, so the optional IDPrefix() accessor is not promoted
+		// and PrefixOwner skips the leg entirely. That is the wrapper's
+		// capability opacity, not an id-space fact: the raw leaf declares "gc"
+		// and production's CachingStore reports "gc" too. Forwarding IDPrefix
+		// through the wrapper (which the shared by-id resolver, ga-ia7li, wants)
+		// is a correct change, and an invariant that reddened on it would be
+		// blaming the id space for a wrapper detail.
 		if reservedClassNamespace(wisp.ID) {
 			t.Fatalf("single-store wisp %q sits in a reserved class namespace; a legacy city mints work-store ids", wisp.ID)
-		}
-		if owner := storeref.PrefixOwner(wisp.ID, []beads.Store{e.work}); owner != nil {
-			t.Errorf("storeref.PrefixOwner routed single-store wisp %q to a namespace owner; a legacy city has one store and no namespace to route on", wisp.ID)
 		}
 		t.Skip("single-store collapse: there is no second store to route a claim to, and no coordination-class claim arm to route it with (ga-ia7li)")
 	}
@@ -315,8 +442,19 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		if wantClass && !sameStorePtr(owner, e.class) {
 			t.Errorf("%s: storeref.PrefixOwner(%q) did not route to the class store — a by-id mutation would run against the store that does not hold it", tt.name, tt.id)
 		}
-		if !wantClass && owner != nil {
-			t.Errorf("%s: storeref.PrefixOwner(%q) claimed an owner; a work id is outside every declared class namespace and must fall through", tt.name, tt.id)
+		// The negative is that no CLASS store claims a work id. It is stated
+		// against the class leg rather than as "no owner at all": whether the
+		// policy-wrapped work leg answers depends on whether the wrapper
+		// forwards IDPrefix(), which is a wrapper detail the by-id resolver
+		// slice (ga-ia7li) is free to change. Routing a work id INTO the
+		// coordination-class store is the thing that would corrupt.
+		if !wantClass {
+			if sameStorePtr(owner, e.class) {
+				t.Errorf("%s: storeref.PrefixOwner(%q) routed a WORK id to the CLASS store — a by-id mutation would run against a store that cannot hold it, which is the residence violation the SQLite leaf accepts silently", tt.name, tt.id)
+			}
+			if classOwner := storeref.PrefixOwner(tt.id, []beads.Store{e.class}); classOwner != nil {
+				t.Errorf("%s: the class store's declared namespace claims work id %q; the two id spaces must stay disjoint or every by-id router built on the namespace rule misroutes", tt.name, tt.id)
+			}
 		}
 		if got := reservedClassNamespace(tt.id); got != wantClass {
 			t.Errorf("%s: %q in a reserved class namespace = %v, want %v", tt.name, tt.id, got, wantClass)
@@ -338,19 +476,37 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 }
 
 // conformanceStrictCrossStoreDeps (I6) guards the cross-store dependency class:
-// a blocking edge whose endpoints live in different stores. bd cannot express it
-// and SQLite will not refuse it, so the two backends answer differently and the
-// invariant is stated per backend rather than as one rule:
+// a blocking edge whose endpoints live in different stores. Three different
+// authorities answer these calls, and the invariant names which one it is
+// pinning on every row, because they do not agree:
 //
-//   - through the WORK front door (bd/Dolt): a hard failure, in bd's own
-//     wording, because bd resolves both endpoints before writing the row.
-//   - through the CLASS front door (SQLite): ACCEPTED and recorded as a
-//     residence violation, because the deps table has no foreign key and DepAdd
-//     is a plain INSERT — production keeps the dangling edge and silently drops
-//     the dependent out of Ready instead of erroring.
+//   - CROSS-PREFIX target through the WORK front door: NEITHER production
+//     backend rejects it. bd resolves the source, fails to resolve the target,
+//     compares prefixes, and — because they differ — passes the target through
+//     as a cross-prefix external ref and writes the row (cmd/bd/dep.go); SQLite
+//     writes it too. The refusal asserted below is the splittest kit's DOMAIN
+//     co-residence rule (convoy.TrackItemIn's ErrMemberNotCoResident), which a
+//     BdSemantics leaf enforces on purpose and says so in its own wording. So
+//     this row pins the domain invariant, NOT a backend behavior, and the fail-
+//     open it names is LIVE in production: on a real split city the dangling
+//     edge lands, the dependent silently drops out of Ready, and the parent goes
+//     READY mid-DAG. Closing that is a later slice (ga-ia7li's by-id resolver is
+//     what a co-residence preflight would be built on); until then the honest
+//     statement is that the kit refuses what production performs.
+//   - SAME-PREFIX unresolvable endpoint through the WORK front door: this one bd
+//     genuinely hard-fails, in its own wording ("resolving issue ID %s: no issue
+//     found matching %q"), because a same-prefix id gets no external-ref
+//     pass-through. Asserted on BOTH topologies, so the suite exercises bd's
+//     real rejection and not only the kit's domain rule.
+//   - CROSS-PREFIX endpoint through the CLASS front door (SQLite): ACCEPTED and
+//     recorded as a residence violation, because the deps table has no foreign
+//     key and DepAdd is a plain INSERT. Not asserting a rejection here is the
+//     same reasoning that makes the first bullet a domain pin rather than a
+//     backend pin.
 //
 // The single-store subtest is the byte-identity half: one store resolves both
-// endpoints and every one of these calls succeeds.
+// endpoints, so every cross-store row succeeds and only the unresolvable-id row
+// still fails.
 func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 	workBead, err := e.work.Create(beads.Bead{Title: "cross-dep work bead", Type: "task"})
 	if err != nil {
@@ -358,18 +514,37 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 	}
 	durable := mintDurableGraphBead(t, e, "cross-dep durable graph bead", "")
 	wisp := e.mintWisp(t, "cross-dep wisp")
+	// Same-prefix and guaranteed absent: bd's resolver gets no cross-prefix
+	// pass-through for this shape, so it is the one endpoint failure bd itself
+	// produces. The prefix is cfg-derived, and assertSplitEnvPins pins that the
+	// work leaf mints under it.
+	absentSamePrefix := config.EffectiveHQPrefix(e.cfg) + "-absent"
 
 	for _, tt := range []struct {
 		name     string
 		front    beads.Store
 		from, to string
+		// sameStoreResolves is true when the single-store topology collapses
+		// both endpoints into one store, which is what makes the row succeed
+		// there. The unresolvable-id row is false: no topology can resolve it.
+		sameStoreResolves bool
 	}{
-		{"work front door: work blocks-on wisp", e.work, workBead.ID, wisp.ID},
-		{"work front door: work blocks-on durable", e.work, workBead.ID, durable.ID},
-		{"graph front door: wisp blocks-on work", e.graphStore(), wisp.ID, workBead.ID},
-		{"graph front door: durable blocks-on work", e.graphStore(), durable.ID, workBead.ID},
+		{"work front door: work blocks-on wisp", e.work, workBead.ID, wisp.ID, true},
+		{"work front door: work blocks-on durable", e.work, workBead.ID, durable.ID, true},
+		{"graph front door: wisp blocks-on work", e.graphStore(), wisp.ID, workBead.ID, true},
+		{"graph front door: durable blocks-on work", e.graphStore(), durable.ID, workBead.ID, true},
+		{"work front door: work blocks-on an absent same-prefix id", e.work, workBead.ID, absentSamePrefix, false},
 	} {
 		err := tt.front.DepAdd(tt.from, tt.to, "blocks")
+		if !tt.sameStoreResolves {
+			// bd's own failure, on both topologies. The wording is asserted
+			// because a test that accepted any error would also accept the kit's
+			// domain rule, which is a different rejection for a different reason.
+			if err == nil || !strings.Contains(err.Error(), "no issue found matching") {
+				t.Errorf("%s: DepAdd(%s → %s) = %v, want bd's own resolution failure (`no issue found matching`) — a same-prefix target gets no external-ref pass-through, so this is the endpoint rejection bd really performs", tt.name, tt.from, tt.to, err)
+			}
+			continue
+		}
 		if !e.split {
 			if err != nil {
 				t.Errorf("%s: single-store DepAdd(%s → %s) = %v, want success (one store resolves both endpoints)", tt.name, tt.from, tt.to, err)
@@ -377,8 +552,14 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 			continue
 		}
 		if sameStorePtr(tt.front, e.work) {
+			// The kit's DOMAIN co-residence rule, not bd's. bd would WRITE this
+			// row as a cross-prefix external ref; the failure text below says so
+			// so a later slice cannot read this as "production refuses it".
 			if err == nil || !strings.Contains(err.Error(), "belongs to another store's id namespace") {
-				t.Errorf("%s: DepAdd(%s → %s) = %v, want the bd/Dolt work store to reject a cross-store edge — a fail-open edge here is a parent that goes READY mid-DAG", tt.name, tt.from, tt.to, err)
+				t.Errorf("%s: DepAdd(%s → %s) = %v, want splittest's DOMAIN co-residence refusal (convoy.TrackItemIn's ErrMemberNotCoResident shape). NOTE what this does NOT say: bd does not reject a cross-prefix target — it writes the dangling external ref, and so does SQLite. This row pins the domain invariant a co-residence preflight will have to enforce; the fail-open (dependent drops out of Ready, parent goes READY mid-DAG) is live in production until that lands", tt.name, tt.from, tt.to, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "no issue found matching") {
+				t.Errorf("%s: the cross-prefix refusal now borrows bd's resolution wording (%v); bd never emits that message for a cross-prefix target, and a domain rule dressed in bd's clothes is what made this invariant misread once already", tt.name, err)
 			}
 			continue
 		}
@@ -679,24 +860,22 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 	}
 
 	leaf, _, wrapped := unwrapBeadPolicyStore(front)
-	if wrapped != e.policyWrapped(front) {
-		t.Fatalf("policy-wrap detection disagrees with the fixture: unwrap=%v policyWrapped=%v", wrapped, e.policyWrapped(front))
-	}
 	if !wrapped {
 		// Relocated class store: no policy layer, so no tier expansion and no
-		// ephemeral tier to be blind to. Everything the store holds is on the main
-		// tier and every read path sees it. Pinned as the negative, so a change
-		// that starts wrapping the class store — which would change wisp storage
-		// on a split city — fails here first.
+		// ephemeral tier to be blind to. Everything the store holds is on the
+		// main tier and every read path sees it.
+		//
+		// Which branch runs is decided by the fixture's model of the class
+		// store, so it cannot police that model. The pin that does is
+		// TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes, which asks
+		// openStorageRoutes directly: wrap the class map there and the fixture,
+		// this branch, and the wisp tier all move together.
 		list, err := front.List(beads.ListQuery{AllowScan: true})
 		if err != nil {
 			t.Fatalf("class-store default list: %v", err)
 		}
 		if !beadListHasID(list, durable.ID) || !beadListHasID(list, wisp.ID) {
 			t.Errorf("relocated class store default List sees durable=%v wisp=%v, want both (no policy layer means no tier to hide behind)", beadListHasID(list, durable.ID), beadListHasID(list, wisp.ID))
-		}
-		if wisp.Ephemeral {
-			t.Error("a create through the relocated class store landed on the ephemeral tier; that store carries no bead-policy layer, so this test's model of production is wrong")
 		}
 		return
 	}
@@ -814,6 +993,40 @@ func countGraphClassBeads(t *testing.T, store beads.Store) int {
 		}
 	}
 	return n
+}
+
+// splitEnvDeadAssignee is the identity of a session that is gone: it holds a
+// claim, and no session bead names it, so orphan release must recover the claim
+// wherever the release pass can reach it.
+const splitEnvDeadAssignee = "s-dead99"
+
+// splitEnvDeadClaimedWorkBead mints a routed WORK-class bead claimed by a dead
+// session, in the store handed to it. It is the HQ-work leg of I1/I2: a plain
+// work-class bead (no reserved prefix, coordclass ClassWork) carrying
+// gc.routed_to, which is what order dispatch stamps on a city-scope target.
+func splitEnvDeadClaimedWorkBead(t *testing.T, store beads.Store, qualified string) beads.Bead {
+	t.Helper()
+	created, err := store.Create(beads.Bead{
+		Title:    "dead-claimed HQ work bead",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: qualified},
+	})
+	if err != nil {
+		t.Fatalf("create HQ work bead: %v", err)
+	}
+	if coordclass.Classify(created).IsInfrastructure() {
+		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", created.ID)
+	}
+	inProgress := "in_progress"
+	assignee := splitEnvDeadAssignee
+	if err := store.Update(created.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("stage the dead claim on HQ work bead %s: %v", created.ID, err)
+	}
+	staged, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("reload staged HQ work bead %s: %v", created.ID, err)
+	}
+	return staged
 }
 
 // splitEnvPoolSessionBead is the open pool-worker session bead a warm rig pool
