@@ -146,11 +146,6 @@ func TestOrderDispatchWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 			t.Fatalf("work store holds graph bead %s (%s, gc.kind=%q); graph beads belong in the graph binding", b.ID, b.Title, kind)
 		}
 	}
-	for _, b := range allBeads(t, graphStore) {
-		if hasLabel(b.Labels, labelOrderTracking) {
-			t.Fatalf("graph store holds order-tracking bead %s; order tracking stays on the order store", b.ID)
-		}
-	}
 }
 
 // TestOrderDispatchSingleFlightGateSeesGraphResidentWisp pins the read half of
@@ -329,14 +324,12 @@ func TestOrderDispatchExecutionFactsProjectFromTheGraphStore(t *testing.T) {
 		}
 	}
 
-	// The work leg stays the order's own store, so the two classes end the
-	// dispatch in their own bindings rather than piled into one.
-	tracking := trackingBeads(t, workStore, "order-run:reaper")
-	if len(tracking) == 0 {
-		t.Fatal("no order-run tracking bead in the work store")
-	}
-	if got := trackingBeads(t, graphStore, labelOrderTracking); len(got) != 0 {
-		t.Fatalf("graph store holds order-tracking beads %+v, want none", got)
+	// The work leg is still the order's own store — it is where an input
+	// convoy's tracks edges live — but nothing the dispatch WRITES lands there
+	// on a split city: the graph class owns the root and its steps, the orders
+	// class owns the tracking bead, and both are served by the binding.
+	if got := allBeads(t, workStore); len(got) != 0 {
+		t.Fatalf("work store holds %+v after a split-city dispatch, want nothing; every bead a dispatch writes is infrastructure class and belongs in the binding", got)
 	}
 }
 

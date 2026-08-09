@@ -1574,6 +1574,20 @@ func (cs *controllerState) GraphBeadStore() beads.GraphStore {
 	return beads.GraphStore{Store: resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// OrdersBeadStore returns the store backing orders-class beads. At the default
+// backend resolveOrderStore returns cityBeadStore, so this is byte-identical to
+// CityBeadStore; when [beads.classes.orders] is relocated it returns the
+// per-class store, which is the store the order dispatcher creates every
+// tracking bead in. cs.eventProv is the recorder, matching the nudges/sessions
+// wiring. The result is wrapped in the strongly-typed beads.OrdersStore so the
+// orders class is statically visible to callers; the wrapper carries the same
+// underlying store value, so runtime behavior is unchanged.
+func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+}
+
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()
