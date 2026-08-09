@@ -1,20 +1,11 @@
 package api
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
-
-// graphFederationLegKey returns the synthetic fan-out key the bead-list
-// federation files the relocated graph store under.
-//
-// The list fan-out is keyed by rig name, so the graph leg needs a key of its
-// own. ':' cannot appear in a rig name, so the key can never collide with a
-// real one — and the merge that mints it is skipped for rig-scoped requests, so
-// the key is not addressable through ?rig= either.
-func graphFederationLegKey(cityName string) string {
-	return "infra:" + cityName
-}
 
 // relocatedGraphStore returns the graph-class store when — and only when — the
 // city has actually relocated it.
@@ -42,6 +33,16 @@ func relocatedGraphStore(state State) beads.Store {
 // answers or the request fails loud, including when it answers PARTIALLY: a
 // partial graph read leaves an unnamed hole in a dependency graph, and the
 // response has no way to say which part is missing.
-func graphPlaneUnavailable(op string, err error) error {
-	return apierr.StoreUnavailable.Msg("graph store " + op + " read failed (graph plane unreadable): " + err.Error())
+//
+// workLegErrors are the degraded work legs recorded before the graph leg failed.
+// They ride along because this 503 replaces the Partial 200 that would have
+// carried them: without them "the graph plane is down" and "every store in the
+// city is down" are byte-identical responses, and the operator loses the
+// work-side diagnosis the response had already collected.
+func graphPlaneUnavailable(op string, err error, workLegErrors ...string) error {
+	detail := "graph store " + op + " read failed (graph plane unreadable): " + err.Error()
+	if len(workLegErrors) > 0 {
+		detail += "; work legs also degraded: " + strings.Join(workLegErrors, "; ")
+	}
+	return apierr.StoreUnavailable.Msg(detail)
 }

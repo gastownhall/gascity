@@ -443,6 +443,17 @@ func (s *StrictStore) ConditionalWritesResolveTarget() beads.Store {
 // Count forwards the leaf's beads.Counter capability. Leaves without one report
 // beads.ErrCountUnsupported, signaling callers to fall back to List — the same
 // contract cmd/gc's beadPolicyStore forwards.
+//
+// FIDELITY GAP, read this before using a kit leaf to model a count. Declaring
+// this method makes every kit store type-assert as beads.Counter, and the
+// production relocated-class binding does NOT: OpenEngine hands callers a raw
+// *beads.SQLiteStore, which has no Count at all (only CachingStore,
+// NativeDoltStore and DoltliteReadStore implement it). The two shapes are
+// indistinguishable to a caller that reaches Count — both end at
+// ErrCountUnsupported — but not to one that branches on the type assertion
+// alone. A fixture whose subject is that assertion (internal/api's bead-list
+// page bounding is the live example) must use a leaf that implements no Count,
+// or it silently models a capability the class binding does not have.
 func (s *StrictStore) Count(ctx context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
 	counter, ok := s.Store.(beads.Counter)
 	if !ok {

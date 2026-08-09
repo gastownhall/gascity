@@ -718,6 +718,10 @@ func TestBeadListFiltering(t *testing.T) {
 func TestBeadListCrossRig(t *testing.T) {
 	state := newFakeState(t)
 	store2 := beads.NewMemStore()
+	// Two rigs mint under different prefixes (config.Rig.EffectivePrefix); two
+	// MemStores left on the default prefix would both mint "gc-1", i.e. one bead
+	// co-resident in two legs rather than two beads.
+	store2.IDPrefix = "r2"
 	state.stores["rig2"] = store2
 
 	state.stores["myrig"].Create(beads.Bead{Title: "Bead from rig1"}) //nolint:errcheck
@@ -1824,16 +1828,28 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 	}
 }
 
-func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
+// TestPhase2BeadListAssigneeAliasServesEveryRigsBeads pins that resolving an
+// assignee alias into several identity terms does not cost a rig its rows: every
+// bead assigned to the session, in every rig, is in the response exactly once.
+//
+// The rigs mint under different prefixes because that is the only shape a
+// running city can have — config.ValidateRigs rejects a colliding rig prefix on
+// every start, reload and config-edit path, so two rigs cannot mint the same id.
+// (Its ancestor left both MemStores on the default prefix, which made "two beads"
+// and "one bead resident in two legs" the same fixture; the fan-out reads bead
+// ids as identity, the way GET /v0/beads/ready and every by-id endpoint do.)
+func TestPhase2BeadListAssigneeAliasServesEveryRigsBeads(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.stores["otherrig"] = beads.NewMemStore()
-	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig"})
+	otherStore := beads.NewMemStore()
+	otherStore.IDPrefix = "or"
+	state.stores["otherrig"] = otherStore
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "or"})
 	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
 	workA, _ := state.stores["myrig"].Create(beads.Bead{Title: "Task A", Assignee: sessionBead.ID})
-	workB, _ := state.stores["otherrig"].Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
-	if workA.ID != workB.ID {
-		t.Fatalf("test setup expected duplicate local IDs, got %q and %q", workA.ID, workB.ID)
+	workB, _ := otherStore.Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
+	if workA.ID == workB.ID {
+		t.Fatalf("test setup expected distinct per-rig IDs, got %q twice", workA.ID)
 	}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
@@ -1854,6 +1870,17 @@ func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
 	}
 	if listed.Total != 2 || len(listed.Items) != 2 {
 		t.Fatalf("list by alias total/items = %d/%d, want 2/2: %#v", listed.Total, len(listed.Items), listed.Items)
+	}
+	for _, want := range []string{workA.ID, workB.ID} {
+		found := false
+		for _, b := range listed.Items {
+			if b.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("alias fan-out dropped %q: %#v", want, listed.Items)
+		}
 	}
 }
 

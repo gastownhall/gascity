@@ -203,8 +203,9 @@ func TestBeadListGraphLegPartialIsAlso503(t *testing.T) {
 }
 
 // TestBeadListRigScopedReadExcludesGraphLeg pins that ?rig=<name> stays a
-// rig-scoped read: the graph plane is not a rig, so it is not merged and the
-// synthetic federation key is never addressable as one.
+// rig-scoped read: the graph plane is not a rig, so a rig-scoped request gets no
+// graph leg. The leg has no name of its own to be selected by either — legs are
+// a slice, and only the named rig stores are addressable through ?rig=.
 func TestBeadListRigScopedReadExcludesGraphLeg(t *testing.T) {
 	fs := newSplitFederationState(t)
 	graphID := seedGraphStepBead(t, fs)
@@ -221,10 +222,11 @@ func TestBeadListRigScopedReadExcludesGraphLeg(t *testing.T) {
 		t.Fatalf("rig-scoped items include the graph bead %q; ?rig= is a rig-scoped read and the graph plane is not a rig", graphID)
 	}
 
-	// The synthetic federation key must not be selectable as a rig either.
-	synthetic := getListBody(t, fs, "/beads?rig="+graphFederationLegKey(fs.CityName()))
-	if len(synthetic.Items) != 0 {
-		t.Fatalf("?rig=%s returned %d items; the synthetic graph leg key must not be addressable as a rig", graphFederationLegKey(fs.CityName()), len(synthetic.Items))
+	// A rig name that does not exist selects nothing — there is no leg reachable
+	// through ?rig= other than a configured rig store.
+	unknown := getListBody(t, fs, "/beads?rig=not-a-rig")
+	if len(unknown.Items) != 0 {
+		t.Fatalf("?rig=not-a-rig returned %d items; only configured rig stores are addressable", len(unknown.Items))
 	}
 }
 
@@ -380,16 +382,20 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 // assert CLI == API instead of inventing an oracle:
 //
 //	legs, in order:  city store, then rigs by name ascending, then the graph store
-//	within a leg:    that leg's canonical ready order (priority, created_at, id)
+//	within a leg:    whatever order that leg's own Ready reader emits
 //	dedupe:          first leg to return an id wins
 //	merged order:    leg concatenation — deliberately NOT re-sorted, because a
 //	                 global sort would change the bytes a single-store city
 //	                 already serves
 //
-// Because every leg is already in canonical ready order and that order is total,
-// both sides normalize with beads.SortBeadsReadyOrder before comparing. The
-// graph leg goes LAST, which matches the CLI composite's work-then-infra leg
-// order, so on a rig-less city the two sequences agree without normalizing.
+// Per-leg order is deterministic but NOT canonical across leg kinds: a
+// caching-wrapped work store emits (priority, created_at, id) via
+// sortBeadsReadyOrder, while the canonical relocated graph binding
+// (beads.SQLiteStore) emits (created_at, id) with no priority term at all
+// (sqliteReadySQL). Both sides therefore normalize with
+// beads.SortBeadsReadyOrder before comparing — a load-bearing step, not a
+// formality. The graph leg goes LAST, which matches the CLI composite's
+// work-then-infra leg order.
 func TestBeadReadyFederationOrderIsLegConcatenation(t *testing.T) {
 	fs := newSplitFederationState(t)
 	cityBead, err := fs.cityBeadStore.Create(beads.Bead{Type: "task", Title: "city work"})
