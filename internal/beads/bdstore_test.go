@@ -3410,6 +3410,25 @@ esac
 	}
 }
 
+// legacyBdReleaseRunner adapts a runner that only understands the raw-SQL
+// release path to bd 1.0.4 semantics: the native conditional-release verb is
+// rejected as an unknown flag, exactly as a bd predating gastownhall/beads#5364
+// rejects it, so the store latches its fallback. Every test that pins the
+// generated SQL is a FALLBACK-path test — the minimum supported bd
+// (deps.env BD_PREV_VERSION=v1.0.4) still takes it — and must go through this.
+func legacyBdReleaseRunner(inner beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "update" {
+			for _, arg := range args {
+				if arg == "--if-assignee" {
+					return nil, errors.New("unknown flag: --if-assignee")
+				}
+			}
+		}
+		return inner(dir, name, args...)
+	}
+}
+
 func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 	var gotName string
 	var gotArgs []string
@@ -3418,7 +3437,7 @@ func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-'1")
 	if err != nil {
@@ -3445,7 +3464,7 @@ func TestBdStoreReleaseIfCurrentSQLLiteralEscapesBackslash(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	if _, err := s.ReleaseIfCurrent("bd-\\42", "worker-\\1"); err != nil {
 		t.Fatalf("ReleaseIfCurrent: %v", err)
@@ -3477,7 +3496,7 @@ func TestBdStoreReleaseIfCurrentFallsBackWhenEmbeddedBdSQLUnsupported(t *testing
 			return nil, fmt.Errorf("unexpected call %s", call)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3556,7 +3575,7 @@ func TestBdStoreReleaseIfCurrentEmbeddedFallbackSkipsWrongAssignee(t *testing.T)
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3586,7 +3605,7 @@ func embeddedDoltReleaseIfCurrentStore(t *testing.T, doltOut []byte) *beads.BdSt
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	return beads.NewBdStore(dir, runner)
+	return beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 }
 
 func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
@@ -3598,7 +3617,7 @@ func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
 			out: []byte(`{"rows_affected":0,"schema_version":1}`),
 		},
 	})
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {

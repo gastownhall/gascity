@@ -309,6 +309,12 @@ type BdStore struct {
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
 
+	// condReleaseLatchedUnsupported records that this bd rejected the
+	// conditional-release flags, pinning ReleaseIfCurrent to the raw-SQL
+	// fallback for the rest of the process (bdstore_conditional_release.go).
+	condReleaseMu                 sync.Mutex
+	condReleaseLatchedUnsupported bool
+
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
 	// condWriteCapable memoize the four-verb --if-revision probe; condWriteLatched
@@ -1179,19 +1185,29 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
 //
-// SEAM (bd conditional-release verb): today this rides raw `bd sql`. The
-// sqlite backend refuses raw DB access, so that rejection — and embedded dolt
-// WITHOUT a configured dolt directory — surface ErrConditionalReleaseUnsupported
-// (the latter via the releaseIfCurrentViaEmbeddedDoltSQL fallback). Embedded
-// dolt WITH a configured directory instead services the CAS directly through
-// that fallback, returning real rows-affected rather than reporting
-// unsupported. When bd ships its native issueops CAS release verb, consume it
-// HERE as the first attempt:
-// probe by invoking the verb and fall back to this `bd sql` path when bd
-// reports the command unknown (older pinned bd). Callers already treat
-// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
-// (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
+// It prefers bd's native conditional-release verb, which evaluates both
+// preconditions server-side and reports a failed one as exit 13 having written
+// nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
+// fallback for bd 1.0.4, the contract-tested minimum, which predates the flags:
+// there the sqlite backend refuses raw DB access, so that rejection — and
+// embedded dolt WITHOUT a configured dolt directory — surface
+// ErrConditionalReleaseUnsupported (the latter via the
+// releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
+// configured directory services the CAS through that fallback directly. Callers
+// treat ErrConditionalReleaseUnsupported as "take a conditional recheck
+// fallback" (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb
+// path never returns it for a precondition miss.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	if !s.conditionalReleaseUnsupported() {
+		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
+		if handled {
+			if err != nil {
+				return false, fmt.Errorf("bd release-if-current: %w", err)
+			}
+			return released, nil
+		}
+		s.latchConditionalReleaseUnsupported()
+	}
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +

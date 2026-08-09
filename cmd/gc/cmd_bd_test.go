@@ -2435,7 +2435,14 @@ prefix = "fe"
 	}
 	fakeBin := t.TempDir()
 	sqlLog := filepath.Join(fakeBin, "sql.log")
+	// bd 1.0.4 — the contract-tested minimum (deps.env BD_PREV_VERSION) — has no
+	// conditional-release flags and rejects them the way its flag parser does,
+	// which is what latches the store onto the raw-SQL path this test pins.
 	fakeBD := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"update\" ]; then\n" +
+		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
 		"if [ \"$1\" = \"sql\" ] && [ \"$2\" = \"--json\" ]; then\n" +
 		"  printf '%s\\n' \"$3\" > " + strconv.Quote(sqlLog) + "\n" +
 		"  printf '{\"rows_affected\":1,\"schema_version\":1}\\n'\n" +
@@ -2476,6 +2483,82 @@ prefix = "fe"
 	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
 	if strings.TrimSpace(string(query)) != wantQuery {
 		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	}
+}
+
+// TestDoBdReleaseIfCurrentUsesNativeVerbAndReadsExit13 is the CLI twin of the
+// store-level conversion: on a bd that HAS the conditional-release flags, the
+// command must issue the native verb (never SQL) and must read bd's exit 13 as
+// an authoritative "not released", printing skipped and exiting 0 — not as a
+// command failure.
+func TestDoBdReleaseIfCurrentUsesNativeVerbAndReadsExit13(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	origCityFlag, origRigFlag := cityFlag, rigFlag
+	defer func() { cityFlag, rigFlag = origCityFlag, origRigFlag }()
+	cityFlag, rigFlag = "", ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatalf("write rig metadata: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	argvLog := filepath.Join(fakeBin, "argv.log")
+	// A capable bd: the verb is understood, and the precondition miss is
+	// reported the way bd reports it — exit 13, nothing written.
+	fakeBD := "#!/bin/sh\n" +
+		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
+		"if [ \"$1\" = \"update\" ]; then\n" +
+		"  printf 'assignee mismatch\\n' >&2\n" +
+		"  exit 13\n" +
+		"fi\n" +
+		"printf 'unexpected bd args:' >&2\n" +
+		"printf ' %s' \"$@\" >&2\n" +
+		"exit 2\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setCwd(t, cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+
+	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
+	var stdout, stderr bytes.Buffer
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 0 (exit 13 is a verdict, not a failure); stderr=%q", got, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "skipped" {
+		t.Fatalf("output = %q, want skipped", stdout.String())
+	}
+	argv, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	for _, want := range []string{"update fe-abc", "--if-assignee worker-1", "--if-status in_progress", "--status open"} {
+		if !strings.Contains(string(argv), want) {
+			t.Errorf("bd argv %q does not contain %q", string(argv), want)
+		}
+	}
+	if strings.Contains(string(argv), "UPDATE issues SET") {
+		t.Fatalf("a capable bd still received hand-built SQL: %q", string(argv))
 	}
 }
 
