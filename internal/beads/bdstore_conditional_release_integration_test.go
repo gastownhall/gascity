@@ -4,11 +4,20 @@ package beads_test
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// requireConditionalReleaseEnv is set by the one CI cell that installs a bd
+// built from deps.env BD_CURRENT_REF, which carries the flags. There the
+// capability skip below is a FAILURE: the cell exists to guard the CAS, so a
+// green run that skipped it has guarded nothing — exactly the state this row was
+// in while every job installed the flagless BD_VERSION release. Unset (every
+// other shard, and local runs on a stock bd) it still skips.
+const requireConditionalReleaseEnv = "GC_REQUIRE_BD_CONDITIONAL_RELEASE"
 
 // TestBdStoreReleaseIfCurrentAgainstRealBd executes the conditional-release CAS
 // against a REAL bd binary in EMBEDDED mode — the mode where `bd sql` is
@@ -22,12 +31,24 @@ import (
 // fails the capability leg here; a bd that changes the exit status fails the
 // mismatch leg, loudly, instead of silently degrading gascity to "someone else
 // holds it" on every release.
+//
+// It runs on the contract matrix's "current" cell, whose bd is built from
+// deps.env BD_CURRENT_REF. That is not a preference: no PUBLISHED beads release
+// carries the flags, so on every shard that installs BD_VERSION this row can
+// only skip.
 func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	store, scope := newConditionalIntegrationBdStore(t)
 	if !bdParsesConditionalReleaseFlags(t, scope) {
-		t.Skip("installed bd does not advertise --if-assignee/--if-status (pre-beads#5364): " +
+		const detail = "installed bd does not advertise --if-assignee/--if-status (pre-beads#5008): " +
 			"the store latches to the raw-SQL fallback, which embedded mode rejects outright, " +
-			"so this row cannot exercise the verb at all. Move deps.env BD_VERSION past #5364 to run it.")
+			"so this row cannot exercise the verb at all"
+		if os.Getenv(requireConditionalReleaseEnv) == "1" {
+			t.Fatalf("%s. %s=1 promised a flag-capable bd (deps.env BD_CURRENT_REF); "+
+				"either the pin regressed or bd renamed the flags", detail, requireConditionalReleaseEnv)
+		}
+		t.Skipf("%s. deps.env BD_VERSION is a published release that predates the flags and none has "+
+			"shipped with them yet, so this row runs on the source-built BD_CURRENT_REF cell "+
+			"(make test-bd-conditional-release-contract), not on the shards that install BD_VERSION.", detail)
 	}
 
 	created, err := store.Create(beads.Bead{Title: "conditional release row", Type: "task"})

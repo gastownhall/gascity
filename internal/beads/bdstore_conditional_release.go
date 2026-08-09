@@ -31,9 +31,15 @@ import (
 // whole reason to prefer this verb: the load-bearing branch stops depending on
 // message text.
 //
-// bd 1.0.4 is the contract-tested minimum (deps.env BD_PREV_VERSION) and predates
-// the flags, so the raw-SQL path stays as the fallback and is selected by a
-// per-store latch the first time bd rejects the flag as unknown.
+// BOTH bd pins predate the flags, so the raw-SQL path stays as the fallback,
+// selected by a per-store latch the first time bd rejects the flag as unknown:
+// the contract-tested minimum (deps.env BD_PREV_VERSION, 1.0.4) and — the
+// load-bearing one — the installable default CI and operators actually install
+// (deps.env BD_VERSION, 1.1.0). The flags landed on beads main after that
+// release, in beads#5008, and no published release carries them yet, so on a
+// stock install the FALLBACK is still the live path. The verb is exercised
+// against the source-built deps.env BD_CURRENT_REF bd
+// (make test-bd-conditional-release-contract).
 
 // bdCASPreconditionExitCode is bd's dedicated exit status for a rejected
 // --if-assignee / --if-status precondition: nothing was written, and the verdict
