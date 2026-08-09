@@ -2862,6 +2862,14 @@
         "config_ref": {
           "type": "string",
           "description": "ConfigRef is an opaque, secret-free reference resolved by the provider\nthat owns the binding, within the city that declares it."
+        },
+        "url": {
+          "type": "string",
+          "description": "URL is the http or https endpoint a remote beads workspace is served\nfrom, for a binding whose workspace backend does not live on this disk.\nIt carries no credentials, query, or fragment; a path prefix is allowed\nbecause an edge may mount the service below the root. Empty means the\nworkspace named by config_ref is local, which is the default."
+        },
+        "auth": {
+          "type": "string",
+          "description": "Auth is a reference to the credential for URL, never the credential\nitself: \"gasworks\" mints one through the configured credential-provider\ncommand, and \"env:NAME\" reads one from an environment variable."
         }
       },
       "additionalProperties": false,

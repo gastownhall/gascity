@@ -16,6 +16,11 @@ const (
 	// binding serves. It is the only provider `path` is valid for; every other
 	// compiled provider, built-in or not, is configured by config_ref.
 	StorageProviderSQLiteBeads = "sqlite-beads"
+	// StorageProviderBeadsWorkspace is the built-in provider that serves a
+	// binding from a beads workspace directory. It is the one provider whose
+	// backing store may itself be remote, so it is the one provider `url` and
+	// `auth` are valid for.
+	StorageProviderBeadsWorkspace = "beads-workspace"
 	// DefaultSQLiteStoragePath is the provider-owned root used when a SQLite
 	// binding omits path. Like any relative binding path it is resolved
 	// against the city, not against the working directory of whatever process
@@ -111,6 +116,16 @@ type StorageBindingConfig struct {
 	// ConfigRef is an opaque, secret-free reference resolved by the provider
 	// that owns the binding, within the city that declares it.
 	ConfigRef string `toml:"config_ref,omitempty"`
+	// URL is the http or https endpoint a remote beads workspace is served
+	// from, for a binding whose workspace backend does not live on this disk.
+	// It carries no credentials, query, or fragment; a path prefix is allowed
+	// because an edge may mount the service below the root. Empty means the
+	// workspace named by config_ref is local, which is the default.
+	URL string `toml:"url,omitempty"`
+	// Auth is a reference to the credential for URL, never the credential
+	// itself: "gasworks" mints one through the configured credential-provider
+	// command, and "env:NAME" reads one from an environment variable.
+	Auth string `toml:"auth,omitempty"`
 }
 
 // Clone returns a detached storage configuration.
@@ -291,6 +306,9 @@ func validateStorageBindingConfig(name string, binding StorageBindingConfig) err
 	}
 	if binding.Path != "" && binding.ConfigRef != "" {
 		return fmt.Errorf("%s: path and config reference are mutually exclusive", prefix)
+	}
+	if err := validateStorageBindingEndpoint(prefix, binding); err != nil {
+		return err
 	}
 	if binding.Provider == StorageProviderSQLiteBeads {
 		if binding.ConfigRef != "" {

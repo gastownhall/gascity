@@ -129,6 +129,17 @@ type BindingSpec struct {
 	// that only exercises planning — and a provider that needs it refuses when
 	// it is absent rather than inventing a base.
 	CityRoot string
+	// URL is the http or https endpoint a binding's backing store answers on
+	// when it does not live on this disk. Empty — the default — means the
+	// binding's configuration resolves locally. No provider in this build
+	// reads it; it is carried so a plan does not silently drop what the city
+	// authored, and validated so a provider that does read it never sees a
+	// value that smuggles a credential.
+	URL string
+	// Auth is a reference to the credential for URL, never the credential
+	// itself. AuthCredentialProvider and the "env:NAME" form are the whole
+	// accepted set.
+	Auth string
 }
 
 // Validate verifies that a binding specification is safe for provider selection.
@@ -163,6 +174,9 @@ func (s BindingSpec) Validate() error {
 			// guessing a base from the working directory.
 			return fmt.Errorf("%w: city root %q is not absolute", ErrInvalidBindingSpec, s.CityRoot)
 		}
+	}
+	if err := validateEndpoint(s.URL, s.Auth); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidBindingSpec, err)
 	}
 	return nil
 }

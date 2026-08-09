@@ -363,6 +363,8 @@ func resolveBindingSpecs(storage config.StorageConfig, assignments map[coordclas
 			Path:      binding.Path,
 			ConfigRef: ConfigRef(binding.ConfigRef),
 			CityRoot:  cityRoot,
+			URL:       binding.URL,
+			Auth:      binding.Auth,
 		}
 		if err := spec.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: binding %q: %w", ErrInvalidStoragePlan, name, err)
