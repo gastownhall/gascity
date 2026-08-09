@@ -124,7 +124,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 	if session == nil {
 		return
 	}
-	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
+	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, true, sessFront, clk, 0, true)
 	if err != nil {
 		panic("healStateInfo: " + err.Error())
 	}
@@ -139,7 +139,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 // healStatePatchFromBead is the test shim for the retired raw healStatePatch /
 // healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
 func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration) map[string]string {
-	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, true)
+	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, true, clk, startupTimeout, true)
 }
 
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
