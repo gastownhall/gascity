@@ -2940,3 +2940,47 @@ func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscardPartialStartup(t *testing.T) {
+	partialErr := fmt.Errorf("%w: second chunk", errPartialPasteDelivery)
+	cleanupErr := errors.New("process cleanup failed")
+	fallbackErr := errors.New("fallback kill failed")
+
+	t.Run("unrelated error does not kill", func(t *testing.T) {
+		calls := 0
+		err := discardPartialStartup(errors.New("other"), func() error { calls++; return nil }, func() error { calls++; return nil })
+		if err == nil || calls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, kill calls = %d; want original error and no kills", err, calls)
+		}
+	})
+
+	t.Run("process cleanup succeeds", func(t *testing.T) {
+		fallbackCalls := 0
+		err := discardPartialStartup(partialErr, func() error { return nil }, func() error { fallbackCalls++; return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || fallbackCalls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, fallback calls = %d", err, fallbackCalls)
+		}
+	})
+
+	t.Run("session already gone skips fallback", func(t *testing.T) {
+		fallbackCalls := 0
+		err := discardPartialStartup(partialErr, func() error { return ErrSessionNotFound }, func() error { fallbackCalls++; return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || errors.Is(err, ErrSessionNotFound) || fallbackCalls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, fallback calls = %d", err, fallbackCalls)
+		}
+	})
+
+	t.Run("fallback kill succeeds and cleanup failure is reported", func(t *testing.T) {
+		err := discardPartialStartup(partialErr, func() error { return cleanupErr }, func() error { return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || !errors.Is(err, cleanupErr) {
+			t.Fatalf("discardPartialStartup() = %v, want partial and cleanup errors", err)
+		}
+	})
+
+	t.Run("both kill paths fail and both failures are reported", func(t *testing.T) {
+		err := discardPartialStartup(partialErr, func() error { return cleanupErr }, func() error { return fallbackErr })
+		if !errors.Is(err, errPartialPasteDelivery) || !errors.Is(err, cleanupErr) || !errors.Is(err, fallbackErr) {
+			t.Fatalf("discardPartialStartup() = %v, want partial, cleanup, and fallback errors", err)
+		}
+	})
+}
