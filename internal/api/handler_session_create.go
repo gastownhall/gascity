@@ -161,11 +161,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// handles both: schema overrides map to CLI flags, initial_message
 	// is appended to the prompt on first start only.
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
-	if extraMeta == nil {
-		extraMeta = make(map[string]string)
-	}
-	extraMeta["agent_name"] = createCtx.Identity
-	extraMeta["session_origin"] = "ephemeral"
+	extraMeta = agentSessionCreateMetadata(extraMeta, createCtx.Identity)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, createCtx.Identity, mcpServers)
 		if err != nil {
