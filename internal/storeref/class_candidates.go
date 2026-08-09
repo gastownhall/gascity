@@ -25,10 +25,12 @@ type ClassRouting struct {
 	// value equal to Work, means the class is NOT relocated.
 	Class beads.Store
 
-	// Work is the city/HQ work store the class was relocated away from. It is
-	// the trailing fallback leg of the candidate list: on a MIGRATED city an id
-	// minted before relocation keeps its work-era prefix, and a bead the class
-	// arm has not physically moved yet is still readable there.
+	// Work is the city/HQ work store the class was relocated away from. It stays
+	// in the candidate list directly behind the class store — where the pre-seam
+	// resolver already put it — as the fallback leg for an id inside the class
+	// namespace that the class store does not hold. The reserved prefix is
+	// warned-and-allowed on work stores, so one can legitimately mint and hold
+	// such an id.
 	Work beads.Store
 
 	// Shadows are the loaded work stores paired with the id prefixes they were
@@ -59,17 +61,46 @@ type PrefixedStore struct {
 //     migration flag. A city whose class store IS its work store gets nil here
 //     and keeps its legacy resolution byte-identical.
 //   - Nil unless id is inside the class namespace (IDInNamespace).
-//   - Otherwise: the class store FIRST, then every shadowing work store whose
-//     configured prefix also covers id (most specific first), then Work.
+//   - Otherwise: the class store FIRST, then Work, then every shadowing work
+//     store whose configured prefix also covers id (most specific first).
 //
-// The result is a candidate list, never an unconditional route: a bead lives in
-// exactly one store, so the caller probes the list in order and pins the first
-// store that answers. The class store leads because it is the sole minter of
-// the reserved namespace, so a class id pins it on the first probe; the rest of
-// the list exists because "reserved prefix" is an ADVISORY on work stores, and
-// on a migrated city an id can predate the relocation that gave the namespace
-// away. Routing unconditionally on the prefix instead would strand exactly
-// those ids.
+// # Why a probe list rather than a route
+//
+// A bead lives in exactly one store, so the caller probes the list in order and
+// pins the first store that answers. The value of the shape is that it PROBES:
+// the class store leads because it is the sole MINTER of the reserved
+// namespace, but minting is not holding, and a reserved prefix is only an
+// ADVISORY on work stores (config.ReservedPrefixWarnings warns;
+// config.ValidateRigs does not reject). A work store can therefore legitimately
+// hold an id inside the class namespace, and a resolver that routed
+// unconditionally on the prefix would report those beads as absent.
+//
+// # What the order guarantees
+//
+// [class, work] is exactly the list the pre-seam internal/api arm returned, and
+// it stays the HEAD of this one — the shadowing stores are appended behind it.
+// Every probe the pre-seam list performed still happens, in the same order, and
+// the added legs are reached only where it had already given up. So a store
+// added here can neither change an answer that resolution already served nor
+// turn a served read into an error by failing ahead of the store that holds the
+// bead: the worst a broken shadow can do is turn a not-found into a hard error,
+// which is the honest report when a store that could hold the id is unreachable.
+//
+// # NOT covered: a relocated bead that kept a legacy id
+//
+// IDInNamespace gates BEFORE the list is built, so this resolver only ever sees
+// ids inside the class namespace. `gc storage migrate` preserves ids
+// (cmd/gc/infra_class_migrate.go), so a bead it relocated keeps its HQ/rig-era
+// prefix, is outside the namespace, and gets nil back here. This resolver does
+// not cover that bead and must not be described as if it does.
+//
+// What covers it is a residence probe — asking the class store about EVERY id
+// rather than only about prefixed ones. cmd/gc/cmd_bd_by_id.go's
+// bdByIDClassDoor.resolve does exactly that, for exactly this reason. Nothing
+// on the internal/api by-id path does, so there a legacy-prefixed relocated
+// bead is still answered from the work store's retained pre-migration copy (the
+// migration never deletes its source). Giving that path a residence probe is
+// open work, not a property of this function.
 func ClassCandidates(id string, routing ClassRouting) []beads.Store {
 	id = strings.TrimSpace(id)
 	if routing.Class == nil || routing.Class == routing.Work {
@@ -88,10 +119,10 @@ func ClassCandidates(id string, routing ClassRouting) []beads.Store {
 		candidates = append(candidates, s)
 	}
 	add(routing.Class)
+	add(routing.Work)
 	for _, shadow := range shadowsCovering(id, routing.Shadows) {
 		add(shadow)
 	}
-	add(routing.Work)
 	return candidates
 }
 
@@ -124,11 +155,18 @@ func shadowsCovering(id string, shadows []PrefixedStore) []beads.Store {
 // rule — it admits the bare form because a configured rig/HQ prefix can be a
 // whole id.
 //
-// It is deliberately NOT the rule PrefixOwner applies. PrefixOwner routes on a
-// store's SELF-DECLARED IDPrefix() and requires the "prefix-" separator, because
-// a store that mints "gcg-1" never mints the bare id "gcg". Keep the two
-// distinct: widening PrefixOwner would let a bare id capture a store that cannot
-// hold it.
+// It is deliberately NOT the rule PrefixOwner applies, and the two are the
+// package's two namespace predicates. Which to use:
+//
+//   - IDInNamespace, when the prefix comes from CONFIG — a rig/HQ prefix, or a
+//     reserved class prefix from config.ReservedClassPrefix. A configured prefix
+//     can be a whole id, so the bare form counts.
+//   - PrefixOwner, when the prefix comes from the STORE — its self-declared
+//     IDPrefix(). It requires the "prefix-" separator, because a store that
+//     mints "gcg-1" never mints the bare id "gcg".
+//
+// Keep them distinct: widening PrefixOwner would let a bare id capture a store
+// that cannot hold it.
 func IDInNamespace(id, prefix string) bool {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {

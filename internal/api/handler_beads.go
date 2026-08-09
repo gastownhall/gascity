@@ -164,12 +164,22 @@ func (s *Server) findStore(rig string) beads.Store {
 // resolved by the class-prefix arm, which runs first so a reserved class prefix
 // can never be captured by a rig/HQ prefix or a routes.jsonl entry — but that
 // arm returns a probe LIST, not a route, so a work store configured with the
-// reserved prefix keeps its own ids reachable behind the class store.
+// reserved prefix keeps its own ids reachable behind the class store and the
+// city store.
+//
+// The handlers probe this list in order and stop at the first store that
+// answers, and they surface a non-ErrNotFound read as a 500 rather than
+// continuing — an unreachable store must not be reported as a missing bead, and
+// on a city where two stores claim one namespace it must not be silently
+// replaced by the other store's row of the same id. The class arm's list is
+// ordered so that the legs it ADDS sit behind the ones this resolver already
+// returned, which is what keeps that fail-fast rule from costing availability:
+// an added store can only be probed after the previously-answering ones have
+// already missed.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
 	// Built once and shared by both prefix resolvers below: they answer
-	// different questions about the same set of configured work prefixes, and
-	// this is the walk of cfg.Rigs the pre-seam code already did.
+	// different questions about the same set of configured work prefixes.
 	configured := s.configuredPrefixStores()
 
 	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
@@ -214,9 +224,18 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 // question is asked by cmd/gc's one-shot commands, and answering it twice is
 // exactly how the split-store bug class reproduces. The routing is keyed on
 // STORE IDENTITY (GraphBeadStore() != CityBeadStore()) rather than a marker
-// file, so a MIGRATED city — where infra_class_migrate.go deliberately preserves
-// legacy ids, and a relocated bead can still carry its HQ/rig-era prefix — is
-// resolved by probing the returned list rather than by trusting the prefix.
+// file or a migration flag, and it returns a probe list rather than a route, so
+// a work store that legitimately holds an id inside the class namespace stays
+// reachable behind the class store.
+//
+// NOT covered here: a bead `gc storage migrate` relocated with its id PRESERVED
+// (infra_class_migrate.go). That id keeps its HQ/rig-era prefix, so it is
+// outside the class namespace, the arm never fires, and the configured-prefix
+// resolver below answers it from the work store — which still holds the
+// migration's retained source copy, frozen at migration time. Covering it needs
+// a residence probe that asks the class store about every id; that is what
+// cmd/gc/cmd_bd_by_id.go's bdByIDClassDoor.resolve does, and this path has no
+// equivalent yet.
 //
 // GRAPH ONLY. Sessions, orders and nudges have relocated-store accessors on
 // State, but adding them here would change which stores answer for gcs-/gco-/
@@ -244,6 +263,12 @@ func (s *Server) classStoresForID(id string, configured []storeref.PrefixedStore
 // Only stores that are actually loaded are listed: a configured prefix whose
 // store is missing must not win a slot, so a shorter loaded prefix can still own
 // an id (and otherwise the id is left to the legacy scan).
+//
+// This walks every rig, which the pre-seam resolver did not: it looked the store
+// up only for a rig whose prefix already covered the id and beat the best match
+// so far. The set is built here because two resolvers now consume it and they
+// select different subsets of it. State.BeadStore is a map read under an RLock,
+// so the widened walk costs a lookup per rig and no I/O.
 func (s *Server) configuredPrefixStores() []storeref.PrefixedStore {
 	cfg := s.state.Config()
 	if cfg == nil {

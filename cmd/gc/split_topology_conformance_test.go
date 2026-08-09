@@ -384,15 +384,19 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 //
 // storeref.PrefixOwner is that routing primitive (internal/dispatch,
 // internal/convoy and cmd/gc/cmd_wait already route on it), and it resolves on
-// the store's own declared namespace — the prefix+"-" segment rule
-// internal/api's beadIDHasConfiguredPrefix applies too. This invariant pins that
-// both shapes route to the class store on a split city, and pins the TRAP that
-// makes the wisp shape special: the config-free sling.BeadPrefix heuristic
-// answers "gcg-wisp" for a gcg-wisp-0042 id, which is not a reserved class
-// prefix at all, so a by-id router built on that heuristic instead of the
-// namespace rule would hand every wisp to the work store. That divergence is
-// asserted as a negative here so it cannot change silently under a future
-// resolver.
+// the store's own declared namespace: the prefix+"-" SEGMENT rule. Its sibling
+// predicate storeref.IDInNamespace — the CONFIGURED-prefix rule the shared class
+// resolver gates on — is deliberately not the same rule, because a configured
+// rig/HQ prefix can be a whole id while a store that mints "gcg-1" never mints
+// the bare "gcg". They agree on every id shape this invariant routes and diverge
+// on the bare form, so nothing here may be read as one implying the other.
+// This invariant pins that both shapes route to the class store on a split
+// city, and pins the TRAP that makes the wisp shape special: the config-free
+// sling.BeadPrefix heuristic answers "gcg-wisp" for a gcg-wisp-0042 id, which is
+// not a reserved class prefix at all, so a by-id router built on that heuristic
+// instead of the namespace rule would hand every wisp to the work store. That
+// divergence is asserted as a negative here so it cannot change silently under a
+// future resolver.
 //
 // The CLAIM-MUTATION half runs on the SHARED resolver, storeref.ClassCandidates
 // (ga-ia7li), which is the seam this invariant was waiting on: a candidate list
@@ -412,6 +416,13 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // lands, this paragraph goes and the assertions move from claimByID to the
 // command.
 //
+// The gap is ASSERTED and not merely described, the way I1, I2 and I10 assert
+// theirs: hookQueryEnv is the production seam that decides which store the
+// hook's claim runs against, and the row below pins that it answers a WORK scope
+// rooted at the city path on BOTH topologies — identically on a city whose graph
+// class lives in a binding of its own. A gap stated in prose and nowhere else
+// can close, or widen, without a single test moving.
+//
 // `gc bd update --claim` is already routed (#5132, cmd_bd_by_id.go) and probes
 // the same way, so the resolver is not the only class-aware claim path — it is
 // the one a caller holding just an id and a set of stores can use.
@@ -423,6 +434,25 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	if reservedClassNamespace(workBead.ID) {
 		t.Fatalf("work bead %q sits in a reserved class namespace; by-id routing cannot be built on this id space", workBead.ID)
 	}
+	classPrefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("config.ReservedClassPrefix(graph) = ok:false; there is no reserved namespace for by-id class routing to run on")
+	}
+
+	// The KNOWN GAP above, pinned on both topologies: the store `gc hook
+	// --claim` runs its claim against is a WORK scope, resolved from cfg with no
+	// class arm anywhere in it. Relocating graph does not move it.
+	hookEnv, err := hookQueryEnv(e.cityPath, e.cfg, &config.Agent{Name: splitEnvPoolAgent})
+	if err != nil {
+		t.Fatalf("build the hook's work-query env: %v", err)
+	}
+	if got := hookEnv["GC_STORE_SCOPE"]; got != "city" {
+		t.Errorf("`gc hook --claim` resolves store scope %q, want \"city\" — if it now names a coordination class, the ga-xo8ch rewire has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", got)
+	}
+	if got := hookEnv["GC_STORE_ROOT"]; got != e.cityPath {
+		t.Errorf("`gc hook --claim` resolves store root %q, want the city work root %q — a claim it issues for a relocated class id runs against the work ledger, and that is the gap this row pins", got, e.cityPath)
+	}
+
 	if !e.split {
 		wisp := e.mintWisp(t, "claim-routing wisp")
 		// A legacy city mints no reserved-class ids at all, so there is nothing
@@ -447,9 +477,20 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		// every by-id claim keeps running on the one store exactly as it does
 		// today. A resolver that answered on a legacy city would be routing a
 		// city with nowhere to route to.
-		for _, id := range []string{workBead.ID, wisp.ID} {
-			if got := e.classCandidatesForID(id); got != nil {
-				t.Fatalf("classCandidatesForID(%q) returned %d candidates on a single-store city; the resolver must be inert where the class store IS the work store", id, len(got))
+		//
+		// The rows are not interchangeable, and the class-shaped one is the only
+		// one that pins the IDENTITY gate. A legacy city's own ids sit outside
+		// the reserved namespace, so the NAMESPACE gate alone rejects them and
+		// those rows would still pass with the identity gate deleted. A
+		// class-shaped id clears the namespace gate, so identity is the only
+		// thing left that can reject it.
+		for _, tt := range []struct{ name, id string }{
+			{"work bead — namespace gate", workBead.ID},
+			{"wisp — namespace gate", wisp.ID},
+			{"class-shaped id — identity gate", classPrefix + "-1"},
+		} {
+			if got := e.classCandidatesForID(tt.id); got != nil {
+				t.Fatalf("%s: classCandidatesForID(%q) returned %d candidates on a single-store city; the resolver must be inert where the class store IS the work store", tt.name, tt.id, len(got))
 			}
 		}
 		for _, id := range []string{workBead.ID, wisp.ID} {
