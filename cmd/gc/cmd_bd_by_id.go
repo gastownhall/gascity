@@ -46,9 +46,12 @@ package main
 //     work store never held.
 //   - A resolution failure surfaces. Reading "the binding could not be opened"
 //     as "the bead is not there" is the root-loss shape this whole lane exists
-//     to prevent. A city this build must not serve resolves to the funnel's
-//     refusing store, so every routed read on it returns the boot refusal that
-//     names the remedy — never absence, and never the work store's answer.
+//     to prevent. On a city this build must not serve, an id only the class
+//     binding could own gets the boot refusal that names the remedy — never
+//     absence, and never the work store's answer. A WORK id on that same city
+//     keeps its existing path, because the refusal is a fact about the city's
+//     storage and says nothing about a bead the work ledger still serves. See
+//     resolve.
 //
 // Served here: show, update --claim, release-if-current, and dep list. `gc bd
 // heartbeat` is not — it is rewritten to a metadata update before this hook
