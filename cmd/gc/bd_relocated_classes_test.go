@@ -392,8 +392,8 @@ func TestGcBdQueryRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
 	}
 }
 
-// TestGcBdDepTreeIsStillARawPassthroughOnASplitCity is the fact that made the
-// old refusal message wrong, pinned for the verb that still carries it.
+// TestGcBdDepTreeSplitsOnOwnershipNotOnServability is the fact that made the old
+// refusal message wrong, pinned in the shape it now takes.
 //
 // The message used to end "Use the federated `gc bd show <id>` or `gc bd dep
 // tree <id>`". Neither verb was federated: doBd resolved a scope and then
@@ -401,27 +401,50 @@ func TestGcBdQueryRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
 // routing anywhere on the path, so following the advice ran the blind read the
 // refusal had just prevented.
 //
-// `gc bd show` is federated now (cmd_bd_by_id.go). `dep tree` is not — it
-// reaches no by-ID routing and is still forwarded verbatim — so the residue is
-// pinned here rather than left to be rediscovered by the next operator who
-// takes the message at its word.
-func TestGcBdDepTreeIsStillARawPassthroughOnASplitCity(t *testing.T) {
-	args := []string{"dep", "tree", "gcg-abc123"}
-	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
-	resetCLIStorageRoutes(t)
-	captureCLIStorageStderr(t)
+// `dep tree` is still not served in process — this surface implements no tree
+// walk — but servability is no longer what decides where it goes. On a
+// class-owned id it is refused before the subprocess, because bd would answer
+// from the one ledger that cannot hold the bead; on a work id it is forwarded
+// verbatim, because that ledger is exactly the right answerer. Both halves are
+// asserted together: either alone is satisfied by a surface that stopped
+// discriminating.
+func TestGcBdDepTreeSplitsOnOwnershipNotOnServability(t *testing.T) {
+	t.Run("work id is forwarded verbatim", func(t *testing.T) {
+		args := []string{"dep", "tree", "demo-abc123"}
+		capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
 
-	var stdout, stderr bytes.Buffer
-	if code := doBd(args, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
-	}
-	data, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("bd was not invoked for %v: %v", args, err)
-	}
-	if !strings.Contains(string(data), strings.Join(args, " ")) {
-		t.Fatalf("bd received %q, want the args forwarded verbatim", data)
-	}
+		var stdout, stderr bytes.Buffer
+		if code := doBd(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("doBd(%v) = %d; stderr=%q", args, code, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatalf("bd was not invoked for %v: %v", args, err)
+		}
+		if !strings.Contains(string(data), strings.Join(args, " ")) {
+			t.Fatalf("bd received %q, want the args forwarded verbatim", data)
+		}
+	})
+
+	t.Run("class-owned id is refused", func(t *testing.T) {
+		args := []string{"dep", "tree", "gcg-abc123"}
+		capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
+
+		var stdout, stderr bytes.Buffer
+		if code := doBd(args, &stdout, &stderr); code == 0 {
+			t.Fatalf("doBd(%v) exited 0 for a class-owned id; stdout=%q", args, stdout.String())
+		}
+		if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
+			t.Fatalf("the class-owned dep tree was forwarded to bd: %q", data)
+		}
+		if !strings.Contains(stderr.String(), "gc bd dep tree") {
+			t.Errorf("the refusal does not name the command the operator ran; stderr=%q", stderr.String())
+		}
+	})
 }
 
 // TestGcBdShowNeverReachesBdForAClassOwnedIDOnASplitCity is the other half, and

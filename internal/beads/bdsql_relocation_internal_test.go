@@ -52,17 +52,17 @@ func TestRelocatedClassRefusalNamesEverythingAnOperatorNeeds(t *testing.T) {
 //
 // The set of blind verbs shrank once. `gc bd show` and `gc bd dep list` acquired
 // in-process class routing (cmd/gc/cmd_bd_by_id.go) and are now the read this
-// message names first. `gc bd dep tree` did not, so it is the one that must
-// still be named as blind — and the pin moved with the fact rather than being
-// deleted, because a message that stops warning about a verb that is still
-// blind is the original defect returning.
+// message names first. `gc bd dep tree` did not acquire routing, but it is no
+// longer blind either: on a relocated id that surface refuses it. The pin moved
+// with the fact rather than being deleted, because a message that offered a
+// verb which cannot answer would be the original defect returning.
 func TestRelocatedClassRefusalDoesNotRecommendABlindVerb(t *testing.T) {
 	msg := RelocatedClassRefusal("bd sql", []RelocatedClass{graphRelocated()}).Error()
 	if strings.Contains(msg, "Use the federated `gc bd") {
 		t.Errorf("refusal still recommends a raw bd passthrough as federated:\n%s", msg)
 	}
-	if !strings.Contains(msg, "`gc bd dep tree <id>` is still a raw bd passthrough") {
-		t.Errorf("refusal does not warn that dep tree answers from this same ledger:\n%s", msg)
+	if !strings.Contains(msg, "`gc bd dep tree <id>` is not served in process") {
+		t.Errorf("refusal does not say dep tree is unavailable on a relocated id:\n%s", msg)
 	}
 	if !strings.Contains(msg, "`gc bd show <id>`") {
 		t.Errorf("refusal does not name the by-ID read that IS class-routed:\n%s", msg)

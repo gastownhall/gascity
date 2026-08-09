@@ -246,9 +246,9 @@ func isIDBodyByte(b byte) bool {
 // `gc bd show <id>` and `gc bd dep list <id>` are now answered in process from
 // the binding the class is served from (cmd/gc/cmd_bd_by_id.go), so they are
 // the read this message names first — they need no controller, which the API
-// lane does. `gc bd dep tree <id>` reached no such routing and is still a raw
-// passthrough (doBd ends at exec.Command(bdPath, bdArgs...)), so it is still
-// named as blind rather than offered as an escape.
+// lane does. `gc bd dep tree <id>` is not served there, and on a relocated id
+// that surface refuses it rather than forwarding it, so it is named as
+// unavailable rather than offered as an escape.
 func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
@@ -271,6 +271,6 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		"`gc bd show <id>`, which answers a reserved-prefix id in process from the binding its class is served from "+
 		"and needs no controller, or with `gc beads show <id>`, which routes by class through the controller API "+
 		"(GET /v0/city/{cityName}/bead/{id}) and falls back to a work-store scan when no controller is reachable. "+
-		"`gc bd dep tree <id>` is still a raw bd passthrough against this same ledger",
+		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
 		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
 }
