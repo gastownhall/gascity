@@ -1,0 +1,5 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "postgres_dsn": "postgres://bd@db.example.test:6543"
+}

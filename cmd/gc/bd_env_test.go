@@ -4307,6 +4307,66 @@ func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
 	}
 }
 
+// TestApplyResolvedScopePostgresEnv_DerivesFromDSN covers bd's own postgres
+// metadata shape: a password-free postgres_dsn with no discrete fields. The
+// BEADS_POSTGRES_* projection has to derive the tuple rather than ship empty
+// values, which is what it would do if it read the metadata fields directly.
+func TestApplyResolvedScopePostgresEnv_DerivesFromDSN(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
+	scopeRoot := t.TempDir()
+	writePGScopeFixture(t, scopeRoot, "devpw")
+
+	env := map[string]string{}
+	meta := contract.MetadataState{
+		Backend:        "postgres",
+		PostgresDSN:    "postgres://gc_city@pg.example.test:6543/gascity_infra",
+		PostgresSchema: "city_x",
+	}
+	if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
+		t.Fatalf("applyResolvedScopePostgresEnv: %v", err)
+	}
+	want := map[string]string{
+		"BEADS_POSTGRES_HOST":     "pg.example.test",
+		"BEADS_POSTGRES_PORT":     "6543",
+		"BEADS_POSTGRES_USER":     "gc_city",
+		"BEADS_POSTGRES_DATABASE": "gascity_infra",
+	}
+	for key, value := range want {
+		if got := env[key]; got != value {
+			t.Errorf("env[%q] = %q, want %q", key, got, value)
+		}
+	}
+}
+
+// TestApplyResolvedScopePostgresEnv_RefusesUnderivableDSN pins the libpq
+// limitation at the projection boundary: gc fails loudly instead of handing bd
+// a set of empty connection variables.
+func TestApplyResolvedScopePostgresEnv_RefusesUnderivableDSN(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	cityPath := t.TempDir()
+	scopeRoot := t.TempDir()
+	writePGScopeFixture(t, scopeRoot, "devpw")
+
+	env := map[string]string{}
+	meta := contract.MetadataState{
+		Backend:     "postgres",
+		PostgresDSN: "host=pg.example.test port=6543 user=gc_city dbname=gascity_infra",
+	}
+	err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta)
+	if err == nil {
+		t.Fatalf("applyResolvedScopePostgresEnv = nil error, want refusal; env=%v", env)
+	}
+	if !errors.Is(err, contract.ErrPostgresDSNUnsupportedForm) {
+		t.Fatalf("error %v, want errors.Is(err, contract.ErrPostgresDSNUnsupportedForm)", err)
+	}
+	for _, key := range []string{"BEADS_POSTGRES_HOST", "BEADS_POSTGRES_PORT", "BEADS_POSTGRES_USER", "BEADS_POSTGRES_DATABASE"} {
+		if got, ok := env[key]; ok {
+			t.Errorf("env[%q] = %q, want it unset (no partial projection)", key, got)
+		}
+	}
+}
+
 func TestEmitPostgresCredentialResolved_DedupsWithinProcess(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 

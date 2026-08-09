@@ -82,8 +82,9 @@ func (c DoltConfig) DisableEventFlushEnabled() bool {
 // Backend determines which backend-specific fields are meaningful. When
 // returned from LoadMetadataState the populated backend-specific fields are
 // guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
-// always has every Postgres field non-empty and PostgresPort already verified
-// as a TCP-port-shaped string.
+// carries either a parseable postgres_dsn or the complete discrete field set,
+// PostgresEndpoint derives a full host/port/user/database tuple from it, and
+// the effective port is already verified as a TCP-port-shaped string.
 type MetadataState struct {
 	Database         string `json:"database"`
 	Backend          string `json:"backend"`
@@ -93,6 +94,14 @@ type MetadataState struct {
 	PostgresPort     string `json:"postgres_port,omitempty"`
 	PostgresUser     string `json:"postgres_user,omitempty"`
 	PostgresDatabase string `json:"postgres_database,omitempty"`
+	// PostgresDSN and PostgresSchema are bd's postgres shape:
+	// `bd init --backend=postgres` persists a password-free connection URL
+	// plus the per-workspace search_path schema instead of the discrete
+	// host/port/user/database fields above. The password never lands on
+	// disk — bd reads BEADS_PG_PASSWORD (or a credential command) at
+	// command time.
+	PostgresDSN    string `json:"postgres_dsn,omitempty"`
+	PostgresSchema string `json:"postgres_schema,omitempty"`
 }
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
@@ -132,6 +141,8 @@ var postgresBackendKeys = []string{
 	"postgres_port",
 	"postgres_user",
 	"postgres_database",
+	"postgres_dsn",
+	"postgres_schema",
 }
 
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
@@ -388,17 +399,29 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	}
 
 	if state.Backend == "postgres" {
-		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
+		hasDSN := strings.TrimSpace(state.PostgresDSN) != ""
+		hasAllDiscrete := state.PostgresHost != "" && state.PostgresPort != "" && state.PostgresUser != "" && state.PostgresDatabase != ""
+		if !hasDSN && !hasAllDiscrete {
 			return MetadataState{}, false, &MetadataParseError{
 				Path:   abs,
-				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+				Reason: "backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database",
 			}
 		}
-		port, err := strconv.Atoi(state.PostgresPort)
+		endpoint, err := state.PostgresEndpoint()
+		if err != nil {
+			return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error()}
+		}
+		if missing := missingPostgresEndpointFields(endpoint); len(missing) > 0 {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: fmt.Sprintf("backend=postgres resolves to an incomplete endpoint: postgres_dsn supplies no %s", strings.Join(missing, ", ")),
+			}
+		}
+		port, err := strconv.Atoi(endpoint.Port)
 		if err != nil || port < 1 || port > 65535 {
 			return MetadataState{}, false, &MetadataParseError{
 				Path:   abs,
-				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
+				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", endpoint.Port),
 			}
 		}
 	}
@@ -413,9 +436,10 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 //
 // Field-iteration order is the JSON-key declaration order on MetadataState
 // (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database). When state.Backend is empty or unknown and both backend
-// families appear, the first populated field across both backends wins (with
-// Dolt fields preferred per declaration order).
+// postgres_database, postgres_dsn, postgres_schema). When state.Backend is
+// empty or unknown and both backend families appear, the first populated
+// field across both backends wins (with Dolt fields preferred per
+// declaration order).
 func mixedBackendField(state MetadataState) (string, bool) {
 	type entry struct {
 		name    string
@@ -429,6 +453,8 @@ func mixedBackendField(state MetadataState) (string, bool) {
 		{"postgres_port", state.PostgresPort, "postgres"},
 		{"postgres_user", state.PostgresUser, "postgres"},
 		{"postgres_database", state.PostgresDatabase, "postgres"},
+		{"postgres_dsn", state.PostgresDSN, "postgres"},
+		{"postgres_schema", state.PostgresSchema, "postgres"},
 	}
 	var firstDolt, firstPostgres string
 	for _, f := range fields {
@@ -586,6 +612,8 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		"postgres_port":     strings.TrimSpace(state.PostgresPort),
 		"postgres_user":     strings.TrimSpace(state.PostgresUser),
 		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
+		"postgres_dsn":      strings.TrimSpace(state.PostgresDSN),
+		"postgres_schema":   strings.TrimSpace(state.PostgresSchema),
 	}
 	for key, want := range defaults {
 		if want == "" {

@@ -308,7 +308,21 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
 	case "postgres":
 		if hasDSN {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)
+			// Gas City derives the endpoint from postgres_dsn (see
+			// MetadataState.PostgresEndpoint), so the DSN form is a shape gc
+			// understands rather than one to convert. Only a DSN gc cannot
+			// derive from — libpq's keyword/value form, a non-postgres scheme,
+			// a hostless URL — is a shape problem, and it is a hard one: the
+			// scope has no usable endpoint at all.
+			//
+			// The summary stays free of the DSN itself: only
+			// PostgresDSNRedacted is sanitized on the way out, so echoing a
+			// parse error that quotes the DSN would leak a hand-written
+			// password past Redacted().
+			if _, err := ParsePostgresDSNEndpoint(metadata.PostgresDSN); err != nil {
+				return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn is not a derivable postgres:// URL", details)
+			}
+			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses postgres_dsn shape", details)
 		}
 		if metadata.hasCompletePostgresSplitFields() {
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)

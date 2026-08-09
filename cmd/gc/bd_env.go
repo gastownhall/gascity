@@ -630,7 +630,8 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 // applyResolvedScopePostgresEnv projects PG credentials and connection
 // info into env. Caller guarantees meta.Backend == "postgres". The
 // resolver chain in internal/pgauth supplies the password; the host,
-// port, user, and database come straight from MetadataState.
+// port, user, and database come from meta.PostgresEndpoint, which reads
+// either the discrete metadata fields or bd's postgres_dsn.
 //
 // On resolver exhaustion returns an error wrapping
 // pgauth.ErrNoPasswordResolvable; callers can match with errors.Is.
@@ -642,14 +643,21 @@ func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot st
 	if env == nil {
 		return nil
 	}
+	// LoadMetadataState refuses a postgres scope it cannot derive a complete
+	// endpoint for, so this only fires for a hand-built MetadataState.
+	// Failing here beats projecting empty BEADS_POSTGRES_* values.
+	pg, err := meta.PostgresEndpoint()
+	if err != nil {
+		return fmt.Errorf("deriving postgres endpoint for %s: %w", scopeRoot, err)
+	}
 	clearProjectedBeadsBackendEnv(env)
 	clearProjectedDoltEnv(env)
 	mirrorBeadsDoltEnv(env)
 	clearProjectedPostgresEnv(env)
 	endpoint := pgauth.Endpoint{
-		Host: meta.PostgresHost,
-		Port: meta.PostgresPort,
-		User: meta.PostgresUser,
+		Host: pg.Host,
+		Port: pg.Port,
+		User: pg.User,
 	}
 	// Scope projection clears inherited PG keys first, so credential
 	// resolution intentionally starts at process and file-backed sources.
@@ -659,12 +667,12 @@ func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot st
 	}
 	env["GC_POSTGRES_PASSWORD"] = resolved.Password
 	env["BEADS_POSTGRES_PASSWORD"] = resolved.Password
-	env["BEADS_POSTGRES_HOST"] = meta.PostgresHost
-	env["BEADS_POSTGRES_PORT"] = meta.PostgresPort
-	env["BEADS_POSTGRES_USER"] = meta.PostgresUser
-	env["BEADS_POSTGRES_DATABASE"] = meta.PostgresDatabase
+	env["BEADS_POSTGRES_HOST"] = pg.Host
+	env["BEADS_POSTGRES_PORT"] = pg.Port
+	env["BEADS_POSTGRES_USER"] = pg.User
+	env["BEADS_POSTGRES_DATABASE"] = pg.Database
 	mirrorBeadsPostgresEnv(env)
-	emitPostgresCredentialResolved(cityPath, scopeRoot, meta, resolved.Source)
+	emitPostgresCredentialResolved(cityPath, scopeRoot, pg, resolved.Source)
 	return nil
 }
 
@@ -673,7 +681,7 @@ func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot st
 // Best-effort: recorder failures (file unreachable, JSONL write error) do
 // not propagate to the caller. The payload deliberately omits the password
 // value (asserted by TestPostgresEventOmitsPassword).
-func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.MetadataState, source pgauth.Source) {
+func emitPostgresCredentialResolved(cityPath, scopeRoot string, pg contract.PostgresEndpoint, source pgauth.Source) {
 	scopeKind, scopeName := scopeKindAndName(cityPath, scopeRoot)
 	subject := "city/" + scopeName
 	if scopeKind == "rig" {
@@ -683,9 +691,9 @@ func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.Me
 		ScopeKind: scopeKind,
 		ScopeName: scopeName,
 		Source:    source.String(),
-		Host:      meta.PostgresHost,
-		Port:      meta.PostgresPort,
-		User:      meta.PostgresUser,
+		Host:      pg.Host,
+		Port:      pg.Port,
+		User:      pg.User,
 	}
 	if _, loaded := postgresCredentialResolvedSeen.LoadOrStore(postgresCredentialResolvedKey(cityPath, payload), struct{}{}); loaded {
 		return
@@ -1283,7 +1291,11 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
-				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
+				pg, pgErr := meta.PostgresEndpoint()
+				if pgErr != nil {
+					return out, fmt.Errorf("postgres scope with an underivable endpoint (%w): gc does not manage external PG endpoints (no managed recovery attempted): %w", pgErr, err)
+				}
+				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", pg.Host, pg.Port, err)
 			}
 		}
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {

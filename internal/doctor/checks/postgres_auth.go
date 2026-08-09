@@ -247,10 +247,16 @@ func loadPostgresAuthScope(scopeRoot, kind, displayBase, relEnv string) (postgre
 	if err != nil || meta.Backend != "postgres" {
 		return postgresAuthScope{}, false
 	}
+	// LoadMetadataState guarantees a postgres state derives cleanly, so this
+	// only skips a scope whose metadata.json was mutated underneath us.
+	pg, err := meta.PostgresEndpoint()
+	if err != nil {
+		return postgresAuthScope{}, false
+	}
 	endpoint := pgauth.Endpoint{
-		Host: meta.PostgresHost,
-		Port: meta.PostgresPort,
-		User: meta.PostgresUser,
+		Host: pg.Host,
+		Port: pg.Port,
+		User: pg.User,
 	}
 	display := fmt.Sprintf("%s (%s:%s)", displayBase, endpoint.Host, endpoint.Port)
 	scope := postgresAuthScope{
