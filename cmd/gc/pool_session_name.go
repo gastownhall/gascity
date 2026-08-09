@@ -626,36 +626,21 @@ func directSessionBeadIDCandidates(assignee string) []string {
 	return candidates
 }
 
-// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
-// before clearing assignee. The expectedStatus must match the snapshot
-// status the caller observed: if the bead has since transitioned (e.g. a
-// concurrent claim moved open→in_progress, or another release moved
-// in_progress→open) the snapshot's release decision is no longer safe.
-// Open status is required for the issue #2793 path — graph.v2 step
-// beads stuck on a dead session's long-form assignee are status=open,
-// not in_progress.
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale before
+// clearing assignee, collapsing a read failure to "not releasable" for callers
+// that have no error channel. Open status is required for the issue #2793 path —
+// graph.v2 step beads stuck on a dead session's long-form assignee are
+// status=open, not in_progress.
+//
+// The check itself lives in liveWorkAssignmentAssigneeMatches (work_assignment.go),
+// shared with the work-release and reassign paths.
 func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
-	id = strings.TrimSpace(id)
-	expectedStatus = strings.TrimSpace(expectedStatus)
-	if store == nil || id == "" || expectedStatus == "" {
-		return false
-	}
-	work, err := store.List(beads.ListQuery{
-		Status:   expectedStatus,
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
+	matches, err := liveWorkAssignmentAssigneeMatches(store, id, expectedStatus, assignee)
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)
 		return false
 	}
-	for _, wb := range work {
-		if wb.ID != id {
-			continue
-		}
-		return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(assignee)
-	}
-	return false
+	return matches
 }
 
 func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, assignee, workStoreRef string, storeRefAware bool) bool {

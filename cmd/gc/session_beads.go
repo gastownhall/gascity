@@ -966,9 +966,14 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) [
 }
 
 // unclaimResult reports the outcome of one unassign sweep over a retired
-// session bead's owned work: Released counts work beads whose assignee was
-// successfully cleared/reopened, Failed counts ReleaseWorkBead errors (already
-// logged per item to stderr). Void callers (named-session retirement, closed-
+// session bead's owned work: Released counts release attempts that completed
+// without error, Failed counts ReleaseWorkBead errors (already logged per item
+// to stderr). Released is deliberately NOT a count of writes — a release whose
+// snapshot went stale (the work was re-claimed by a live worker before the
+// write) correctly performs no write and reports no error, and is counted here
+// with the ones that did write. Both mean the same thing to every caller: this
+// session no longer holds that work. Only Failed distinguishes the case where
+// that is still unknown. Void callers (named-session retirement, closed-
 // session release) ignore it; the stranded-repair path reads Failed to avoid
 // reporting a clean repair — or closing the session bead — when an unassign did
 // not land, so a stale-assignee item is not masked behind a "repaired" close.
@@ -1061,7 +1066,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
+					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -1108,7 +1113,7 @@ func reassignWorkAssignedToRetiredSessionInfo(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
+					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -1256,6 +1261,8 @@ func repairStrandedPoolWorkerBead(
 		// report a repair: closing now would strand the still-assigned work
 		// against a retired session. Leave the bead open so the next tick
 		// re-attempts (episode marker still aged, session still not-alive).
+		// The denominator counts every attempt, including releases that correctly
+		// no-oped because the work had already moved to a live worker.
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
