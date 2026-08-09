@@ -113,27 +113,56 @@ func TestReleaseWorkBead_PropagatesBackendFailures(t *testing.T) {
 // therefore take the single-write path whenever a route has to be stamped, the
 // same bypass releaseOrphanedPoolAssignment applies to continuation groups.
 func TestReleaseWorkBead_FallbackRouteNeverRidesASecondWrite(t *testing.T) {
-	store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
-	claimed := seedClaimedBead(t, store, "retired-session")
+	t.Run("current snapshot uses one combined write", func(t *testing.T) {
+		store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+		claimed := seedClaimedBead(t, store, "retired-session")
+		store.updateCalls = 0
 
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	if err := wa.ReleaseWorkBead(claimed, "worker"); err != nil {
-		t.Fatalf("ReleaseWorkBead: %v", err)
-	}
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReleaseWorkBead(claimed, "worker"); err != nil {
+			t.Fatalf("ReleaseWorkBead: %v", err)
+		}
 
-	got, err := store.Get(claimed.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Assignee != "" || got.Status != "open" {
-		t.Fatalf("release did not land: status=%q assignee=%q", got.Status, got.Assignee)
-	}
-	// The invariant: a released bead is never claimable without its route. On the
-	// two-write path this bead would be open, unassigned, and unrouted.
-	if got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
-		t.Errorf("run_target = %q, want %q — a released bead with no route is invisible to the demand query and to the orphan sweep",
-			got.Metadata[beadmeta.RunTargetMetadataKey], "worker")
-	}
+		if store.updateCalls != 1 {
+			t.Fatalf("Update calls = %d, want 1 combined release write", store.updateCalls)
+		}
+		got, err := store.Get(claimed.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Assignee != "" || got.Status != "open" {
+			t.Fatalf("release did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		// The invariant: a released bead is never claimable without its route. On the
+		// two-write path this bead would be open, unassigned, and unrouted.
+		if got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
+			t.Errorf("run_target = %q, want %q — a released bead with no route is invisible to the demand query and to the orphan sweep",
+				got.Metadata[beadmeta.RunTargetMetadataKey], "worker")
+		}
+	})
+
+	t.Run("stale snapshot performs no write", func(t *testing.T) {
+		store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+		stale := seedReclaimedBead(t, store)
+		store.updateCalls = 0
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReleaseWorkBead(stale, "worker"); err != nil {
+			t.Fatalf("ReleaseWorkBead: %v", err)
+		}
+
+		if store.updateCalls != 0 {
+			t.Fatalf("Update calls = %d, want 0 for a stale release snapshot", store.updateCalls)
+		}
+		got, err := store.Get(stale.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Assignee != "fresh-worker" || got.Status != "in_progress" {
+			t.Errorf("status=%q assignee=%q, want in_progress/fresh-worker — the stale fallback-route release clobbered a live claim",
+				got.Status, got.Assignee)
+		}
+	})
 }
 
 // staleGetReleaseStore answers Get from a stale snapshot while List(Live:true) tells
@@ -193,9 +222,11 @@ func TestReleaseWorkBead_Tier2DoesNotTrustACachedRead(t *testing.T) {
 // one that splits the write leaves the bead released but unrouted.
 type failSecondWriteStore struct {
 	*beads.MemStore
+	updateCalls int
 }
 
 func (s *failSecondWriteStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updateCalls++
 	if opts.Assignee == nil && opts.Status == nil && opts.Metadata != nil {
 		return errors.New("metadata-only write failed")
 	}
@@ -249,12 +280,13 @@ func seedClaimedBead(t *testing.T, store beads.Store, owner string) beads.Bead {
 	return claimed
 }
 
-// seedReclaimedBead creates a bead already owned by newOwner and returns the
-// STALE snapshot (owned by staleOwner) that a caller would be holding.
-func seedReclaimedBead(t *testing.T, store beads.Store, staleOwner, newOwner string) beads.Bead {
+// seedReclaimedBead creates a bead already owned by the fixture "fresh-worker"
+// owner and returns the STALE snapshot (owned by the fixture "retired-session"
+// owner) that a caller would be holding.
+func seedReclaimedBead(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
-	stale := seedClaimedBead(t, store, newOwner)
-	stale.Assignee = staleOwner
+	stale := seedClaimedBead(t, store, "fresh-worker")
+	stale.Assignee = "retired-session"
 	return stale
 }
 
@@ -272,7 +304,7 @@ func TestReleaseWorkBead_DoesNotClobberReclaimedAssignee(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newClobberingReleaseStore(tc.conditional)
-			stale := seedReclaimedBead(t, store, "retired-session", "fresh-worker")
+			stale := seedReclaimedBead(t, store)
 
 			wa := workAssignmentForStore(beads.WorkStore{Store: store})
 			if err := wa.ReleaseWorkBead(stale, ""); err != nil {
@@ -338,7 +370,7 @@ func TestReleaseWorkBead_ReleasesWhenSnapshotStillCurrent(t *testing.T) {
 // the two store shapes the release test needs.
 func TestReassignWorkBead_DoesNotClobberReclaimedAssignee(t *testing.T) {
 	store := beads.NewMemStore()
-	stale := seedReclaimedBead(t, store, "retired-session", "fresh-worker")
+	stale := seedReclaimedBead(t, store)
 
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	if err := wa.ReassignWorkBead(stale, "successor-session"); err != nil {
@@ -401,30 +433,63 @@ func TestReassignWorkBead_PropagatesVerificationFailure(t *testing.T) {
 // is covered separately; this one has no route to stamp, so only the group
 // forces the single write.
 func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
-	store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
-	claimed := seedClaimedBead(t, store, "retired-session")
-	if err := store.SetMetadata(claimed.ID, beadmeta.ContinuationGroupMetadataKey, "grp-1"); err != nil {
-		t.Fatalf("seed continuation group: %v", err)
-	}
-	claimed.Metadata = map[string]string{beadmeta.ContinuationGroupMetadataKey: "grp-1"}
+	t.Run("current snapshot uses one combined write", func(t *testing.T) {
+		store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+		claimed := seedClaimedBead(t, store, "retired-session")
+		if err := store.SetMetadata(claimed.ID, beadmeta.ContinuationGroupMetadataKey, "grp-1"); err != nil {
+			t.Fatalf("seed continuation group: %v", err)
+		}
+		claimed.Metadata = map[string]string{beadmeta.ContinuationGroupMetadataKey: "grp-1"}
+		store.updateCalls = 0
 
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	// runTargetFallback is empty, so stampFallbackRoute is false and the group is
-	// the only thing that can force the single-write path.
-	if err := wa.ReleaseWorkBead(claimed, ""); err != nil {
-		t.Fatalf("ReleaseWorkBead: %v", err)
-	}
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		// runTargetFallback is empty, so stampFallbackRoute is false and the group is
+		// the only thing that can force the single-write path.
+		if err := wa.ReleaseWorkBead(claimed, ""); err != nil {
+			t.Fatalf("ReleaseWorkBead: %v", err)
+		}
 
-	got, err := store.Get(claimed.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Assignee != "" || got.Status != "open" {
-		t.Fatalf("release did not land: status=%q assignee=%q", got.Status, got.Assignee)
-	}
-	// The invariant: the bead is never claimable while still carrying the group.
-	// On the two-write path the group would survive the failing second write.
-	if g := strings.TrimSpace(got.Metadata[beadmeta.ContinuationGroupMetadataKey]); g != "" {
-		t.Errorf("continuation group = %q, want cleared — an open, unassigned bead still carrying its group lets a concurrent claim vacuum its siblings through it", g)
-	}
+		if store.updateCalls != 1 {
+			t.Fatalf("Update calls = %d, want 1 combined release write", store.updateCalls)
+		}
+		got, err := store.Get(claimed.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Assignee != "" || got.Status != "open" {
+			t.Fatalf("release did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		// The invariant: the bead is never claimable while still carrying the group.
+		// On the two-write path the group would survive the failing second write.
+		if g := strings.TrimSpace(got.Metadata[beadmeta.ContinuationGroupMetadataKey]); g != "" {
+			t.Errorf("continuation group = %q, want cleared — an open, unassigned bead still carrying its group lets a concurrent claim vacuum its siblings through it", g)
+		}
+	})
+
+	t.Run("stale snapshot performs no write", func(t *testing.T) {
+		store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+		stale := seedReclaimedBead(t, store)
+		if err := store.SetMetadata(stale.ID, beadmeta.ContinuationGroupMetadataKey, "grp-1"); err != nil {
+			t.Fatalf("seed continuation group: %v", err)
+		}
+		stale.Metadata = map[string]string{beadmeta.ContinuationGroupMetadataKey: "grp-1"}
+		store.updateCalls = 0
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReleaseWorkBead(stale, ""); err != nil {
+			t.Fatalf("ReleaseWorkBead: %v", err)
+		}
+
+		if store.updateCalls != 0 {
+			t.Fatalf("Update calls = %d, want 0 for a stale release snapshot", store.updateCalls)
+		}
+		got, err := store.Get(stale.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Assignee != "fresh-worker" || got.Status != "in_progress" {
+			t.Errorf("status=%q assignee=%q, want in_progress/fresh-worker — the stale continuation-group release clobbered a live claim",
+				got.Status, got.Assignee)
+		}
+	})
 }
