@@ -235,6 +235,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// `gc bd sql` is a passthrough to bd, and bd answers about the bd ledger
+	// only. On a split city a query that names a relocated class's beads comes
+	// back empty and exit 0 — a confident wrong answer, and the one that
+	// reported live molecule roots as missing. Refuse it here, where the class
+	// routing is known; bd cannot know a class was relocated.
+	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

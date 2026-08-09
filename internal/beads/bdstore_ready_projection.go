@@ -107,6 +107,16 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 		return result, nil
 	}
 
+	// The projection's contract is "these are the active rows", so a row that is
+	// simply invisible to this ledger comes back as unblocked-unknown and the
+	// caller keeps the nil fallback forever. Refuse when the requested set names
+	// a class this ledger does not serve: an incomplete active-row answer is the
+	// one thing this projection must never hand back silently. Cities that
+	// relocate nothing carry no relocated classes and never reach the refusal.
+	if err := s.guardRelocatedClassIDs("ready projection", ids...); err != nil {
+		return nil, err
+	}
+
 	// bd exposes this as an active-row projection: the SQL filters out closed
 	// rows so cache prime/reconcile cost stays O(active work) instead of
 	// scanning unbounded closed issue/wisp history every cycle. The ids

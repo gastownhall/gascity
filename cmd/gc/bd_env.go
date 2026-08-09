@@ -206,10 +206,18 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 }
 
 func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
+	var opts []beads.BdStoreOption
 	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
-		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
+		opts = append(opts, beads.WithBdStoreListSkipLabels(true))
 	}
-	return nil
+	// Every bd-backed store this binary opens is a work ledger, so the classes
+	// a split city serves elsewhere are exactly the classes its SQL reads must
+	// refuse. Nil on a city that relocates nothing, which leaves the option
+	// list byte-identical to what it was.
+	if relocated := relocatedBeadClasses(cfg); len(relocated) > 0 {
+		opts = append(opts, beads.WithBdStoreRelocatedClasses(relocated...))
+	}
+	return opts
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the

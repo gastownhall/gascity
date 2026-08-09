@@ -305,6 +305,11 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
+	// relocatedClasses names the coordination classes this ledger does not
+	// serve. Empty on every city that keeps all classes on one store, which is
+	// what makes the SQL guard inert there. See bdsql_relocation.go.
+	relocatedClasses []RelocatedClass
+
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
@@ -353,6 +358,28 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
 	}
+}
+
+// WithBdStoreRelocatedClasses declares the coordination classes this store's bd
+// ledger no longer serves, so its SQL-backed reads refuse instead of returning
+// the empty result bd hands back for beads it cannot see. See
+// bdsql_relocation.go for why bd cannot detect this itself.
+//
+// A city that relocates nothing passes no classes and the guard cannot fire.
+func WithBdStoreRelocatedClasses(classes ...RelocatedClass) BdStoreOption {
+	return func(s *BdStore) {
+		s.relocatedClasses = append(s.relocatedClasses, classes...)
+	}
+}
+
+// guardRelocatedClassIDs returns a refusal when any of ids belongs to a class
+// this store's ledger does not serve. It is the precondition of every
+// id-scoped, SQL-backed BdStore read and write.
+func (s *BdStore) guardRelocatedClassIDs(op string, ids ...string) error {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return RelocatedClassRefusal(op, relocatedClassesForIDs(s.relocatedClasses, ids...))
 }
 
 // NewBdStore creates a BdStore rooted at dir using the given runner.
@@ -1205,7 +1232,21 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // anything and returns an error wrapping ErrIDCollision when bd resolved a
 // different one (gcy-g4o). The raw-SQL fallback matches id literally and needs
 // no such check.
+//
+// On a city that relocated a coordination class off this ledger, an id in that
+// class is refused outright before either path runs (bdsql_relocation.go); a
+// city that relocated nothing cannot reach that branch.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	// Precondition of BOTH paths below, so it runs before either. A bead this
+	// ledger does not hold reaches a false "not held" verdict twice over: the
+	// SQL CAS matches zero rows, and the verb path resolves nothing and reports
+	// the same. Every caller reads that as "someone else holds it" and backs
+	// off. Worse on the verb path, bd's resolver prefix-matches an id with no
+	// exact hit, so a blind ledger can answer with a DIFFERENT bead's row
+	// instead of nothing at all. Refuse before either path touches bd.
+	if err := s.guardRelocatedClassIDs("release-if-current "+id, id); err != nil {
+		return false, err
+	}
 	if !s.conditionalReleaseUnsupported() {
 		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
 		if handled {
