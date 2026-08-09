@@ -5,21 +5,75 @@
 //
 // The split-store bug class — code resolving "which store owns this class of
 // bead" differently on different paths — is the one this repo keeps paying
-// for. beads.MemStore hides it, because MemStore is lenient exactly where the
-// production bd/Dolt and SQLite backends are strict:
+// for. beads.MemStore hides it:
 //
 //   - MemStore.DepAdd appends an edge without resolving either endpoint, so a
-//     cross-store dependency that hard-fails in production ("no issue found")
-//     silently succeeds in a test.
+//     cross-store dependency succeeds in a test no matter what the backend the
+//     test claims to model would have done with it.
 //   - MemStore.Create mints over whatever id it was handed, so a graph-prefixed
 //     bead can be "created" inside a work store without a peep — and the test
 //     never learns that the row it thinks it made does not exist.
 //
-// A test written against those leniencies passes while the production path it
-// models hard-fails. StrictStore closes both gaps at the LEAF store, so a
-// policy or class wrapper layered on top keeps the checks live on every path
-// (cmd/gc's beadPolicyStore does not override DepAdd or Create's id handling —
-// the embedded Store interface delegates them straight down).
+// StrictStore closes both gaps at the LEAF store, so a policy or class wrapper
+// layered on top keeps the checks live on every path (cmd/gc's beadPolicyStore
+// does not override DepAdd or Create's id handling — the embedded Store
+// interface delegates them straight down).
+//
+// # Two backends, two answers: pick one per leaf
+//
+// The two production backends do NOT agree on these operations, so a single
+// strictness setting would model one of them and lie about the other. A work
+// store runs on bd/Dolt, which hard-fails; a relocated coordination class runs
+// on SQLite (internal/storebinding/sqlite/beads_engine.go OpenEngine opens
+// beads.OpenSQLiteStore with the class's reserved prefix), which accepts
+// silently and corrupts instead. Semantics selects which one a leaf models —
+// [BdSemantics] for [NewWorkStore], [SQLiteSemantics] for [NewClassStore] —
+// and every rule below names the backend it is modeling:
+//
+//	rule                               bd/Dolt          SQLite            kit
+//	---------------------------------- ---------------- ----------------- -------------------------
+//	Create, explicit id outside the    rejects:         accepts verbatim: BdSemantics: reject with
+//	store's own prefix                 prefix mismatch, no prefix check   bd's message.
+//	                                   --force to       in                SQLiteSemantics: accept,
+//	                                   override         normalizeCreate   record a violation.
+//
+//	DepAdd, endpoint missing from      rejects: no      accepts: deps has BdSemantics: reject with
+//	this store, SAME prefix            issue found      no foreign key    bd's message.
+//	                                   matching <id>    and depAdd is a   SQLiteSemantics: accept,
+//	                                                    plain INSERT      record a violation.
+//
+//	DepAdd, endpoint in ANOTHER        accepts as a     accepts           Neither backend rejects
+//	store's prefix                     cross-prefix                       this. BdSemantics rejects
+//	                                   external ref                       it anyway, for the DOMAIN
+//	                                                                      co-residence invariant
+//	                                                                      (convoy.TrackItemIn's
+//	                                                                      ErrMemberNotCoResident),
+//	                                                                      not for the backend.
+//	                                                                      SQLiteSemantics accepts,
+//	                                                                      records a violation.
+//
+//	Leaf hands back an id other than   n/a — both honor a pinned id       Always reject. This is a
+//	the one pinned, or mints outside   and mint under their configured    check on the DOUBLE's
+//	the declared prefix                prefix                             fidelity, not on a backend.
+//
+// Sources for the bd column, at the pinned beads version: cmd/bd/create.go
+// calls validation.ValidateIDPrefixAllowed(id, dbPrefix, allowed, force), which
+// returns "prefix mismatch: ... (use --force to override)"; cmd/bd/dep.go
+// resolves both endpoints and returns "resolving issue ID %s: no issue found
+// matching %q", EXCEPT that a target whose prefix differs from the source's is
+// passed through unresolved as a cross-prefix ref. Sources for the SQLite
+// column: beads.SQLiteStore.normalizeCreate keeps an explicit id verbatim (its
+// own CreateWithForeignID doc says so), and sqliteSchemaDepsTable declares no
+// foreign key on issue_id/depends_on_id.
+//
+// # Accepted is not unnoticed
+//
+// A SQLiteSemantics leaf accepting a violation is the point: the row or edge
+// lands, so the test sees what production sees — a dangling edge drops its
+// dependent out of Ready rather than erroring. But the violation is recorded,
+// and the kit's constructors fail the test at cleanup for any violation the
+// fixture did not claim with [TakeResidenceViolations]. A fixture asserting the
+// production corruption claims them; every other fixture goes red.
 //
 // # Tier transparency is a requirement, not a bonus
 //
@@ -40,23 +94,25 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// StrictStore wraps a LEAF beads.Store and makes the leniencies of in-process
-// stores fail loudly, the way the bd/Dolt and SQLite backends fail in
-// production:
+// StrictStore wraps a LEAF beads.Store and answers a residence-invariant
+// violation the way the backend it models answers it, instead of the way
+// beads.MemStore does (silently, always):
 //
-//   - DepAdd resolves BOTH endpoints in this store first and rejects a missing
-//     one with a bd-shaped "no issue found" error, preserving the parent-child
-//     short-circuit exactly as beads.BdStore.DepAdd does.
+//   - DepAdd resolves BOTH endpoints in this store first, preserving the
+//     parent-child short-circuit exactly as beads.BdStore.DepAdd does.
 //   - Create (including Tx creates and CreateWithStorage on storage-capable
-//     leaves) rejects an explicit id whose prefix segment differs from the
-//     store's declared id prefix, mirroring bd's rejection of a mismatched
-//     --id without --force, and fails loudly when the leaf hands back an id
-//     other than the one that was asked for.
+//     leaves) checks an explicit id against the store's declared prefix, and
+//     always fails loudly when the leaf hands back an id other than the one
+//     that was asked for.
+//
+// A BdSemantics store rejects; a SQLiteSemantics store accepts and records (see
+// the package doc's rule table, and ResidenceViolation).
 //
 // Reads are untouched. Optional leaf capabilities that production code
 // discovers by type-assertion are forwarded (see the method set and the
@@ -64,10 +120,15 @@ import (
 type StrictStore struct {
 	beads.Store
 	// prefix is the normalized id-prefix segment this store mints under
-	// ("gcg" for a graph-class store). Empty means no declared namespace: the
-	// create guard is inert and IDPrefix reports "", which storeref skips —
-	// the same routing behavior as a store without the accessor.
+	// ("gcg" for a graph-class store). It is never empty: the constructors
+	// reject a leaf with no declared namespace, because the residence checks
+	// have nothing to be about without one.
 	prefix string
+	// semantics is the production backend this leaf models.
+	semantics Semantics
+	// residence collects what a SQLiteSemantics leaf accepted. Nil under
+	// BdSemantics, which rejects at the call site and has nothing to collect.
+	residence *residenceLog
 }
 
 // Compile-time capability contracts.
@@ -85,9 +146,16 @@ var (
 	_ storeref.HasIDPrefix                   = (*StrictStore)(nil)
 )
 
-// Strict wraps a leaf store in the strict split-store checks. The store's id
-// prefix is taken from the leaf's own storeref.HasIDPrefix accessor when it
-// exposes one; use StrictWithPrefix for leaves that do not (beads.MemStore).
+// Strict wraps a leaf store in the strict split-store checks, taking the id
+// prefix from the leaf's own storeref.HasIDPrefix accessor and the backend to
+// model from semantics.
+//
+// A leaf that exposes no prefix — beads.MemStore cannot, because its IDPrefix
+// is a field and Go forbids a method of the same name; beads.BdStore and
+// beads.SQLiteStore report "" when opened without one — fails the test here
+// rather than producing a store called strict whose residence checks have no
+// namespace to be about. Use StrictWithPrefix to declare the namespace for
+// those leaves.
 //
 // Wrap the LEAF store, not a policy wrapper: cmd/gc's beadPolicyStore does not
 // override DepAdd, so a strict leaf keeps the dependency check live on every
@@ -118,34 +186,85 @@ var (
 // some fixture paths, and bd's --deps validation behavior is not pinned by a
 // contract test, so enforcing here would reject valid fixtures rather than
 // catch real cross-store bugs.
-func Strict(s beads.Store) beads.Store {
-	prefix := ""
-	if p, ok := s.(storeref.HasIDPrefix); ok {
-		prefix = p.IDPrefix()
+func Strict(t *testing.T, s beads.Store, semantics Semantics) beads.Store {
+	t.Helper()
+	prefix, err := inferredPrefix(s)
+	if err != nil {
+		t.Fatalf("splittest.Strict: %v", err)
 	}
-	return newStrict(s, prefix)
+	return StrictWithPrefix(t, s, prefix, semantics)
 }
 
-// StrictWithPrefix wraps a leaf store like Strict, additionally declaring the
-// id-prefix segment the store mints under (e.g. "gcg" for a graph-class store).
-// The declared prefix arms the foreign-prefix create guard and is reported
-// through IDPrefix for storeref prefix routing. Use it for leaves that do not
-// expose storeref.HasIDPrefix themselves (beads.MemStore).
-func StrictWithPrefix(s beads.Store, prefix string) beads.Store {
-	return newStrict(s, prefix)
+// inferredPrefix reads a leaf's declared id prefix, rejecting a leaf that has
+// none. Split out of Strict so the rejection rule is testable without a failing
+// *testing.T.
+func inferredPrefix(s beads.Store) (string, error) {
+	accessor, ok := s.(storeref.HasIDPrefix)
+	if !ok {
+		return "", fmt.Errorf("leaf store %T does not expose storeref.HasIDPrefix, so it declares no id namespace; pass the prefix to StrictWithPrefix instead", s)
+	}
+	prefix := normalizePrefix(accessor.IDPrefix())
+	if prefix == "" {
+		return "", fmt.Errorf("leaf store %T reports an empty id prefix, so it declares no id namespace; pass the prefix to StrictWithPrefix instead", s)
+	}
+	return prefix, nil
+}
+
+// StrictWithPrefix wraps a leaf store like Strict, declaring the id-prefix
+// segment the store mints under (e.g. "gcg" for a graph-class store) rather than
+// reading it off the leaf. The declared prefix is what the residence checks are
+// about and what IDPrefix reports for storeref prefix routing, so an empty one
+// fails the test: a store whose namespace is undeclared cannot tell a foreign id
+// from its own.
+func StrictWithPrefix(t *testing.T, s beads.Store, prefix string, semantics Semantics) beads.Store {
+	t.Helper()
+	strict, err := newStrict(s, prefix, semantics)
+	if err != nil {
+		t.Fatalf("splittest.StrictWithPrefix: %v", err)
+	}
+	failOnUnclaimedResidenceViolations(t, strict)
+	return strict
 }
 
 // newStrict builds the wrapper, choosing the StorageCreateStore-preserving
-// variant when (and only when) the leaf implements CreateWithStorage.
-func newStrict(s beads.Store, prefix string) beads.Store {
+// variant when (and only when) the leaf implements CreateWithStorage. Split out
+// of the constructors so the rejection rules are testable without a failing
+// *testing.T.
+func newStrict(s beads.Store, prefix string, semantics Semantics) (beads.Store, error) {
 	if s == nil {
+		return nil, errors.New("leaf store is nil")
+	}
+	if !semantics.valid() {
+		return nil, fmt.Errorf("no production backend declared (%s); pass BdSemantics for a work store or SQLiteSemantics for a coordination-class store", semantics)
+	}
+	normalized := normalizePrefix(prefix)
+	if normalized == "" {
+		return nil, fmt.Errorf("empty id prefix %q; the residence checks need a declared namespace to be about", prefix)
+	}
+	strict := &StrictStore{Store: s, prefix: normalized, semantics: semantics}
+	if semantics == SQLiteSemantics {
+		strict.residence = &residenceLog{}
+	}
+	if storage, ok := s.(beads.StorageCreateStore); ok {
+		return &strictStorageStore{StrictStore: strict, storage: storage}, nil
+	}
+	return strict, nil
+}
+
+// takeResidenceViolations implements residenceRecorder. A BdSemantics store has
+// no log and reports none — it rejected at the call site instead.
+func (s *StrictStore) takeResidenceViolations() []ResidenceViolation {
+	if s.residence == nil {
 		return nil
 	}
-	strict := &StrictStore{Store: s, prefix: normalizePrefix(prefix)}
-	if storage, ok := s.(beads.StorageCreateStore); ok {
-		return &strictStorageStore{StrictStore: strict, storage: storage}
-	}
-	return strict
+	return s.residence.take()
+}
+
+// acceptedResidenceViolation records a write this store let through because the
+// SQLite backend it models lets it through. It must only be called on a
+// SQLiteSemantics store.
+func (s *StrictStore) acceptedResidenceViolation(op, detail string) {
+	s.residence.record(op, detail)
 }
 
 // normalizePrefix mirrors the beads package's internal id-prefix normalization
@@ -155,7 +274,7 @@ func normalizePrefix(prefix string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
 }
 
-// Create rejects an explicit id outside the store's declared namespace before
+// Create checks an explicit id against the store's declared namespace before
 // delegating, and fails loudly if the leaf did not return the id that was
 // asked for. A post-check failure leaves the offending row in the leaf — this
 // is a test double, and loud beats tidy.
@@ -198,23 +317,27 @@ func (s *StrictStore) CreateWithForeignID(b beads.Bead) (beads.Bead, error) {
 	return created, nil
 }
 
-// DepAdd resolves both endpoints in THIS store before delegating, mirroring the
-// bd backend, which hard-fails `bd dep add` when either id does not resolve in
-// the target database. beads.MemStore.DepAdd appends unconditionally — the
-// exact leniency that lets a cross-store dependency (work bead → graph bead or
-// vice versa) succeed in-process while production wedges on "no issue found".
+// DepAdd resolves both endpoints in THIS store before delegating, which
+// beads.MemStore.DepAdd never does — it appends the edge whatever the ids are,
+// so a cross-store dependency is invisible in a test regardless of which backend
+// the test claims to model.
+//
+// What an unresolvable endpoint means depends on the store's semantics and on
+// which endpoint it is; see the package doc's rule table. A BdSemantics store
+// rejects, in bd's own wording for the two cases bd rejects and in the domain
+// layer's wording for the cross-prefix case only the domain layer rejects. A
+// SQLiteSemantics store accepts and records, because SQLite's deps table has no
+// foreign key and its DepAdd is a plain INSERT.
+//
+// The rejection intentionally does NOT wrap beads.ErrNotFound: bd's real failure
+// is a subprocess stderr string that callers can only classify textually, so a
+// typed error here would let in-process tests pass on errors.Is checks that
+// production could never satisfy.
 //
 // The parent-child short-circuit is preserved exactly as beads.BdStore.DepAdd
 // has it: a parent-child dep that merely restates the bead's own ParentID
 // returns nil BEFORE endpoint resolution — on a split store the parent may
 // legitimately live elsewhere, and bd never sees the call.
-//
-// The missing-endpoint error is shaped like the bd backend's output
-// ("resolving issue ID <id>: no issue found", wrapped in BdStore's "adding dep"
-// context) and intentionally does NOT wrap beads.ErrNotFound: bd's real failure
-// is a subprocess stderr string that callers can only classify textually, so a
-// typed error here would let in-process tests pass on errors.Is checks that
-// production could never satisfy.
 func (s *StrictStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if depType == "parent-child" {
 		bead, err := s.Get(issueID)
@@ -222,15 +345,48 @@ func (s *StrictStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 	}
-	for _, id := range []string{issueID, dependsOnID} {
-		if _, err := s.Get(id); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return fmt.Errorf("adding dep %s→%s: resolving issue ID %s: no issue found (endpoint not in this store — cross-store dependency?)", issueID, dependsOnID, id)
-			}
-			return fmt.Errorf("adding dep %s→%s: resolving issue ID %s: %w", issueID, dependsOnID, id, err)
+	for _, endpoint := range []struct {
+		id       string
+		isSource bool
+	}{{issueID, true}, {dependsOnID, false}} {
+		_, err := s.Get(endpoint.id)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("adding dep %s→%s: resolving issue ID %s: %w", issueID, dependsOnID, endpoint.id, err)
+		}
+		if err := s.endpointNotResident(issueID, dependsOnID, endpoint.id, endpoint.isSource); err != nil {
+			return err
 		}
 	}
 	return s.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+// endpointNotResident answers a DepAdd endpoint this store cannot resolve, the
+// way the backend this leaf models answers it.
+//
+// bd resolves the source with resolveIDForMutation and the target with
+// resolveIDWithRouting (cmd/bd/dep.go), reporting `resolving issue ID <id>: no
+// issue found matching "<id>"` — except for a target whose prefix differs from
+// the source's, which bd passes through unresolved as a cross-prefix external
+// ref. So the cross-prefix target is the one case NO backend rejects; a
+// BdSemantics store rejects it for the domain co-residence invariant instead
+// (convoy.TrackItemIn returns ErrMemberNotCoResident "because a dep row cannot
+// reference an id its own store cannot resolve"), and says so, rather than
+// dressing a domain rule in bd's clothes.
+func (s *StrictStore) endpointNotResident(issueID, dependsOnID, missing string, isSource bool) error {
+	crossStore := !isSource && !s.ownsID(missing)
+	if s.semantics == SQLiteSemantics {
+		s.acceptedResidenceViolation("dep-add", fmt.Sprintf(
+			"edge %s→%s was recorded although %s is not in this %q store: SQLite's deps table has no foreign key and DepAdd is a plain INSERT, so production keeps the dangling edge and silently drops %s out of Ready instead of erroring",
+			issueID, dependsOnID, missing, s.prefix, issueID))
+		return nil
+	}
+	if crossStore {
+		return fmt.Errorf("adding dep %s→%s: %s belongs to another store's id namespace, not %q: a dep row cannot reference an id its own store cannot resolve (convoy.TrackItemIn rejects the same shape with ErrMemberNotCoResident). Neither backend rejects this write; both record a dangling edge instead", issueID, dependsOnID, missing, s.prefix)
+	}
+	return fmt.Errorf("adding dep %s→%s: resolving issue ID %s: no issue found matching %q", issueID, dependsOnID, missing, missing)
 }
 
 // Tx wraps the leaf transaction so creates inside the callback go through the
@@ -252,8 +408,10 @@ func (s *StrictStore) Handles() beads.StoreHandles {
 }
 
 // IDPrefix implements storeref.HasIDPrefix, reporting the declared id-prefix
-// segment ("" when none was declared or inferred — storeref.PrefixOwner skips
-// empty prefixes, matching a store without the accessor).
+// segment so storeref.PrefixOwner can route an id to this store. It is never
+// empty: the constructors reject a leaf with no declared namespace, because a
+// store that reported "" would be silently unroutable while type-asserting as
+// routable.
 func (s *StrictStore) IDPrefix() string {
 	return s.prefix
 }
@@ -373,28 +531,51 @@ func (s *StrictStore) WaitForParentProjection(ctx context.Context, id, oldParent
 	return nil
 }
 
-// guardExplicitID rejects a caller-supplied id outside the store's declared
-// namespace, mirroring bd's rejection of a mismatched --id without --force. An
-// empty id (store-minted) or an undeclared namespace passes.
+// guardExplicitID answers a caller-supplied id outside the store's declared
+// namespace the way the backend this leaf models answers it. An empty id
+// (store-minted) or an in-prefix one always passes: bd accepts an in-prefix
+// --id, so the guard is about the NAMESPACE, not about pinning.
+//
+// bd rejects the mismatch in validation.ValidateIDPrefixAllowed, called from
+// cmd/bd/create.go with the command's --force flag; the message below is bd's,
+// plus the pointer at the forced path. SQLite accepts it verbatim —
+// SQLiteStore.normalizeCreate has no prefix check at all, as its own
+// CreateWithForeignID doc says — so a SQLiteSemantics store lands the row and
+// records the violation.
 func (s *StrictStore) guardExplicitID(id string) error {
 	id = strings.TrimSpace(id)
-	if id == "" || s.prefix == "" || s.ownsID(id) {
+	if id == "" || s.ownsID(id) {
 		return nil
 	}
-	return fmt.Errorf("creating bead %q: explicit id prefix does not match store id prefix %q (bd rejects a mismatched --id without --force; use CreateWithForeignID for the forced foreign-prefix create)", id, s.prefix)
+	if s.semantics == SQLiteSemantics {
+		s.acceptedResidenceViolation("create", fmt.Sprintf(
+			"bead %q was created inside the %q store: SQLiteStore.normalizeCreate keeps a pinned id verbatim with no prefix check, so production lands this foreign-prefix row in the class database and no prefix route will ever look for it there",
+			id, s.prefix))
+		return nil
+	}
+	return fmt.Errorf("creating bead %q: prefix mismatch: database uses %q but ID %q doesn't match (use --force to override) — bd's own rejection of a mismatched --id; use CreateWithForeignID for the forced foreign-prefix create", id, s.prefix+"-", id)
 }
 
 // checkCreatedID fails loudly when the leaf did not produce the row the caller
 // asked for: a pinned id silently replaced by the leaf's own sequence (a leaf
 // that does not honor explicit ids, so every wisp-shaped fixture id is a lie),
-// or a minted id outside the declared namespace (a foreign-prefix row inside a
-// split store — exactly the residence-invariant violation this wrapper exists
-// to catch).
+// or a store-MINTED id outside the declared namespace (the leaf mints under a
+// different prefix than the wrapper was declared with). Both are checks on the
+// double's fidelity — no backend does either — so they hold under both
+// semantics.
+//
+// The namespace half deliberately covers minted ids only. A pinned id has
+// already been answered by guardExplicitID, which under SQLiteSemantics accepts
+// a foreign-prefix pin exactly as SQLite does; re-rejecting it here would undo
+// that on the way back out.
 func (s *StrictStore) checkCreatedID(requestedID string, created beads.Bead) error {
-	if requested := strings.TrimSpace(requestedID); requested != "" && created.ID != requested {
-		return fmt.Errorf("store returned bead %q for an explicit create of %q: the leaf store %T clobbers pinned ids, so it cannot model a store that round-trips them (production wisps carry pinned <prefix>-wisp-<suffix> ids)", created.ID, requested, s.Store)
+	if requested := strings.TrimSpace(requestedID); requested != "" {
+		if created.ID != requested {
+			return fmt.Errorf("store returned bead %q for an explicit create of %q: the leaf store %T clobbers pinned ids, so it cannot model a store that round-trips them (production wisps carry pinned <prefix>-wisp-<suffix> ids)", created.ID, requested, s.Store)
+		}
+		return nil
 	}
-	if s.prefix == "" || s.ownsID(created.ID) {
+	if s.ownsID(created.ID) {
 		return nil
 	}
 	return fmt.Errorf("store minted bead %q outside its declared id namespace %q: the leaf is minting under a different prefix than the one this store was declared with", created.ID, s.prefix)
@@ -402,7 +583,7 @@ func (s *StrictStore) checkCreatedID(requestedID string, created beads.Bead) err
 
 // ownsID reports whether id sits in the declared prefix namespace, using the
 // same case-insensitive segment match as storeref.PrefixOwner and CachingStore.
-// Only meaningful when a prefix is declared.
+// The prefix is never empty — the constructors reject a leaf without one.
 func (s *StrictStore) ownsID(id string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	return strings.HasPrefix(id, s.prefix+"-")

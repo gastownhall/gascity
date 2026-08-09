@@ -48,7 +48,10 @@ type MemStore struct {
 	// passed. A duplicate id is a hard error rather than a silent fallback to
 	// the sequence id: SQLiteStore rejects it, and a double that quietly
 	// renamed the bead would hide exactly the id collision the caller asked
-	// about.
+	// about. A pinned "<prefix>-<n>" also consumes that suffix so a later mint
+	// cannot re-issue it — the second half of SQLiteStore's contract, pinned
+	// against SQLiteStore itself by
+	// TestMemStoreHonorExplicitIDsMatchesSQLiteStore.
 	HonorExplicitIDs bool
 
 	// localStrings holds clone-local key-value data set via SetLocalString,
@@ -121,14 +124,15 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		if m.beadExistsLocked(explicit) {
 			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
 		}
+		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
+		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
+		// the very next store-minted id re-issues the pinned one.
+		if n := numericIDSuffix(explicit); n > m.seq {
+			m.seq = n
+		}
 		b.ID = explicit
 	} else {
-		m.seq++
-		prefix := m.IDPrefix
-		if prefix == "" {
-			prefix = "gc"
-		}
-		b.ID = fmt.Sprintf("%s-%d", prefix, m.seq)
+		b.ID = m.mintIDLocked()
 	}
 	b.Status = "open"
 	if b.Type == "" {
@@ -158,6 +162,27 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		})
 	}
 	return cloneBead(stored), nil
+}
+
+// mintIDLocked returns a store-generated ID that is free in this store,
+// advancing past any suffix already taken. SQLiteStore's mintUniqueIDTx does the
+// same re-check on every auto-minted id, because a sequence that lags the rows
+// actually present — a store seeded by NewMemStoreFrom, or one that honored a
+// pinned id — would otherwise re-issue an id that is already there, and MemStore
+// is slice-backed, so a duplicate aliases rather than conflicts. The caller must
+// hold m.mu.
+func (m *MemStore) mintIDLocked() string {
+	prefix := m.IDPrefix
+	if prefix == "" {
+		prefix = "gc"
+	}
+	for {
+		m.seq++
+		candidate := fmt.Sprintf("%s-%d", prefix, m.seq)
+		if !m.beadExistsLocked(candidate) {
+			return candidate
+		}
+	}
 }
 
 // indexOfLocked returns the slice index of the bead with the given ID, or -1 if

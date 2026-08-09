@@ -32,8 +32,15 @@ func TestNewClassStoreCoversEveryReservedClass(t *testing.T) {
 		if !strings.HasPrefix(minted.ID, prefix+"-") {
 			t.Errorf("class %q: minted %q, want the %q namespace", class, minted.ID, prefix)
 		}
-		if _, err := store.Create(beads.Bead{ID: "gc-foreign", Title: "foreign"}); err == nil {
-			t.Errorf("class %q: accepted a work-prefixed explicit id", class)
+		// Every class store runs on SQLiteSemantics, so the work-prefixed row
+		// lands the way SQLite lands it and is recorded rather than rejected.
+		if _, err := store.Create(beads.Bead{ID: "gc-foreign", Title: "foreign"}); err != nil {
+			t.Errorf("class %q: rejected a work-prefixed explicit id SQLite accepts: %v", class, err)
+			continue
+		}
+		violations := TakeResidenceViolations(store)
+		if len(violations) != 1 || violations[0].Op != "create" {
+			t.Errorf("class %q: recorded %v, want the one accepted create violation", class, violations)
 		}
 	}
 }

@@ -26,16 +26,19 @@ const defaultWorkPrefix = "gc"
 //
 // Store shapes:
 //
-//   - work mints "gc-<n>" and rejects an explicit id outside that namespace —
-//     in particular a graph-prefixed create, the foreign-prefix row-minting
-//     half of the residence invariant.
+//   - work mints "gc-<n>" on BdSemantics: a graph-prefixed create and a dep on
+//     a graph bead are hard errors, the way bd fails them.
 //   - graph mints under config.ReservedClassPrefix(config.BeadClassGraph)
-//     ("gcg-<n>") and honors explicit in-prefix ids, so production-shaped wisp
-//     ids (gcg-wisp-*) round-trip. It exposes IDPrefix() == "gcg" for storeref
+//     ("gcg-<n>") on SQLiteSemantics: the same two writes are ACCEPTED, the way
+//     the SQLite class database accepts them, and recorded as residence
+//     violations that fail the test at cleanup unless the fixture claims them.
+//     It honors explicit in-prefix ids, so production-shaped wisp ids
+//     (gcg-wisp-*) round-trip, and exposes IDPrefix() == "gcg" for storeref
 //     prefix routing.
-//   - both reject a DepAdd whose endpoint lives in the other store with a
-//     bd-shaped "no issue found" error, where plain MemStores would silently
-//     accept the cross-store edge.
+//
+// The asymmetry is the point: these two stores really do run on different
+// backends, and a pair that answered the same way would misrepresent one of
+// them. See the package doc's rule table.
 //
 // Graph is the pair's coordination class because it is the one the live
 // incidents happened in; NewClassStore builds the same strict leaf for any
@@ -56,13 +59,19 @@ func NewSplitStores(t *testing.T) (work, graph beads.Store) {
 // bd/Dolt under a rig/HQ EffectivePrefix — fails the test: its ids are
 // indistinguishable from work ids, so there is no namespace for the residence
 // invariant to be about. Use NewWorkStore for those.
+//
+// The leaf runs on SQLiteSemantics, because that is what serves a relocated
+// class in production: internal/storebinding/sqlite/beads_engine.go OpenEngine
+// opens beads.OpenSQLiteStore with the class's reserved prefix. A residence
+// violation here is therefore ACCEPTED and recorded, not rejected — see the
+// package doc's rule table and TakeResidenceViolations.
 func NewClassStore(t *testing.T, class string) beads.Store {
 	t.Helper()
 	prefix, err := classPrefix(class)
 	if err != nil {
 		t.Fatalf("splittest.NewClassStore: %v", err)
 	}
-	return newStrictMemLeaf(prefix)
+	return newStrictMemLeaf(t, prefix, SQLiteSemantics)
 }
 
 // classPrefix resolves a relocated coordination class to the id prefix its
@@ -80,8 +89,9 @@ func classPrefix(class string) (string, error) {
 // prefix (a rig's or HQ's config.Rig.EffectivePrefix, e.g. "ra" for "rig-A"),
 // for split-store tests that need the third store of a real city: an HQ work
 // store, a coordination-class store, and per-rig work stores. It honors explicit
-// in-prefix ids (bd accepts an in-prefix --id) and rejects foreign-prefix creates
-// and cross-store deps exactly like the NewSplitStores pair.
+// in-prefix ids (bd accepts an in-prefix --id) and, on BdSemantics — the backend
+// a work store really runs on — hard-fails foreign-prefix creates and cross-store
+// deps.
 //
 // The prefix must be a genuine WORK prefix: not empty and not a reserved class
 // prefix (a work store minting class-shaped ids would break the residence
@@ -95,7 +105,7 @@ func NewWorkStore(t *testing.T, prefix string) beads.Store {
 	if err != nil {
 		t.Fatalf("splittest.NewWorkStore: %v", err)
 	}
-	return newStrictMemLeaf(p)
+	return newStrictMemLeaf(t, p, BdSemantics)
 }
 
 // workPrefix normalizes and validates a work-store id prefix. Split out of
@@ -114,12 +124,14 @@ func workPrefix(prefix string) (string, error) {
 
 // newStrictMemLeaf builds the kit's standard leaf: an in-memory store that mints
 // under prefix and round-trips a pinned in-prefix id, wrapped in the strict
-// checks. beads.MemStore.IDPrefix supplies the minting half and
-// HonorExplicitIDs the accepting half — together they are what makes a MemStore
-// able to stand in for a real per-class database instead of one global id space.
-func newStrictMemLeaf(prefix string) beads.Store {
+// checks for the given backend. beads.MemStore.IDPrefix supplies the minting
+// half and HonorExplicitIDs the accepting half — together they are what makes a
+// MemStore able to stand in for a real per-class database instead of one global
+// id space.
+func newStrictMemLeaf(t *testing.T, prefix string, semantics Semantics) beads.Store {
+	t.Helper()
 	leaf := beads.NewMemStore()
 	leaf.IDPrefix = prefix
 	leaf.HonorExplicitIDs = true
-	return StrictWithPrefix(leaf, prefix)
+	return StrictWithPrefix(t, leaf, prefix, semantics)
 }
