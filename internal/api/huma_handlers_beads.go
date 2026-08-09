@@ -69,6 +69,25 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	stores := s.state.BeadStores()
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
 	var rigNames []string
+	// Split city: graph-class beads (gcg- molecule roots, steps, control beads)
+	// live in the relocated graph store, which BeadStores() does not include.
+	// Merge it in as one more fan-out leg — under a synthetic key, so the whole
+	// per-store body below (bounded Count, keyset seek, the global re-sort, the
+	// page cut) covers it too — or the DAG is invisible behind an authoritative
+	// 200. Skipped for a rig-scoped request, which is asking for one rig and the
+	// graph plane is not one; that also keeps the synthetic key unaddressable.
+	// The map is copied, never mutated in place: State hands its own map out by
+	// reference.
+	infraLeg := ""
+	if graph := relocatedGraphStore(s.state); graph != nil && input.Rig == "" {
+		infraLeg = graphFederationLegKey(s.state.CityName())
+		merged := make(map[string]beads.Store, len(stores)+1)
+		for k, v := range stores {
+			merged[k] = v
+		}
+		merged[infraLeg] = graph
+		stores = merged
+	}
 	if input.Rig != "" {
 		if _, ok := stores[input.Rig]; ok {
 			rigNames = []string{input.Rig}
@@ -140,6 +159,14 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			pa.attempt()
 			list, err := store.List(query)
 			if err != nil {
+				if rigName == infraLeg {
+					// The graph leg is the execution DAG, not a rig: any degraded
+					// read there — hard failure or partial — leaves an unnamed hole
+					// in a dependency graph, so it fails LOUD instead of degrading
+					// to a work-only 200 (the authoritative-failure contract, same
+					// as the ready arm).
+					return nil, graphPlaneUnavailable("list", err)
+				}
 				if beads.IsPartialResult(err) && len(list) > 0 {
 					// Partial result: the rig returned rows (appended to `all`
 					// below) but flagged a degraded read. Keep its bounded count
@@ -355,6 +382,25 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 }
 
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
+//
+// FEDERATION CONTRACT — the follow-on CLI federation (`gc ready`, ga-oxsyu) is
+// specified against this handler, so its conformance test can assert CLI == API
+// instead of inventing an oracle. The rules it has to match:
+//
+//   - Legs, in order: the city store, then the rigs by name ascending, then the
+//     relocated graph store. The CLI composite's legs are work-then-infra, the
+//     same relative order, so on a rig-less city the two sequences agree.
+//   - Within a leg: that leg's own canonical ready order — (priority ASC,
+//     created_at ASC, id ASC), what beads.SortBeadsReadyOrder produces.
+//   - Dedupe: first leg to return an id wins.
+//   - Merged order: leg concatenation, deliberately NOT re-sorted. A global
+//     re-sort would change the bytes a multi-rig single-store city already
+//     serves, and the graph leg must be free for such a city. Both sides are
+//     therefore compared after normalizing with beads.SortBeadsReadyOrder,
+//     which is well-defined: every leg is already in that order and the order
+//     is total.
+//   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
+//     does not (503). See graphPlaneUnavailable.
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -404,6 +450,27 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
 		}
 		federate("rig "+rigName, stores[rigName])
+	}
+	// Split city: graph-class ready work (gcg- steps, control beads, molecule
+	// roots) lives in the relocated graph store, which BeadStores() does not
+	// include — federate it or the whole execution DAG is invisible behind an
+	// authoritative-looking 200. It runs LAST so the merged order stays a leg
+	// concatenation whose prefix is exactly what a legacy city serves, and it
+	// does NOT go through federate(): the graph leg has no partial tier.
+	if graph := relocatedGraphStore(s.state); graph != nil {
+		pa.attempt()
+		ready, err := beads.HandlesFor(graph).Live.Ready()
+		if err != nil {
+			return nil, graphPlaneUnavailable("ready", err)
+		}
+		pa.success()
+		for _, b := range ready {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

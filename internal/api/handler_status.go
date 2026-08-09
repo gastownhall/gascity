@@ -581,11 +581,20 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work exactly like GET /beads/ready: the city
-// store first, then BeadStores excluding the CityName alias. Stores exposing
-// beads.Counter answer persisted counts without hydrating rows — the caching
-// layer counts matches in memory when its cache is clean (#1896). Stores are
-// queried concurrently; results aggregate in deterministic city/rig order.
+// and federates canonical Ready work the way GET /beads/ready does over the
+// work stores: the city store first, then BeadStores excluding the CityName
+// alias. Stores exposing beads.Counter answer persisted counts without
+// hydrating rows — the caching layer counts matches in memory when its cache is
+// clean (#1896). Stores are queried concurrently; results aggregate in
+// deterministic city/rig order.
+//
+// NOT identical to GET /beads/ready on a split city: that handler grew a
+// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
+// on a city with [beads.classes.graph] relocated the status ready count omits
+// graph-class ready work while /beads/ready includes it. Left divergent
+// deliberately rather than fixed here: this read is cache-only and error-lenient
+// by design (see cacheColdRigs below), which is the opposite of the graph leg's
+// fail-loud contract, so wiring one in is its own slice, not a rider.
 //
 // Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
 // Their store runs no background cache refresh, so the cache-only Ready
