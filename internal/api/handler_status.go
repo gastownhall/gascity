@@ -54,6 +54,51 @@ func statusProviderPartial(sp any) bool {
 	return ok && reporter.StatusPartial()
 }
 
+type statusRunningSessions struct {
+	names []string
+	set   map[string]bool
+	err   error
+}
+
+func collectStatusRunningSessions(sp sessionLister) statusRunningSessions {
+	out := statusRunningSessions{set: make(map[string]bool)}
+	if sp == nil {
+		return out
+	}
+	names, err := sp.ListRunning("")
+	out.names = append(out.names, names...)
+	out.err = err
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out.set[name] = true
+	}
+	return out
+}
+
+func (s statusRunningSessions) IsRunning(name string) bool {
+	return s.set[strings.TrimSpace(name)]
+}
+
+func (s statusRunningSessions) ListRunning(prefix string) ([]string, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return append([]string(nil), s.names...), nil
+	}
+	out := make([]string, 0, len(s.names))
+	for _, name := range s.names {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -135,6 +180,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sessTmpl := cfg.Workspace.SessionTemplate
 	sessionSnapshot := s.statusSessionSnapshot(ctx)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
+	runningSessions := collectStatusRunningSessions(sp)
+	if runningSessions.err != nil {
+		partialErrors = append(partialErrors, fmt.Sprintf("runtime status probe incomplete: %v", runningSessions.err))
+	}
 
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 
@@ -159,7 +208,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, runningSessions)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
@@ -171,7 +220,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			}
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
-			running := statusProviderRunning(sp, sessName)
+			running := runningSessions.IsRunning(sessName)
 			if running {
 				rawRunning++
 			}
@@ -251,20 +300,24 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		partialErrors = append(partialErrors, workErrs...)
 	}
 
-	// Count mail (best-effort).
+	// Count mail (best-effort). Skipped in lite mode for the same reason as
+	// work counts: an all-mail aggregate can touch every provider and should not
+	// make the high-frequency status overview partial.
 	var mc mailCounts
-	seenProvs := make(map[string]bool)
-	for _, mp := range s.state.MailProviders() {
-		key := fmt.Sprintf("%p", mp)
-		if seenProvs[key] {
-			continue
-		}
-		seenProvs[key] = true
-		if total, unread, err := statusMailCountWithTimeout(mp); err == nil {
-			mc.Total += total
-			mc.Unread += unread
-		} else {
-			partialErrors = append(partialErrors, fmt.Sprintf("mail: %v", err))
+	if !lite {
+		seenProvs := make(map[string]bool)
+		for _, mp := range s.state.MailProviders() {
+			key := fmt.Sprintf("%p", mp)
+			if seenProvs[key] {
+				continue
+			}
+			seenProvs[key] = true
+			if total, unread, err := statusMailCountWithTimeout(mp); err == nil {
+				mc.Total += total
+				mc.Unread += unread
+			} else {
+				partialErrors = append(partialErrors, fmt.Sprintf("mail: %v", err))
+			}
 		}
 	}
 
@@ -964,14 +1017,6 @@ func statusSessionStateInfo(info session.Info) session.State {
 	default:
 		return state
 	}
-}
-
-func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {
-	sessionName = strings.TrimSpace(sessionName)
-	if sp == nil || sessionName == "" {
-		return false
-	}
-	return sp.IsRunning(sessionName)
 }
 
 // HealthInput is the Huma input for GET /v0/city/{cityName}/health.

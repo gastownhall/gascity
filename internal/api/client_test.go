@@ -1295,6 +1295,37 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
+func TestClientGetStatusLiteSendsLiteParam(t *testing.T) {
+	var gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/alpha/status" {
+			t.Fatalf("path = %q, want /v0/city/alpha/status", r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"name":   "alpha",
+			"path":   "/tmp/alpha",
+			"agents": map[string]any{"total": 0, "running": 0},
+			"rigs":   map[string]any{"total": 0},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.GetStatusLite()
+	if err != nil {
+		t.Fatalf("GetStatusLite: %v", err)
+	}
+	if got.Body.CityName != "alpha" || got.AgeSeconds != 2 {
+		t.Fatalf("status = %+v, age=%v; want alpha age 2", got.Body, got.AgeSeconds)
+	}
+	if gotQuery != "lite=true" {
+		t.Fatalf("query = %q, want lite=true", gotQuery)
+	}
+}
+
 func TestClientListMailInbox(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

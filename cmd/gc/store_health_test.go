@@ -12,6 +12,36 @@ import (
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
+type blockingLegacyMaintenanceEvents struct {
+	events.Provider
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (p blockingLegacyMaintenanceEvents) List(events.Filter) ([]events.Event, error) {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	return nil, nil
+}
+
+type blockingTailMaintenanceEvents struct {
+	events.Provider
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (p blockingTailMaintenanceEvents) ListTail(events.Filter, int) ([]events.Event, error) {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	return nil, nil
+}
+
 func TestStoreHealthSIBytes(t *testing.T) {
 	cases := []struct {
 		in   int64
@@ -170,5 +200,81 @@ func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	}
 	if h.Path != storehealth.StorePath("/c") {
 		t.Errorf("Path = %q, want %q", h.Path, storehealth.StorePath("/c"))
+	}
+}
+
+func TestLastMaintenanceForStatusUsesTailProvider(t *testing.T) {
+	ep := events.NewFake()
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := lastMaintenanceForStatus(ep)
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
+
+func TestLastMaintenanceForStatusBoundsLegacyProviderList(t *testing.T) {
+	oldTimeout := statusStoreHealthTimeout
+	statusStoreHealthTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreHealthTimeout = oldTimeout })
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	ep := blockingLegacyMaintenanceEvents{
+		Provider: events.NewFake(),
+		entered:  entered,
+		release:  release,
+	}
+
+	start := time.Now()
+	ts, status := lastMaintenanceForStatus(ep)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("lastMaintenanceForStatus elapsed %s, want bounded timeout", elapsed)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("legacy provider List was not called")
+	}
+	if !ts.IsZero() || status != "" {
+		t.Fatalf("lastMaintenanceForStatus = (%v,%q), want empty result on timeout", ts, status)
+	}
+}
+
+func TestLastMaintenanceForStatusBoundsTailProviderList(t *testing.T) {
+	oldTimeout := statusStoreHealthTimeout
+	statusStoreHealthTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreHealthTimeout = oldTimeout })
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	ep := blockingTailMaintenanceEvents{
+		Provider: events.NewFake(),
+		entered:  entered,
+		release:  release,
+	}
+
+	start := time.Now()
+	ts, status := lastMaintenanceForStatus(ep)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("lastMaintenanceForStatus elapsed %s, want bounded timeout", elapsed)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("tail provider ListTail was not called")
+	}
+	if !ts.IsZero() || status != "" {
+		t.Fatalf("lastMaintenanceForStatus = (%v,%q), want empty result on timeout", ts, status)
 	}
 }

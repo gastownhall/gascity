@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1265,6 +1266,36 @@ func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
 
+func openCityStoreAtWithoutBuiltinPackRefresh(cityPath string) (beads.Store, error) {
+	result, err := openStoreResultAtForCityWithoutBuiltinPackRefresh(cityPath, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+func openCityStoreAtReadOnlyFast(cityPath string) (beads.Store, error) {
+	result, err := openStoreResultAtForCityReadOnlyFast(cityPath, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+func openCityStoreWithoutBuiltinPackRefresh(stderr io.Writer, cmdName string) (beads.Store, int) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	store, err := openCityStoreAtWithoutBuiltinPackRefresh(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: opening bead store: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return store, 0
+}
+
 const fileStoreLayoutScopedV1 = "scope-local-v1"
 
 func fileStoreLayoutMarkerPath(cityPath string) string {
@@ -1359,11 +1390,33 @@ func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride g
 }
 
 func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigLoader(storePath, cityPath, modeOverride, haveMode, authoritative, loadCityConfig)
+}
+
+func openStoreResultAtForCityWithoutBuiltinPackRefresh(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigLoader(storePath, cityPath, gate.ModeUnset, false, false, loadCityConfigWithoutBuiltinPackRefresh)
+}
+
+func openStoreResultAtForCityReadOnlyFast(storePath, cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigLoaderOptions(storePath, cityPath, gate.ModeUnset, false, false, loadCityConfigWithoutBuiltinPackRefresh, storeOpenConfigOptions{
+		skipNativePreflight: true,
+	})
+}
+
+type storeOpenConfigOptions struct {
+	skipNativePreflight bool
+}
+
+func openStoreResultAtForCityWithConfigLoader(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool, loadConfig func(string, ...io.Writer) (*config.City, error)) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfigLoaderOptions(storePath, cityPath, modeOverride, haveMode, authoritative, loadConfig, storeOpenConfigOptions{})
+}
+
+func openStoreResultAtForCityWithConfigLoaderOptions(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool, loadConfig func(string, ...io.Writer) (*config.City, error), openOpts storeOpenConfigOptions) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
-	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
+	cfg, _ := loadConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if authoritative {
@@ -1379,6 +1432,26 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 	mode := resolvedConditionalWritesMode(cfg)
 	if haveMode {
 		mode = modeOverride
+	}
+	if openOpts.skipNativePreflight && contract.ProviderUsesBDContract(provider) {
+		diag := beads.BeadsDiagnostic{
+			Store:               beads.BeadsStoreNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       "read_only_fast_path",
+			PreflightReason:     "native-store preflight skipped for responsive read-only command fallback",
+		}
+		var store beads.Store
+		var err error
+		if strings.HasPrefix(strings.TrimSpace(provider), "exec:") {
+			diag.Store = beads.BeadsStoreNameExecStore
+			store, err = openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
+		} else {
+			store, err = openBdStoreAtWithLoadedConfig(scopeRoot, runtimeCityPath, cfg)
+		}
+		if err != nil {
+			return beads.StoreOpenResult{}, err
+		}
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: diag}, nil
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
@@ -1484,16 +1557,24 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 }
 
 func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
+	return openBdStoreAtWithConfigLoader(storePath, cityPath, loadCityConfig)
+}
+
+func openBdStoreAtWithConfigLoader(storePath, cityPath string, loadConfig func(string, ...io.Writer) (*config.City, error)) (beads.Store, error) {
+	cfg, err := loadConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	return openBdStoreAtWithLoadedConfig(storePath, cityPath, cfg)
+}
+
+func openBdStoreAtWithLoadedConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
+		store := bdStoreForCityWithConfig(storePath, cityPath, cfg)
 		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
 			return optimized, nil
 		}
 		return store, nil
-	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		cfg = nil
 	}
 	store := bdStoreForRig(storePath, cityPath, cfg)
 	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {

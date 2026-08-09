@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"errors"
 	"log"
 	"time"
 )
@@ -29,6 +30,32 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 		}
 		return latest, nil
 	}
+}
+
+// LastRunIndexAcross returns the newest tracking-bead CreatedAt per scoped
+// order across a federation of order front doors. It is the bulk counterpart to
+// LastRunAcross for diagnostics that need to inspect many orders at once.
+func LastRunIndexAcross(stores []*Store) (map[string]time.Time, error) {
+	latest := make(map[string]time.Time)
+	var errs []error
+	for _, s := range stores {
+		if s == nil {
+			continue
+		}
+		index, err := s.LastRunIndex()
+		if err != nil {
+			errs = append(errs, err)
+		}
+		for scoped, last := range index {
+			if scoped == "" {
+				continue
+			}
+			if last.After(latest[scoped]) {
+				latest[scoped] = last
+			}
+		}
+	}
+	return latest, errors.Join(errs...)
 }
 
 // CursorAcross returns a CursorFunc merging the event seq cursor for a named

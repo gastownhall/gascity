@@ -94,6 +94,54 @@ type rigStatusCounts struct {
 	Suspended int
 }
 
+type statusRunningSessions struct {
+	names []string
+	set   map[string]bool
+	err   error
+}
+
+func collectStatusRunningSessions(sp runtime.Provider) statusRunningSessions {
+	out := statusRunningSessions{set: make(map[string]bool)}
+	if sp == nil {
+		return out
+	}
+	names, err := sp.ListRunning("")
+	out.names = append(out.names, names...)
+	out.err = err
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out.set[name] = true
+	}
+	if err != nil {
+		markStatusProviderPartial(sp)
+	}
+	return out
+}
+
+func (s statusRunningSessions) IsRunning(name string) bool {
+	return s.set[strings.TrimSpace(name)]
+}
+
+func (s statusRunningSessions) ListRunning(prefix string) ([]string, error) {
+	prefix = strings.TrimSpace(prefix)
+	if s.err != nil {
+		return nil, s.err
+	}
+	if prefix == "" {
+		return append([]string(nil), s.names...), nil
+	}
+	out := make([]string, 0, len(s.names))
+	for _, name := range s.names {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
 func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads.BeadsDiagnostic, int) {
 	if cityPath == "" {
 		return nil, nil, 0
@@ -101,7 +149,7 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads
 	if !cityStatusStorePresent(cityPath) {
 		return nil, nil, 0
 	}
-	opened, err := openCityStoreAtForStatus(cityPath)
+	opened, err := openStoreResultAtForCityReadOnlyFast(cityPath, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, nil, 1
@@ -183,6 +231,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		return snapshot
 	}
 
+	runningSessions := collectStatusRunningSessions(sp)
 	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspendedRigs := buildEffectiveSuspendedRigNames(cfg, suspState)
 
@@ -229,7 +278,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 			scaleLabel := fmt.Sprintf("scaled (min=%d, %s)", sp0.Min, maxDisplay)
 			headerShown := false
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, runningSessions) {
 				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
@@ -266,32 +315,26 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		plans = append(plans, agentPlan{row: row, target: target, suspended: suspended, rigDir: a.Dir})
 	}
 
-	// Phase 2: fan out runtime observations across the worker pool. This is
-	// the long pole on multi-rig cities; running the probes serially used to
-	// dominate gc status wall time.
-	targets := make([]statusObservationTarget, len(plans))
-	for i, p := range plans {
-		targets[i] = p.target
+	if runningSessions.err != nil {
+		snapshot.Partial = true
+		snapshot.PartialErrors = append(snapshot.PartialErrors, fmt.Sprintf("runtime status probe incomplete: %v", runningSessions.err))
 	}
-	observations := observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
-
 	if statusProviderPartial(sp) {
 		snapshot.Partial = true
 		snapshot.PartialErrors = append(snapshot.PartialErrors, "runtime status probe incomplete; non-running agent rows are unknown")
 	}
 
-	// Phase 3: stitch observation results back into rows and tallies in the
+	// Phase 2: stitch runtime-list results back into rows and tallies in the
 	// original order to keep output deterministic.
-	for i, p := range plans {
-		obs := observations[i]
-		p.row.Agent.Running = obs.Running
-		p.row.Agent.Suspended = p.suspended || obs.Suspended || p.target.suspended
+	for _, p := range plans {
+		p.row.Agent.Running = runningSessions.IsRunning(p.target.runtimeSessionName)
+		p.row.Agent.Suspended = p.suspended || p.target.suspended
 		snapshot.Agents = append(snapshot.Agents, p.row)
 		snapshot.Summary.TotalAgents++
-		if obs.Running {
+		if p.row.Agent.Running {
 			snapshot.Summary.RunningAgents++
 		}
-		addRigCount(p.rigDir, p.suspended || obs.Suspended || p.target.suspended)
+		addRigCount(p.rigDir, p.row.Agent.Suspended)
 	}
 
 	for _, r := range cfg.Rigs {

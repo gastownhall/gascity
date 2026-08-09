@@ -274,7 +274,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -519,10 +519,11 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
-	store, err := openCityStoreAt(cityPath)
+	opened, err := openStoreResultAtForCityWithoutBuiltinPackRefresh(cityPath, cityPath)
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
 	}
+	store := opened.Store
 	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
 	if err != nil {
 		return classifyHookClaimSessionLookupError(err)

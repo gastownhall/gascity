@@ -17,7 +17,7 @@ import (
 // returns 0 — mirroring the API server's countBeadStoreRows defense
 // (internal/api/store_health.go, statusStoreReadTimeout), which this CLI local
 // fallback never inherited. It matches the server's 1s bound.
-const statusStoreHealthTimeout = time.Second
+var statusStoreHealthTimeout = time.Second
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. LastGCAt is serialized as RFC3339 UTC when present;
@@ -47,8 +47,80 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	lastAt, lastStatus := lastMaintenanceForStatus(ep)
 	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
+}
+
+type storeHealthTailProvider interface {
+	ListTail(events.Filter, int) ([]events.Event, error)
+}
+
+func lastMaintenanceForStatus(ep events.Provider) (time.Time, string) {
+	if ep == nil {
+		return time.Time{}, ""
+	}
+	if tailer, ok := ep.(storeHealthTailProvider); ok {
+		return lastMaintenanceFromTail(tailer)
+	}
+	type result struct {
+		at     time.Time
+		status string
+	}
+	done := make(chan result, 1)
+	go func() {
+		at, status := storehealth.LastMaintenance(ep)
+		done <- result{at: at, status: status}
+	}()
+	select {
+	case r := <-done:
+		return r.at, r.status
+	case <-time.After(statusStoreHealthTimeout):
+		return time.Time{}, ""
+	}
+}
+
+func lastMaintenanceFromTail(tailer storeHealthTailProvider) (time.Time, string) {
+	var (
+		latestTs     time.Time
+		latestStatus string
+	)
+	for _, spec := range []struct {
+		typ    string
+		status string
+	}{
+		{events.StoreMaintenanceDone, "success"},
+		{events.StoreMaintenanceFailed, "failed"},
+	} {
+		evts, err := listMaintenanceTailWithTimeout(tailer, events.Filter{Type: spec.typ}, 1)
+		if err != nil {
+			continue
+		}
+		for _, e := range evts {
+			if e.Ts.After(latestTs) {
+				latestTs = e.Ts
+				latestStatus = spec.status
+			}
+		}
+	}
+	return latestTs, latestStatus
+}
+
+func listMaintenanceTailWithTimeout(tailer storeHealthTailProvider, filter events.Filter, limit int) ([]events.Event, error) {
+	type tailResult struct {
+		evts []events.Event
+		err  error
+	}
+	done := make(chan tailResult, 1)
+	go func() {
+		evts, err := tailer.ListTail(filter, limit)
+		done <- tailResult{evts: evts, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.evts, r.err
+	case <-time.After(statusStoreHealthTimeout):
+		return nil, context.DeadlineExceeded
+	}
 }
 
 // liveRowCount returns the number of beads known to store, or 0 when store is

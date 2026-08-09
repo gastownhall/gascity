@@ -56,13 +56,19 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 	}
 }
 
-func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
+func TestV2RoutedToNamespaceCheckScansEachScopeOnce(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{
-		Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}},
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "polecat", BindingName: "gastown"},
+			{Name: "witness", BindingName: "hq"},
+		},
 	}
 	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
+		{ID: "CITY-2", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "polecat"}},
+		{ID: "CITY-3", Title: "canonical", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "hq.witness"}},
 	}, nil)}
 
 	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
@@ -75,16 +81,18 @@ func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
 	}
-	if len(store.queries) == 0 {
-		t.Fatal("expected at least one route query")
+	if got, want := len(store.queries), 1; got != want {
+		t.Fatalf("List calls = %d, want %d; queries=%+v", got, want, store.queries)
 	}
-	for _, query := range store.queries {
-		if query.AllowScan {
-			t.Fatalf("query %+v used AllowScan; route namespace check should use targeted metadata lookups", query)
-		}
-		if got := query.Metadata["gc.routed_to"]; got == "" {
-			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
-		}
+	query := store.queries[0]
+	if !query.AllowScan {
+		t.Fatalf("query %+v did not opt into the intentional scope scan", query)
+	}
+	if len(query.Metadata) != 0 {
+		t.Fatalf("query %+v used per-route metadata filters", query)
+	}
+	if !query.SkipLabels {
+		t.Fatalf("query %+v should skip labels", query)
 	}
 }
 

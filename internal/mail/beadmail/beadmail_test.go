@@ -2,7 +2,6 @@ package beadmail
 
 import (
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,7 +101,7 @@ func TestMessageCreatedInWispTier(t *testing.T) {
 	}
 }
 
-func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
+func TestInboxUsesExactBothTierMessageQueriesAcrossRoutes(t *testing.T) {
 	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
 	p := New(store)
 
@@ -134,16 +133,17 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	if len(msgs) != 4 {
 		t.Fatalf("Inbox = %#v, want four routed messages", msgs)
 	}
-	if len(store.messageQueries) != 1 {
-		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
-	}
-	query := store.messageQueries[0]
 	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
-	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
-		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
+	if len(store.messageQueries) != len(wantRoutes) {
+		t.Fatalf("message query count = %d, want %d; queries=%+v", len(store.messageQueries), len(wantRoutes), store.messageQueries)
 	}
-	if !query.Live {
-		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	for i, query := range store.messageQueries {
+		if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != wantRoutes[i] || len(query.Assignees) != 0 {
+			t.Fatalf("message query %d = %+v, want exact both-tier assignee %q", i, query, wantRoutes[i])
+		}
+		if !query.Live {
+			t.Fatalf("message query %d = %+v, want live read for command-visible mail freshness", i, query)
+		}
 	}
 }
 

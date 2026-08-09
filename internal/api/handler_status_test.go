@@ -183,6 +183,83 @@ type partialStatusRuntimeProvider struct {
 
 func (partialStatusRuntimeProvider) StatusPartial() bool { return true }
 
+type listOnlyStatusRuntimeProvider struct {
+	runtime.Provider
+	running        []string
+	listErr        error
+	listCalls      int
+	isRunningCalls int
+}
+
+func (p *listOnlyStatusRuntimeProvider) ListRunning(prefix string) ([]string, error) {
+	p.listCalls++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	if prefix == "" {
+		return append([]string(nil), p.running...), nil
+	}
+	var out []string
+	for _, name := range p.running {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+func (p *listOnlyStatusRuntimeProvider) IsRunning(string) bool {
+	p.isRunningCalls++
+	return false
+}
+
+func TestBuildStatusBodyUsesSingleRunningListSnapshot(t *testing.T) {
+	state := newFakeState(t)
+	provider := &listOnlyStatusRuntimeProvider{
+		Provider: runtime.NewFake(),
+		running:  []string{"myrig--worker"},
+	}
+	state.sessionProvider = provider
+	s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
+
+	resp := s.buildStatusBody(context.Background(), true)
+
+	if resp.Running != 1 || resp.Agents.Running != 1 || resp.Agents.Total != 1 {
+		t.Fatalf("running counts = raw:%d agents:%+v, want one running agent", resp.Running, resp.Agents)
+	}
+	if provider.listCalls != 1 {
+		t.Fatalf("ListRunning calls = %d, want 1", provider.listCalls)
+	}
+	if provider.isRunningCalls != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0", provider.isRunningCalls)
+	}
+	if resp.Partial {
+		t.Fatalf("Partial = true, want false; errors=%v", resp.PartialErrors)
+	}
+}
+
+func TestBuildStatusBodyListRunningErrorMarksPartial(t *testing.T) {
+	state := newFakeState(t)
+	provider := &listOnlyStatusRuntimeProvider{
+		Provider: runtime.NewFake(),
+		listErr:  errors.New("runtime list unavailable"),
+	}
+	state.sessionProvider = provider
+	s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
+
+	resp := s.buildStatusBody(context.Background(), true)
+
+	if !resp.Partial {
+		t.Fatal("Partial = false, want true for failed runtime list")
+	}
+	if !statusPartialErrorsContain(resp.PartialErrors, "runtime status probe incomplete") {
+		t.Fatalf("PartialErrors = %#v, want runtime list diagnostic", resp.PartialErrors)
+	}
+	if provider.isRunningCalls != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0", provider.isRunningCalls)
+	}
+}
+
 func TestHandleStatusMarksRuntimeProbePartial(t *testing.T) {
 	state := newFakeState(t)
 	state.sessionProvider = partialStatusRuntimeProvider{Provider: state.sp}
@@ -712,6 +789,26 @@ func TestBuildStatusBodyLiteOmitsExpensiveBlocks(t *testing.T) {
 	}
 	if body.Rigs.Total != 1 {
 		t.Errorf("lite body Rigs.Total = %d, want 1", body.Rigs.Total)
+	}
+}
+
+func TestBuildStatusBodyLiteSkipsMailCount(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	state := newFakeState(t)
+	state.cityMailProv = &blockingMailCountProvider{Provider: state.cityMailProv, release: release}
+	s := &Server{state: state}
+
+	body := s.buildStatusBody(context.Background(), true)
+	if body.Partial {
+		t.Fatalf("Partial = true, want false; errors=%v", body.PartialErrors)
+	}
+	if body.Mail != (mailCounts{}) {
+		t.Fatalf("Mail = %+v, want zero when lite status skips mail counts", body.Mail)
 	}
 }
 

@@ -141,3 +141,27 @@ func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
 		t.Fatalf("LastRunAcross() = %s, want %s (max across scopes)", got, lateRun.CreatedAt)
 	}
 }
+
+func TestLastRunIndexAcrossReturnsMaxScope(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	early := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:        "gc-early",
+		Title:     "order:digest",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		CreatedAt: base,
+	}}, nil)
+	late := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:        "gc-late",
+		Title:     "order:digest",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		CreatedAt: base.Add(time.Hour),
+	}}, nil)
+
+	got, err := LastRunIndexAcross([]*Store{ordersStoreOver(early), ordersStoreOver(late)})
+	if err != nil {
+		t.Fatalf("LastRunIndexAcross(): %v", err)
+	}
+	if !got["digest"].Equal(base.Add(time.Hour)) {
+		t.Fatalf("LastRunIndexAcross()[digest] = %s, want %s", got["digest"], base.Add(time.Hour))
+	}
+}

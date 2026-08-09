@@ -1186,7 +1186,42 @@ func matchesRecipientRoute(routes []string, assignee string) bool {
 }
 
 func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, error) {
-	return p.messageCandidatesAll(routes)
+	if len(routes) == 0 {
+		return p.messageCandidatesAll(nil)
+	}
+	seen := make(map[string]struct{})
+	out := make([]beads.Bead, 0)
+	for _, route := range routes {
+		candidates, err := p.messageCandidatesForRoute(route)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range candidates {
+			if _, ok := seen[b.ID]; ok {
+				continue
+			}
+			if !matchesRecipientRoute([]string{route}, b.Assignee) {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+func (p *Provider) messageCandidatesForRoute(route string) ([]beads.Bead, error) {
+	all, err := p.store.List(beads.ListQuery{
+		Type:     messageBeadType,
+		Status:   "open",
+		Assignee: route,
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scanning message beads for route %q: %w", route, err)
+	}
+	return all, nil
 }
 
 // messageCandidatesAll returns all open message beads matching any route.

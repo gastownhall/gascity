@@ -81,27 +81,13 @@ func (c *v2RoutedToNamespaceCheck) scanScope(findings, skipped *[]string, aliase
 		*skipped = append(*skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 		return
 	}
-	seen := make(map[string]bool)
-	routes := make([]string, 0, len(aliases))
-	for route := range aliases {
-		routes = append(routes, route)
+	items, err := store.List(beads.ListQuery{AllowScan: true, SkipLabels: true})
+	if err != nil {
+		*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
+		return
 	}
-	sort.Strings(routes)
-	for _, route := range routes {
-		items, err := store.List(beads.ListQuery{
-			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
-		})
-		if err != nil {
-			*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
-			return
-		}
-		for _, bead := range items {
-			if seen[bead.ID] {
-				continue
-			}
-			seen[bead.ID] = true
-			c.scanRoutedToBead(findings, aliases, label, bead)
-		}
+	for _, bead := range items {
+		c.scanRoutedToBead(findings, aliases, label, bead)
 	}
 }
 

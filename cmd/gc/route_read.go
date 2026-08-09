@@ -4,9 +4,56 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
+
+const defaultRouteReadLocalAPITimeout = 5 * time.Second
+
+var routeReadLocalAPITimeout = defaultRouteReadLocalAPITimeout
+
+type routeReadAPITimeoutError struct {
+	timeout time.Duration
+}
+
+func (e *routeReadAPITimeoutError) Error() string {
+	return fmt.Sprintf("api read timed out after %s", e.timeout)
+}
+
+func fetchRouteReadAPI(c *api.Client, apiFetch func() error) error {
+	if c == nil || c.IsRemote() || routeReadLocalAPITimeout <= 0 {
+		return apiFetch()
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- apiFetch()
+	}()
+	timer := time.NewTimer(routeReadLocalAPITimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return &routeReadAPITimeoutError{timeout: routeReadLocalAPITimeout}
+	}
+}
+
+func localRouteReadAPIClient(cityPath string) (*api.Client, string) {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return nil, "escape-hatch"
+	}
+	if c := supervisorCityAPIClientWithoutRunningProbe(cityPath); c != nil {
+		return c, ""
+	}
+	if apiRouteControllerAliveHook(cityPath) != 0 {
+		if c := standaloneControllerClient(cityPath); c != nil {
+			return c, ""
+		}
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
 
 // fallbackAfterFetch is a sentinel an apiFetch closure may return to force a
 // fallback to the local path AFTER a successful API round-trip — for a command
@@ -45,10 +92,15 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 		logRoute(stderr, cmdName, "fallback", nilReason)
 		return localRender()
 	}
-	err := apiFetch()
+	err := fetchRouteReadAPI(c, apiFetch)
 	if err == nil {
 		logRoute(stderr, cmdName, "api", "")
 		return apiRender()
+	}
+	var timeoutErr *routeReadAPITimeoutError
+	if errors.As(err, &timeoutErr) {
+		logRoute(stderr, cmdName, "fallback", "api-timeout")
+		return localRender()
 	}
 	var faf fallbackAfterFetch
 	if errors.As(err, &faf) {

@@ -197,6 +197,83 @@ func TestRecentRunsAllFoldsTrackingBeads(t *testing.T) {
 	}
 }
 
+func TestLastRunIndexFoldsNewestTrackingRunPerOrder(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	mem := beads.NewMemStoreFrom(4, []beads.Bead{
+		{
+			ID:        "gc-a-old",
+			Title:     "order:a",
+			Labels:    []string{"order-run:a", "order-tracking"},
+			CreatedAt: base,
+		},
+		{
+			ID:        "gc-a-new",
+			Title:     "order:a",
+			Labels:    []string{"order-run:a", "order-tracking"},
+			CreatedAt: base.Add(2 * time.Hour),
+		},
+		{
+			ID:        "gc-b",
+			Title:     "order:legacy-b",
+			Labels:    []string{"order-tracking"},
+			CreatedAt: base.Add(time.Hour),
+		},
+		{
+			ID:        "gc-skip",
+			Title:     "unrelated",
+			Labels:    []string{"order-tracking"},
+			CreatedAt: base.Add(3 * time.Hour),
+		},
+	}, nil)
+
+	got, err := NewStore(beads.OrdersStore{Store: mem}).LastRunIndex()
+	if err != nil {
+		t.Fatalf("LastRunIndex(): %v", err)
+	}
+	want := map[string]time.Time{
+		"a":        base.Add(2 * time.Hour),
+		"legacy-b": base.Add(time.Hour),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("LastRunIndex() = %v, want %v", got, want)
+	}
+}
+
+func TestLastRunIndexUsesOneTrackingScanPerSharedStore(t *testing.T) {
+	spy := &listSpyStore{Store: beads.NewMemStore()}
+	if _, err := spy.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking"}}); err != nil {
+		t.Fatal(err)
+	}
+	spy.queries = nil
+
+	st := NewStoreWithGraph(
+		beads.OrdersStore{Store: spy},
+		beads.GraphStore{Store: spy},
+	)
+	if _, err := st.LastRunIndex(); err != nil {
+		t.Fatalf("LastRunIndex(): %v", err)
+	}
+	if len(spy.queries) != 1 {
+		t.Fatalf("LastRunIndex issued %d List calls, want 1 (deduped shared store)", len(spy.queries))
+	}
+	q := spy.queries[0]
+	if q.Label != labelOrderTracking {
+		t.Fatalf("LastRunIndex query label = %q, want %q", q.Label, labelOrderTracking)
+	}
+	if q.Limit != 0 {
+		t.Fatalf("LastRunIndex query limit = %d, want 0", q.Limit)
+	}
+	if !q.IncludeClosed {
+		t.Fatal("LastRunIndex query IncludeClosed = false, want true")
+	}
+	if q.Sort != beads.SortCreatedDesc {
+		t.Fatalf("LastRunIndex query Sort = %q, want %q", q.Sort, beads.SortCreatedDesc)
+	}
+	if q.TierMode != beads.TierBoth {
+		t.Fatalf("LastRunIndex query TierMode = %v, want TierBoth", q.TierMode)
+	}
+}
+
 // TestHasOpenWorkUnionsGraphLeg proves HasOpenWork finds an open wisp root that
 // lives only in the graph leg, via the injected wisp-walk predicate.
 func TestHasOpenWorkUnionsGraphLeg(t *testing.T) {

@@ -144,6 +144,58 @@ func TestOrderFiringCurrent_NeverFired_WithinFirstCycle(t *testing.T) {
 	}
 }
 
+func TestOrderFiringCurrent_TailGapKeepsNeverFiredSignal(t *testing.T) {
+	oldLimit := orderFiringEventTailLimit
+	orderFiringEventTailLimit = 3
+	t.Cleanup(func() { orderFiringEventTailLimit = oldLimit })
+
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.BeadCreated, Subject: "omitted-lower-bound", Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.BeadUpdated, Subject: "noise-1", Ts: now.Add(-7 * time.Hour)},
+		events.Event{Type: events.MailSent, Subject: "noise-2", Ts: now.Add(-6*time.Hour - 30*time.Minute)},
+		events.Event{Type: events.BeadClosed, Subject: "noise-3", Ts: now.Add(-6*time.Hour - 15*time.Minute)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if strings.Contains(details, "controller start unknown") {
+		t.Fatalf("details = %v, want tail lower-bound to preserve never-fired signal", result.Details)
+	}
+	if !strings.Contains(details, "never fired since controller start 8h ago") {
+		t.Fatalf("details = %v, want lower-bound controller-start age", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_ExactlyAtTailLimitKeepsControllerStartUnknown(t *testing.T) {
+	oldLimit := orderFiringEventTailLimit
+	orderFiringEventTailLimit = 3
+	t.Cleanup(func() { orderFiringEventTailLimit = oldLimit })
+
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.BeadCreated, Subject: "noise-1", Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.BeadUpdated, Subject: "noise-2", Ts: now.Add(-7 * time.Hour)},
+		events.Event{Type: events.MailSent, Subject: "noise-3", Ts: now.Add(-6 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK with unknown controller start; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "controller start unknown") {
+		t.Fatalf("details = %v, want controller-start-unknown detail", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_FiredRecently(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
@@ -595,7 +647,7 @@ func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, now, nil)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -626,7 +678,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, now, nil)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -635,6 +687,31 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 	}
 	if !got.Equal(freshRun) {
 		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
+	}
+}
+
+func TestLatestOrderFiredAt_StaleEventUsesPersistedRunIndex(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
+	staleEvent := now.Add(-13 * time.Hour)
+	freshRun := now.Add(-1 * time.Hour)
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: staleEvent},
+	}
+
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			return time.Time{}, fmt.Errorf("lastRun must not be consulted when a persisted run index is supplied")
+		},
+	}
+
+	got, err := check.latestOrderFiredAt(evts, order, expected, now, map[string]time.Time{order.ScopedName(): freshRun})
+	if err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
+	if !got.Equal(freshRun) {
+		t.Fatalf("latest = %v, want %v (newer order-run index)", got, freshRun)
 	}
 }
 

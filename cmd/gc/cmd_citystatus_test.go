@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -92,17 +93,72 @@ func TestCityStatusWithAgents(t *testing.T) {
 	}
 }
 
-func TestCityStatusReportsObservationErrors(t *testing.T) {
-	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
-		t.Fatalf("Start: %v", err)
+type listOnlyCityStatusProvider struct {
+	runtime.Provider
+	running        []string
+	listErr        error
+	listCalls      int
+	isRunningCalls int
+}
+
+func (p *listOnlyCityStatusProvider) ListRunning(prefix string) ([]string, error) {
+	p.listCalls++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	if prefix == "" {
+		return append([]string(nil), p.running...), nil
+	}
+	var out []string
+	for _, name := range p.running {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+func (p *listOnlyCityStatusProvider) IsRunning(string) bool {
+	p.isRunningCalls++
+	return false
+}
+
+func TestCityStatusUsesSingleRunningListSnapshot(t *testing.T) {
+	sp := &listOnlyCityStatusProvider{
+		Provider: runtime.NewFake(),
+		running:  []string{"mayor"},
 	}
 	dops := newFakeDrainOps()
-	oldObserve := observeSessionTargetForStatus
-	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
-		return worker.LiveObservation{}, errors.New("status observation unavailable")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "worker", MaxActiveSessions: intPtr(1)},
+		},
 	}
-	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1/2 agents running") {
+		t.Fatalf("stdout = %q, want one running agent from ListRunning snapshot", stdout.String())
+	}
+	if sp.listCalls != 1 {
+		t.Fatalf("ListRunning calls = %d, want 1", sp.listCalls)
+	}
+	if sp.isRunningCalls != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0", sp.isRunningCalls)
+	}
+}
+
+func TestCityStatusRuntimeListErrorRendersPartialUnknown(t *testing.T) {
+	sp := &listOnlyCityStatusProvider{
+		Provider: runtime.NewFake(),
+		listErr:  errors.New("runtime list unavailable"),
+	}
+	dops := newFakeDrainOps()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Agents: []config.Agent{
@@ -115,8 +171,11 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "gc status: observing") {
-		t.Fatalf("stderr = %q, want observation warning", stderr.String())
+	if !strings.Contains(stdout.String(), "unknown  (partial status)") {
+		t.Fatalf("stdout = %q, want partial unknown status", stdout.String())
+	}
+	if sp.isRunningCalls != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0", sp.isRunningCalls)
 	}
 }
 
@@ -1137,6 +1196,95 @@ func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 }
 
+func TestRouteCityStatusLazy_APIDoesNotOpenLocalStore(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	origLoad := loadCityConfigForStatus
+	loadCityConfigForStatus = func(string, ...io.Writer) (*config.City, error) {
+		t.Fatal("API status route loaded local config")
+		return nil, nil
+	}
+	defer func() { loadCityConfigForStatus = origLoad }()
+
+	origOpen := openCityStoreAtForStatus
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		t.Fatal("API status route opened the local store")
+		return beads.StoreOpenResult{}, nil
+	}
+	defer func() { openCityStoreAtForStatus = origOpen }()
+
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatusLazy(cityPath, nil, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "\"_cache_age_s\"") {
+		t.Fatalf("API output missing cache age envelope: %s", stdout.String())
+	}
+}
+
+func TestRouteCityStatusLazy_APIRequestsLiteStatus(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	var gotRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRawQuery = r.URL.RawQuery
+		if r.URL.Path != "/v0/city/test-city/status" {
+			t.Fatalf("path = %q, want /v0/city/test-city/status", r.URL.Path)
+		}
+		if r.URL.Query().Get("lite") != "true" {
+			t.Fatalf("query = %q, want lite=true", r.URL.RawQuery)
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":   "test-city",
+			"path":   cityPath,
+			"agents": map[string]any{"total": 0, "running": 0},
+			"rigs":   map[string]any{"total": 0},
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatusLazy(cityPath, nil, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotRawQuery != "lite=true" {
+		t.Fatalf("raw query = %q, want lite=true", gotRawQuery)
+	}
+}
+
+func TestCityStatusAPIClientDoesNotUseGenericSupervisorListFallback(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	cityPath := t.TempDir()
+
+	origAlive := supervisorAliveHook
+	origControllerAlive := apiRouteControllerAliveHook
+	origSupervisorClient := apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		supervisorAliveHook = origAlive
+		apiRouteControllerAliveHook = origControllerAlive
+		apiRouteSupervisorClientHook = origSupervisorClient
+	})
+	supervisorAliveHook = func() int { return 0 }
+	apiRouteControllerAliveHook = func(string) int { return 0 }
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		t.Fatal("cityStatusAPIClient called generic apiClient supervisor fallback")
+		return nil
+	}
+
+	c, reason := cityStatusAPIClient(cityPath)
+	if c != nil {
+		t.Fatalf("client = %v, want nil", c)
+	}
+	if reason != "controller-down" {
+		t.Fatalf("reason = %q, want controller-down", reason)
+	}
+}
+
 func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 	cityPath := writeCityStatusTestCity(t)
 	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
@@ -1293,6 +1441,18 @@ func (p blockingStatusRunningProvider) IsRunning(string) bool {
 	}
 	<-p.release
 	return p.running
+}
+
+func (p blockingStatusRunningProvider) ListRunning(string) ([]string, error) {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-p.release
+	if p.running {
+		return []string{"worker"}, nil
+	}
+	return nil, nil
 }
 
 func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testing.T) {

@@ -518,7 +518,7 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
 	cityPath, cityPathErr := resolveCity()
 	if cityPathErr == nil {
-		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
+		if cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, stderr); err == nil && citySuspended(cfg) {
 			if inject {
 				return 0
 			}
@@ -538,10 +538,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
 var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeMailCheck dispatches non-injecting `mail check` to the supervisor API
@@ -558,7 +555,12 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	}
 	if inject {
 		if c != nil {
-			cr, err := c.ListMailInbox(recipient, "")
+			var cr api.CachedRead[api.MailListView]
+			err := fetchRouteReadAPI(c, func() error {
+				var err error
+				cr, err = c.ListMailInbox(recipient, "")
+				return err
+			})
 			if err == nil {
 				if mailListHasPartial(cr.Body) {
 					logRoute(stderr, cmdName, "api", "error")
@@ -581,7 +583,12 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	if c != nil {
-		cr, err := c.ListMailInbox(recipient, "")
+		var cr api.CachedRead[api.MailListView]
+		err := fetchRouteReadAPI(c, func() error {
+			var err error
+			cr, err = c.ListMailInbox(recipient, "")
+			return err
+		})
 		if err == nil {
 			if mailListHasPartial(cr.Body) {
 				logRoute(stderr, cmdName, "api", "error")
@@ -1000,7 +1007,7 @@ func configuredMailboxAddress(identifier string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return "", false
 	}
@@ -1061,7 +1068,7 @@ func ambientMailTargetConfig() (string, *config.City) {
 	if err != nil {
 		return "", nil
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return cityPath, nil
 	}
@@ -1220,7 +1227,7 @@ func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName s
 	if isStorelessMailProvider() {
 		return resolveRawMailTargetForStorelessProvider(identifier, stderr, cmdName)
 	}
-	store, code := openCityStore(stderr, cmdName)
+	store, code := openCityStoreWithoutBuiltinPackRefresh(stderr, cmdName)
 	if store == nil {
 		_ = code
 		return resolvedMailTarget{}, false
@@ -1243,7 +1250,7 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	if len(candidates) == 1 || isStorelessMailProvider() {
 		return resolveMailTargetsForCommand(candidates[0], stderr, cmdName)
 	}
-	store, code := openCityStore(stderr, cmdName)
+	store, code := openCityStoreWithoutBuiltinPackRefresh(stderr, cmdName)
 	if store == nil {
 		_ = code
 		return resolvedMailTarget{}, false
@@ -1291,6 +1298,32 @@ func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) 
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
 	}
 	return resolveDefaultMailTargetsForCommand(stderr, cmdName)
+}
+
+func resolveMailTargetFromArgsWithConfig(cityPath string, cfg *config.City, store beads.Store, args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
+	if len(args) > 0 {
+		target, err := resolveMailTargetsWithConfig(cityPath, cfg, store, args[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return resolvedMailTarget{}, false
+		}
+		return target, true
+	}
+
+	candidates := defaultMailIdentityCandidates()
+	cache := &mailIdentitySessionCache{}
+	for _, c := range candidates {
+		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, store, c, cache)
+		if err == nil {
+			return target, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return resolvedMailTarget{}, false
+		}
+	}
+	fmt.Fprintf(stderr, "%s: no mail identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
+	return resolvedMailTarget{}, false
 }
 
 func resolveRawMailTargetForStorelessProvider(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
@@ -1902,6 +1935,44 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	return routeReadCmdWithHooks("mail inbox", stderr, readCmdHooks{
+		onResolveErr: func(error) int { return doMailInboxFallback(args, jsonOut, stdout, stderr) },
+	}, mailInboxAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeMailInbox(cityPath, args, c, nilReason, jsonOut, stdout, stderr)
+	})
+}
+
+// mailInboxAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back.
+var mailInboxAPIClient = func(cityPath string) (*api.Client, string) {
+	return localRouteReadAPIClient(cityPath)
+}
+
+func routeMailInbox(cityPath string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+	const cmdName = "mail inbox"
+	recipient := defaultMailIdentity()
+	if len(args) > 0 {
+		recipient = strings.TrimSpace(args[0])
+	}
+	var cr api.CachedRead[api.MailListView]
+	return routeRead(c, cmdName, nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListMailInbox(recipient, "")
+			if err != nil {
+				return err
+			}
+			if mailListHasPartial(cr.Body) {
+				return errorAfterFetch{Detail: mailListPartialErrorDetail(cr.Body)}
+			}
+			return nil
+		},
+		func() int { return renderMailInboxFromAPI(cr, recipient, jsonOut, stdout, stderr) },
+		func() int { return doMailInboxFallbackAtReadOnlyFast(cityPath, args, jsonOut, stdout, stderr) },
+	)
+}
+
+func doMailInboxFallback(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail inbox")
 	if mp == nil {
 		return code
@@ -1913,6 +1984,53 @@ func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer)
 	}
 
 	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
+}
+
+func doMailInboxFallbackAtReadOnlyFast(cityPath string, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	mp, store, cfg, code := openCityMailProviderAtReadOnlyFast(cityPath, stderr, "gc mail inbox")
+	if mp == nil {
+		return code
+	}
+	if store == nil {
+		return doMailInboxFallback(args, jsonOut, stdout, stderr)
+	}
+
+	target, ok := resolveMailTargetFromArgsWithConfig(cityPath, cfg, store, args, stderr, "gc mail inbox")
+	if !ok {
+		return 1
+	}
+
+	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
+}
+
+func renderMailInboxFromAPI(cr api.CachedRead[api.MailListView], recipient string, jsonOut bool, stdout, stderr io.Writer) int {
+	messages := cr.Body.Items
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, mailInboxJSONResult{
+			SchemaVersion: "1",
+			Recipient:     recipient,
+			Recipients:    []string{recipient},
+			Messages:      messages,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	if len(messages) == 0 {
+		fmt.Fprintf(stdout, "No unread messages for %s\n", recipient) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tFROM\tSUBJECT\tBODY") //nolint:errcheck // best-effort stdout
+	for _, m := range messages {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.ID, m.From, m.Subject, truncate(m.Body, 60)) //nolint:errcheck // best-effort stdout
+	}
+	tw.Flush() //nolint:errcheck // best-effort stdout
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	}
+	return 0
 }
 
 type mailInboxReader interface {
@@ -1929,7 +2047,13 @@ func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, st
 }
 
 func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Inbox, target.recipients)
+	var messages []mail.Message
+	var err error
+	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
+		messages, err = inboxer.InboxRecipients(target.recipients)
+	} else {
+		messages, err = collectMailMessages(mp.Inbox, target.recipients)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2035,10 +2159,7 @@ func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server.
 var mailPeekAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeMailPeek dispatches `mail peek` to the supervisor API when a
@@ -2520,10 +2641,7 @@ func cmdMailCountWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer)
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server.
 var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeMailCount dispatches `mail count` to the supervisor API when a

@@ -46,9 +46,18 @@ func loadSessionProviderContext() sessionProviderContext {
 		providerName: os.Getenv("GC_SESSION"),
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp, io.Discard); err == nil {
-			return sessionProviderContextForCity(cfg, cp, ctx.providerName)
-		}
+		return loadSessionProviderContextAt(cp, ctx.providerName)
+	}
+	return ctx
+}
+
+func loadSessionProviderContextAt(cityPath, providerOverride string) sessionProviderContext {
+	ctx := sessionProviderContext{
+		providerName: providerOverride,
+		cityPath:     cityPath,
+	}
+	if cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err == nil {
+		return sessionProviderContextForCity(cfg, cityPath, providerOverride)
 	}
 	return ctx
 }
@@ -896,6 +905,23 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
+}
+
+func openCityMailProviderAtReadOnlyFast(cityPath string, stderr io.Writer, cmdName string) (mail.Provider, beads.Store, *config.City, int) {
+	v := mailProviderName()
+	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
+		return newCommandMailProvider(nil), nil, nil, 0
+	}
+
+	store, err := openCityStoreAtReadOnlyFast(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: opening bead store: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, nil, nil, 1
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return newMailProviderWithSessionStore(msgStore, sessStore), store, cfg, 0
 }
 
 // eventsProviderName returns the events provider name.

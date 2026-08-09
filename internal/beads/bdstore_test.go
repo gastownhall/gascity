@@ -4353,21 +4353,23 @@ func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
 	}
 }
 
-func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+func TestBdStoreListAssigneesMultipleUsesExactAssigneeFanout(t *testing.T) {
+	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
-		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit a single --assignee", gotCmd)
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want unlimited per-route query before global client limit", gotCmd)
 		}
-		if strings.Contains(gotCmd, "--limit 1") {
-			return []byte(`[{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"}]`), nil
+		switch {
+		case strings.Contains(gotCmd, "--assignee=route-a"):
+			return []byte(`[{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}]`), nil
+		case strings.Contains(gotCmd, "--assignee=route-b"):
+			return []byte(`[{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"}]`), nil
+		default:
+			t.Fatalf("cmd = %q, want exact assignee fanout", gotCmd)
 		}
-		return []byte(`[
-			{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"},
-			{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"},
-			{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}
-		]`), nil
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
@@ -4375,15 +4377,16 @@ func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
 		Type:      "message",
 		Status:    "open",
 		Limit:     1,
+		Sort:      beads.SortCreatedAsc,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %+v, want one exact query per assignee", calls)
 	}
 	if len(got) != 1 || got[0].ID != "bd-route-b" {
-		t.Fatalf("got = %+v, want first matching route after client filter", got)
+		t.Fatalf("got = %+v, want first matching route after global sort/limit", got)
 	}
 }
 
@@ -4408,21 +4411,32 @@ func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
 	}
 }
 
-func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+func TestBdStoreListWispsAssigneesMultipleUsesExactAssigneeFanout(t *testing.T) {
+	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
-		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		if strings.HasPrefix(gotCmd, "bd list ") {
+			if !strings.Contains(gotCmd, "--assignee=route-a") && !strings.Contains(gotCmd, "--assignee=route-b") {
+				t.Fatalf("cmd = %q, want exact assignee fanout", gotCmd)
+			}
+			return []byte(`[]`), nil
 		}
-		if strings.Contains(gotCmd, "--limit 1") {
-			return []byte(`[{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
+		if strings.HasPrefix(gotCmd, "bd query ") {
+			if !strings.Contains(gotCmd, "--limit 0") {
+				t.Fatalf("cmd = %q, want unlimited per-route query before global client limit", gotCmd)
+			}
+			switch {
+			case strings.Contains(gotCmd, "assignee=route-a"):
+				return []byte(`[{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z","ephemeral":true}]`), nil
+			case strings.Contains(gotCmd, "assignee=route-b"):
+				return []byte(`[{"id":"bd-wisp-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z","ephemeral":true}]`), nil
+			default:
+				t.Fatalf("cmd = %q, want exact assignee fanout", gotCmd)
+			}
 		}
-		return []byte(`[
-			{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
-			{"id":"bd-wisp-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z","ephemeral":true},
-			{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z","ephemeral":true}
-		]`), nil
+		t.Fatalf("unexpected command = %q", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
@@ -4430,16 +4444,17 @@ func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) 
 		Type:      "message",
 		Status:    "open",
 		Limit:     1,
+		Sort:      beads.SortCreatedAsc,
 		TierMode:  beads.TierWisps,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	if len(calls) != 4 {
+		t.Fatalf("calls = %+v, want list+query for each assignee", calls)
 	}
 	if len(got) != 1 || got[0].ID != "bd-wisp-b" {
-		t.Fatalf("got = %+v, want first matching wisp after client filter", got)
+		t.Fatalf("got = %+v, want first matching wisp after global sort/limit", got)
 	}
 }
 

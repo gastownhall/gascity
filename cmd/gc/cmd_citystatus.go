@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -160,43 +161,8 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	configStderr := stderr
-	if jsonOutput {
-		configStderr = io.Discard
-	}
-	cfg, err := loadCityConfig(cityPath, configStderr)
-	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
-		}
-		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	storeStderr := stderr
-	if jsonOutput {
-		storeStderr = io.Discard
-	}
-	store, _, code := openCityStatusStore(cityPath, storeStderr)
-	if code != 0 {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
-		}
-		return code
-	}
-	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
-	if err != nil {
-		message := fmt.Sprintf("gc status: %v", err)
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
-		}
-		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	dops := newDrainOps(sp)
 	c, reason := cityStatusAPIClient(cityPath)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+	return routeCityStatusLazy(cityPath, nil, c, reason, jsonOutput, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
@@ -204,11 +170,33 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
 var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return nil, "escape-hatch"
+	}
+	if c := supervisorCityAPIClientWithoutRunningProbe(cityPath); c != nil {
 		return c, ""
+	}
+	if apiRouteControllerAliveHook(cityPath) != 0 {
+		if c := standaloneControllerClient(cityPath); c != nil {
+			return c, ""
+		}
 	}
 	return nil, apiClientFallbackReason(cityPath)
 }
+
+func supervisorCityAPIClientWithoutRunningProbe(cityPath string) *api.Client {
+	entry, registered, err := registeredCityEntry(cityPath)
+	if err != nil || !registered || supervisorAliveHook() == 0 {
+		return nil
+	}
+	baseURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		return nil
+	}
+	return api.NewCityScopedClient(baseURL, entry.EffectiveName())
+}
+
+var loadCityConfigForStatus = loadCityConfigWithoutBuiltinPackRefresh
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.
@@ -243,6 +231,78 @@ func routeCityStatus(
 			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 		},
 	)
+}
+
+func routeCityStatusLazy(
+	cityPath string,
+	cfg *config.City,
+	c *api.Client,
+	nilReason string,
+	jsonOutput bool,
+	stdout, stderr io.Writer,
+) int {
+	var cr api.CachedRead[api.StatusView]
+	return routeRead(c, "status", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.GetStatusLite()
+			if err != nil {
+				return err
+			}
+			if cr.Body.Partial {
+				return fallbackAfterFetch{Reason: "partial-status"}
+			}
+			return nil
+		},
+		func() int { return renderCityStatusFromAPI(cityPath, cr, nil, jsonOutput, stdout) },
+		func() int {
+			return doCityStatusLocalFallback(cityPath, cfg, jsonOutput, stdout, stderr)
+		},
+	)
+}
+
+func doCityStatusLocalFallback(cityPath string, cfg *config.City, jsonOutput bool, stdout, stderr io.Writer) int {
+	if cfg == nil {
+		configStderr := stderr
+		if jsonOutput {
+			configStderr = io.Discard
+		}
+		loaded, err := loadCityConfigForStatus(cityPath, configStderr)
+		if err != nil {
+			if jsonOutput {
+				return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
+			}
+			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cfg = loaded
+	}
+	storeStderr := stderr
+	if jsonOutput {
+		storeStderr = io.Discard
+	}
+	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
+	if code != 0 {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
+		}
+		return code
+	}
+	statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dops := newDrainOps(sp)
+	if jsonOutput {
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 // renderCityStatusFromAPI renders the server's StatusView using the same

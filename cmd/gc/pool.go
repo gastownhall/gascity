@@ -26,6 +26,10 @@ type poolSessionRef struct {
 	sessionName       string
 }
 
+type runningSessionLister interface {
+	ListRunning(prefix string) ([]string, error)
+}
+
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
 // for rig-scoped pools so bd queries the correct database). env, when
@@ -432,7 +436,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 // For unlimited pools (max < 0), discovers running instances via session provider
 // prefix matching.
 func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
-	cityName, st string, sp runtime.Provider,
+	cityName, st string, sp runningSessionLister,
 ) []string {
 	isUnlimited := sp0.Max < 0
 	if !isUnlimited {
@@ -490,7 +494,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	return names
 }
 
-func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) []string {
+func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runningSessionLister) []string {
 	if a == nil {
 		return nil
 	}

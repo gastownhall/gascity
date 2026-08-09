@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -179,17 +180,96 @@ type buildDoctorChecksOpts struct {
 }
 
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
+	indexFunc := doctorOrderFiringCurrentLastRunIndexFunc(cityPath, cfg, stderr)
+	return func(order orders.Order) (time.Time, error) {
+		index, err := indexFunc([]orders.Order{order})
+		if err != nil {
+			return time.Time{}, err
+		}
+		return index[order.ScopedName()], nil
+	}
+}
+
+func doctorOrderFiringCurrentLastRunIndexFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunIndexFunc {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
-	return func(order orders.Order) (time.Time, error) {
-		stores, err := resolveStores(order)
-		if err != nil {
-			return time.Time{}, err
+	return func(orderList []orders.Order) (map[string]time.Time, error) {
+		type historyGroup struct {
+			stores []beads.OrdersStore
+			names  map[string]struct{}
 		}
-		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
+		groups := make(map[string]*historyGroup)
+		for _, order := range orderList {
+			scoped := order.ScopedName()
+			if scoped == "" {
+				continue
+			}
+			stores, err := resolveStores(order)
+			if err != nil {
+				return nil, err
+			}
+			key := doctorOrderHistoryStoresKey(stores)
+			group := groups[key]
+			if group == nil {
+				group = &historyGroup{
+					stores: stores,
+					names:  make(map[string]struct{}),
+				}
+				groups[key] = group
+			}
+			group.names[scoped] = struct{}{}
+		}
+		out := make(map[string]time.Time)
+		var errs []error
+		for _, group := range groups {
+			index, err := doctorLastRunIndexForNames(orderFrontDoorsForTypedStores(group.stores), doctorOrderHistoryNames(group.names))
+			if err != nil {
+				errs = append(errs, err)
+			}
+			for scoped, last := range index {
+				if last.After(out[scoped]) {
+					out[scoped] = last
+				}
+			}
+		}
+		return out, errors.Join(errs...)
 	}
+}
+
+func doctorOrderHistoryNames(names map[string]struct{}) []string {
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func doctorLastRunIndexForNames(stores []*orders.Store, names []string) (map[string]time.Time, error) {
+	out := make(map[string]time.Time)
+	if len(names) == 0 {
+		return out, nil
+	}
+	index, err := orders.LastRunIndexAcross(stores)
+	for _, name := range names {
+		if last := index[name]; !last.IsZero() {
+			out[name] = last
+		}
+	}
+	return out, err
+}
+
+func doctorOrderHistoryStoresKey(stores []beads.OrdersStore) string {
+	if len(stores) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(stores))
+	for _, store := range stores {
+		parts = append(parts, fmt.Sprintf("%p", store.Store))
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
@@ -242,7 +322,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
-		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
+		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunIndexFunc(doctorOrderFiringCurrentLastRunIndexFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
@@ -303,7 +383,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
-	storeFactory := openStoreForCity(cityPath)
+	storeFactory := openStoreForCityReadOnlyFast(cityPath)
 
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
@@ -675,6 +755,16 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
+	}
+}
+
+func openStoreForCityReadOnlyFast(cityPath string) func(string) (beads.Store, error) {
+	return func(dirPath string) (beads.Store, error) {
+		opened, err := openStoreResultAtForCityReadOnlyFast(dirPath, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return opened.Store, nil
 	}
 }
 

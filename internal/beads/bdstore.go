@@ -2240,6 +2240,14 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
+	if routes, ok := compactListAssignees(query.Assignees); query.Assignee == "" && ok && len(query.Assignees) > 1 {
+		if len(routes) == 1 {
+			deduped := query
+			deduped.Assignees = routes
+			return s.List(deduped)
+		}
+		return s.listByAssigneeFanout(query, routes)
+	}
 
 	switch query.TierMode {
 	case TierWisps:
@@ -2248,6 +2256,54 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return s.listBothTiers(query)
 	}
 	return s.listViaBDList(query)
+}
+
+func compactListAssignees(assignees []string) ([]string, bool) {
+	if len(assignees) == 0 {
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(assignees))
+	out := make([]string, 0, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" {
+			return nil, false
+		}
+		if _, ok := seen[assignee]; ok {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		out = append(out, assignee)
+	}
+	return out, len(out) > 0
+}
+
+func (s *BdStore) listByAssigneeFanout(query ListQuery, routes []string) ([]Bead, error) {
+	merged := make([]Bead, 0)
+	seen := make(map[string]struct{})
+	var partialErrs []error
+	for _, route := range routes {
+		routeQuery := query
+		routeQuery.Assignee = route
+		routeQuery.Assignees = nil
+		routeQuery.Limit = 0
+		rows, err := s.List(routeQuery)
+		if err != nil {
+			if !IsPartialResult(err) {
+				return nil, err
+			}
+			partialErrs = append(partialErrs, err)
+		}
+		for _, b := range rows {
+			if _, ok := seen[b.ID]; ok {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			merged = append(merged, b)
+		}
+	}
+	filtered := applyListQuery(merged, query)
+	return filtered, errors.Join(partialErrs...)
 }
 
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {

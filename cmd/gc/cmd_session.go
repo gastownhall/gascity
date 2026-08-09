@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -721,16 +722,13 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
 var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeSessionList dispatches `session list` to the supervisor API when a
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+func routeSessionList(cityPath string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]api.SessionView]
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
@@ -739,7 +737,9 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 			return err
 		},
 		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
-		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
+		func() int {
+			return doSessionListFallback(cityPath, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+		},
 	)
 }
 
@@ -889,20 +889,21 @@ func sortSessionsCreatedDesc(sessions []session.Info) {
 }
 
 // doSessionListFallback is the direct-bd path for "gc session list".
-func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+func doSessionListFallback(cityPath, stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, code := openCityStore(storeStderr, "gc session list")
-	if store == nil {
+	store, err := openCityStoreAtReadOnlyFast(cityPath)
+	if err != nil {
+		fmt.Fprintf(storeStderr, "gc session list: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", code)
+			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", 1)
 		}
-		return code
+		return 1
 	}
 
-	providerCtx := loadSessionProviderContext()
+	providerCtx := loadSessionProviderContextAt(cityPath, os.Getenv("GC_SESSION"))
 	// Every store consumer here is session-class (the ready gc:wait set, the
 	// session-bead list, and the session catalog), so route the whole flow through
 	// the session coordination-class store for relocation-safety.
@@ -2117,10 +2118,7 @@ type sessionPeekJSONResult struct {
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests can inject one.
 var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeSessionPeek dispatches `session peek` to the supervisor API when a
@@ -2128,10 +2126,15 @@ var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 // The API path passes the raw target to the server which resolves aliases;
 // fallback resolves locally via resolveSessionIDWithConfig.
-func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+func routeSessionPeek(cityPath, target string, lines int, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "session peek"
 	if c != nil {
-		cr, err := c.GetSession(target, true, lines)
+		var cr api.CachedRead[api.SessionView]
+		err := fetchRouteReadAPI(c, func() error {
+			var err error
+			cr, err = c.GetSession(target, true, lines)
+			return err
+		})
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
 			return renderSessionPeekFromAPI(cr, target, lines, jsonOutput, stdout, stderr)
@@ -2145,7 +2148,7 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
-	return doSessionPeekFallback(target, lines, jsonOutput, stdout, stderr)
+	return doSessionPeekFallback(cityPath, target, lines, jsonOutput, stdout, stderr)
 }
 
 // renderSessionPeekFromAPI writes the API-sourced peek output to stdout,
@@ -2189,17 +2192,15 @@ func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io
 
 // doSessionPeekFallback is the direct runtime-provider path for
 // "gc session peek".
-func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session peek")
-	if store == nil {
-		return code
+func doSessionPeekFallback(cityPath, target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
+	store, err := openCityStoreAtReadOnlyFast(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session peek: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
-	cityPath, err := resolveCity()
 	var cfg *config.City
-	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
-	}
+	cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, configWarnWriter(jsonOutput, stderr))
 	// Both store consumers here are session-class (session-ID resolution + session
 	// worker handle), so route the whole flow through the session coordination-class
 	// store for relocation-safety.

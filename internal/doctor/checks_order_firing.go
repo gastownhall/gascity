@@ -21,8 +21,14 @@ const (
 	orderFiringHistoryTimeout = 15 * time.Second
 )
 
+var orderFiringEventTailLimit = 50000
+
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
 type OrderFiringCurrentLastRunFunc func(order orders.Order) (time.Time, error)
+
+// OrderFiringCurrentLastRunIndexFunc reports newest persisted run times for a
+// set of orders in one batched lookup.
+type OrderFiringCurrentLastRunIndexFunc func([]orders.Order) (map[string]time.Time, error)
 
 // OrderFiringCurrentOption configures the scheduled-order freshness check.
 type OrderFiringCurrentOption func(*OrderFiringCurrentCheck)
@@ -35,12 +41,21 @@ func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFi
 	}
 }
 
+// WithOrderFiringCurrentLastRunIndexFunc lets callers provide a batched
+// order-run history source so doctor does not issue one store lookup per order.
+func WithOrderFiringCurrentLastRunIndexFunc(fn OrderFiringCurrentLastRunIndexFunc) OrderFiringCurrentOption {
+	return func(c *OrderFiringCurrentCheck) {
+		c.lastRunIndex = fn
+	}
+}
+
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
 	clock          func() time.Time
 	lastRun        OrderFiringCurrentLastRunFunc
+	lastRunIndex   OrderFiringCurrentLastRunIndexFunc
 	historyTimeout time.Duration
 }
 
@@ -120,23 +135,16 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
+	now := c.clock()
+	if now.IsZero() {
+		now = time.Now()
+	}
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
+	firedEvents, startedAt, err := readOrderFiringCurrentEventTail(eventPath)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order firing events: %v", err)
 		return result
-	}
-	startedAt, err := latestControllerStartedAt(eventPath)
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read controller start events: %v", err)
-		return result
-	}
-
-	now := c.clock()
-	if now.IsZero() {
-		now = time.Now()
 	}
 	cronIntervals := map[string]time.Duration{}
 	worst := StatusOK
@@ -146,6 +154,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	var persistedRuns map[string]time.Time
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -165,7 +174,20 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
+		_, needsPersistedHistory := latestOrderFiredAtForDoctor(firedEvents, order, expected, now)
+		if needsPersistedHistory && c.lastRunIndex != nil && persistedRuns == nil {
+			persistedRuns, err = c.lastRunIndex(orderFiringCurrentHistoryOrders(allOrders, suspendedRigs))
+			if err != nil {
+				worst = worseStatus(worst, StatusError)
+				result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
+				if firstNonOK == "" {
+					firstNonOK = orderHistoryHintTarget(order)
+				}
+				blockingErrors++
+				continue
+			}
+		}
+		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now, persistedRuns)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -214,6 +236,20 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		result.FixHint = fmt.Sprintf(orderFiringInspectHintFmt, firstNonOK)
 	}
 	return result
+}
+
+func orderFiringCurrentHistoryOrders(allOrders []orders.Order, suspendedRigs map[string]bool) []orders.Order {
+	out := make([]orders.Order, 0, len(allOrders))
+	for _, order := range allOrders {
+		if order.Trigger != "cron" && order.Trigger != "cooldown" {
+			continue
+		}
+		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		out = append(out, order)
+	}
+	return out
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
@@ -549,26 +585,59 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 	}
 }
 
-func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
-	if err != nil {
-		return time.Time{}, err
+func readOrderFiringCurrentEventTail(eventPath string) ([]events.Event, time.Time, error) {
+	readLimit := orderFiringEventTailLimit
+	if readLimit > 0 {
+		readLimit++
 	}
-	var latest time.Time
-	for _, event := range startEvents {
-		if event.Ts.After(latest) {
-			latest = event.Ts
+	evts, err := events.ReadFilteredTail(eventPath, events.Filter{}, readLimit)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	var lowerBoundStart time.Time
+	truncated := orderFiringEventTailLimit > 0 && len(evts) > orderFiringEventTailLimit
+	if truncated {
+		lowerBoundStart = evts[0].Ts
+		evts = evts[1:]
+	}
+	var fired []events.Event
+	var startedAt time.Time
+	for _, event := range evts {
+		switch event.Type {
+		case events.OrderFired:
+			fired = append(fired, event)
+		case events.ControllerStarted:
+			if event.Ts.After(startedAt) {
+				startedAt = event.Ts
+			}
 		}
 	}
-	return latest, nil
+	if startedAt.IsZero() && truncated {
+		startedAt = lowerBoundStart
+	}
+	return fired, startedAt, nil
 }
 
-func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
+func latestOrderFiredAtForDoctor(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, bool) {
 	latest := latestOrderFiredAt(evts, order.ScopedName())
-	if c.lastRun == nil {
+	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
+		return latest, false
+	}
+	return latest, true
+}
+
+func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time, persistedRuns map[string]time.Time) (time.Time, error) {
+	latest, needsPersistedHistory := latestOrderFiredAtForDoctor(evts, order, expected, now)
+	if !needsPersistedHistory {
 		return latest, nil
 	}
-	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
+	if persistedRuns != nil {
+		if runAt := persistedRuns[order.ScopedName()]; runAt.After(latest) {
+			return runAt, nil
+		}
+		return latest, nil
+	}
+	if c.lastRun == nil {
 		return latest, nil
 	}
 	runAt, err := c.lastRun(order)

@@ -415,8 +415,10 @@ func agentStatusLineWithPartial(running bool, dops drainOps, sn string, suspende
 		}
 		return "stopped"
 	}
-	if draining, _ := dops.isDraining(sn); draining {
-		return "running  (draining)"
+	if dops != nil {
+		if draining, _ := dops.isDraining(sn); draining {
+			return "running  (draining)"
+		}
 	}
 	return "running"
 }

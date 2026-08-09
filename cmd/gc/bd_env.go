@@ -57,6 +57,10 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	if err != nil {
 		cfg = nil
 	}
+	return bdStoreForCityWithConfig(dir, cityPath, cfg)
+}
+
+func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
 		dir,

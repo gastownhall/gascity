@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -72,6 +73,8 @@ type providerCatalogReadinessAdvisoryCheck struct {
 	cityPath string
 }
 
+const providerCatalogReadinessDoctorTimeout = 2 * time.Second
+
 func newProviderCatalogReadinessAdvisoryCheck(cityPath string) *providerCatalogReadinessAdvisoryCheck {
 	return &providerCatalogReadinessAdvisoryCheck{cityPath: cityPath}
 }
@@ -89,7 +92,9 @@ func (c *providerCatalogReadinessAdvisoryCheck) Run(_ *doctor.CheckContext) *doc
 		return r
 	}
 	names := api.ProviderReadinessNames()
-	items, err := initProbeProvidersReadiness(context.Background(), names, true)
+	ctx, cancel := context.WithTimeout(context.Background(), providerCatalogReadinessDoctorTimeout)
+	defer cancel()
+	items, err := initProbeProvidersReadiness(ctx, names, true)
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("could not probe local provider readiness: %v", err)

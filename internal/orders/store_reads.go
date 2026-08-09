@@ -107,6 +107,44 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 	return decodeTrackingRuns(list), err
 }
 
+// LastRunIndex returns the newest tracking-bead CreatedAt per scoped order in
+// one cache-friendly scan per mixed store. It backs doctor-style freshness
+// checks that need a coarse persisted run index across many orders without
+// issuing one order-run:<scoped> label query per order. LastRun remains the
+// precise per-order API for dispatch because it also sees graph-only order-run
+// evidence that is not discoverable by an all-order tracking scan.
+func (s *Store) LastRunIndex() (map[string]time.Time, error) {
+	latest := make(map[string]time.Time)
+	if s.store.Store == nil {
+		return latest, nil
+	}
+	var errs []error
+	for _, store := range s.mixedLegStores() {
+		list, err := store.List(beads.ListQuery{
+			Label:         labelOrderTracking,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			if len(list) == 0 {
+				errs = append(errs, err)
+				continue
+			}
+			runtimeHelpersLogf("orders: last-run index partially failed: %v", err)
+		}
+		for _, run := range decodeTrackingRuns(list) {
+			if run.Scoped == "" {
+				continue
+			}
+			if run.CreatedAt.After(latest[run.Scoped]) {
+				latest[run.Scoped] = run.CreatedAt
+			}
+		}
+	}
+	return latest, errors.Join(errs...)
+}
+
 // OpenRuns lists the OPEN tracking beads across every order (newest-first),
 // decoded into OrderRun. It folds the dispatcher's single-flight open-tracking
 // index (order_dispatch.go entriesForStore) onto OrderRun and reads the LIVE

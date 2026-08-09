@@ -316,10 +316,7 @@ func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
 var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeConvoyList dispatches `convoy list` to the supervisor API when a
@@ -574,14 +571,17 @@ func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, i
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
 	stores, err := openConvoyStores(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		opened, err := openStoreResultAtForCityReadOnlyFast(storeDir, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return opened.Store, nil
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -712,14 +712,17 @@ func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (bea
 // used by routed callers that already resolved the city before dispatching
 // to a fallback or mutation path.
 func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName string) (beads.Store, int) {
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	emitLoadCityConfigWarnings(stderr, prov)
 	store, err := resolveConvoyStore(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		opened, err := openStoreResultAtForCityReadOnlyFast(storeDir, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return opened.Store, nil
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -852,10 +855,7 @@ func cmdConvoyStatus(args []string, jsonOut bool, stdout, stderr io.Writer) int 
 // convoyStatusAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back.
 var convoyStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
+	return localRouteReadAPIClient(cityPath)
 }
 
 // routeConvoyStatus dispatches `convoy status` to the supervisor API when a
