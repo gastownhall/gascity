@@ -177,7 +177,7 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -200,6 +200,15 @@ check-release-dist-ignore:
 ## api-404-error, controller-down, escape-hatch).
 check-routed-test-rows:
 	./scripts/check-routed-test-rows.sh
+
+## check-split-topology-rows: keep every split-store conformance invariant on both topologies
+## The split-store bug class is a fix that is correct on one store arrangement and
+## wrong on the other, so an invariant that runs on only one row is worse than no
+## invariant: it reads as coverage. Enforces that every t.Run("I<n>...") in
+## TestSplitTopologyConformance routes through forEachTopology/forEachTopologyWithRig
+## and that the suite never constructs an env directly.
+check-split-topology-rows:
+	./scripts/check-split-topology-rows.sh
 
 ## check-gomod-replace: block unreleased replace directives (pseudo-version, local path, git ref)
 ## Tripwire for the 2026-06-11 incident where PR #3489 shipped a pseudo-version replace
