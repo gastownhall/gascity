@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -216,6 +217,10 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// errPartialPasteDelivery means one or more chunks reached the provider
+	// before a later chunk failed. Startup callers must discard that session so
+	// reconciliation cannot accept an agent with a truncated role prompt.
+	errPartialPasteDelivery = errors.New("nudge: partial paste delivery")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -237,6 +242,11 @@ const (
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
 	maxSendKeysLiteralLen    = 4096
+	// Copilot CLI converts any single paste larger than 20 KiB into a
+	// workspace attachment. Keep each paste below that provider boundary and
+	// separate consecutive paste events so its TUI does not coalesce them.
+	copilotMaxPasteBytes   = 16 * 1024
+	copilotPasteChunkDelay = 500 * time.Millisecond
 )
 
 // tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
@@ -1984,6 +1994,50 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 	return nil
 }
 
+func splitPasteText(text string, maxBytes int) []string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, (len(text)+maxBytes-1)/maxBytes)
+	for len(text) > maxBytes {
+		cut := maxBytes
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		// Invalid UTF-8 can consist entirely of continuation bytes. Preserve
+		// those bytes exactly and still make progress; valid prompts never use
+		// this fallback.
+		if cut == 0 {
+			cut = maxBytes
+		}
+		if newline := strings.LastIndexByte(text[:cut], '\n'); newline >= 0 {
+			cut = newline + 1
+		}
+		chunks = append(chunks, text[:cut])
+		text = text[cut:]
+	}
+	if text != "" {
+		chunks = append(chunks, text)
+	}
+	return chunks
+}
+
+func sendPasteChunks(chunks []string, send func(string) error, pause func()) error {
+	for i, chunk := range chunks {
+		if err := send(chunk); err != nil {
+			if i > 0 {
+				return fmt.Errorf("%w after %d chunks: %w", errPartialPasteDelivery, i, err)
+			}
+			return err
+		}
+		if i+1 < len(chunks) {
+			pause()
+		}
+	}
+	return nil
+}
+
 // sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
 // transient errors (e.g., "not in a mode" during agent TUI startup).
 // This is the core retry loop used by both NudgeSession and NudgePane.
@@ -1998,12 +2052,39 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
 func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
+	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+}
+
+func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
+	if len(text) > copilotMaxPasteBytes && sessionlog.ProviderFamily(provider) == "copilot" {
+		chunks := splitPasteText(text, copilotMaxPasteBytes)
+		deadline := time.Now().Add(timeout)
+		return sendPasteChunks(chunks, func(chunk string) error {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("agent not ready for input after %s", timeout)
+			}
+			return t.sendTextWithRetry(target, chunk, remaining, t.pasteLiteralText)
+		}, func() {
+			remaining := time.Until(deadline)
+			if remaining > copilotPasteChunkDelay {
+				remaining = copilotPasteChunkDelay
+			}
+			if remaining > 0 {
+				time.Sleep(remaining)
+			}
+		})
+	}
+	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+}
+
+func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) error) error {
 	deadline := time.Now().Add(timeout)
 	interval := t.cfg.NudgeRetryInterval
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		err := t.sendLiteralText(target, text)
+		err := send(target, text)
 		if err == nil {
 			return nil
 		}
@@ -2194,6 +2275,35 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
 func (t *Tmux) NudgeSession(session, message string) error {
+	return t.nudgeSession(
+		session,
+		message,
+		t.sendKeysLiteralWithRetry,
+		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
+		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+	)
+}
+
+// nudgeStartupSession sends the initial startup prompt. Copilot startup
+// prompts use provider-safe paste chunks so its TUI keeps the text inline.
+func (t *Tmux) nudgeStartupSession(session, message string) error {
+	return t.nudgeSession(
+		session,
+		message,
+		func(target, text string, timeout time.Duration) error {
+			return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
+		},
+		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
+		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+	)
+}
+
+func (t *Tmux) nudgeSession(
+	session, message string,
+	sendText func(string, string, time.Duration) error,
+	shouldSendEscape func(string) bool,
+	submitKeySequence func(string) []string,
+) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2256,7 +2366,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	t.DismissFeedbackSurveyModalIfPresent(session)
 
 	// 2. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
@@ -2268,7 +2378,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
-	if t.shouldSendEscapeBeforeEnter(target) {
+	if shouldSendEscape(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
 		time.Sleep(100 * time.Millisecond)
@@ -2286,7 +2396,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// "drafted but not submitted" stall; confirming here removes the town's
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
-	submitKeys := t.nudgeSubmitKeySequence(target)
+	submitKeys := submitKeySequence(target)
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an

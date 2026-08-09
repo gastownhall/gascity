@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 )
@@ -2320,6 +2321,203 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	}
 	assertTmuxCommand(t, fe.calls[0], "load-buffer")
 	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+}
+
+func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 3 {
+		t.Fatalf("paste-buffer calls = %d, want 3: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 3 {
+		t.Fatalf("paste-buffer calls = %d, want 3: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 1 {
+		t.Fatalf("paste-buffer calls = %d, want 1: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 1 {
+		t.Fatalf("paste-buffer calls = %d, want 1: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *testing.T) {
+	errs := make([]error, 6)
+	errs[3] = errors.New("not in a mode")
+	fe := &fakeExecutor{errs: errs}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var loadCalls, pasteCalls int
+	for _, call := range fe.calls {
+		joined := "\x00" + strings.Join(call, "\x00") + "\x00"
+		if strings.Contains(joined, "\x00load-buffer\x00") {
+			loadCalls++
+		}
+		if strings.Contains(joined, "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if loadCalls != 3 || pasteCalls != 3 {
+		t.Fatalf("load/paste calls = %d/%d, want 3/3: %#v", loadCalls, pasteCalls, fe.calls)
+	}
+}
+
+func TestNudgeStartupWithoutProviderUsesOrdinaryDelivery(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-startup-no-provider-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", nil); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.nudgeStartupSession(sessionName, "startup prompt"); err != nil {
+		t.Fatalf("nudgeStartupSession without GC_PROVIDER: %v", err)
+	}
+}
+
+func TestSplitPasteTextPreservesUTF8AndPrefersNewlines(t *testing.T) {
+	text := "alpha\n" + strings.Repeat("界", 8) + "\nomega"
+	chunks := splitPasteText(text, 10)
+
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %q, want %q", got, text)
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid UTF-8: %q", i, chunk)
+		}
+		if len(chunk) > 10 {
+			t.Fatalf("chunk %d size = %d, want <= 10", i, len(chunk))
+		}
+	}
+	if chunks[0] != "alpha\n" {
+		t.Fatalf("first chunk = %q, want newline boundary %q", chunks[0], "alpha\\n")
+	}
+}
+
+func TestSplitPasteTextPreservesInvalidUTF8AndMakesProgress(t *testing.T) {
+	text := string([]byte{0x80, 0x80, 0x80, 0x80, 0x80})
+	chunks := splitPasteText(text, 2)
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %v, want %v", []byte(got), []byte(text))
+	}
+	for i, chunk := range chunks {
+		if len(chunk) == 0 || len(chunk) > 2 {
+			t.Fatalf("chunk %d size = %d, want 1..2", i, len(chunk))
+		}
+	}
+}
+
+func TestSendPasteChunksPausesBetweenChunks(t *testing.T) {
+	if copilotPasteChunkDelay != 500*time.Millisecond {
+		t.Fatalf("copilotPasteChunkDelay = %s, want 500ms", copilotPasteChunkDelay)
+	}
+	var sent []string
+	pauses := 0
+	err := sendPasteChunks([]string{"one", "two", "three"}, func(chunk string) error {
+		sent = append(sent, chunk)
+		return nil
+	}, func() { pauses++ })
+	if err != nil {
+		t.Fatalf("sendPasteChunks() = %v, want nil", err)
+	}
+	if got := strings.Join(sent, ""); got != "onetwothree" {
+		t.Fatalf("sent text = %q, want %q", got, "onetwothree")
+	}
+	if pauses != 2 {
+		t.Fatalf("pauses = %d, want 2", pauses)
+	}
+}
+
+func TestSendPasteChunksMarksPartialDelivery(t *testing.T) {
+	sends := 0
+	err := sendPasteChunks([]string{"one", "two"}, func(string) error {
+		sends++
+		if sends == 2 {
+			return errors.New("paste failed")
+		}
+		return nil
+	}, func() {})
+	if !errors.Is(err, errPartialPasteDelivery) {
+		t.Fatalf("sendPasteChunks() error = %v, want errPartialPasteDelivery", err)
+	}
 }
 
 func assertTmuxCommand(t *testing.T, args []string, want string) {
