@@ -116,12 +116,14 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
 	deps := sling.SlingDeps{
-		CityName: s.state.CityName(),
-		CityPath: s.state.CityPath(),
-		Cfg:      s.state.Config(),
-		SP:       s.state.SessionProvider(),
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:   s.state.CityName(),
+		CityPath:   s.state.CityPath(),
+		Cfg:        s.state.Config(),
+		SP:         s.state.SessionProvider(),
+		Store:      store,
+		GraphStore: s.state.GraphBeadStore().Store,
+		Events:     s.state.EventProvider(),
+		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},

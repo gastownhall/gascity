@@ -235,7 +235,7 @@ func TestStructuredWireTypesHaveNoMapFields(t *testing.T) {
 // firstMapField returns the dotted path to the first map-typed field reachable
 // from t, or "" if none exists.
 func firstMapField(t reflect.Type, seen map[reflect.Type]struct{}, path string) string {
-	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
 		t = t.Elem()
 	}
 	if t.Kind() == reflect.Map {

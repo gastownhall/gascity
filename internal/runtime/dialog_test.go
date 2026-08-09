@@ -344,6 +344,47 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return "⚠ 8 hooks need review before they can run.\nPress t to trust all; enter to review hooks; esc to skip", nil
+			}
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestContainsCodexHookReviewDialogRequiresAllCompactSignals(t *testing.T) {
+	for name, content := range map[string]string{
+		"missing title":  "Press t to trust all; enter to review hooks; esc to skip",
+		"missing trust":  "8 hooks need review before they can run; enter to review hooks; esc to skip",
+		"missing review": "8 hooks need review before they can run; press t to trust all; esc to skip",
+		"unrelated":      "trust all configured hooks after entering review mode",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if containsCodexHookReviewDialog(content) {
+				t.Fatalf("containsCodexHookReviewDialog(%q) = true, want false", content)
+			}
+		})
+	}
+}
+
 func TestAcceptStartupDialogsHandlesTrustThenCodexHookReview(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second

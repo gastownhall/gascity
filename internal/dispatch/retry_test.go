@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -214,6 +215,173 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	want := retryEvalResult{Outcome: "canceled"}
 	if got != want {
 		t.Fatalf("classifyRetryAttempt(canceled) = %+v, want %+v", got, want)
+	}
+}
+
+// TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome pins strict validation
+// of the typed close that reproduces gc-e2xqk.
+func TestClassifyRetryAttemptConsumesTypedCoordinatorOutcome(t *testing.T) {
+	t.Parallel()
+
+	const attemptID = "gc-attempt1"
+	const validDeliverable = `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     retryEvalResult
+	}{
+		{
+			name: "valid deliverable close folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+				"gc.outcome.producer":                         "formula-step",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "valid deliverable close with passing verdict folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "consumed",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "passing verdict requires consumed review gate",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"evidence.reviewer_verdict"}`,
+				"gc.review_gate":            "pass",
+				"evidence.reviewer_verdict": "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "passing verdict requires published pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"review_verdict"}`,
+				"gc.review_gate": "consumed",
+				"review_verdict": "reject",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unsupported passing verdict stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","passing_verdict":"surprise"}`,
+				"gc.review_gate": "consumed",
+				"surprise":       "pass",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "explicit gc.outcome takes precedence over typed close",
+			metadata: map[string]string{
+				"gc.outcome": "pass",
+				"gc.coordinator_outcome.producer_disposition": validDeliverable,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "non-deliverable close stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"non-deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"obsolete"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with arbitrary producer folds as pass",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"novel-writer-42"}`,
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "deliverable absent producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty producer stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":""}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty recorded_by stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable empty reason stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown envelope field stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step","surprise":"x"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "deliverable with trailing data stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"} {"junk":1}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "malformed json stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": "{not json",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "wrong contract_version stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":2,"disposition":"deliverable","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "foreign work_id stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"deliverable","work_id":"gc-someone-else","recorded_by":"tester","reason":"shipped","producer":"formula-step"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name: "unknown disposition stays missing_outcome",
+			metadata: map[string]string{
+				"gc.coordinator_outcome.producer_disposition": `{"contract_version":1,"disposition":"mystery","work_id":"gc-attempt1","recorded_by":"tester","reason":"shipped"}`,
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+		{
+			name:     "no typed outcome stays missing_outcome",
+			metadata: map[string]string{},
+			want:     retryEvalResult{Outcome: "transient", Reason: "missing_outcome"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyRetryAttempt(beads.Bead{ID: attemptID, Metadata: tt.metadata})
+			if got != tt.want {
+				t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -671,6 +839,83 @@ func TestRequiredArtifactTemplatesTreatsSingularAsOnePath(t *testing.T) {
 			t.Fatalf("requiredArtifactTemplates()[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
 		}
 	}
+}
+
+// TestRequiredArtifactTargetInWorktree regression-pins the
+// existence/resolvability checks in requiredArtifactTargetInWorktree's two
+// bare EvalSymlinks calls (refs ga-iawy13.4): a missing target is treated
+// as contained (the caller's earlier os.Stat already classifies
+// missing/unreadable paths, so this function only needs to gate symlink
+// escapes for targets that exist), a symlinked worktree root resolves
+// correctly for a contained target, and a target that escapes via symlink
+// is rejected. These sites are deliberate existence/resolvability
+// checking, not comparison preparation, and must keep behaving identically
+// after the canonical-path-at-ingest migration.
+func TestRequiredArtifactTargetInWorktree(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing target treated as contained", func(t *testing.T) {
+		t.Parallel()
+		worktree := t.TempDir()
+		missing := filepath.Join(worktree, "does-not-exist.md")
+
+		got, err := requiredArtifactTargetInWorktree(worktree, missing)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected missing target to be treated as contained (true)")
+		}
+	})
+
+	t.Run("symlinked worktree root with contained target resolves", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		realDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(realDir, "review.md"), []byte("ok"), 0o644); err != nil {
+			t.Fatalf("write artifact: %v", err)
+		}
+		aliasParent := t.TempDir()
+		alias := filepath.Join(aliasParent, "worktree-alias")
+		if err := os.Symlink(realDir, alias); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(alias, filepath.Join(alias, "review.md"))
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if !got {
+			t.Fatal("expected symlinked worktree root with contained target to resolve as contained")
+		}
+	})
+
+	t.Run("target escaping via symlink is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		t.Parallel()
+		worktree := t.TempDir()
+		outside := t.TempDir()
+		outsideFile := filepath.Join(outside, "secret.md")
+		if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+			t.Fatalf("write outside file: %v", err)
+		}
+		link := filepath.Join(worktree, "review.md")
+		if err := os.Symlink(outsideFile, link); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		got, err := requiredArtifactTargetInWorktree(worktree, link)
+		if err != nil {
+			t.Fatalf("requiredArtifactTargetInWorktree: %v", err)
+		}
+		if got {
+			t.Fatal("expected target escaping worktree via symlink to be rejected (false)")
+		}
+	})
 }
 
 type fakeFileInfo struct {

@@ -1586,12 +1586,12 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 		{
 			name:            "E4 postgres missing host",
 			fixture:         "reject_pg_missing_host.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+			wantErrContains: "backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database",
 		},
 		{
 			name:            "E4 postgres missing all fields",
 			fixture:         "reject_pg_missing_all.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+			wantErrContains: "backend=postgres requires postgres_dsn or all of postgres_host, postgres_port, postgres_user, postgres_database",
 		},
 		{
 			name:            "E5 postgres_port non-numeric",

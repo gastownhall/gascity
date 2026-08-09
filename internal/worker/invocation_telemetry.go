@@ -102,7 +102,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	// whether the sidecar should be written, and the Message/Nudge callers expect
 	// the write on every successful turn. Best-effort and a no-op unless
 	// correlation is armed; it uses its own guard, not invTelemetryMu.
-	defer h.writeTranscriptSessionMeta()
+	defer h.recordTranscriptSessionMetaAfterTurn()
 
 	if operationEventsSuppressed(ctx) {
 		return
@@ -443,9 +443,12 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // It is best-effort. The returned settled reports whether the interval is fully
 // accounted for and needs no retry: true when the transcript was read (even if
 // nothing new was pending) OR the miss is permanent (unregistered family, or a
-// terminal codex session that never captured a session_key); false when the miss
-// is transient (no transcript discovered yet, an extraction error, or a sink
-// Record failure) so the caller should retry on a later tick. err is reserved for
+// keyless codex session whose bounded workdir+window fallback found no unambiguous
+// rollout in a CLEAN scan — a closed session's rollout is already on disk, so that
+// miss is ambiguity/out-of-window/TZ, which no retry resolves); false when the
+// miss is transient (a keyed codex rollout not discovered yet, a keyless codex
+// scan clouded by a transient IO fault, an extraction error, or a sink Record
+// failure) so the caller should retry on a later tick. err is reserved for
 // a sink Record failure; the cursor is then advanced only through the last
 // successfully recorded entry so the retry resumes at the gap rather than
 // skipping it. Every gate is slog.Debug'd so a fleet-wide zero is attributable in
@@ -482,22 +485,103 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
 		return 0, true, nil
 	}
-	if family == "codex" && strings.TrimSpace(meta["session_key"]) == "" {
-		// Permanent: a terminal codex session that never captured its session_key
-		// (SessionStart hook bypassed) has no keyed rollout to find, and no later
-		// hook will fire while it is asleep — retrying cannot help.
-		slog.Debug("model-usage sweep: codex session has no session_key; settling",
+	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
+	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	if keylessCodex && !scanClean {
+		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
+		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
+		// scan whether or not a path was found: an empty result may have hidden the
+		// only rollout, and a lone hit may have hidden a second same-cwd, in-window
+		// rollout that would make it ambiguous. Either way the result is
+		// non-definitive, so record nothing and leave the interval unsettled for a
+		// later, unclouded tick; the recently-closed sweep window bounds the retries.
+		slog.Debug("model-usage sweep: keyless codex workdir scan hit a transient IO fault; will retry",
 			slog.String("session_id", id))
-		return 0, true, nil
+		return 0, false, nil
 	}
-	path := f.discoverSweepTranscript(family, id, meta, now)
 	if path == "" {
+		if keylessCodex {
+			// Clean miss: a terminal session's rollout is written at codex start and is
+			// already on disk, so a clean zero/ambiguous match is ambiguity, an
+			// out-of-window filename timestamp, or a TZ-shifted filename — none of which
+			// a retry resolves. Settle so the whole recently-closed window is not
+			// re-swept every tick. (A keyed miss below stays transient: its keyed
+			// rollout may simply not be flushed yet.)
+			slog.Debug("model-usage sweep: keyless codex workdir fallback found no rollout; settling",
+				slog.String("session_id", id))
+			return 0, true, nil
+		}
 		// Transient: the rollout may not be flushed yet at interval end, so leave the
 		// interval unsettled for a retry on a later tick.
 		slog.Debug("model-usage sweep: no transcript discovered; will retry",
 			slog.String("session_id", id), slog.String("provider", family))
 		return 0, false, nil
 	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// DiscoverSweepTranscript resolves the transcript path for a model-usage
+// sweep without reading it. It preserves the same bounded keyed and keyless
+// discovery rules as SweepSessionModelUsage so callers can safely memoize a
+// stable rollout path across repeated incremental sweeps.
+//
+// settled classifies a miss with the same meaning SweepSessionModelUsage gives
+// it, so a caller that memoizes discovery can distinguish the two kinds: true
+// means there is definitively nothing to find (an unregistered provider family,
+// or a keyless codex session whose bounded workdir+window fallback came up empty
+// on a CLEAN scan) and re-running discovery is pure waste; false means the miss
+// is transient (a keyed rollout not flushed yet, or a keyless scan clouded by an
+// I/O fault, which leaves both an empty result and a lone hit non-definitive) and
+// a later attempt may resolve it. A found path is always settled.
+func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return "", true
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		return "", true
+	}
+	path, scanClean := f.discoverSweepTranscript(family, id, meta, now)
+	keylessCodex := family == "codex" && strings.TrimSpace(meta["session_key"]) == ""
+	if keylessCodex && !scanClean {
+		return "", false
+	}
+	if path == "" {
+		return "", keylessCodex
+	}
+	return path, true
+}
+
+// SweepSessionModelUsageAtPath performs the same cursor-guarded extraction,
+// fact emission, metrics, and cursor persistence as SweepSessionModelUsage,
+// using an already-resolved transcript path instead of repeating discovery.
+// An empty path is a transient miss so callers can retry on a later tick.
+func (f *Factory) SweepSessionModelUsageAtPath(ctx context.Context, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	id = strings.TrimSpace(id)
+	if f == nil || id == "" || meta == nil {
+		return 0, true, nil
+	}
+	sink := f.usageSink
+	if sink == nil || sink == usage.Discard {
+		return 0, true, nil
+	}
+	family := invocationUsageFamily(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
+	if _, ok := invocationUsageSpecs[family]; !ok {
+		slog.Debug("model-usage sweep (at path): unregistered provider family; skipping",
+			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
+		return 0, true, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return 0, false, nil
+	}
+	return f.sweepResolvedTranscript(ctx, family, id, meta, path, now)
+}
+
+// sweepResolvedTranscript owns the post-discovery model-usage sweep shared by
+// the discovery-driven and already-resolved entry points.
+func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
+	sink := f.usageSink
 	usages, extractErr := f.Adapter().InvocationUsage(family, path)
 	if extractErr != nil {
 		// Transient: a torn mid-write tail can fail the parse; retry on a later tick.
@@ -574,28 +658,57 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 // per terminal session per tick could stall the tick. FindCodexSessionFileByID
 // still resolves resumed sessions whose rollout predates this interval: the
 // keyed lookup also scans the session UUID's own creation day (UUIDv7 hint ±2
-// days), which is where a resumed rollout was first written. A codex session
-// with no captured session_key yields "": the sweep has no window fallback,
-// matching the keyed-miss-records-nothing contract of the prompt-op codex
-// discovery.
-func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) string {
+// days), which is where a resumed rollout was first written.
+//
+// A codex session with NO captured session_key — the graph.v2 wisp case, where
+// no capture path ever ran — falls back to sessionlog.FindCodexSessionFileNear,
+// the SAME bounded (cwd, wake-window) lookup the prompt-op seam runs for
+// fresh-wake keyless codex (discoverCodexInvocationTranscript). It is anchored at
+// the interval START (awake_started_at) with the same fixed
+// codexInvocationDiscoveryWindow, NOT the interval span: a rollout's filename
+// timestamp is the codex START (≈ the interval start), not its end, so a small
+// forward window catches a fresh wisp's rollout while keeping the scan to ~one day
+// directory — the interval span could be days for a long-awake session or a stale
+// slept_at, re-opening the unbounded-scan risk this bound exists to prevent. Wisps
+// run in per-wisp worktrees, so the session_meta cwd disambiguates on its own;
+// FindCodexSessionFileNear still REFUSES ambiguity (more than one in-window rollout
+// under the same cwd yields "") so a reused workdir records nothing rather than
+// misattributing.
+//
+// The returned scanClean is meaningful only for the keyless-codex fallback: it is
+// false when the (cwd, wake-window) scan hit a transient IO fault (a non-ENOENT
+// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds BOTH an empty
+// path (a miss that may have hidden the only rollout) AND a lone hit (a fault may
+// have hidden a second same-cwd rollout, making the singleton non-definitive), so
+// the caller retries rather than recording or settling either. The keyed codex
+// lookup and the claude manager lookup return scanClean true, which the caller
+// does not consult.
+func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool) {
 	switch family {
 	case "codex":
-		key := strings.TrimSpace(meta["session_key"])
-		if key == "" {
-			slog.Debug("model-usage sweep: codex session has no session_key; skipping",
-				slog.String("session_id", id))
-			return ""
-		}
+		workDir := contract.WorkerDirFromMetadata(meta)
 		notBefore, notAfter := sweepIntervalWindow(meta, now)
-		return sessionlog.FindCodexSessionFileByID(
-			f.searchPaths, contract.WorkerDirFromMetadata(meta), key, notBefore, notAfter)
+		if key := strings.TrimSpace(meta["session_key"]); key != "" {
+			return sessionlog.FindCodexSessionFileByID(
+				f.searchPaths, workDir, key, notBefore, notAfter), true
+		}
+		// Keyless fallback (Design B): resolve by cwd + wake window. Requires a
+		// workdir to key on and a non-zero interval start to anchor the window;
+		// without either, FindCodexSessionFileNear cannot bound its scan and the
+		// sweep records nothing — a clean, permanent miss.
+		if workDir == "" || notBefore.IsZero() {
+			slog.Debug("model-usage sweep: keyless codex has no workdir/anchor for fallback; skipping",
+				slog.String("session_id", id))
+			return "", true
+		}
+		return sessionlog.FindCodexSessionFileNearScan(
+			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
 	default:
 		path, terr := f.manager.TranscriptPath(id, f.searchPaths)
 		if terr != nil {
-			return ""
+			return "", true
 		}
-		return strings.TrimSpace(path)
+		return strings.TrimSpace(path), true
 	}
 }
 

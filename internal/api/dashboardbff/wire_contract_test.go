@@ -150,28 +150,6 @@ func TestWireContractRigStoreHealth(t *testing.T) {
 	mustArray(t, m, "rigs")
 }
 
-func TestWireContractRunDiff(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/city/alpha/runs/gc-run-1/diff",
-		strings.NewReader(`{"executionPath":{"kind":"unavailable","reason":"missing_cwd_and_rig_root"}}`))
-	req.Header.Set("X-GC-Request", "dashboard")
-	contractPlane().Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("run-diff: status %d, want 200 (body %s)", rec.Code, rec.Body.String())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-		t.Fatalf("run-diff decode: %v", err)
-	}
-	mustString(t, m, "kind")
-	mustObject(t, m, "rootPath")
-	mustObject(t, m, "comparison")
-	mustArray(t, m, "status")
-	mustArray(t, m, "changedFiles")
-	mustString(t, m, "patch")
-	mustBool(t, m, "truncated")
-}
-
 // TestWireContractRunDetailProgressTerminal guards the Go-derived
 // progress.terminal flag on the run-detail wire: the SPA reads it (in place of
 // the retired isTerminalProgress client fold) to drive ambient-event

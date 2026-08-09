@@ -313,6 +313,9 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	if p.ReadyDelayMs != 8000 {
 		t.Errorf("ReadyDelayMs = %d, want 8000", p.ReadyDelayMs)
 	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false (OpenCode permissions are non-interactive)", p.AcceptStartupDialogs)
+	}
 }
 
 func TestBuiltinProvidersKiro(t *testing.T) {
@@ -874,5 +877,43 @@ func TestResolveSessionCreateTransportFallsBackToProviderCreateTransport(t *test
 	})
 	if got != "acp" {
 		t.Fatalf("ResolveSessionCreateTransport() = %q, want %q", got, "acp")
+	}
+}
+
+func TestPathCheckBinary(t *testing.T) {
+	tests := []struct {
+		name string
+		spec ProviderSpec
+		want string
+	}{
+		{
+			name: "PathCheck set takes precedence",
+			spec: ProviderSpec{PathCheck: "my-binary", Command: "other-binary --flag"},
+			want: "my-binary",
+		},
+		{
+			name: "simple Command without spaces",
+			spec: ProviderSpec{Command: "my-binary"},
+			want: "my-binary",
+		},
+		{
+			name: "Command with arguments returns first token",
+			spec: ProviderSpec{Command: "my-binary --agent coder --yolo"},
+			want: "my-binary",
+		},
+		{
+			name: "empty Command returns empty string",
+			spec: ProviderSpec{Command: ""},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.spec.pathCheckBinary()
+			if got != tt.want {
+				t.Errorf("pathCheckBinary() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

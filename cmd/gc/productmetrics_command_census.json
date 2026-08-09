@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 196,
+  "next_id": 200,
   "permanent_ids": [
     {
       "name": "help",
@@ -1468,6 +1468,21 @@
       "id": 50
     },
     {
+      "path": "gc events reemit-execution",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "events-stream",
+      "notice_policy": "ineligible",
+      "classification": "events-reemit-execution",
+      "owner": "immediate",
+      "id": 197
+    },
+    {
       "path": "gc events rotate",
       "aliases": [],
       "conditional_modes": [],
@@ -2842,6 +2857,21 @@
       "id": 106
     },
     {
+      "path": "gc pack registry requests",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-registry-requests",
+      "owner": "immediate",
+      "id": 196
+    },
+    {
       "path": "gc pack registry search",
       "aliases": [],
       "conditional_modes": [],
@@ -3886,6 +3916,52 @@
       "classification": "stop",
       "owner": "immediate",
       "id": 164
+    },
+    {
+      "path": "gc storage",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc storage migrate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-migrate",
+      "owner": "immediate",
+      "id": 198
+    },
+    {
+      "path": "gc storage status",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-status",
+      "owner": "immediate",
+      "id": 199
     },
     {
       "path": "gc supervisor",

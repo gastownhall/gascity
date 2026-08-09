@@ -240,13 +240,10 @@ prefix = "fe"
 	}
 }
 
-func TestDoDoctorRegistersDoltBackupCheckOnlyForActiveManagedRigs(t *testing.T) {
+func TestBuildDoctorChecksRegistersDoltChecksOnlyForActiveManagedRigs(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 
 	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 
@@ -291,24 +288,12 @@ suspended = true
 		}
 	}
 	doltDataDir := filepath.Join(cityDir, "runtime-dolt")
-	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_DOLT_DATA_DIR", doltDataDir)
-	oldCityFlag := cityFlag
-	cityFlag = cityDir
-	t.Cleanup(func() { cityFlag = oldCityFlag })
 
-	oldCityCheck := newDoctorDoltServerCheck
-	oldRigCheck := newDoctorRigDoltServerCheck
 	oldBackupCheck := newDoctorDoltBackupCheck
 	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
 	registeredBackup := map[string]string{}
 	registeredLocalOnly := map[string]string{}
-	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
-		return doctor.NewDoltServerCheck(cityPath, true)
-	}
-	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
-		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
-	}
 	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
 		registeredBackup[rig.Name] = dataDir
 		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
@@ -318,14 +303,23 @@ suspended = true
 		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
 	}
 	t.Cleanup(func() {
-		newDoctorDoltServerCheck = oldCityCheck
-		newDoctorRigDoltServerCheck = oldRigCheck
 		newDoctorDoltBackupCheck = oldBackupCheck
 		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
-	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "managed", Path: "managed", Prefix: "ma"},
+			{Name: "filebacked", Path: "filebacked", Prefix: "fi"},
+			{Name: "sleeping", Path: "sleeping", Prefix: "sl", Suspended: true},
+		},
+	}
+	buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	})
 
 	if len(registeredBackup) != 1 {
 		t.Fatalf("registered dolt-backup checks = %#v, want only active managed rig", registeredBackup)
@@ -353,14 +347,11 @@ suspended = true
 	}
 }
 
-func TestDoDoctorSkipsDoltBackupCheckWhenGCDoltSkip(t *testing.T) {
+func TestBuildDoctorChecksSkipsRigDoltChecks(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "managed")
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -388,47 +379,38 @@ prefix = "ma"
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_DOLT", "skip")
-	oldCityFlag := cityFlag
-	cityFlag = cityDir
-	t.Cleanup(func() { cityFlag = oldCityFlag })
 
-	oldCityCheck := newDoctorDoltServerCheck
 	oldRigCheck := newDoctorRigDoltServerCheck
-	oldBackupCheck := newDoctorDoltBackupCheck
-	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
-	registeredBackup := 0
-	registeredLocalOnly := 0
-	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
-		return doctor.NewDoltServerCheck(cityPath, true)
-	}
-	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
-		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
-	}
-	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
-		registeredBackup++
-		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
-	}
-	newDoctorDoltLocalOnlyCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltLocalOnlyRemoteCheck {
-		registeredLocalOnly++
-		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
+	var rigSkip *bool
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigDoltServerCheck {
+		rigSkip = &skip
+		return doctor.NewRigDoltServerCheck(cityPath, rig, skip)
 	}
 	t.Cleanup(func() {
-		newDoctorDoltServerCheck = oldCityCheck
 		newDoctorRigDoltServerCheck = oldRigCheck
-		newDoctorDoltBackupCheck = oldBackupCheck
-		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
-	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, false, 0, &stdout, &stderr)
-
-	if registeredBackup != 0 {
-		t.Fatalf("registered %d dolt-backup checks, want 0 when GC_DOLT=skip", registeredBackup)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "managed", Path: "managed", Prefix: "ma"}},
 	}
-	if registeredLocalOnly != 0 {
-		t.Fatalf("registered %d dolt-local-only checks, want 0 when GC_DOLT=skip", registeredLocalOnly)
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	if rigSkip == nil {
+		t.Error("rig dolt-server check was not registered")
+	} else if !*rigSkip {
+		t.Error("rig dolt-server check skip = false, want true")
+	}
+	names := doctorCheckNames(checks)
+	for _, name := range []string{"rig:managed:dolt-backup", "rig:managed:dolt-local-only-remote"} {
+		if doctorCheckIndex(names, name) >= 0 {
+			t.Errorf("check %q registered with SkipRigDoltChecks=true; names=%v", name, names)
+		}
 	}
 }
 

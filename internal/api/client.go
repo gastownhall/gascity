@@ -432,10 +432,13 @@ func (c *Client) waitForEventOnce(ctx context.Context, requestID, successType, f
 			cursor = "0"
 		}
 		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=" + url.QueryEscape(cursor)
-	} else {
-		if cursor == "" {
-			cursor = "0"
-		}
+	} else if cursor != "" {
+		// A resume cursor from a 202 (including the literal "0" the supervisor
+		// returns when no provider existed at capture) is passed through so the
+		// caller resumes at the intended boundary. An empty cursor must NOT be
+		// coerced to after_cursor=0: "0" now requests a full replay from zero
+		// for every provider, whereas an absent after_cursor starts at the
+		// current supervisor event head with no backlog.
 		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
 	}
 	// For a remote client, an idle watchdog cancels a stalled stream: the stream

@@ -590,14 +590,38 @@ func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
 	return false
 }
 
+// directSessionBeadIDCandidates returns the bead IDs a work-bead assignee could
+// name, so liveSessionBeadExistsByIdentity can resolve the owning session bead
+// with a direct Get instead of depending on the open-session snapshot or the
+// live gc:session label list.
+//
+// A pool assignee is PoolSessionName(template, beadID) —
+// "<sanitized-template-base>-<beadID>" — and bead IDs contain a "-" themselves
+// ("th-vb20q"), so the ID is not simply the final "-"-delimited segment.
+// Enumerating every suffix that begins just after a "-" covers both the modern
+// form and the legacy "-mc-" form without special-casing either.
+//
+// Extra candidates cannot produce a false "session is live" answer: the caller
+// still requires the resolved bead to be a non-closed session bead whose own
+// assignee identities contain this exact assignee.
 func directSessionBeadIDCandidates(assignee string) []string {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return nil
 	}
 	candidates := []string{assignee}
-	if idx := strings.LastIndex(assignee, "-mc-"); idx >= 0 {
-		candidates = append(candidates, assignee[idx+1:])
+	for i := 0; i < len(assignee); i++ {
+		if assignee[i] != '-' {
+			continue
+		}
+		// A qualified agent name encodes "/" as "--" (agent.SessionNameFor),
+		// so the byte after a "-" can be another "-". Such a suffix is never a
+		// bead ID, and stores that shell out would read it as a flag.
+		suffix := assignee[i+1:]
+		if suffix == "" || suffix[0] == '-' {
+			continue
+		}
+		candidates = append(candidates, suffix)
 	}
 	return candidates
 }

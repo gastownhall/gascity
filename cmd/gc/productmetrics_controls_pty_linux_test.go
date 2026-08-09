@@ -1,4 +1,4 @@
-//go:build linux && !android
+//go:build productmetrics_testhook && linux && !android
 
 package main
 

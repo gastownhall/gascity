@@ -47,6 +47,22 @@ type herdrError struct {
 	Message string `json:"message"`
 }
 
+// Error renders the herdr-reported failure as "<code>: <message>", matching the
+// text run() previously formatted inline; wrapping it with %w additionally lets
+// callers recover the typed error (and its Code) via errors.As.
+func (e *herdrError) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+
+// herdrErrorCode returns the herdr-reported error code wrapped anywhere in err
+// (via *herdrError), or "" if err carries no herdr error. Callers branch on
+// specific herdr failures (e.g. "agent_name_taken") without matching message text.
+func herdrErrorCode(err error) string {
+	var he *herdrError
+	if errors.As(err, &he) {
+		return he.Code
+	}
+	return ""
+}
+
 type envelope struct {
 	Result json.RawMessage `json:"result"`
 	Error  *herdrError     `json:"error"`
@@ -72,7 +88,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 		return nil, fmt.Errorf("herdr %v: decode response: %w", args, err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %s: %s", args, env.Error.Code, env.Error.Message)
+		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
 	}
 	return env.Result, nil
 }
@@ -88,23 +104,27 @@ type agentInfo struct {
 	Cwd         string `json:"cwd"`
 }
 
-// startAgent → `herdr agent start <name> --no-focus [--tab <tabID>] [--cwd <cwd>]
-// [--env k=v …] -- <argv…>`. A non-empty tabID places the agent in that tab;
-// without it herdr splits the focused tab into a new pane.
-func (c *client) startAgent(ctx context.Context, name, tabID, cwd string, env map[string]string, argv []string) (agentInfo, error) {
-	args := []string{"agent", "start", name, "--no-focus"}
-	if tabID != "" {
-		args = append(args, "--tab", tabID)
+// agentStartTimeoutMS bounds herdr's own wait for the launched agent TUI to
+// be detected and interactive-ready (`agent start --timeout`). herdr requires
+// >3000 and defaults to 30000; sized up to cover cold, concurrent claude
+// boots during a town-wide restart.
+const agentStartTimeoutMS = 60000
+
+// startAgentKind → `herdr agent start <name> --kind <kind> --pane <paneID>
+// --timeout <ms> [-- <args…>]` (herdr ≥0.7.5). herdr launches the kind's
+// canonical executable with args inside the existing shell pane and blocks
+// until the agent TUI is detected and interactive-ready — its native
+// claude-detection, which replaces the pre-0.7.5 exec-argv launch (whose
+// shell→TUI occupant handoff is what cleared agent names mid-boot). cwd and
+// env are properties of the pane (set at tab/workspace creation), not of the
+// agent start.
+func (c *client) startAgentKind(ctx context.Context, name, kind, paneID string, args []string) (agentInfo, error) {
+	cli := []string{"agent", "start", name, "--kind", kind, "--pane", paneID, "--timeout", strconv.Itoa(agentStartTimeoutMS)}
+	if len(args) > 0 {
+		cli = append(cli, "--")
+		cli = append(cli, args...)
 	}
-	if cwd != "" {
-		args = append(args, "--cwd", cwd)
-	}
-	for k, v := range env {
-		args = append(args, "--env", k+"="+v)
-	}
-	args = append(args, "--")
-	args = append(args, argv...)
-	res, err := c.run(ctx, args...)
+	res, err := c.run(ctx, cli...)
 	if err != nil {
 		return agentInfo{}, err
 	}
@@ -115,6 +135,15 @@ func (c *client) startAgent(ctx context.Context, name, tabID, cwd string, env ma
 		return agentInfo{}, fmt.Errorf("herdr agent start: decode: %w", err)
 	}
 	return wrap.Agent, nil
+}
+
+// agentPrompt → `herdr agent prompt <target> <text>` (herdr ≥0.7.5): types
+// text into a registered agent's input and submits it through herdr's own
+// prompt machinery — the reliable replacement for the paste+Enter+confirm
+// dance. target is an agent name or the pane id hosting it.
+func (c *client) agentPrompt(ctx context.Context, target, text string) error {
+	_, err := c.run(ctx, "agent", "prompt", target, text)
+	return err
 }
 
 // listAgents → `herdr agent list`.
@@ -132,27 +161,46 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 	return wrap.Agents, nil
 }
 
-// read → `herdr agent read <name> --source <source> [--lines n]`. Use
-// "visible" for the current screen (the liveness/fingerprint snapshot);
-// "recent"/"recent-unwrapped" are scrollback only.
-func (c *client) read(ctx context.Context, name, source string, lines int) (string, error) {
-	args := []string{"agent", "read", name, "--source", source}
+// paneRead → `herdr pane read <paneID> --source <source> [--lines n]`
+// (herdr ≥0.7.5). Reads any pane's screen without needing a registered agent
+// (raw shell sessions never register one). Use "visible" for the current
+// screen (the liveness/fingerprint snapshot). On 0.7.5 the CLI prints the
+// text raw rather than in the JSON envelope, so this parses failures out of
+// an envelope only when one is present.
+func (c *client) paneRead(ctx context.Context, paneID, source string, lines int) (string, error) {
+	args := []string{"pane", "read", paneID, "--source", source}
 	if lines > 0 {
 		args = append(args, "--lines", strconv.Itoa(lines))
 	}
-	res, err := c.run(ctx, args...)
+	out, err := c.runRaw(ctx, args...)
 	if err != nil {
 		return "", err
 	}
-	var wrap struct {
-		Read struct {
-			Text string `json:"text"`
-		} `json:"read"`
+	return out, nil
+}
+
+// runRaw executes a herdr verb whose success output is plain text, not the
+// JSON envelope (0.7.5 `pane read`). Failures still arrive as an envelope on
+// stdout or as stderr text, so an output that decodes to an envelope carrying
+// an error is surfaced as that error; anything else is returned verbatim.
+func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
+	full := append([]string{"--session", c.session}, args...)
+	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+		}
+		return "", fmt.Errorf("herdr %v: %w", args, err)
 	}
-	if err := json.Unmarshal(res, &wrap); err != nil {
-		return "", fmt.Errorf("herdr agent read: decode: %w", err)
+	trimmed := strings.TrimSpace(string(out))
+	if strings.HasPrefix(trimmed, "{") {
+		var env envelope
+		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
+			return "", fmt.Errorf("herdr %v: %w", args, env.Error)
+		}
 	}
-	return wrap.Read.Text, nil
+	return string(out), nil
 }
 
 // proc is one process in a pane's foreground tree.
@@ -195,71 +243,34 @@ func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 	return err
 }
 
-// deliverNudge types a nudge into the agent's input and submits it, then
-// confirms the submit actually landed. The text is injected with `pane run`
-// (paste semantics: multi-line content is preserved and the paste's own trailing
-// newline is swallowed by the TUI, so the text never submits on its own).
-//
-// Submission is the hard part. Two facts, learned empirically against herdr 0.7.1
-// + the Claude Code TUI:
-//
-//   - The TUI must be at a ready input prompt: a submit delivered mid-boot is
-//     swallowed. Callers deliver to a ready agent — Start waits for idle first
-//     (see startupNudgeIdleTimeout); the Nudge path targets running agents.
-//   - A submit that races the paste-commit is swallowed, stranding the prompt
-//     typed-but-unsubmitted — the agent then idles forever with work it never
-//     began (the missed startup-nudge stall).
-//
-// The prior open-loop form (settle → CR → settle → CR, via `agent send "\r"`) was
-// not enough under concurrent restart-time boot load: both CRs raced the paste
-// and the nudge stranded, and the swallowed result hid it. This is now
-// closed-loop: press Enter as a real key event (`pane send-keys`, which submits
-// reliably where a pasted `\r` did not), then verify via `agent get` that the
-// agent actually left its idle prompt. Retry the Enter until it does, bounded so
-// a nudge that legitimately produces no work cannot spin. A redundant Enter on an
-// already-submitted/empty prompt is a harmless no-op. Returns an error if the
-// submit never confirms, so the caller can surface it instead of silently
-// leaving a stranded agent.
-//
-// Contract: inject + submit by pane id, confirm by agent name.
-func (c *client) deliverNudge(ctx context.Context, paneID, name, text string) error {
+// deliverNudge types a nudge into the session and submits it. Registered
+// agents (the kind-launch path) go through herdr ≥0.7.5's native
+// `agent prompt`, which owns the type+submit handshake that the pre-0.7.5
+// paste+Enter+confirm dance approximated — targeting the pane id, which agent
+// verbs accept even after the registry name is unavailable to the caller.
+// Panes with no registered agent (raw `exec /bin/sh -c` sessions, bare
+// shells) fall back to paste + Enter: there is no TUI prompt machinery to
+// confirm against, so delivery is best-effort by construction.
+func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
+	err := c.agentPrompt(ctx, paneID, text)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
+		return err
+	}
+	// No registered agent on this pane: paste, settle, submit.
 	if err := c.paneRun(ctx, paneID, text); err != nil {
 		return err
 	}
-	time.Sleep(submitSettleDelay) // let the paste commit before the first submit
-	var lastErr error
-	for attempt := 0; attempt < submitMaxAttempts; attempt++ {
-		if err := c.sendKeys(ctx, paneID, "Enter"); err != nil {
-			lastErr = err // transient send failure; verify + retry within the bound
-		}
-		time.Sleep(submitSettleDelay)
-		info, ok, err := c.getAgent(ctx, name)
-		switch {
-		case err != nil:
-			lastErr = err // transient read failure; retry within the bound
-		case !ok:
-			return fmt.Errorf("herdr deliverNudge: agent %q vanished before submit confirmed", name)
-		case !strings.EqualFold(strings.TrimSpace(info.AgentStatus), "idle"):
-			return nil // left the idle prompt → submit landed, agent is running
-		}
-	}
-	if lastErr != nil {
-		return fmt.Errorf("herdr deliverNudge: %q still idle after %d submit attempts: %w", name, submitMaxAttempts, lastErr)
-	}
-	return fmt.Errorf("herdr deliverNudge: %q still idle after %d submit attempts (nudge typed-but-unsubmitted?)", name, submitMaxAttempts)
+	time.Sleep(submitSettleDelay)
+	return c.sendKeys(ctx, paneID, "Enter")
 }
 
-// submitSettleDelay is how long deliverNudge waits for a `pane run` paste to
-// commit in the TUI before each submit Enter and before re-reading agent status.
-// A submit that races the paste is swallowed; ~1s clears it with margin even
-// under the concurrent boot load of a town-wide restart.
+// submitSettleDelay is how long the unregistered-pane fallback waits for a
+// `pane run` paste to commit before the submit Enter (a submit racing the
+// paste is swallowed).
 const submitSettleDelay = 1 * time.Second
-
-// submitMaxAttempts bounds the closed-loop submit: ~submitMaxAttempts·settle is
-// the worst-case latency before deliverNudge gives up and returns an error. Sized
-// to cover a slow paste-commit under restart-time load without spinning on a
-// nudge that legitimately leaves the agent idle.
-const submitMaxAttempts = 5
 
 // closePane → `herdr pane close <paneID>`.
 func (c *client) closePane(ctx context.Context, paneID string) error {
@@ -290,9 +301,11 @@ func (c *client) getAgent(ctx context.Context, name string) (agentInfo, bool, er
 //
 // herdr's tree is workspace › tab › pane. To give each agent its own switchable
 // space (vs tiling every agent as a pane in one tab), Start groups agents one
-// workspace per rig/town and one tab per agent. `workspace create` and `tab
-// create` each auto-spawn a stray shell pane; the caller closes it so the tab
-// holds only the agent.
+// workspace per rig/town and one tab per agent. Under herdr ≥0.7.5 the shell
+// pane that `workspace create`/`tab create` auto-spawns IS the agent's pane —
+// agents launch into an existing shell pane, and cwd/env are set here at pane
+// creation (there is no longer a stray pane to close, which is what leaked one
+// shell per wrongful Start in the spawn storm).
 
 type workspaceInfo struct {
 	WorkspaceID string `json:"workspace_id"`
@@ -324,11 +337,18 @@ func (c *client) findWorkspace(ctx context.Context, label string) (string, error
 	return "", nil
 }
 
-// workspaceCreate makes a workspace labeled label and returns its id plus the
-// default tab and stray shell pane herdr auto-spawns inside it (the caller
-// repurposes the tab and closes the stray pane).
-func (c *client) workspaceCreate(ctx context.Context, label string) (wsID, tabID, strayPane string, err error) {
-	res, err := c.run(ctx, "workspace", "create", "--label", label, "--no-focus")
+// workspaceCreate makes a workspace labeled label whose root shell pane is
+// created with the given cwd and env, and returns the workspace id plus the
+// default tab and root pane (the agent's pane) herdr auto-spawns inside it.
+func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (wsID, tabID, paneID string, err error) {
+	args := []string{"workspace", "create", "--label", label, "--no-focus"}
+	if cwd != "" {
+		args = append(args, "--cwd", cwd)
+	}
+	for k, v := range env {
+		args = append(args, "--env", k+"="+v)
+	}
+	res, err := c.run(ctx, args...)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -349,30 +369,33 @@ func (c *client) workspaceCreate(ctx context.Context, label string) (wsID, tabID
 	return wrap.Workspace.WorkspaceID, wrap.Tab.TabID, wrap.RootPane.PaneID, nil
 }
 
-// findTab returns the id of the tab in wsID whose label matches, or "".
-func (c *client) findTab(ctx context.Context, wsID, label string) (string, error) {
+// listTabs returns the tabs in wsID.
+func (c *client) listTabs(ctx context.Context, wsID string) ([]tabInfo, error) {
 	res, err := c.run(ctx, "tab", "list", "--workspace", wsID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var wrap struct {
 		Tabs []tabInfo `json:"tabs"`
 	}
 	if err := json.Unmarshal(res, &wrap); err != nil {
-		return "", fmt.Errorf("herdr tab list: decode: %w", err)
+		return nil, fmt.Errorf("herdr tab list: decode: %w", err)
 	}
-	for _, t := range wrap.Tabs {
-		if t.Label == label {
-			return t.TabID, nil
-		}
-	}
-	return "", nil
+	return wrap.Tabs, nil
 }
 
-// tabCreate makes a tab labeled label in wsID and returns its id plus the stray
-// shell pane herdr auto-spawns (the caller closes it after the agent starts).
-func (c *client) tabCreate(ctx context.Context, wsID, label string) (tabID, strayPane string, err error) {
-	res, err := c.run(ctx, "tab", "create", "--workspace", wsID, "--label", label, "--no-focus")
+// tabCreate makes a tab labeled label in wsID whose root shell pane is created
+// with the given cwd and env, and returns the tab id plus that root pane (the
+// agent's pane).
+func (c *client) tabCreate(ctx context.Context, wsID, label, cwd string, env map[string]string) (tabID, paneID string, err error) {
+	args := []string{"tab", "create", "--workspace", wsID, "--label", label}
+	if cwd != "" {
+		args = append(args, "--cwd", cwd)
+	}
+	for k, v := range env {
+		args = append(args, "--env", k+"="+v)
+	}
+	res, err := c.run(ctx, args...)
 	if err != nil {
 		return "", "", err
 	}
@@ -396,32 +419,45 @@ func (c *client) tabRename(ctx context.Context, tabID, label string) error {
 	return err
 }
 
-// ensurePlacement resolves where an agent's pane should live: it finds or creates
-// the per-rig/town workspace wsLabel, then finds or creates the per-agent tab
-// tabLabel inside it. It returns the tab id and, when herdr auto-spawned a stray
-// shell pane (new workspace or new tab), that pane's id so Start can close it —
-// leaving the tab holding only the agent. A reused existing tab returns "".
-func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel string) (tabID, strayPane string, err error) {
+// tabClose closes a tab and its panes (used to recycle a stale tab left by a
+// previous life of the same session before creating its replacement).
+func (c *client) tabClose(ctx context.Context, tabID string) error {
+	_, err := c.run(ctx, "tab", "close", tabID)
+	return err
+}
+
+// ensurePlacement resolves where an agent should live and returns its tab id
+// plus the fresh shell pane the agent will launch into: it finds or creates
+// the per-rig/town workspace wsLabel, then creates the per-agent tab tabLabel
+// inside it with the agent's cwd and env baked into the pane. A stale tab
+// with the same label (left by a previous life of this session — e.g. an
+// exited agent whose pane sits at a shell prompt) is closed first, so every
+// Start gets a clean shell with the right cwd/env and dead panes never
+// accumulate across restarts.
+func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string) (tabID, paneID string, err error) {
 	wsID, err := c.findWorkspace(ctx, wsLabel)
 	if err != nil {
 		return "", "", err
 	}
 	if wsID == "" {
 		// New workspace: repurpose the default tab herdr spawns for this agent.
-		_, tabID, strayPane, err = c.workspaceCreate(ctx, wsLabel)
+		_, tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
 		if err != nil {
 			return "", "", err
 		}
 		_ = c.tabRename(ctx, tabID, tabLabel) // cosmetic; ignore failure
-		return tabID, strayPane, nil
+		return tabID, paneID, nil
 	}
-	if tabID, err = c.findTab(ctx, wsID, tabLabel); err != nil {
+	tabs, err := c.listTabs(ctx, wsID)
+	if err != nil {
 		return "", "", err
 	}
-	if tabID != "" {
-		return tabID, "", nil // reuse existing tab; no stray pane to close
+	for _, tb := range tabs {
+		if tb.Label == tabLabel {
+			_ = c.tabClose(ctx, tb.TabID) // best-effort: replaced below either way
+		}
 	}
-	return c.tabCreate(ctx, wsID, tabLabel)
+	return c.tabCreate(ctx, wsID, tabLabel, cwd, env)
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────

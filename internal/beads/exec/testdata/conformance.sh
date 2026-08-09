@@ -158,11 +158,22 @@ update)
 	input=$(cat)
 	current=$(cat "$bead_file")
 
-	# Apply description if present (non-null).
-	has_desc=$(echo "$input" | jq 'has("description") and .description != null')
-	if [ "$has_desc" = "true" ]; then
-		new_desc=$(echo "$input" | jq -r '.description')
-		current=$(echo "$current" | jq --arg d "$new_desc" '.description = $d')
+	# Apply the scalar string fields the update request may carry. Omitted
+	# fields are left unchanged.
+	for field in title status type description; do
+		has_field=$(echo "$input" | jq --arg f "$field" 'has($f) and .[$f] != null')
+		if [ "$has_field" = "true" ]; then
+			new_value=$(echo "$input" | jq -r --arg f "$field" '.[$f]')
+			current=$(echo "$current" | jq --arg f "$field" --arg v "$new_value" '.[$f] = $v')
+		fi
+	done
+
+	# Apply priority if present (non-null). Numeric, so it is not part of the
+	# string loop above.
+	has_priority=$(echo "$input" | jq 'has("priority") and .priority != null')
+	if [ "$has_priority" = "true" ]; then
+		new_priority=$(echo "$input" | jq '.priority')
+		current=$(echo "$current" | jq --argjson p "$new_priority" '.priority = $p')
 	fi
 
 	# Apply parent_id if present (non-null).
@@ -193,6 +204,12 @@ update)
 	new_labels=$(echo "$input" | jq -c '.labels // []')
 	if [ "$new_labels" != "[]" ]; then
 		current=$(echo "$current" | jq --argjson nl "$new_labels" '.labels = (.labels + $nl | unique)')
+	fi
+
+	# Remove labels if present.
+	drop_labels=$(echo "$input" | jq -c '.remove_labels // []')
+	if [ "$drop_labels" != "[]" ]; then
+		current=$(echo "$current" | jq --argjson dl "$drop_labels" '.labels = [.labels[] | select(. as $l | $dl | index($l) | not)]')
 	fi
 
 	echo "$current" >"$bead_file"

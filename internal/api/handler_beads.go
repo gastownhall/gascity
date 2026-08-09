@@ -159,28 +159,25 @@ func (s *Server) findStore(rig string) beads.Store {
 // The result is the per-class by-id candidate set: a successful prefix/route
 // match returns the single store that owns the ID's namespace (which is already
 // the bead's class+rig store), and the unrouted fallback leads with the
-// city/HQ store ahead of the per-rig work stores. A graph-relocated city adds a
-// class-prefix arm so graph-class ids reach the dedicated graph store.
+// city/HQ store ahead of the per-rig work stores. A graph-relocated city is
+// resolved by the class-prefix arm, which runs first so a reserved class prefix
+// can never be captured by a rig/HQ prefix or a routes.jsonl entry.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
-	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
-		return []beads.Store{store}
-	}
-	if prefix := beadPrefix(id); prefix != "" {
-		if store := s.resolveStoreByPrefix(prefix); store != nil {
-			return []beads.Store{store}
-		}
-	}
 
 	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
-	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
-	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
-	// fall through to the candidate scan and miss. Return [graph, work] —
+	// id-prefix "gcg") in a dedicated graph store, which is the only store that
+	// mints and owns that prefix. The arm runs FIRST — ahead of the configured
+	// prefix and routes.jsonl resolvers — because both of those can name the
+	// reserved prefix and would otherwise hand a class id to a work store: a
+	// routed prefix wins unconditionally, and a shadowing rig/HQ prefix is
+	// warned-but-allowed (config.ReservedPrefixWarnings), which documents the
+	// class store as the owner once relocation is active. Return [graph, work] —
 	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
 	// the by-id handlers federates the graph store ahead of work and pins it on
 	// the first probe. Skipped for a default (non-relocated) city, where
-	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path stays
-	// byte-identical.
+	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path
+	// stays byte-identical.
 	if graph := s.state.GraphBeadStore().Store; graph != nil {
 		if city := s.state.CityBeadStore(); graph != city {
 			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
@@ -189,6 +186,15 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 				}
 				return []beads.Store{graph}
 			}
+		}
+	}
+
+	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+		return []beads.Store{store}
+	}
+	if prefix := beadPrefix(id); prefix != "" {
+		if store := s.resolveStoreByPrefix(prefix); store != nil {
+			return []beads.Store{store}
 		}
 	}
 
@@ -335,9 +341,15 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 				return store
 			}
 		}
-		// Fallback: the route pointed to the same rig.
-		if store, exists := stores[rig.Name]; exists {
-			return store
+		// Fallback: the route pointed back at this rig itself (a self-route).
+		// Only then may this rig answer. A route that resolves to some OTHER
+		// path — one that is not a registered rig, e.g. a relocated class store
+		// directory — says the prefix does NOT live here, so it must fall
+		// through to the caller's candidate scan rather than pin the wrong store.
+		if cleanPath == filepath.Clean(rigPath) {
+			if store, exists := stores[rig.Name]; exists {
+				return store
+			}
 		}
 	}
 	return nil

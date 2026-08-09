@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,9 @@ func TestProductMetricsTesthookCAReadIsBounded(t *testing.T) {
 }
 
 func TestProductMetricsTaggedProcessFixtureIsEnabled(t *testing.T) {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		configureProductMetricsTrustedProcessTempRoot(t)
+	}
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	seedPrivateUploaderProcessFixture(t, home, "6ba7b810-9dad-41d1-80b4-00c04fd430c8", time.Now().UTC())

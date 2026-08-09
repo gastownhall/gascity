@@ -3168,6 +3168,127 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 }
 
+// --- SetLocalString / GetLocalString ---
+
+func TestBdStoreSetLocalStringRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreGetLocalStringUnsetReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	got, err := s.GetLocalString("bd-1", "never_set")
+	if err != nil {
+		t.Fatalf("GetLocalString: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString unset = %q, want empty", got)
+	}
+}
+
+// TestBdStoreLocalStringNeverInvokesCommandRunner asserts the property
+// documented on BdStore.SetLocalString: clone-local writes are persisted to
+// a sidecar JSON file and never shell out to bd, so they never touch Dolt
+// sync or bd's on_update hook. The runner fails the test immediately if
+// invoked at all.
+func TestBdStoreLocalStringNeverInvokesCommandRunner(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("SetLocalString/GetLocalString must never invoke bd, got: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k1", "v1"); err != nil {
+		t.Fatalf("SetLocalString k1: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k2", "v2"); err != nil {
+		t.Fatalf("SetLocalString k2: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k1"); err != nil {
+		t.Fatalf("GetLocalString k1: %v", err)
+	}
+	if _, err := s.GetLocalString("bd-1", "k2"); err != nil {
+		t.Fatalf("GetLocalString k2: %v", err)
+	}
+	if err := s.SetLocalString("bd-1", "k1", ""); err != nil {
+		t.Fatalf("SetLocalString clear k1: %v", err)
+	}
+}
+
+func TestBdStoreSetLocalStringPersistsAcrossNewInstanceSameDir(t *testing.T) {
+	dir := t.TempDir()
+	failRunner := func(_, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected bd invocation: %s %s", name, strings.Join(args, " "))
+		return nil, nil
+	}
+
+	first := beads.NewBdStore(dir, failRunner)
+	if err := first.SetLocalString("bd-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	// A fresh *BdStore at the same dir simulates a new process/session
+	// opening the same clone; clone-local data must survive that restart.
+	second := beads.NewBdStore(dir, failRunner)
+	got, err := second.GetLocalString("bd-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString from fresh instance: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Errorf("GetLocalString from fresh instance at same dir = %q, want persisted value", got)
+	}
+}
+
+func TestBdStoreDeleteRemovesLocalStrings(t *testing.T) {
+	dir := t.TempDir()
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		if len(args) == 0 || args[0] != "delete" {
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+
+	if err := s.SetLocalString("bd-1", "k", "v"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+	if err := s.Delete("bd-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := s.GetLocalString("bd-1", "k")
+	if err != nil {
+		t.Fatalf("GetLocalString after Delete: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetLocalString after Delete = %q, want empty (sidecar entry removed)", got)
+	}
+}
+
 func TestBdStoreSetMetadataBatchRetriesDoltSerializationFailure(t *testing.T) {
 	calls := 0
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
@@ -3289,6 +3410,30 @@ esac
 	}
 }
 
+// legacyBdReleaseRunner adapts a runner that only understands the raw-SQL
+// release path to bd 1.0.4 semantics: the native conditional-release verb is
+// rejected as an unknown flag, exactly as a bd predating gastownhall/beads#5364
+// rejects it, so the store latches its fallback. It also answers the verb path's
+// exact-ID preflight by resolving the id to itself, so a test that pins the
+// generated SQL still sees only the SQL. Every test that pins the generated SQL
+// is a FALLBACK-path test — the minimum supported bd
+// (deps.env BD_PREV_VERSION=v1.0.4) still takes it — and must go through this.
+func legacyBdReleaseRunner(inner beads.CommandRunner) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[0] == "show" && args[1] == "--json" {
+			return []byte(`[{"id":"` + args[2] + `"}]`), nil
+		}
+		if len(args) > 0 && args[0] == "update" {
+			for _, arg := range args {
+				if arg == "--if-assignee" {
+					return nil, errors.New("unknown flag: --if-assignee")
+				}
+			}
+		}
+		return inner(dir, name, args...)
+	}
+}
+
 func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 	var gotName string
 	var gotArgs []string
@@ -3297,7 +3442,7 @@ func TestBdStoreReleaseIfCurrentUsesGuardedSQL(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-'1")
 	if err != nil {
@@ -3324,7 +3469,7 @@ func TestBdStoreReleaseIfCurrentSQLLiteralEscapesBackslash(t *testing.T) {
 		gotArgs = append([]string(nil), args...)
 		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	if _, err := s.ReleaseIfCurrent("bd-\\42", "worker-\\1"); err != nil {
 		t.Fatalf("ReleaseIfCurrent: %v", err)
@@ -3356,7 +3501,7 @@ func TestBdStoreReleaseIfCurrentFallsBackWhenEmbeddedBdSQLUnsupported(t *testing
 			return nil, fmt.Errorf("unexpected call %s", call)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3435,7 +3580,7 @@ func TestBdStoreReleaseIfCurrentEmbeddedFallbackSkipsWrongAssignee(t *testing.T)
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	s := beads.NewBdStore(dir, runner)
+	s := beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {
@@ -3465,7 +3610,7 @@ func embeddedDoltReleaseIfCurrentStore(t *testing.T, doltOut []byte) *beads.BdSt
 			return nil, fmt.Errorf("unexpected command %s %q", name, args)
 		}
 	}
-	return beads.NewBdStore(dir, runner)
+	return beads.NewBdStore(dir, legacyBdReleaseRunner(runner))
 }
 
 func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
@@ -3477,7 +3622,7 @@ func TestBdStoreReleaseIfCurrentSkipsWhenRowsAffectedIsZero(t *testing.T) {
 			out: []byte(`{"rows_affected":0,"schema_version":1}`),
 		},
 	})
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", legacyBdReleaseRunner(runner))
 
 	released, err := s.ReleaseIfCurrent("bd-42", "worker-1")
 	if err != nil {

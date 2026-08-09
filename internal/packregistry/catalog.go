@@ -25,6 +25,12 @@ import (
 const (
 	// CatalogSchema is the supported registry catalog schema version.
 	CatalogSchema = 1
+	// CatalogTierMaintained identifies a pack maintained by a known publisher.
+	CatalogTierMaintained = "maintained"
+	// CatalogTierCommunity identifies a community-maintained or unattributed pack.
+	CatalogTierCommunity = "community"
+	// UnknownPublisher is the safe publisher fallback for missing or malformed attribution.
+	UnknownPublisher = "Unknown publisher"
 	// DefaultMaxBytes is the default maximum registry catalog size.
 	DefaultMaxBytes = 16 << 20
 	// DefaultFetchTimeout is the default timeout for remote registry fetches.
@@ -49,6 +55,23 @@ type Catalog struct {
 // CatalogPack describes one pack entry in a registry catalog.
 type CatalogPack struct {
 	Name        string           `toml:"name"`
+	Tier        string           `toml:"tier"`
+	Publisher   string           `toml:"publisher"`
+	Description string           `toml:"description"`
+	Source      string           `toml:"source"`
+	SourceKind  string           `toml:"source_kind"`
+	Releases    []CatalogRelease `toml:"release,omitempty"`
+}
+
+type rawCatalog struct {
+	Schema int              `toml:"schema"`
+	Packs  []rawCatalogPack `toml:"pack,omitempty"`
+}
+
+type rawCatalogPack struct {
+	Name        string           `toml:"name"`
+	Tier        any              `toml:"tier"`
+	Publisher   any              `toml:"publisher"`
 	Description string           `toml:"description"`
 	Source      string           `toml:"source"`
 	SourceKind  string           `toml:"source_kind"`
@@ -135,9 +158,25 @@ func FetchCatalog(ctx context.Context, source Source, opts FetchOptions) ([]byte
 
 // ParseCatalog decodes and version-checks registry catalog data.
 func ParseCatalog(data []byte) (Catalog, error) {
-	var catalog Catalog
-	if _, err := toml.Decode(string(data), &catalog); err != nil {
-		return catalog, fmt.Errorf("parsing registry catalog: %w", err)
+	var raw rawCatalog
+	if _, err := toml.Decode(string(data), &raw); err != nil {
+		return Catalog{}, fmt.Errorf("parsing registry catalog: %w", err)
+	}
+	catalog := Catalog{
+		Schema: raw.Schema,
+		Packs:  make([]CatalogPack, 0, len(raw.Packs)),
+	}
+	for _, rawPack := range raw.Packs {
+		tier, publisher := normalizeCatalogAttribution(rawPack.Tier, rawPack.Publisher)
+		catalog.Packs = append(catalog.Packs, CatalogPack{
+			Name:        rawPack.Name,
+			Tier:        tier,
+			Publisher:   publisher,
+			Description: rawPack.Description,
+			Source:      rawPack.Source,
+			SourceKind:  rawPack.SourceKind,
+			Releases:    rawPack.Releases,
+		})
 	}
 	if catalog.Schema == 0 {
 		catalog.Schema = CatalogSchema
@@ -146,6 +185,18 @@ func ParseCatalog(data []byte) (Catalog, error) {
 		return catalog, fmt.Errorf("unsupported registry catalog schema %d", catalog.Schema)
 	}
 	return catalog, nil
+}
+
+func normalizeCatalogAttribution(rawTier, rawPublisher any) (string, string) {
+	publisher, ok := rawPublisher.(string)
+	publisher = strings.TrimSpace(publisher)
+	if !ok || publisher == "" || publisher == UnknownPublisher {
+		publisher = UnknownPublisher
+	}
+	if tier, ok := rawTier.(string); ok && tier == CatalogTierMaintained && publisher != UnknownPublisher {
+		return CatalogTierMaintained, publisher
+	}
+	return CatalogTierCommunity, publisher
 }
 
 // ValidateCatalog validates registry catalog structure and source policy.

@@ -13,7 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -83,7 +87,13 @@ func requirePython3(t *testing.T) {
 // that proxy_process.go intentionally seeds into the helper env. Other GC_*
 // leak vectors stay scrubbed. GC_SERVICE_* vars are not leak vectors so they
 // flow through untouched without being listed here.
-const helperPassthroughForTests = "GC_CITY,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT"
+//
+// GC_DISABLE_USAGE_METRICS is on the list for the same reason: proxy_process.go
+// seeds the opt-out into every helper env deliberately, and that seeding is
+// what TestProxyProcessDisablesProductMetrics asserts. It is a leak vector
+// elsewhere — an ambient value silently flips the productmetrics projection —
+// so only this intentional seeding is exempted, by name.
+const helperPassthroughForTests = "GC_CITY,GC_CITY_PATH,GC_CITY_RUNTIME_DIR,GC_CONTROL_DISPATCHER_TRACE_DEFAULT,GC_DISABLE_USAGE_METRICS"
 
 // setHelperPassthrough installs extraHelperEnv so proxy_process.start()
 // appends the passthrough var to the helper subprocess env. Tests run
@@ -1100,4 +1110,295 @@ func TestManagerTickProxyProcess_RetryRespectsDeadline(t *testing.T) {
 	if !deadlineAfter.Equal(originalDeadline) {
 		t.Fatalf("nextConstructionRetry changed before deadline elapsed: %v -> %v", originalDeadline, deadlineAfter)
 	}
+}
+
+// --- Family A: hard-parent-exit orphan guard (ga-9br097) -----------------
+//
+// Go's per-test -timeout watchdog kills the test binary via a direct
+// os.Exit after dumping goroutine stacks: no defer and no t.Cleanup runs
+// anywhere in the process, in the timed-out goroutine or any other. A
+// proxy_process child spawned before that moment is orphaned — reparented
+// to init — because nothing ever unwinds to call Manager.Close(). The fix
+// has to be kernel-enforced (Pdeathsig) rather than more userspace
+// cleanup, since userspace cleanup structurally cannot run in this
+// scenario.
+
+// proxyProcessInstancePID returns the OS pid of the running helper
+// subprocess backing the named entry, or 0 if it has none. Test-only:
+// reaches into unexported Manager/proxyProcessInstance state directly
+// (same-package white-box access, matching the mgr.entries access already
+// used elsewhere in this file) rather than adding a pid accessor to the
+// public Status type, which carries no PID by design.
+func proxyProcessInstancePID(t *testing.T, mgr *Manager, name string) int {
+	t.Helper()
+	mgr.mu.RLock()
+	e, ok := mgr.entries[name]
+	mgr.mu.RUnlock()
+	if !ok {
+		t.Fatalf("no entry named %q", name)
+	}
+	pp, ok := e.inst.(*proxyProcessInstance)
+	if !ok {
+		t.Fatalf("entry %q instance is %T, want *proxyProcessInstance", name, e.inst)
+	}
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	if pp.cmd == nil || pp.cmd.Process == nil {
+		return 0
+	}
+	return pp.cmd.Process.Pid
+}
+
+// TestProxyProcessHardExitHarness is re-exec'd as a subprocess by
+// TestProxyProcessSurvivesHardParentExit. It starts a real proxy_process
+// child, writes that child's pid to GC_HARD_EXIT_PIDFILE, then calls
+// os.Exit directly with zero cleanup — reproducing exactly what the Go
+// test watchdog does on a -timeout kill, deliberately skipping every
+// defer and t.Cleanup in the process (including Manager.Close).
+func TestProxyProcessHardExitHarness(t *testing.T) {
+	if os.Getenv("GC_HARD_EXIT_HARNESS") != "1" {
+		t.Skip("harness process")
+	}
+	setHelperPassthrough(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	cityDir := os.Getenv("GC_HARD_EXIT_CITYDIR")
+	if cityDir == "" {
+		t.Fatal("GC_HARD_EXIT_CITYDIR not set")
+	}
+	pidFile := os.Getenv("GC_HARD_EXIT_PIDFILE")
+	if pidFile == "" {
+		t.Fatal("GC_HARD_EXIT_PIDFILE not set")
+	}
+
+	rt := &testRuntime{
+		cityPath: cityDir,
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	pid := proxyProcessInstancePID(t, mgr, "bridge")
+	if pid == 0 {
+		t.Fatal("started grandchild has pid 0")
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+
+	os.Exit(1)
+}
+
+// TestProxyProcessSurvivesHardParentExit is the RED test for ga-9br097's
+// Family A acceptance criterion: a proxy_process child spawned by start()
+// must not survive its parent's hard exit (the Go -timeout watchdog's
+// os.Exit path, which runs no defer/t.Cleanup anywhere in the process).
+// It re-execs this test binary as a harness (TestProxyProcessHardExitHarness)
+// that starts a real child and then os.Exit(1)s with zero cleanup, then
+// asserts the grandchild is gone. start() does not set Pdeathsig today, so
+// this must fail.
+func TestProxyProcessSurvivesHardParentExit(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("Pdeathsig is Linux-only")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	stateDir := t.TempDir()
+	pidFile := filepath.Join(stateDir, "grandchild.pid")
+
+	cmd := exec.Command(exe, "-test.run=^TestProxyProcessHardExitHarness$", "--")
+	cmd.Env = append(os.Environ(),
+		"GC_HARD_EXIT_HARNESS=1",
+		"GC_SERVICE_HELPER=1",
+		"GC_HARD_EXIT_CITYDIR="+stateDir,
+		"GC_HARD_EXIT_PIDFILE="+pidFile,
+	)
+	out, runErr := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &exitErr) {
+		t.Fatalf("run harness: %v\n%s", runErr, out)
+	}
+
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("harness did not report a grandchild pid (harness output below):\n%s\nerr: %v", out, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("parse pidfile %q: %v", pidBytes, err)
+	}
+
+	// Pdeathsig delivery is asynchronous; poll for death rather than
+	// asserting immediately.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL) // don't leak this test's own reproduction
+	t.Fatalf("grandchild pid %d still alive 5s after harness hard-exited with no cleanup", pid)
+}
+
+// --- Family A: TestMain regression backstop (ga-9br097 ASK 3) ------------
+
+// livingTestChildren returns the pids of any direct child process of this
+// test binary still alive right now, or an error if enumeration itself
+// could not be performed. Every subprocess this package's tests spawn is
+// reaped by the code under test (Manager.Close / stopProcessGroup) before
+// the spawning test returns, so any survivor found after m.Run() means a
+// leak. Enumerates portably via pidutil.ChildPIDs (ps-based) rather than a
+// /proc walk: a /proc-only walk returns nil unconditionally on darwin,
+// which would make the guard below report a false "no leaks" on any
+// platform where it cannot actually look (ga-gxmz9n).
+func livingTestChildren() ([]int, error) {
+	return pidutil.ChildPIDs(os.Getpid())
+}
+
+// shouldFailForLeak decides whether TestMain's exit code must be forced
+// non-zero. An enumeration error means the check did not run at all, and
+// that must never be indistinguishable from a check that ran and found
+// nothing (ga-gxmz9n's binding constraint) — so it fails alongside an
+// actual leak rather than passing silently.
+func shouldFailForLeak(pids []int, err error) (fail bool, reason string) {
+	if err != nil {
+		return true, fmt.Sprintf("leak detection unavailable: %v", err)
+	}
+	if len(pids) > 0 {
+		return true, fmt.Sprintf("%d live child process(es) leaked by tests: %v", len(pids), pids)
+	}
+	return false, ""
+}
+
+// TestMain runs the package's tests, then fails the run if any test left a
+// live direct child process behind (ga-9br097 ASK 3): every subprocess
+// these tests spawn is reaped by the code under test before its owning
+// test returns, so a survivor here is a real leak, not a slow child. It
+// also fails the run if leak detection itself was unavailable, rather than
+// letting that read as a clean pass (ga-gxmz9n).
+func TestMain(m *testing.M) {
+	code := m.Run()
+	pids, err := livingTestChildren()
+	if fail, reason := shouldFailForLeak(pids, err); fail {
+		fmt.Fprintf(os.Stderr, "workspacesvc: %s\n", reason)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// TestShouldFailForLeakOnUnavailableEnumeration is a RED test for
+// ga-gxmz9n's binding constraint: an enumeration error must never be
+// treated as a clean run, even though it also carries zero pids.
+func TestShouldFailForLeakOnUnavailableEnumeration(t *testing.T) {
+	fail, reason := shouldFailForLeak(nil, errors.New("ps: command not found"))
+	if !fail {
+		t.Fatal("shouldFailForLeak(nil, non-nil err) = fail=false, want true — an unavailable check must never look like a clean pass")
+	}
+	if reason == "" {
+		t.Fatal("shouldFailForLeak(nil, non-nil err) returned an empty reason")
+	}
+}
+
+// TestShouldFailForLeakOnLeakedChild covers the pre-existing ga-9br097
+// contract: a live leaked child must fail the run.
+func TestShouldFailForLeakOnLeakedChild(t *testing.T) {
+	fail, reason := shouldFailForLeak([]int{12345}, nil)
+	if !fail {
+		t.Fatal("shouldFailForLeak([pid], nil) = fail=false, want true")
+	}
+	if reason == "" {
+		t.Fatal("shouldFailForLeak([pid], nil) returned an empty reason")
+	}
+}
+
+// TestShouldFailForLeakOnCleanRun asserts a genuinely clean run (enumeration
+// succeeded, zero children) still passes — the fix must not make the guard
+// fail unconditionally.
+func TestShouldFailForLeakOnCleanRun(t *testing.T) {
+	if fail, reason := shouldFailForLeak(nil, nil); fail {
+		t.Fatalf("shouldFailForLeak(nil, nil) = fail=true (reason %q), want false", reason)
+	}
+}
+
+// TestLivingTestChildrenDetectsSurvivor is the RED test for the TestMain
+// regression backstop (ga-9br097 ASK 3): it spawns a real child directly
+// (bypassing Manager/proxy_process entirely, so it exercises only the
+// detector) and asserts livingTestChildren both finds it while alive and
+// stops finding it once killed and reaped. Runs unconditionally on every
+// platform (no macOS skip) — ga-gxmz9n requires real detection on darwin,
+// not a skip standing in for it.
+func TestLivingTestChildrenDetectsSurvivor(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	var pids []int
+	for time.Now().Before(deadline) {
+		var err error
+		pids, err = livingTestChildren()
+		if err != nil {
+			t.Fatalf("livingTestChildren(): %v", err)
+		}
+		if containsPID(pids, cmd.Process.Pid) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !containsPID(pids, cmd.Process.Pid) {
+		t.Fatalf("livingTestChildren() = %v, want to contain live child pid %d", pids, cmd.Process.Pid)
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("wait: %v", err)
+		}
+	}
+
+	pids, err := livingTestChildren()
+	if err != nil {
+		t.Fatalf("livingTestChildren(): %v", err)
+	}
+	if containsPID(pids, cmd.Process.Pid) {
+		t.Fatalf("livingTestChildren() = %v, still contains reaped pid %d", pids, cmd.Process.Pid)
+	}
+}
+
+func containsPID(pids []int, pid int) bool {
+	for _, p := range pids {
+		if p == pid {
+			return true
+		}
+	}
+	return false
 }

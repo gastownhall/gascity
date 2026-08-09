@@ -77,7 +77,7 @@ func NeutralWireKeys(t reflect.Type) map[string]struct{} {
 }
 
 func collectNeutralWireKeys(t reflect.Type, out map[string]struct{}, seen map[reflect.Type]struct{}) {
-	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {

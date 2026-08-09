@@ -2764,6 +2764,57 @@ func TestProcessWorkflowFinalizeClosesOpenSpecSidecars(t *testing.T) {
 	}
 }
 
+func TestProcessWorkflowFinalizeClosesRemainingGeneratedMembers(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	remaining := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "partially materialized step that can no longer execute",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "unused",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+
+	remainingAfter := mustGetBead(t, store, remaining.ID)
+	if remainingAfter.Status != "closed" {
+		t.Fatalf("remaining generated member status = %q, want closed", remainingAfter.Status)
+	}
+	if got := remainingAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("remaining generated member gc.outcome = %q, want skipped", got)
+	}
+	finalizerAfter := mustGetBead(t, store, finalizer.ID)
+	if got := finalizerAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("finalizer gc.outcome = %q, want pass", got)
+	}
+}
+
 func TestProcessWorkflowFinalizeTreatsQuarantinedControlAsFailure(t *testing.T) {
 	t.Parallel()
 

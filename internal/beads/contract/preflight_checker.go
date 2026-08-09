@@ -308,7 +308,24 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
 	case "postgres":
 		if hasDSN {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)
+			// Gas City derives the endpoint from postgres_dsn (see
+			// MetadataState.PostgresEndpoint), so the DSN form is a shape gc
+			// understands rather than one to convert. The gate is
+			// validatePostgresEndpoint — the one LoadMetadataState uses — so a
+			// PASS here means the loader will accept the scope. Gating on
+			// ParsePostgresDSNEndpoint alone would PASS a DSN that parses but
+			// supplies no database, or a port outside 1..65535, both of which
+			// the loader hard-rejects.
+			//
+			// The summary stays free of the DSN itself: only
+			// PostgresDSNRedacted is sanitized on the way out, so echoing a
+			// parse error that quotes the DSN would leak a hand-written
+			// password past Redacted().
+			state := MetadataState{Backend: "postgres", PostgresDSN: metadata.PostgresDSN}
+			if err := state.validatePostgresEndpoint(); err != nil {
+				return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn does not resolve to a complete postgres endpoint", details)
+			}
+			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses postgres_dsn shape", details)
 		}
 		if metadata.hasCompletePostgresSplitFields() {
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)

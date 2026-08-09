@@ -50,7 +50,10 @@ func TestPreflightRedactsPostgresDSN(t *testing.T) {
 
 	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
 	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckWarn)
-	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckWarn)
+	// Gas City derives the endpoint from postgres_dsn, so the DSN form is a
+	// shape gc understands — the contract-shape check must not nag operators
+	// to convert it back to the discrete fields.
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
 	check := findPreflightCheck(t, result, PreflightCheckMetadataBackend)
 	if check.Details.PostgresDSNRedacted != "postgres://[REDACTED]" {
 		t.Fatalf("PostgresDSNRedacted = %q, want redacted DSN", check.Details.PostgresDSNRedacted)
@@ -61,6 +64,36 @@ func TestPreflightRedactsPostgresDSN(t *testing.T) {
 	}
 	if strings.Contains(string(data), "swordfish") || strings.Contains(string(data), "operator:swordfish") {
 		t.Fatalf("serialized result leaked DSN secret: %s", data)
+	}
+}
+
+// TestPreflightFailsContractShapeOnUnderivablePostgresDSN pins the other half
+// of the postgres_dsn widening: gc accepts the DSN form, so the shape check
+// only fires for a DSN it cannot derive an endpoint from — and it fails hard,
+// because such a scope has no usable endpoint at all.
+func TestPreflightFailsContractShapeOnUnderivablePostgresDSN(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "postgres",
+		"postgres_dsn": "host=db.example.com port=5432 user=operator dbname=gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "postgres"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
+	check := findPreflightCheck(t, result, PreflightCheckContractShape)
+	if !strings.Contains(check.Summary, "postgres_dsn") {
+		t.Errorf("Summary = %q, want it to name postgres_dsn", check.Summary)
+	}
+	// The summary must never echo the DSN: only PostgresDSNRedacted is
+	// sanitized on the way out.
+	if strings.Contains(check.Summary, "db.example.com") {
+		t.Errorf("Summary = %q, leaked the raw DSN", check.Summary)
 	}
 }
 

@@ -68,6 +68,10 @@ type Server struct {
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
+	// structuredPeekPoll overrides the structured fallback stream's periodic
+	// history check in tests. Nil uses outputStreamPollInterval.
+	structuredPeekPoll <-chan time.Time
+
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 

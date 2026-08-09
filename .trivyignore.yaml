@@ -88,6 +88,13 @@ vulnerabilities:
       - "usr/local/bin/dolt"
     expired_at: 2026-08-07
     statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
+  - id: CVE-2026-56852
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-08-07
+    statement: Rebuilt gh and Dolt sources embed golang.org/x/text 0.38.0 and 0.36.0, and external kubectl embeds 0.33.0; remove each path when its upstream source bumps to x/text 0.39.0 or later.
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/dolt"
@@ -180,10 +187,7 @@ vulnerabilities:
   # golang.org/x/crypto v0.52.0, which clears the gc instance of every
   # x/crypto/ssh CVE below (fixed in x/crypto 0.52.0) and CVE-2026-33814
   # (x/net http2, fixed in 0.53.0); the gc path is therefore dropped from those
-  # entries so the scan must prove gc is clean rather than mask it. gc is still
-  # waived for the x/net HTML/idna CVEs fixed only in x/net >= 0.55.0
-  # (CVE-2026-25680/25681/27136/39821/42502/42506); drop the gc path from each
-  # once gc's go.mod bumps golang.org/x/net >= 0.55.0. bd (beads v1.1.0) and
+  # entries so the scan must prove gc is clean rather than mask it. bd (beads v1.1.0) and
   # kubectl stay external and base-pre-existing (Container Scan already red on
   # main, scheduled run 2026-06-24); remove their paths once they rebuild
   # upstream. TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no
@@ -191,45 +195,39 @@ vulnerabilities:
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net HTML parsing DoS; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net HTML parsing DoS; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-25681
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-27136
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-39821
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net/idna issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net/idna issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-42502
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-42506
     paths:
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0), gc (indirect x/net v0.54.0), and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream and gc bumps golang.org/x/net >= 0.55.0.
+    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). Remove once bd/kubectl rebuild upstream.
   - id: CVE-2026-39827
     paths:
       - "usr/local/bin/bd"

@@ -270,7 +270,7 @@ func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]strin
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
-	ad := buildOrderDispatcher(t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher for empty orders")
 	}
@@ -280,7 +280,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 	// City with formula layers that exist but contain no orders.
 	dir := t.TempDir()
 	cfg := &config.City{}
-	ad := buildOrderDispatcher(dir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, dir, cfg, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher when no orders exist")
 	}
@@ -1129,6 +1129,9 @@ metadata = { "gc.run_target" = "worker" }
 	}
 	if !rec.hasType(events.OrderCompleted) || rec.hasType(events.OrderFailed) {
 		t.Fatalf("events = %+v, want completed without failure", rec.events)
+	}
+	if !rec.hasType(events.ExecutionStepDefined) {
+		t.Fatalf("events = %+v, want initial execution step-definition snapshot", rec.events)
 	}
 }
 
@@ -4371,6 +4374,7 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{rigStore, legacyStore},
+		nil,
 		stale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		orderFilterForTest("rig-digest:rig:frontend"),
@@ -4435,6 +4439,7 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{failingStore, cityStore, rigStore},
+		nil,
 		cityStale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		nil,
@@ -6535,7 +6540,7 @@ pool = "polecat"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6816,7 +6821,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6885,7 +6890,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6967,7 +6972,7 @@ pool = "dog"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7056,7 +7061,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7331,7 +7336,7 @@ pool = "worker"
 		},
 	}
 
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &bytes.Buffer{})
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -7403,7 +7408,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7470,7 +7475,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7546,7 +7551,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7600,7 +7605,7 @@ interval = "30s"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher (beads-health should still be found); stderr: %s", stderr.String())
 	}
@@ -10244,4 +10249,53 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 	if !strings.Contains(logs.String(), "panic") {
 		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
 	}
+}
+
+func TestCountClosedOrderTrackingRetentionEligible(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	t.Run("returns correct eligible count without deleting", func(t *testing.T) {
+		seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+3)
+		for i := range minClosedOrderTrackingRetained + 3 {
+			seed = append(seed, beads.Bead{
+				ID:        fmt.Sprintf("count-%02d", i),
+				Title:     "order:count",
+				Status:    "closed",
+				Type:      "task",
+				CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+				Labels:    []string{"order-run:count", labelOrderTracking},
+				Ephemeral: true,
+			})
+		}
+		store := beads.NewMemStoreFrom(100, seed, nil)
+		policy := orderTrackingRetentionPolicyForConfig(nil)
+
+		count, err := countClosedOrderTrackingRetentionEligible([]beads.Store{store}, now, policy, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// 3 beads exceed the retain-10 floor and are past the 7d TTL.
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		// Store must be unchanged — count does not delete.
+		for i := range minClosedOrderTrackingRetained + 3 {
+			id := fmt.Sprintf("count-%02d", i)
+			if _, err := store.Get(id); err != nil {
+				t.Fatalf("%s should still exist after count: %v", id, err)
+			}
+		}
+	})
+
+	t.Run("returns 0 when nothing is eligible", func(t *testing.T) {
+		store := beads.NewMemStore()
+		policy := orderTrackingRetentionPolicyForConfig(nil)
+		count, err := countClosedOrderTrackingRetentionEligible([]beads.Store{store}, now, policy, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("count = %d, want 0 for empty store", count)
+		}
+	})
 }

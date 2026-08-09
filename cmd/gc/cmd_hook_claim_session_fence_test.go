@@ -515,3 +515,156 @@ func TestWriteHookClaimDrainDoesNotAckWhenNotRequested(t *testing.T) {
 		t.Fatalf("result.DrainAcknowledged = true without --drain-ack")
 	}
 }
+
+// writeFenceTestCityAgents writes a minimal city with a caller-supplied agent
+// block, so a test can exercise the claim fence against a config that does NOT
+// contain the runtime's template, or contains it in a suspended state.
+func writeFenceTestCityAgents(t *testing.T, agentsTOML string) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "[workspace]\nname = \"test-city\"\n\n" + agentsTOML
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir
+}
+
+// TestHookCommandClaimStaleSessionMissingTemplateDrainsBeforeAgentResolution
+// proves a stale runtime whose template was removed from config is refused as
+// stale by the claim fence BEFORE the "agent not found in config" early return.
+// The startup wrapper invokes gc hook --claim --json --drain-ack; before the
+// fence was hoisted ahead of agent resolution, a stale session whose template
+// had been dropped hit the bare `return 1` with "not found in config" and its
+// wrapper retried that plain failure forever instead of seeing the terminal
+// stale-session drain result and exiting. This pins the ordering so the fence
+// always pre-empts the missing-template early return for a stale session.
+func TestHookCommandClaimStaleSessionMissingTemplateDrainsBeforeAgentResolution(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	// The city has no "worker" agent, so resolveAgentIdentity(template "worker")
+	// fails — the early return the fence must now pre-empt for a stale session.
+	cityDir := writeFenceTestCityAgents(t, "[[agent]]\nname = \"other\"\n")
+	sessionID := newFenceSessionBead(t, cityDir, session.StateFailedCreate, "failed-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "failed-token")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonStaleSession {
+		t.Fatalf("result = %+v, want action=drain reason=stale_session", result)
+	}
+	if !strings.Contains(stderr.String(), "refusing stale session") {
+		t.Fatalf("stderr = %q, want stale-session refusal", stderr.String())
+	}
+	// The reorder's whole point: the fence must pre-empt the missing-template
+	// early return, so its "not found in config" failure must NOT be reached.
+	if strings.Contains(stderr.String(), "not found in config") {
+		t.Fatalf("stale session hit the agent-not-found early return before the fence: %s", stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran for a stale session with a missing template; stat error = %v", err)
+	}
+}
+
+// TestHookCommandClaimStaleSessionSuspendedAgentDrainsBeforeSuspensionCheck
+// proves a stale runtime whose agent is suspended is refused as stale by the
+// claim fence BEFORE the "agent is suspended" early return. As with the
+// missing-template case, the startup wrapper's gc hook --claim --json
+// --drain-ack must see the terminal stale-session drain instead of the bare
+// suspension failure it would otherwise retry forever.
+func TestHookCommandClaimStaleSessionSuspendedAgentDrainsBeforeSuspensionCheck(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	// The "worker" agent exists but is suspended, so isAgentEffectivelySuspendedWith
+	// returns true — the early return the fence must now pre-empt for a stale session.
+	cityDir := writeFenceTestCityAgents(t, "[[agent]]\nname = \"worker\"\nsuspended = true\n")
+	sessionID := newFenceSessionBead(t, cityDir, session.StateFailedCreate, "failed-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "failed-token")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonStaleSession {
+		t.Fatalf("result = %+v, want action=drain reason=stale_session", result)
+	}
+	if !strings.Contains(stderr.String(), "refusing stale session") {
+		t.Fatalf("stderr = %q, want stale-session refusal", stderr.String())
+	}
+	// The reorder's whole point: the fence must pre-empt the suspension early
+	// return, so its "is suspended" failure must NOT be reached.
+	if strings.Contains(stderr.String(), "is suspended") {
+		t.Fatalf("stale session hit the agent-suspended early return before the fence: %s", stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran for a stale session with a suspended agent; stat error = %v", err)
+	}
+}
+
+// TestHookCommandClaimStaleSessionSuspendedCityDrainsBeforeSuspensionCheck
+// proves a stale runtime in a SUSPENDED CITY is refused as stale by the claim
+// fence BEFORE the bare "gc hook: city is suspended" early return. Before the
+// fence was hoisted ahead of the city-suspension check, a stale session in a
+// suspended city hit that bare `return 1` and its startup wrapper retried the
+// plain city-suspended failure forever instead of seeing the terminal
+// stale-session drain result and exiting. This pins the ordering so the fence
+// pre-empts the city-suspension early return for a stale session too.
+func TestHookCommandClaimStaleSessionSuspendedCityDrainsBeforeSuspensionCheck(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	// A normal, resolvable, non-suspended "worker" agent, so the only early
+	// return in play is the city-suspension one the fence must pre-empt.
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateFailedCreate, "failed-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "failed-token")
+	// Suspend the whole city via the documented GC_SUSPENDED escape hatch so
+	// citySuspendedWithState fires the "gc hook: city is suspended" early return.
+	t.Setenv("GC_SUSPENDED", "1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonStaleSession {
+		t.Fatalf("result = %+v, want action=drain reason=stale_session", result)
+	}
+	if !strings.Contains(stderr.String(), "refusing stale session") {
+		t.Fatalf("stderr = %q, want stale-session refusal", stderr.String())
+	}
+	// The reorder's whole point: the fence must pre-empt the city-suspended early
+	// return, so its "city is suspended" failure must NOT be reached.
+	if strings.Contains(stderr.String(), "city is suspended") {
+		t.Fatalf("stale session hit the city-suspended early return before the fence: %s", stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran for a stale session in a suspended city; stat error = %v", err)
+	}
+}

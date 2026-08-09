@@ -40,6 +40,14 @@ record_fail() { echo "  FAIL $1 — $2"; fail=$((fail + 1)); }
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL="author@example.com"
 export GIT_COMMITTER_NAME="Test Deployer" GIT_COMMITTER_EMAIL="deployer@example.com"
 export GIT_CONFIG_NOSYSTEM=1
+
+# This suite tests rebase conflict resolution, not the pre-push bead
+# ownership/staleness guard (ga-fip9ps.1, its own suite:
+# test-push-ownership-guard.sh). attempt_bounded_self_rebase now calls that
+# guard immediately before its --force-with-lease push; disable it here so
+# these tests stay hermetic instead of making a live bd/network call against
+# this shell's real $GC_AGENT.
+export POG_DISABLE=1
 unset GIT_DIR GIT_WORK_TREE 2>/dev/null || true
 
 # new_repo: create an isolated git repo in a fresh tmpdir, print its path.
@@ -388,10 +396,11 @@ test_push_never_bare_force() {
 test_bounded_rebase_uses_force_with_lease() {
     # SC2016 intentional: literal-text search of rebase-resolve-lib.sh source.
     # shellcheck disable=SC2016
-    if grep -qE 'git push --force-with-lease origin "\$branch"' "$LIB"; then
+    if grep -qE 'git push "\$lease_arg" origin "\$branch"' "$LIB" \
+        && grep -qE '^\s*lease_arg="--force-with-lease=\$branch:\$expected_remote_sha"' "$LIB"; then
         record_pass "push/bounded-rebase-force-with-lease"
     else
-        record_fail "push/bounded-rebase-force-with-lease" "attempt_bounded_self_rebase's push is not --force-with-lease"
+        record_fail "push/bounded-rebase-force-with-lease" "attempt_bounded_self_rebase's push is not the explicit-value --force-with-lease form"
     fi
 }
 
@@ -705,6 +714,65 @@ test_bounded_rebase_stale_lease_returns_13() {
     rm -rf "$remote" "$work" "$seed" "$intruder"
 }
 
+# Reproduces the real-world false-rejection this fix addresses: <branch> is
+# not covered by the remote's configured fetch refspec (only base_ref is,
+# matching deployer worktrees whose remote.origin.fetch is restricted to
+# main/validator refs). The tracking ref for <branch> exists locally (via a
+# one-off fetch, as the real workflow performs) and is verified fresh, but
+# bare --force-with-lease still rejects it as stale because it resolves its
+# expected value through the refspec mapping rather than the ref itself.
+test_bounded_rebase_restricted_fetch_refspec_still_pushes() {
+    local remote work seed
+    remote="$(new_bare_remote)"
+    seed="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-seed.XXXXXX")"
+    git clone -q "$remote" "$seed" 2>/dev/null
+    (
+        cd "$seed" || exit 1
+        git config commit.gpgsign false
+        printf 'base\n' > f.txt; git add -A; git commit -qm base
+        git push -q origin main
+        git checkout -q -b feature
+        printf 'feature file\n' > feature.txt; git add -A; git commit -qm "feature adds feature.txt"
+        git push -q origin feature
+        git checkout -q main
+        printf 'main file\n' > main-only.txt; git add -A; git commit -qm "main adds main-only.txt"
+        git push -q origin main
+    )
+
+    work="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-work.XXXXXX")"
+    git clone -q "$remote" "$work"
+    (
+        cd "$work" || exit 1
+        git config commit.gpgsign false
+        # Restrict to main-only, like the real deployer worktrees this bug
+        # was found in — `feature` is deliberately NOT a configured refspec.
+        git config --unset-all remote.origin.fetch
+        git config --add remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+        # One-off fetch of the branch itself, as the real workflow does,
+        # populating the tracking ref outside the configured refspec.
+        git fetch -q origin refs/heads/feature:refs/remotes/origin/feature
+        git checkout -q -B feature refs/remotes/origin/feature
+    )
+
+    local before_local output rc
+    before_local="$(git -C "$work" rev-parse HEAD)"
+    output="$(cd "$work" && attempt_bounded_self_rebase feature main 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]]; then
+        record_fail "bounded/restricted-fetch-refspec-still-pushes" "expected rc=0, got rc=$rc, output: $output"
+        rm -rf "$remote" "$work" "$seed"; return
+    fi
+    local after_sha remote_after
+    after_sha="$(printf '%s\n' "$output" | sed -n 's/^AFTER_SHA=//p')"
+    remote_after="$(remote_sha "$remote" refs/heads/feature)"
+    if [[ "$before_local" != "" && -n "$after_sha" && "$remote_after" == "$after_sha" ]]; then
+        record_pass "bounded/restricted-fetch-refspec-still-pushes (rc=0, pushed despite refspec restriction)"
+    else
+        record_fail "bounded/restricted-fetch-refspec-still-pushes" \
+            "before_local=$before_local after_sha=$after_sha remote_after=$remote_after"
+    fi
+    rm -rf "$remote" "$work" "$seed"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -732,6 +800,7 @@ run_all() {
     test_bounded_rebase_trivial_conflict_resolves_and_succeeds
     test_bounded_rebase_real_conflict_refused_untouched
     test_bounded_rebase_stale_lease_returns_13
+    test_bounded_rebase_restricted_fetch_refspec_still_pushes
 
     echo
     echo "pass=$pass fail=$fail"

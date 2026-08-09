@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,7 @@ func TestControllerLoopCancel(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	controllerLoop(ctx, time.Hour, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
@@ -68,7 +69,7 @@ func TestControllerLoopTick(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	controllerLoop(ctx, time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
@@ -110,7 +111,7 @@ func TestGracefulStopAllFallsBackWhenPartialListOmitsExplicitTarget(t *testing.T
 	}
 	_ = sp.Start(context.Background(), "alpha", runtime.Config{})
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	gracefulStopAll([]string{"alpha"}, sp, 20*time.Millisecond, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr)
 	if sp.IsRunning("alpha") {
 		t.Fatal("gracefulStopAll should stop explicit targets even when partial listing omits them")
@@ -171,7 +172,7 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -186,10 +187,7 @@ func TestControllerShutdown(t *testing.T) {
 	// Ensure cleanup: if the test fails, send stop so the goroutine exits.
 	t.Cleanup(func() {
 		tryStopController(dir, &bytes.Buffer{})
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
+		awaitClose(t, done, "controller to exit after stop")
 	})
 
 	// Poll for controller socket to become available instead of fixed sleep.
@@ -199,13 +197,9 @@ func TestControllerShutdown(t *testing.T) {
 		t.Fatal("tryStopController returned false, expected true")
 	}
 
-	select {
-	case <-done:
-		if exitCode != 0 {
-			t.Errorf("runController exit code = %d, want 0; stderr: %s", exitCode, stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runController did not exit after stop")
+	awaitClose(t, done, "runController exit after stop")
+	if exitCode != 0 {
+		t.Errorf("runController exit code = %d, want 0; stderr: %s", exitCode, stderr.String())
 	}
 
 	// Agent should have been stopped during shutdown.
@@ -239,7 +233,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -254,6 +248,17 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	}
 	if pid := controllerAlive(cityPath); pid == 0 {
 		t.Fatal("controllerAlive = 0, want live controller via fallback socket")
+	}
+	legacyPing, err := sendControllerCommand(cityPath, "ping")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(ping): %v", err)
+	}
+	if got, want := string(legacyPing), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("legacy ping response = %q, want numeric PID %q", got, want)
+	}
+	identity := probeControllerIdentity(cityPath)
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
+		t.Fatalf("probeControllerIdentity = %+v, want PID %d hosted standalone", identity, os.Getpid())
 	}
 	resp, err := sendControllerCommand(cityPath, "reload")
 	if err != nil {
@@ -273,11 +278,33 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	if !tryStopController(cityPath, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop did not invoke cancel via fallback socket")
+	awaitClose(t, ctx.Done(), "stop invoking cancel via fallback socket")
+}
+
+func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+	cityPath := t.TempDir()
+
+	done := make(chan struct{})
+	go func() {
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		close(done)
+	}()
+
+	if _, err := client.Write([]byte("identify\n")); err != nil {
+		t.Fatalf("write command: %v", err)
 	}
+	var got controllerIdentityReply
+	if err := json.NewDecoder(client).Decode(&got); err != nil {
+		t.Fatalf("decode identity: %v", err)
+	}
+	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("identity = %+v, want PID %d hosted by supervisor", got, os.Getpid())
+	}
+
+	client.Close() //nolint:errcheck
+	awaitClose(t, done, "handleControllerConn to exit")
 }
 
 func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
@@ -390,6 +417,7 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 			t.Errorf("read command: %v", err)
 			return
 		}
+		// Input the test feeds a fake server to define the scenario, not a hang detector (ga-57b2dk exclusion).
 		<-time.After(200 * time.Millisecond)
 	}()
 
@@ -481,7 +509,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -493,10 +521,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	// Ensure cleanup: cancel and wait for the goroutine to exit.
 	t.Cleanup(func() {
 		cancel()
-		select {
-		case <-loopDone:
-		case <-time.After(5 * time.Second):
-		}
+		awaitClose(t, loopDone, "controller reload loop to exit after cancel")
 	})
 
 	// Wait for initial reconcile.
@@ -511,7 +536,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 	// the directory write, debounce (5ms) sets dirty, and the next tick reloads
 	// config and writes "Config reloaded" to stdout. Polling stdout directly
 	// avoids depending on reconcile count which varies with tick timing.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -522,7 +547,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -575,7 +600,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	loopDone := make(chan struct{})
 	go func() {
@@ -586,10 +611,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	t.Cleanup(func() {
 		cancel()
-		select {
-		case <-loopDone:
-		case <-time.After(5 * time.Second):
-		}
+		awaitClose(t, loopDone, "controller reload loop to exit after cancel")
 	})
 
 	for reconcileCount.Load() < 1 {
@@ -598,7 +620,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	writeCityTOML(t, dir, "test", "mayor", "worker")
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for !strings.Contains(stdout.String(), "Config reloaded") {
 		select {
 		case <-deadline:
@@ -609,7 +631,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 		}
 	}
 
-	deadline = time.After(5 * time.Second)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ := lastAgentNames.Load().([]string)
 		if containsAgentNames(names, "mayor", "worker") {
@@ -744,11 +766,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 		t.Fatalf("rewrite city.toml: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after city.toml rewrite; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after city.toml rewrite")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after file change; stderr=%q", stderr.String())
 	}
@@ -768,11 +786,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 		t.Fatalf("MkdirAll(agents): %v", err)
 	}
 	// First poke is from the mkdir CREATE event on the watched city dir.
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for poke after agents/ mkdir; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after agents/ mkdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after agents/ mkdir; stderr=%q", stderr.String())
 	}
@@ -792,11 +806,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	if err := os.WriteFile(agentFile, []byte("You are noreen.\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(agentFile): %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for poke after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after write inside agents/ (subtree watch)")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after write inside agents/; subtree watch did not register; stderr=%q", stderr.String())
 	}
@@ -823,11 +833,7 @@ func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
 		t.Fatalf("rewrite city.toml: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after direct file seed changed; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after direct file seed changed")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after direct file seed changed; stderr=%q", stderr.String())
 	}
@@ -864,6 +870,7 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 		t.Fatalf("rewrite nested unrelated file: %v", err)
 	}
 
+	// Negative-assertion window: asserts no watcher poke arrives (ga-57b2dk exclusion).
 	select {
 	case <-pokeCh:
 		t.Fatalf("unexpected watcher poke after unrelated nested city-root file changed; stderr=%q", stderr.String())
@@ -913,6 +920,7 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 		if err := os.WriteFile(traceFile, []byte(body), 0o644); err != nil {
 			t.Fatalf("rewrite runtime trace #%d: %v", i+1, err)
 		}
+		// Negative-assertion window, loop body: asserts no watcher poke arrives (ga-57b2dk exclusion).
 		select {
 		case <-pokeCh:
 			t.Fatalf("unexpected watcher poke after runtime trace write #%d; stderr=%q", i+1, stderr.String())
@@ -928,11 +936,7 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 		t.Fatalf("write legacy city-root trace: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after legacy city-root trace write; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after legacy city-root trace write")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after legacy city-root trace write; stderr=%q", stderr.String())
 	}
@@ -969,11 +973,7 @@ func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T)
 		t.Fatalf("rewrite symlink target file: %v", err)
 	}
 
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after nested symlink seed dir changed; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after nested symlink seed dir changed")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after nested symlink seed dir changed; stderr=%q", stderr.String())
 	}
@@ -1004,11 +1004,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.RemoveAll(agentDir); err != nil {
 		t.Fatalf("RemoveAll agent dir: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after recursive subdir removal; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after recursive subdir removal")
 
 	dirty.Store(false)
 	select {
@@ -1021,11 +1017,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("recreated\n"), 0o644); err != nil {
 		t.Fatalf("seed recreated prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after recursive subdir recreation; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after recursive subdir recreation")
 
 	dirty.Store(false)
 	select {
@@ -1035,11 +1027,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
 		t.Fatalf("edit recreated prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after edit in recreated recursive subdir; stderr=%q", stderr.String())
-	}
+	awaitClose(t, pokeCh, "watcher poke after edit in recreated recursive subdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit in recreated recursive subdir; stderr=%q", stderr.String())
 	}
@@ -1093,11 +1081,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	if err := os.WriteFile(promptPath, []byte("edited prompt\n"), 0o644); err != nil {
 		t.Fatalf("edit prompt: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for poke after edit to %s; pre-existing nested subdir was not watched; stderr=%q", promptPath, stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after edit to pre-existing nested subdir")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit to nested file %s; stderr=%q", promptPath, stderr.String())
 	}
@@ -1111,11 +1095,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	if err := os.WriteFile(overlayPath, []byte(`{"a":2}`), 0o644); err != nil {
 		t.Fatalf("edit overlay: %v", err)
 	}
-	select {
-	case <-pokeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for poke after edit to %s; overlay subtree was not watched; stderr=%q", overlayPath, stderr.String())
-	}
+	awaitClose(t, pokeCh, "poke after edit to overlay subtree")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after edit to %s; stderr=%q", overlayPath, stderr.String())
 	}
@@ -1201,7 +1181,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1213,21 +1193,12 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	shutdown := func() {
 		shutdownOnce.Do(func() {
 			cancel()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("controller did not exit during cleanup; stdout=%q stderr=%q", stdout.String(), stderr.String())
-			}
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) {
+			awaitClose(t, done, "controller to exit during cleanup")
+			awaitCond(t, func() bool {
 				_ = os.RemoveAll(dir)
-				if _, err := os.Stat(dir); os.IsNotExist(err) {
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			entries, _ := os.ReadDir(filepath.Join(dir, ".gc"))
-			t.Fatalf("controller temp dir persisted after shutdown; .gc entries=%v stdout=%q stderr=%q", entries, stdout.String(), stderr.String())
+				_, statErr := os.Stat(dir)
+				return os.IsNotExist(statErr)
+			}, "controller temp dir removal after shutdown")
 		})
 	}
 	t.Cleanup(shutdown)
@@ -1259,17 +1230,9 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		return beads.Bead{}
 	}
 
-	waitForNamedMode("always", 5*time.Second)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(stdout.String(), "City started.") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(stdout.String(), "City started.") {
-		t.Fatalf("controller never reached started state; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
+	waitForNamedMode("always", hangBudget)
+	awaitCond(t, func() bool { return strings.Contains(stdout.String(), "City started.") },
+		"controller reaching started state")
 
 	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
 	parsedCfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
@@ -1290,7 +1253,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
 	}
 
-	bead := waitForNamedMode("on_demand", 5*time.Second)
+	bead := waitForNamedMode("on_demand", hangBudget)
 	if got := bead.Metadata["session_name"]; got != "mayor" {
 		t.Fatalf("session_name after reload = %q, want mayor", got)
 	}
@@ -1298,16 +1261,8 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		t.Fatalf("controller buildFn idle_timeout = %q, want %q", got, "5s")
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !sp.IsRunning("mayor") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if sp.IsRunning("mayor") {
-		t.Fatalf("mayor still running after idle_timeout reload; stdout=%q stderr=%q calls=%v", stdout.String(), stderr.String(), sp.Calls)
-	}
+	awaitCond(t, func() bool { return !sp.IsRunning("mayor") },
+		"mayor session stopping after idle_timeout reload")
 	if !strings.Contains(stdout.String(), "Config reloaded") {
 		t.Fatalf("stdout missing config reload marker: %q", stdout.String())
 	}
@@ -1325,7 +1280,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -1354,11 +1309,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 	}
 
 	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleControllerConn did not exit")
-	}
+	awaitClose(t, done, "handleControllerConn to exit")
 }
 
 func TestHandleSessionCircuitResetSocketCmd(t *testing.T) {
@@ -1492,17 +1443,14 @@ func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
 		persistErr <- persistSessionCircuitBreakerMetadata(sessionFrontDoor(store), session.ID, cb, identity, t0.Add(6*time.Minute))
 	}()
 
-	select {
-	case <-store.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("persist did not reach blocked OPEN metadata write")
-	}
+	awaitClose(t, store.entered, "persist reaching blocked OPEN metadata write")
 
 	resetErr := make(chan error, 1)
 	go func() {
 		resetErr <- resetSessionCircuitBreakerState(store, session.ID, identity, cb)
 	}()
 
+	// Bounded best-effort probe with no assertion on either branch (ga-57b2dk exclusion).
 	select {
 	case <-store.cleared:
 	case <-time.After(50 * time.Millisecond):
@@ -1858,7 +1806,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -1877,23 +1825,11 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.After(3 * time.Second)
-	for !strings.Contains(stderr.String(), "config reload") {
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for invalid config reload; reconciles=%d stdout=%q stderr=%q",
-				reconcileCount.Load(), stdout.String(), stderr.String())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return strings.Contains(stderr.String(), "config reload") },
+		"invalid config reload to be logged")
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for controllerLoop to exit")
-	}
+	awaitClose(t, done, "controllerLoop to exit")
 
 	if !strings.Contains(stderr.String(), "config reload") {
 		t.Errorf("expected config reload error in stderr, got: %s", stderr.String())
@@ -1935,7 +1871,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
 		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
@@ -1948,16 +1884,8 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	// Change the city name.
 	writeCityTOML(t, dir, "different-city", "mayor")
 
-	deadline := time.After(3 * time.Second)
-	for !strings.Contains(stderr.String(), "workspace.name changed") {
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for city name change rejection; reconciles=%d stdout=%q stderr=%q",
-				reconcileCount.Load(), stdout.String(), stderr.String())
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return strings.Contains(stderr.String(), "workspace.name changed") },
+		"city name change rejection to be logged")
 
 	cancel()
 	time.Sleep(50 * time.Millisecond) // let controllerLoop goroutine exit before TempDir cleanup
@@ -2032,7 +1960,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 		return DesiredStateResult{State: ds}
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
@@ -2040,14 +1968,11 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		tryStopController(dir, &bytes.Buffer{})
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
+		awaitClose(t, done, "controller to exit after stop")
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2074,7 +1999,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	}
 
 	var names []string
-	deadline = time.After(1500 * time.Millisecond)
+	deadline = time.After(hangBudget)
 	for {
 		names, _ = lastAgentNames.Load().([]string)
 		if reconcileCount.Load() > before &&
@@ -2132,7 +2057,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -2143,17 +2068,14 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// Ensure cleanup: if the test fails, send stop so the goroutine exits.
 	t.Cleanup(func() {
 		tryStopController(dir, &bytes.Buffer{})
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
+		awaitClose(t, done, "controller to exit after stop")
 	})
 
 	// Poll for controller socket to become available.
 	waitForController(t, dir)
 
 	// Wait for initial tick.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(hangBudget)
 	for reconcileCount.Load() < 1 {
 		select {
 		case <-deadline:
@@ -2174,23 +2096,12 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	}
 
 	// Wait for an additional reconcile triggered by poke.
-	deadline = time.After(3 * time.Second)
-	for reconcileCount.Load() <= before {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for poke-triggered reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() > before },
+		"poke-triggered reconcile")
 
 	// Stop controller.
 	tryStopController(dir, &bytes.Buffer{})
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit")
-	}
+	awaitClose(t, done, "controller to exit")
 }
 
 // waitForController polls until the controller socket at dir is responsive,
@@ -2198,18 +2109,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 // are unreliable under load.
 func waitForController(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		if controllerAlive(dir) != 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return controllerAlive(dir) != 0 },
+		"controller socket becoming available")
 }
 
 // osFS is a minimal fsys.FS for test helpers that delegates to the os package.

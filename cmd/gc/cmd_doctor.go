@@ -6,7 +6,6 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	doctorchecks "github.com/gastownhall/gascity/internal/doctor/checks"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -173,6 +174,7 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning    bool
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
+	SkipRigDoltChecks    bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -180,96 +182,17 @@ type buildDoctorChecksOpts struct {
 }
 
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
-	indexFunc := doctorOrderFiringCurrentLastRunIndexFunc(cityPath, cfg, stderr)
-	return func(order orders.Order) (time.Time, error) {
-		index, err := indexFunc([]orders.Order{order})
-		if err != nil {
-			return time.Time{}, err
-		}
-		return index[order.ScopedName()], nil
-	}
-}
-
-func doctorOrderFiringCurrentLastRunIndexFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunIndexFunc {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
-	return func(orderList []orders.Order) (map[string]time.Time, error) {
-		type historyGroup struct {
-			stores []beads.OrdersStore
-			names  map[string]struct{}
+	return func(order orders.Order) (time.Time, error) {
+		stores, err := resolveStores(order)
+		if err != nil {
+			return time.Time{}, err
 		}
-		groups := make(map[string]*historyGroup)
-		for _, order := range orderList {
-			scoped := order.ScopedName()
-			if scoped == "" {
-				continue
-			}
-			stores, err := resolveStores(order)
-			if err != nil {
-				return nil, err
-			}
-			key := doctorOrderHistoryStoresKey(stores)
-			group := groups[key]
-			if group == nil {
-				group = &historyGroup{
-					stores: stores,
-					names:  make(map[string]struct{}),
-				}
-				groups[key] = group
-			}
-			group.names[scoped] = struct{}{}
-		}
-		out := make(map[string]time.Time)
-		var errs []error
-		for _, group := range groups {
-			index, err := doctorLastRunIndexForNames(orderFrontDoorsForTypedStores(group.stores), doctorOrderHistoryNames(group.names))
-			if err != nil {
-				errs = append(errs, err)
-			}
-			for scoped, last := range index {
-				if last.After(out[scoped]) {
-					out[scoped] = last
-				}
-			}
-		}
-		return out, errors.Join(errs...)
+		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
-}
-
-func doctorOrderHistoryNames(names map[string]struct{}) []string {
-	out := make([]string, 0, len(names))
-	for name := range names {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func doctorLastRunIndexForNames(stores []*orders.Store, names []string) (map[string]time.Time, error) {
-	out := make(map[string]time.Time)
-	if len(names) == 0 {
-		return out, nil
-	}
-	index, err := orders.LastRunIndexAcross(stores)
-	for _, name := range names {
-		if last := index[name]; !last.IsZero() {
-			out[name] = last
-		}
-	}
-	return out, err
-}
-
-func doctorOrderHistoryStoresKey(stores []beads.OrdersStore) string {
-	if len(stores) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(stores))
-	for _, store := range stores {
-		parts = append(parts, fmt.Sprintf("%p", store.Store))
-	}
-	return strings.Join(parts, "\x00")
 }
 
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
@@ -322,7 +245,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
-		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunIndexFunc(doctorOrderFiringCurrentLastRunIndexFunc(cityPath, cfg, opts.Stderr))))
+		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), doctorLiveSessionSinks(cityPath, cfg)))
+		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
@@ -383,7 +307,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
-	storeFactory := openStoreForCityReadOnlyFastBounded(cityPath)
+	storeFactory := openStoreForCity(cityPath)
 
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
@@ -404,7 +328,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
-		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
+		register(doctorchecks.NewPostgresAuthCheck(cityPath, cfg))
 	}
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
@@ -461,7 +385,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
+			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
@@ -469,7 +393,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
 			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
-			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !opts.SkipRigDoltChecks {
 				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
 				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
 			}
@@ -512,7 +436,8 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
 	supervisorRunning := supervisorAliveHook() != 0
-	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipRigDoltChecks := gcDoltSkip()
+	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
 	// Resolve the rollout-gate snapshot for the doctor section from the on-disk
 	// config plus THIS doctor process's env (Resolve's default LookupEnv); a
@@ -530,6 +455,7 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time
 		SupervisorRunning:    supervisorRunning,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
+		SkipRigDoltChecks:    skipRigDoltChecks,
 		RolloutFlags:         rolloutFlags,
 		RolloutResolveErr:    rolloutResolveErr,
 	}) {
@@ -755,16 +681,6 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
-	}
-}
-
-func openStoreForCityReadOnlyFast(cityPath string) func(string) (beads.Store, error) {
-	return func(dirPath string) (beads.Store, error) {
-		opened, err := openStoreResultAtForCityReadOnlyFast(dirPath, cityPath)
-		if err != nil {
-			return nil, err
-		}
-		return opened.Store, nil
 	}
 }
 

@@ -1321,6 +1321,54 @@ func TestRegression_PolecatWithInProgressWork_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "polecat-mc-p1")
 }
 
+// TestRegression_PolecatWithBlockedInProgressWork_DoesNotWake covers the
+// WakeWork/hook disagreement: an in_progress bead that carries an open
+// ready-blocking dependency or gate is not dispatchable by the hook (see
+// upstream #4726, which taught the hook's crash-recovery tier to skip it),
+// but ComputeAwakeSet fired assigned-work demand from the bead's mere
+// presence, regardless of blocked state. That mismatch re-wakes the session
+// every reconcile tick while the hook returns no_work every cycle.
+func TestRegression_PolecatWithBlockedInProgressWork_DoesNotWake(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
+		Now:              now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
+}
+
+// TestBlockedInProgressWorkDoesNotFillScaleSlot pins the second-order effect of
+// the blocked-work narrowing: workBeadHasAwakeDemand also feeds
+// countAssignedScaleSlots, so a session parked on blocked in_progress work no
+// longer occupies a scale slot. This is intended, not incidental — a session
+// that cannot progress should not hold a pool slot hostage — but it means the
+// change is not purely suppressive: releasing the slot lets a *different*
+// session wake as scaled:demand.
+//
+// mc-p1 is asleep holding blocked work, so it is not a scaled candidate itself
+// (collectActiveBeads requires state=active) but is still counted by
+// countAssignedScaleSlots. With scale_check=1, mc-p2 wakes only if mc-p1's
+// blocked bead released the slot.
+func TestBlockedInProgressWorkDoesNotFillScaleSlot(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep"},
+			{ID: "mc-p2", SessionName: "polecat-mc-p2", Template: "hello-world/polecat", State: "active"},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
+	assertAwake(t, result, "polecat-mc-p2")
+	assertReason(t, result, "polecat-mc-p2", "scaled:demand")
+}
+
 func TestRegression_SessionWithOpenWorkByBeadID_StaysAwake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
@@ -2068,7 +2116,7 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := &tt.cfg.Agents[0]
-			if !isAgentEffectivelySuspendedWith(&tt.cfg, a, suspensionstate.State{}) {
+			if !isAgentEffectivelySuspendedWith(&tt.cfg, "", a, suspensionstate.State{}) {
 				t.Fatalf("expected agent to be effectively suspended")
 			}
 			qn := a.QualifiedName()

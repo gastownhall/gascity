@@ -38,6 +38,9 @@ func diffEndStates(want, got mergeEndState) string {
 	if want.syncFailures != got.syncFailures {
 		fmt.Fprintf(&b, "  syncFailures: want=%v got=%v\n", want.syncFailures, got.syncFailures)
 	}
+	if want.circuitTripped != got.circuitTripped {
+		fmt.Fprintf(&b, "  circuitTripped: want=%v got=%v\n", want.circuitTripped, got.circuitTripped)
+	}
 	if want.statsAdds != got.statsAdds {
 		fmt.Fprintf(&b, "  stats.Adds: want=%v got=%v\n", want.statsAdds, got.statsAdds)
 	}

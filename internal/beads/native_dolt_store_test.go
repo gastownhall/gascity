@@ -340,11 +340,15 @@ func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *test
 	// issue set intentionally includes a blocked bead whose dependency
 	// graph the spy treats as fully satisfied (it is returned unconditionally
 	// whenever queried by status), to prove Ready() must never surface it
-	// even when GetReadyWork would happily return it if asked.
+	// even when GetReadyWork would happily return it if asked. gc-deferred
+	// carries a past DeferUntil to represent an expired time-bound deferral;
+	// the no-DeferUntil (indefinite) case is covered separately by
+	// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads.
+	past := time.Now().UTC().Add(-24 * time.Hour)
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
 		{ID: "gc-pinned", Title: "pinned", Status: beadslib.Status("pinned"), IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-hooked", Title: "hooked", Status: beadslib.Status("hooked"), IssueType: beadslib.TypeTask, Priority: 2},
 		{ID: "gc-review", Title: "review", Status: beadslib.Status("review"), IssueType: beadslib.TypeTask, Priority: 2},
@@ -417,6 +421,52 @@ func TestNativeDoltStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
 	}
 	if ids[futureDeferred.ID] {
 		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
+	}
+}
+
+// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads covers bd defer
+// <id> without --until: a first-class, documented "status-based" indefinite
+// deferral (upstream cmd/bd/defer.go) that sets status=deferred and leaves
+// defer_until NULL, distinct from bd defer <id> --until=<time>'s time-bound
+// snooze. nativeDoltOpenReadyStatuses must keep querying StatusDeferred so an
+// *expired* time-bound deferral (defer_until in the past) can resurface, but
+// an issue that was never time-bound (defer_until nil) must not fall through
+// IsReadyCandidateForTier's nil-DeferUntil case as if it were an ordinary
+// open bead that was never deferred at all.
+func TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	issues := []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred-indefinite", Title: "indefinite", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
+		{ID: "gc-deferred-expired", Title: "expired", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
+	}
+	storage := &nativeDoltStorageSpy{
+		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
+			var result []*beadslib.Issue
+			for _, issue := range issues {
+				if issue.Status != filter.Status {
+					continue
+				}
+				result = append(result, cloneNativeIssueForTest(issue))
+			}
+			return result, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+
+	wantIDs := map[string]bool{"gc-open": true, "gc-deferred-expired": true}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
+	}
+	for _, bead := range got {
+		if !wantIDs[bead.ID] {
+			t.Fatalf("Ready returned unexpected bead %q from %+v — an indefinitely status-deferred bead (status=deferred, defer_until=NULL) must never surface as ready", bead.ID, got)
+		}
 	}
 }
 
@@ -1680,6 +1730,50 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 }
 
+// TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen exercises the
+// real newNativeDoltStoreAt wiring (not the in-memory-only default used by
+// newNativeDoltStoreForTest / the conformance factory): it swaps only the
+// external Dolt-open seam and proves SetLocalString/GetLocalString survive a
+// second open of the same scopeRoot, i.e. clone-local data really lives on
+// disk at <scopeRoot>/.beads/local-strings.json rather than in process memory.
+func TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen(t *testing.T) {
+	scopeRoot := filepath.Join(t.TempDir(), "scope")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() {
+		nativeDoltOpenBestAvailable = oldOpen
+	})
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (first open): %v", err)
+	}
+	if err := store.SetLocalString("gc-1", "last_woke_at", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString: %v", err)
+	}
+
+	sidecarPath := filepath.Join(scopeRoot, ".beads", "local-strings.json")
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("expected sidecar file at %s: %v", sidecarPath, err)
+	}
+
+	reopened, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (reopen): %v", err)
+	}
+	got, err := reopened.GetLocalString("gc-1", "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString after reopen: %v", err)
+	}
+	if got != "2026-07-14T00:00:00Z" {
+		t.Fatalf("GetLocalString after reopen = %q, want persisted value", got)
+	}
+}
+
 func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
 	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
@@ -2008,6 +2102,7 @@ type nativeDoltStorageSpy struct {
 	closeIssue                  func(context.Context, string, string, string, string) error
 	deleteIssue                 func(context.Context, string) error
 	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
+	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
 	getReadyWork                func(context.Context, beadslib.WorkFilter) ([]*beadslib.Issue, error)
 	addLabel                    func(context.Context, string, string, string) error
 	removeLabel                 func(context.Context, string, string, string) error
@@ -2086,6 +2181,13 @@ func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, f
 		return nil, nil
 	}
 	return s.searchIssues(ctx, query, filter)
+}
+
+func (s *nativeDoltStorageSpy) CountIssues(ctx context.Context, query string, filter beadslib.IssueFilter) (int64, error) {
+	if s.countIssues == nil {
+		return 0, nil
+	}
+	return s.countIssues(ctx, query, filter)
 }
 
 func (s *nativeDoltStorageSpy) GetReadyWork(ctx context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -2579,4 +2681,63 @@ func filterNativeIssuesForTest(issues []*beadslib.Issue, filter beadslib.IssueFi
 		}
 	}
 	return filtered
+}
+
+// TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace pins the
+// hermetic open against the variable class that motivated it: the ones this
+// package's scoped projection does not name.
+//
+// BEADS_DOLT_CREDENTIAL_COMMAND is the sharp one — the library runs it — and it
+// is not in nativeDoltOpenEnvKeys, so the scoped projection leaves it standing.
+// The assertion is made from inside the open, where the library would read it.
+func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	t.Setenv("BEADS_DB", "/poison/db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+
+	var seen map[string]string
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen = map[string]string{}
+		for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+			seen[key] = os.Getenv(key)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gcg", nil },
+		}, nil
+	}
+
+	if _, err := OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), filepath.Join(t.TempDir(), "scope")); err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnv: %v", err)
+	}
+	for key, value := range seen {
+		if value != "" {
+			t.Errorf("%s = %q during the open, want withheld", key, value)
+		}
+	}
+	// Withheld for the open, not for the process: a caller that shares this
+	// process must find its environment exactly as it left it.
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND after the open = %q, want the ambient value restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST after the open = %q, want the ambient value restored", got)
+	}
+}
+
+// TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList is the falsification the
+// hermetic open exists for: the scoped projection honors exactly the keys it
+// names, so passing an "empty environment" to it withholds nothing else.
+func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	restore, err := withNativeDoltOpenEnv(map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
+	if err != nil {
+		t.Fatalf("withNativeDoltOpenEnv: %v", err)
+	}
+	got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
+	restore()
+	if got != "/poison/credential-command" {
+		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND during a scoped projection = %q; if the projection now honors unlisted keys, the hermetic open's reason to exist has changed", got)
+	}
 }

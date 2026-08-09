@@ -114,10 +114,19 @@ func TestMain(m *testing.M) {
 	// stay referenced for the process lifetime: the runtime finalizes
 	// unreachable os.Files, which would close the descriptor and release
 	// the lock, letting a concurrent sibling's sweep reclaim this still-
-	// active directory (ga-djbcqt). Cleanup below is explicit, not deferred:
-	// every exit path in this function calls os.Exit, which skips defers.
-	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp")
+	// active directory (ga-djbcqt). Normal and skip exits call os.Exit, which
+	// skips defers, so those paths remove the parent explicitly below; the
+	// deferred removal here additionally covers a setup panic (which unwinds
+	// through defers) so it cannot leak the parent until a later aged sweep.
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
 	tmuxSocketAliveSentinel = tmuxSentinel
+	defer func() {
+		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it
+		// below is honored and this never double-removes on a normal exit.
+		if tmuxSocketParent != "" {
+			_ = os.RemoveAll(tmuxSocketParent)
+		}
+	}()
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
 	if tmuxParentErr == nil {
 		tmuxSocketRoot = filepath.Join(tmuxSocketParent, "tmux")
@@ -192,14 +201,9 @@ func TestMain(m *testing.M) {
 		realBDBinary = override
 	} else {
 		var err error
-		realBDBinary, err = exec.LookPath("bd")
+		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
 		if err != nil {
-			// bd not available — skip all integration tests.
-			_ = os.RemoveAll(tmpDir)
-			if tmuxSocketParent != "" {
-				_ = os.RemoveAll(tmuxSocketParent)
-			}
-			os.Exit(0)
+			panic("integration: building pinned bd binary: " + err.Error())
 		}
 	}
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
@@ -380,6 +384,70 @@ func binaryOverride(envName string) (string, bool, error) {
 		return "", false, fmt.Errorf("%s=%q points to a directory", envName, raw)
 	}
 	return path, true, nil
+}
+
+// buildPinnedIntegrationBDBinary builds bd from the exact Beads module that
+// the integration test binary and gc both import. Resolving PATH here lets an
+// older host bd open the database after gc has migrated it, producing a schema
+// skew that obscures the workflow under test.
+func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		return "", err
+	}
+	binDir := filepath.Join(tmpDir, "pinned-bd")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", fmt.Errorf("create pinned bd directory: %w", err)
+	}
+	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
+	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
+	// which a CGO_ENABLED=0 binary refuses at runtime.
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(binDir, "bd"), nil
+}
+
+// pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
+// same bd shim used by their setup commands. The default runner resolves the
+// ambient process PATH before its per-command environment applies, so using it
+// directly could select a host bd whose schema knowledge predates the pinned
+// Beads module that created the test database.
+func pinnedBdStoreCommandRunner() beads.CommandRunner {
+	runner := beads.ExecCommandRunner()
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			name = bdBinary
+		}
+		return runner(dir, name, args...)
+	}
+}
+
+func pinnedIntegrationBeadsModuleVersion() (string, error) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	cmd.Dir = findModuleRoot()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	}
+	return version, nil
+}
+
+func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
+	version, err := pinnedIntegrationBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
+	}
+	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
+	if version != want {
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	}
 }
 
 func writeExecShim(path, target string) error {

@@ -76,6 +76,12 @@ func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string)
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
+		execName := name
+		if name == "bd" {
+			if pinned := strings.TrimSpace(env["BD_BIN"]); filepath.IsAbs(pinned) {
+				execName = pinned
+			}
+		}
 		start := time.Now()
 		trace := newBDExecTrace(start, dir, name, args)
 		trace("start", nil)
@@ -93,7 +99,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, execName, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
@@ -299,9 +305,20 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
+	// relocatedClasses names the coordination classes this ledger does not
+	// serve. Empty on every city that keeps all classes on one store, which is
+	// what makes the SQL guard inert there. See bdsql_relocation.go.
+	relocatedClasses []RelocatedClass
+
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
+
+	// condReleaseLatchedUnsupported records that this bd rejected the
+	// conditional-release flags, pinning ReleaseIfCurrent to the raw-SQL
+	// fallback for the rest of the process (bdstore_conditional_release.go).
+	condReleaseMu                 sync.Mutex
+	condReleaseLatchedUnsupported bool
 
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
@@ -320,6 +337,8 @@ type BdStore struct {
 	// mode plus the once-per-store degrade latch, under its own mutex
 	// (disjoint from condWriteMu's capability state; no nesting).
 	condWritesStamp
+
+	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
 const (
@@ -341,6 +360,41 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	}
 }
 
+// WithBdStoreRelocatedClasses declares the coordination classes this store's bd
+// ledger no longer serves, so its SQL-backed reads stop believing the empty
+// result bd hands back for beads it cannot see: a read scoped to one bead
+// refuses, and a read over a set of them drops the ones that moved and answers
+// about the rest. See bdsql_relocation.go for why bd cannot detect this itself.
+//
+// A city that relocates nothing passes no classes and the guard cannot fire.
+func WithBdStoreRelocatedClasses(classes ...RelocatedClass) BdStoreOption {
+	return func(s *BdStore) {
+		s.relocatedClasses = append(s.relocatedClasses, classes...)
+	}
+}
+
+// guardRelocatedClassIDs returns a refusal when any of ids belongs to a class
+// this store's ledger does not serve. It is the precondition of every
+// id-scoped, SQL-backed BdStore read and write whose answer is ABOUT the ids it
+// was given — a CAS on one bead, say. A read that answers about a SET of ids
+// partitions instead (see fetchReadyProjection): refusing a whole batch because
+// one member moved would throw away a correct answer about all the others.
+func (s *BdStore) guardRelocatedClassIDs(op string, ids ...string) error {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return RelocatedClassRefusal(op, relocatedClassesForIDs(s.relocatedClasses, ids...))
+}
+
+// relocatedClassesForID reports the relocated classes owning a single id, for
+// the callers that partition a batch rather than refuse it.
+func (s *BdStore) relocatedClassesForID(id string) []RelocatedClass {
+	if s == nil || len(s.relocatedClasses) == 0 {
+		return nil
+	}
+	return relocatedClassesForIDs(s.relocatedClasses, id)
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
 	return NewBdStoreWithPrefix(dir, runner, "", opts...)
@@ -348,13 +402,27 @@ func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStor
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
-	s := &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	s := &BdStore{
+		dir:          dir,
+		runner:       runner,
+		idPrefix:     normalizeIDPrefix(idPrefix),
+		localStrings: newLocalSidecar(bdLocalSidecarPath(dir)),
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
 		}
 	}
 	return s
+}
+
+// bdLocalSidecarPath returns the path of the clone-local sidecar file for a
+// BdStore rooted at dir, or "" (in-memory-only) if dir is unset.
+func bdLocalSidecarPath(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, ".beads", "local-strings.json")
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -1157,19 +1225,51 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
 //
-// SEAM (bd conditional-release verb): today this rides raw `bd sql`. The
-// sqlite backend refuses raw DB access, so that rejection — and embedded dolt
-// WITHOUT a configured dolt directory — surface ErrConditionalReleaseUnsupported
-// (the latter via the releaseIfCurrentViaEmbeddedDoltSQL fallback). Embedded
-// dolt WITH a configured directory instead services the CAS directly through
-// that fallback, returning real rows-affected rather than reporting
-// unsupported. When bd ships its native issueops CAS release verb, consume it
-// HERE as the first attempt:
-// probe by invoking the verb and fall back to this `bd sql` path when bd
-// reports the command unknown (older pinned bd). Callers already treat
-// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
-// (see cmd/gc releasePoolAssignmentIfCurrent), so no caller changes are needed.
+// It prefers bd's native conditional-release verb, which evaluates both
+// preconditions server-side and reports a failed one as exit 13 having written
+// nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
+// fallback for bd 1.0.4, the contract-tested minimum, which predates the flags:
+// there the sqlite backend refuses raw DB access, so that rejection — and
+// embedded dolt WITHOUT a configured dolt directory — surface
+// ErrConditionalReleaseUnsupported (the latter via the
+// releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
+// configured directory services the CAS through that fallback directly. Callers
+// treat ErrConditionalReleaseUnsupported as "take a conditional recheck
+// fallback" (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb
+// path never returns it for a precondition miss.
+//
+// id must be a canonical full bead ID, the same requirement Update documents.
+// bd's resolver prefix/substring-matches an id with no exact hit, and the
+// preconditions are then evaluated against whatever it resolved, so the verb
+// path verifies the id names exactly one existing bead before it mutates
+// anything and returns an error wrapping ErrIDCollision when bd resolved a
+// different one (gcy-g4o). The raw-SQL fallback matches id literally and needs
+// no such check.
+//
+// On a city that relocated a coordination class off this ledger, an id in that
+// class is refused outright before either path runs (bdsql_relocation.go); a
+// city that relocated nothing cannot reach that branch.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	// Precondition of BOTH paths below, so it runs before either. A bead this
+	// ledger does not hold reaches a false "not held" verdict twice over: the
+	// SQL CAS matches zero rows, and the verb path resolves nothing and reports
+	// the same. Every caller reads that as "someone else holds it" and backs
+	// off. Worse on the verb path, bd's resolver prefix-matches an id with no
+	// exact hit, so a blind ledger can answer with a DIFFERENT bead's row
+	// instead of nothing at all. Refuse before either path touches bd.
+	if err := s.guardRelocatedClassIDs("release-if-current "+id, id); err != nil {
+		return false, err
+	}
+	if !s.conditionalReleaseUnsupported() {
+		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
+		if handled {
+			if err != nil {
+				return false, fmt.Errorf("bd release-if-current: %w", err)
+			}
+			return released, nil
+		}
+		s.latchConditionalReleaseUnsupported()
+	}
 	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
@@ -1549,6 +1649,29 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil
+}
+
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Persisted to a sidecar JSON file under this store's
+// .beads/ directory rather than routed through the bd subprocess: unlike
+// SetMetadata, this never invokes bd and so never touches Dolt sync or bd's
+// on_update hook. Does not validate that id refers to an existing bead — see
+// the interface doc comment for why.
+func (s *BdStore) SetLocalString(id, key, value string) error {
+	if err := s.localStrings.Set(id, key, value); err != nil {
+		return fmt.Errorf("setting local string on %q: %w", id, err)
+	}
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (s *BdStore) GetLocalString(id, key string) (string, error) {
+	value, err := s.localStrings.Get(id, key)
+	if err != nil {
+		return "", fmt.Errorf("getting local string on %q: %w", id, err)
+	}
+	return value, nil
 }
 
 // Tx executes fn against a staged BdStore transaction. BdStore reads each bead
@@ -2189,6 +2312,9 @@ func (s *BdStore) Delete(id string) error {
 			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
 	}
 	return nil
 }

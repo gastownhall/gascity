@@ -1,4 +1,4 @@
-//go:build darwin && !ios
+//go:build productmetrics_testhook && darwin && !ios
 
 package main
 

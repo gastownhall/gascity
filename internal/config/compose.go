@@ -420,9 +420,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
-		mergeFragment(root, frag, fragMeta, fragPath, prov)
+		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
+			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
+		}
 		prov.Sources = append(prov.Sources, fragPath)
 		prov.recordSource(fragPath, fragData)
+	}
+	if err := ValidateStorageConfig(root); err != nil {
+		return nil, nil, err
 	}
 
 	// Append caller-supplied extra pack includes to Workspace.Includes,
@@ -977,7 +982,11 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
-func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) error {
+	if err := mergeStorageConfig(base, fragment, fragMeta, fragPath); err != nil {
+		return err
+	}
+
 	// Agents and named sessions: concatenate.
 	trackAgents(prov, fragment.Agents, fragPath)
 	base.Agents = append(base.Agents, fragment.Agents...)
@@ -1088,6 +1097,39 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}
+	return nil
+}
+
+func mergeStorageConfig(base, fragment *City, fragMeta toml.MetaData, fragPath string) error {
+	if !fragMeta.IsDefined("storage") || fragment.Storage == nil {
+		return nil
+	}
+	if base.Storage == nil {
+		base.Storage = &StorageConfig{}
+	}
+
+	for _, class := range storageConfigClassOrder() {
+		if fragMeta.IsDefined("storage", "classes", class.String()) {
+			base.Storage.Classes.setBinding(class, fragment.Storage.Classes.BindingFor(class))
+		}
+	}
+
+	names := sortedStorageBindingNames(fragment.Storage.Bindings)
+	for _, name := range names {
+		if _, exists := base.Storage.Bindings[name]; exists {
+			return fmt.Errorf("storage binding %q is defined more than once (again in %q)", name, fragPath)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	if base.Storage.Bindings == nil {
+		base.Storage.Bindings = make(map[string]StorageBindingConfig, len(names))
+	}
+	for _, name := range names {
+		base.Storage.Bindings[name] = fragment.Storage.Bindings[name]
+	}
+	return nil
 }
 
 type sessionSleepField struct {

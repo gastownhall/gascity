@@ -1,0 +1,5 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "postgres_dsn": "host=db.example.test port=6543 user=bd dbname=beads"
+}

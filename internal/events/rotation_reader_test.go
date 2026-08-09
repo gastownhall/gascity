@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -397,6 +398,53 @@ func TestReadAllSurvivesMultipleRotations(t *testing.T) {
 	// Last event is the tail.
 	if got[len(got)-1].Subject != "tail" {
 		t.Errorf("last event subject = %q, want %q", got[len(got)-1].Subject, "tail")
+	}
+}
+
+// TestReadFilteredIncludesEventWithinArchiveSubSecondWindow pins the exact
+// silent-drop scenario from #4628: the archive filename records only the
+// whole-second-truncated rotation instant, so the true rotation (and any
+// event legitimately appended just before it) can land anywhere within that
+// truncation second. A Since inside that same second must still surface the
+// event rather than have the archive skip-fast past it ungunzipped. The
+// archive is built directly with a fixed rotation timestamp (not via a real
+// ForceRotate) so the test is deterministic and independent of wall-clock
+// timing.
+func TestReadFilteredIncludesEventWithinArchiveSubSecondWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	// Filename truncates to the whole second; the true rotation instant (and
+	// the event inside the archive) can be anywhere in
+	// [rotationSecond, rotationSecond+1s) — here, 900ms in, mirroring the
+	// bug report's own worked example.
+	rotationSecond := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	eventTs := rotationSecond.Add(500 * time.Millisecond)
+
+	line, err := json.Marshal(Event{Seq: 1, Type: BeadCreated, Ts: eventTs, Actor: "human", Subject: "sub-second"})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	src := filepath.Join(dir, "archive-source.jsonl")
+	if err := os.WriteFile(src, append(line, '\n'), 0o644); err != nil {
+		t.Fatalf("write archive source: %v", err)
+	}
+	archive := filepath.Join(dir, formatArchiveBasename(rotationSecond, 1, 1))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(src, archive, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive: %v", err)
+	}
+
+	// Since falls after the filename's floored instant but before the
+	// event's actual sub-second timestamp — exactly the window the old
+	// skip-fast check misjudged.
+	since := rotationSecond.Add(250 * time.Millisecond)
+	got, err := ReadFiltered(path, Filter{Since: since})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("ReadFiltered(Since=%v) = %v, want the sub-second event (seq 1)", since, got)
 	}
 }
 

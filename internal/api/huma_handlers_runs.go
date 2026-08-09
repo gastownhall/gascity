@@ -251,7 +251,8 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	if !fold.ready {
 		return nil, apierr.ServiceUnavailable.Msg("run projection is warming")
 	}
-	if _, ok := runproj.BuildRunLane(fold.beads, input.RunID); !ok {
+	lane, ok := runproj.BuildRunLane(fold.beads, input.RunID)
+	if !ok {
 		if fold.partial {
 			return nil, apierr.ServiceUnavailable.Msg("run projection is incomplete")
 		}
@@ -262,6 +263,18 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 	}
 	s.forgetRunProjectionMiss(ctx, input.RunID)
 
+	// Derive the run's canonical lifecycle status exactly as laneToRun/deriveRunStatus
+	// do (root-terminality wins over lingering members), then clamp each step through
+	// it: a completed run must not report a step as eternally active when its close
+	// event was lost. A non-terminal run yields an inactive clamp (raw statuses stand).
+	byID := beadsByID(fold.beads)
+	root, rootFound := byID[input.RunID]
+	var rootPtr *beads.Bead
+	if rootFound {
+		rootPtr = &root
+	}
+	runStatus := runproj.CanonicalRunStatusForLane(lane, rootPtr, countStartedMembers(fold.beads, lane.ID))
+
 	members := runMemberBeads(fold.beads, input.RunID)
 	out := &RunStepsOutput{}
 	out.Body.RunID = input.RunID
@@ -271,10 +284,11 @@ func (s *Server) humaHandleRunSteps(ctx context.Context, input *RunStepsInput) (
 		if m.ID == input.RunID {
 			continue // the root is the run, not a step
 		}
+		status := RunStepStatus(runproj.ClampStepStatusForRun(runStatus, string(deriveRunStepStatus(m))))
 		out.Body.Steps = append(out.Body.Steps, RunStep{
 			ID:       m.ID,
 			Title:    runStepTitle(m),
-			Status:   deriveRunStepStatus(m),
+			Status:   status,
 			Kind:     m.Type,
 			Assignee: strings.TrimSpace(m.Assignee),
 		})

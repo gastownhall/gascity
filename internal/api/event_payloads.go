@@ -19,6 +19,13 @@ import (
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"
+
+	// Blank import: storebinding's init() registers one payload for the four
+	// storage.binding.* outcomes. The api package never names the type — the
+	// payload travels as JSON through events.Event.Payload — so the import
+	// exists solely to fire the registration before the registry-coverage
+	// tests run.
+	_ "github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // API-layer event payload types. Every API emitter takes one of these

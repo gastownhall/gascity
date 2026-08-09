@@ -188,6 +188,29 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 	return config.Agent{}, false
 }
 
+// RoutedToIdentity returns the canonical gc.routed_to value for agent: its
+// PoolName when set, otherwise its own QualifiedName(). PoolName is set only
+// on pool-instance copies synthesized from a base template (see
+// cmd/gc/pool.go), and always holds that base template's own
+// QualifiedName() — so this collapses a pool instance back to the identity
+// its base template routes under.
+//
+// Every writer that stamps gc.routed_to and every reader that resolves it
+// must derive the value through this function. Calling QualifiedName()
+// directly bypasses the PoolName collapse: a pool-instance agent's routing
+// then diverges from what gc sling stamped for its base template, and the
+// bead becomes invisible to pool demand/claim (this has been independently
+// gotten wrong at multiple call sites — see ga-79uuwq).
+func RoutedToIdentity(agent *config.Agent) string {
+	if agent == nil {
+		return ""
+	}
+	if agent.PoolName != "" {
+		return agent.PoolName
+	}
+	return agent.QualifiedName()
+}
+
 // NormalizePoolRouteTarget collapses a slot-suffixed pool target qualified
 // name (e.g. "myrig/polecat-2") back to its base pool qualified name
 // ("myrig/polecat"). Slinging to a slot-suffixed target expresses a
@@ -211,7 +234,7 @@ func NormalizePoolRouteTarget(cfg *config.City, target string) string {
 		if !IsMultiSessionAgent(&a) {
 			continue
 		}
-		base := a.QualifiedName()
+		base := RoutedToIdentity(&a)
 		prefix := base + "-"
 		if !strings.HasPrefix(target, prefix) {
 			continue

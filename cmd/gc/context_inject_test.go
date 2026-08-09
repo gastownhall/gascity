@@ -155,13 +155,36 @@ func TestContextInjectLastNonEmptyModelWins(t *testing.T) {
 	}
 }
 
-// Bare claude-opus-4-8 is a 1M-context model (no [1m] suffix in the transcript).
-func TestContextInjectBareOpus48Is1M(t *testing.T) {
+// Per-model windows come from the shared modelwindow table, so the injector and
+// the session-log/API path report the same window for the same model ID, and a
+// model added to that table is picked up here for free.
+//
+// Bare claude-opus-4-8 is the original regression case: a 1M-context model whose
+// transcript entry carries no "[1m]" suffix, which the injector must still read
+// as 1M. claude-sonnet-5 is a 1M model the shared table newly recognizes. gpt-5
+// covers the second half of the change — the injector used to flatten every
+// non-1M model to a blanket 200k, and now reports the family's real window.
+func TestContextInjectResolvesWindowFromSharedModelTable(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
-	p := writeTranscript(t, usageLine("claude-opus-4-8", 10_000, 680_000, 10_000))
-	got := contextInjectLine(hookInputFor(p))
-	if !strings.Contains(got, "700k/1000k") {
-		t.Errorf("bare opus-4-8 must resolve to the 1M window: %q", got)
+	tests := []struct {
+		model string
+		// input/cacheRead/cacheCreate sum to a usage inside the advisory band
+		// for that model's window, so the line renders.
+		input, cacheRead, cacheCreate int
+		want                          string
+	}{
+		{"claude-opus-4-8", 10_000, 680_000, 10_000, "700k/1000k"},
+		{"claude-sonnet-5", 10_000, 680_000, 10_000, "700k/1000k"},
+		{"gpt-5-20260101", 10_000, 160_000, 10_000, "180k/258k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			p := writeTranscript(t, usageLine(tt.model, tt.input, tt.cacheRead, tt.cacheCreate))
+			got := contextInjectLine(hookInputFor(p))
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("%s: want window %q in line, got %q", tt.model, tt.want, got)
+			}
+		})
 	}
 }
 

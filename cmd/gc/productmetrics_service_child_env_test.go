@@ -13,6 +13,9 @@ import (
 )
 
 func TestProductMetricsServiceChildEnvSupervisorStart(t *testing.T) {
+	// This test clears the systemd delegation env below, so the start path runs
+	// non-delegated and reaches the HOME-override guard. Present the real HOME.
+	pinRealHome(t)
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv(supervisorSystemdUnitEnv, "")

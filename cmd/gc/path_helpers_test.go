@@ -33,15 +33,16 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
-// cmdGCTmuxSocketRoot returns a short-path tmux socket root under /tmp (not
-// testTempRoot, which can be an arbitrarily long macOS $TMPDIR path that
-// blows Unix socket path limits), plus the parent dir to remove at teardown
-// and the *os.File holding its alive sentinel. The sentinel must stay
-// referenced by the caller for the process lifetime so a concurrent sibling
-// run's orphan sweep (tmuxtest.SweepOrphanPIDPrefixedDirs, invoked inside
-// NewSocketParentDir) does not reclaim this still-active directory.
-func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, *os.File, error) {
-	parent, sentinel, err := tmuxtest.NewSocketParentDir("/tmp")
+// cmdGCTmuxSocketRoot returns a tmux socket root under socketParentRoot.
+// TestMain normally supplies /tmp rather than testTempRoot, which can be an
+// arbitrarily long macOS $TMPDIR path that blows Unix socket path limits. It
+// also returns the parent dir to remove at teardown and the *os.File holding
+// its alive sentinel. The sentinel must stay referenced by the caller for the
+// process lifetime so a concurrent sibling run's orphan sweep
+// (tmuxtest.SweepOrphanPIDPrefixedDirs, invoked inside NewSocketParentDir)
+// does not reclaim this still-active directory.
+func cmdGCTmuxSocketRoot(testTempRoot, socketParentRoot string) (string, string, *os.File, error) {
+	parent, sentinel, err := tmuxtest.NewSocketParentDir(socketParentRoot, io.Discard)
 	if err != nil {
 		root := filepath.Join(testTempRoot, "tmux")
 		if err := os.MkdirAll(root, 0o700); err != nil {

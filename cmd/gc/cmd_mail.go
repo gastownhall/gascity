@@ -729,7 +729,11 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
-			injectedMessages := messages
+			// Archive the SAME messages that were injected: priority-sort
+			// before the clamp so the archived set matches formatInjectOutput's
+			// displayed set (a priority:1 handoff that floats into the window is
+			// injected AND archived, never injected-but-not-archived).
+			injectedMessages := sortMailByPriority(messages)
 			if len(injectedMessages) > mailInjectMaxMessages {
 				injectedMessages = injectedMessages[:mailInjectMaxMessages]
 			}
@@ -764,9 +768,36 @@ func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Messag
 	}
 }
 
+// sortMailByPriority returns a copy of messages ordered by descending Priority
+// (higher first), stable so ties keep arrival (oldest-first) order. This runs
+// BEFORE the mailInjectMaxMessages clamp so a higher-priority unread message
+// (e.g. a restart handoff tagged priority:1) surfaces within the injection
+// window instead of being dropped by arrival order. It returns a copy so the
+// caller's (possibly cached, e.g. api.CachedRead) backing slice is never
+// reordered as a side effect.
+//
+// Safety: mail.Message.Priority has no writer for ordinary mail today —
+// extractPriority parses a numeric `priority:N` label and every normal message
+// is priority 0 — so on existing all-priority-0 mail SliceStable is a provable
+// no-op that preserves oldest-first order. Only newly priority-tagged mail
+// floats. See STAGED-mail-priority (gastownhall/gascity Phase-4
+// priority-stratified inbox check).
+func sortMailByPriority(messages []mail.Message) []mail.Message {
+	sorted := make([]mail.Message, len(messages))
+	copy(sorted, messages)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority > sorted[j].Priority // higher priority first; ties keep arrival order
+	})
+	return sorted
+}
+
 // formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook.
+// injection into an agent's prompt via a UserPromptSubmit hook. It priority-
+// sorts before the display clamp so both inject render paths
+// (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
+// priority unread first.
 func formatInjectOutput(messages []mail.Message) string {
+	messages = sortMailByPriority(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
@@ -986,6 +1017,15 @@ func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads
 func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return "human", nil
+	}
+	if store != nil {
+		sessionID, err := session.ResolveSessionIDByExactID(store, identifier)
+		if err == nil {
+			return sessionID, nil
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", err
+		}
 	}
 	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
 		return "", targetErr
@@ -1437,8 +1477,10 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
-the recipient after sending. Use --from to override the sender identity.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
+a recipient turn after sending. In a managed city, it can request a wake for
+a non-running recipient. Unread mail alone does not request a wake.
+Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").`,
@@ -1463,7 +1505,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this message, even if earlier mail is still unread")
+	cmd.Flags().BoolVar(&notify, "notify", false, "request a recipient turn (including a managed wake if not running), even with earlier unread mail")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
@@ -1550,7 +1592,9 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use --notify to nudge the recipient after replying.
+Use --notify to request a recipient turn after replying. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1568,7 +1612,7 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	}
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this reply, even if earlier mail is still unread")
+	cmd.Flags().BoolVar(&notify, "notify", false, "request a recipient turn (including a managed wake if not running), even with earlier unread mail")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	_ = cmd.Flags().MarkHidden("nudge")

@@ -13,25 +13,29 @@ import (
 
 // statusStoreHealthTimeout bounds the store-health row count so a live city
 // with a large closed-history table cannot stall `gc status` for minutes. The
-// count drives only the on-disk size ratio and is best-effort, so a timeout
-// returns 0 — mirroring the API server's countBeadStoreRows defense
-// (internal/api/store_health.go, statusStoreReadTimeout), which this CLI local
-// fallback never inherited. It matches the server's 1s bound.
-var statusStoreHealthTimeout = time.Second
+// count drives only the on-disk size ratio and is best-effort: a timeout
+// means the count is UNMEASURED, not zero. The API server's
+// countBeadStoreRows (internal/api/store_health.go, statusStoreReadTimeout)
+// returns an error on the same failure modes rather than fabricating a
+// count; liveRowCount mirrors that by returning measured=false instead of a
+// bare 0. It matches the server's 1s bound.
+const statusStoreHealthTimeout = time.Second
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
-// measurements. LastGCAt is serialized as RFC3339 UTC when present;
-// when the maintenance log is empty, LastGCAt and LastGCStatus are
-// omitted (json:"omitempty").
-func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
-	h := storehealth.Compute(cityPath, sizeBytes, liveRows, lastGCAt, lastGCStatus)
+// measurements. rowsMeasured distinguishes a real liveRows count from a
+// count that failed or timed out — see storehealth.Compute. LastGCAt is
+// serialized as RFC3339 UTC when present; when the maintenance log is
+// empty, LastGCAt and LastGCStatus are omitted (json:"omitempty").
+func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsMeasured bool, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
+	h := storehealth.Compute(cityPath, sizeBytes, liveRows, rowsMeasured, lastGCAt, lastGCStatus)
 	out := &StoreHealth{
-		Path:        h.Path,
-		SizeBytes:   h.SizeBytes,
-		LiveRows:    h.LiveRows,
-		RatioMB:     h.RatioMB,
-		Warning:     h.Warning,
-		ThresholdMB: h.ThresholdMB,
+		Path:            h.Path,
+		SizeBytes:       h.SizeBytes,
+		LiveRows:        h.LiveRows,
+		LiveRowsUnknown: !h.RowsMeasured,
+		RatioMB:         h.RatioMB,
+		Warning:         h.Warning,
+		ThresholdMB:     h.ThresholdMB,
 	}
 	if !h.LastGCAt.IsZero() {
 		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
@@ -42,112 +46,44 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 
 // collectStoreHealth measures the Dolt store at cityPath and the latest
 // maintenance event via ep, returning a populated *StoreHealth.
-// liveRowCount provides the live row count; callers without a store pass
-// nil and LiveRows is reported as zero.
+// liveRowCount provides the live row count and whether it was actually
+// measured; callers without a store pass nil and the count is unmeasured.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows := liveRowCount(store)
-	lastAt, lastStatus := lastMaintenanceForStatus(ep)
-	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
+	rows, measured := liveRowCount(store)
+	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	return storeHealthFromInputs(cityPath, size, rows, measured, lastAt, lastStatus)
 }
 
-type storeHealthTailProvider interface {
-	ListTail(events.Filter, int) ([]events.Event, error)
-}
-
-func lastMaintenanceForStatus(ep events.Provider) (time.Time, string) {
-	if ep == nil {
-		return time.Time{}, ""
-	}
-	if tailer, ok := ep.(storeHealthTailProvider); ok {
-		return lastMaintenanceFromTail(tailer)
-	}
-	type result struct {
-		at     time.Time
-		status string
-	}
-	done := make(chan result, 1)
-	go func() {
-		at, status := storehealth.LastMaintenance(ep)
-		done <- result{at: at, status: status}
-	}()
-	select {
-	case r := <-done:
-		return r.at, r.status
-	case <-time.After(statusStoreHealthTimeout):
-		return time.Time{}, ""
-	}
-}
-
-func lastMaintenanceFromTail(tailer storeHealthTailProvider) (time.Time, string) {
-	var (
-		latestTs     time.Time
-		latestStatus string
-	)
-	for _, spec := range []struct {
-		typ    string
-		status string
-	}{
-		{events.StoreMaintenanceDone, "success"},
-		{events.StoreMaintenanceFailed, "failed"},
-	} {
-		evts, err := listMaintenanceTailWithTimeout(tailer, events.Filter{Type: spec.typ}, 1)
-		if err != nil {
-			continue
-		}
-		for _, e := range evts {
-			if e.Ts.After(latestTs) {
-				latestTs = e.Ts
-				latestStatus = spec.status
-			}
-		}
-	}
-	return latestTs, latestStatus
-}
-
-func listMaintenanceTailWithTimeout(tailer storeHealthTailProvider, filter events.Filter, limit int) ([]events.Event, error) {
-	type tailResult struct {
-		evts []events.Event
-		err  error
-	}
-	done := make(chan tailResult, 1)
-	go func() {
-		evts, err := tailer.ListTail(filter, limit)
-		done <- tailResult{evts: evts, err: err}
-	}()
-	select {
-	case r := <-done:
-		return r.evts, r.err
-	case <-time.After(statusStoreHealthTimeout):
-		return nil, context.DeadlineExceeded
-	}
-}
-
-// liveRowCount returns the number of beads known to store, or 0 when store is
+// liveRowCount returns the number of beads known to store and whether that
+// count is real. measured is false — and rows is meaningless — when store is
 // nil, the count fails, or it does not finish within statusStoreHealthTimeout.
-// Counts all statuses (including closed) because the ratio is about on-disk row
-// footprint, not actionable work — but that closed-inclusive scan is never
-// cache-answerable and hydrates the whole history from the backend, so it is
-// bounded to keep `gc status` responsive. A Counter-capable store (Dolt /
-// CachingStore) answers from the catalog without hydrating rows; otherwise a
-// bounded full scan is the fallback.
-func liveRowCount(store beads.Store) int {
+// A caller MUST NOT treat rows as a real zero when measured is false: that
+// conflation renders a timed-out count byte-identically to a healthy,
+// genuinely empty store. Counts all statuses (including closed) because the
+// ratio is about
+// on-disk row footprint, not actionable work — but that closed-inclusive scan
+// is never cache-answerable and hydrates the whole history from the backend,
+// so it is bounded to keep `gc status` responsive. A Counter-capable store
+// (Dolt / CachingStore) answers from the catalog without hydrating rows;
+// otherwise a bounded full scan is the fallback.
+func liveRowCount(store beads.Store) (rows int, measured bool) {
 	if store == nil {
-		return 0
+		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), statusStoreHealthTimeout)
 	defer cancel()
 	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
 	if counter, ok := store.(beads.Counter); ok {
 		if n, err := counter.Count(ctx, query); err == nil {
-			return n
+			return n, true
 		}
 	}
 	list, err := listBeadsWithTimeout(ctx, store, query)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return len(list)
+	return len(list), true
 }
 
 // listBeadsWithTimeout runs store.List on a goroutine and returns its result,
@@ -183,12 +119,21 @@ func renderStoreHealthBlock(w io.Writer, h *StoreHealth) {
 	fmt.Fprintln(w, "Store health:")                                       //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(w, "  Path:        %s\n", h.Path)                          //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(w, "  Size:        %s\n", storeHealthSIBytes(h.SizeBytes)) //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(w, "  Live rows:   %d\n", h.LiveRows)                      //nolint:errcheck // best-effort stdout
-	suffix := ""
-	if h.Warning {
-		suffix = "  \u26a0 maintenance overdue"
+	if h.LiveRowsUnknown {
+		// The ratio line is deliberately omitted rather than printed as
+		// 0.0 MB/row: with no row count there is no ratio, and rendering
+		// one would restate the defect this branch exists to fix. The
+		// cause is not named because the caller does not know it \u2014 a nil
+		// store, a scan error and a timeout are all unmeasured.
+		fmt.Fprintln(w, "  Live rows:   unknown (count unavailable)") //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(w, "  Live rows:   %d\n", h.LiveRows) //nolint:errcheck // best-effort stdout
+		suffix := ""
+		if h.Warning {
+			suffix = "  \u26a0 maintenance overdue"
+		}
+		fmt.Fprintf(w, "  Ratio:       %.1f MB/row  (threshold %.1f MB/row)%s\n", h.RatioMB, h.ThresholdMB, suffix) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintf(w, "  Ratio:       %.1f MB/row  (threshold %.1f MB/row)%s\n", h.RatioMB, h.ThresholdMB, suffix) //nolint:errcheck // best-effort stdout
 	if h.LastGCAt != "" {
 		fmt.Fprintf(w, "  Last GC:     %s (%s)\n", h.LastGCAt, h.LastGCStatus) //nolint:errcheck // best-effort stdout
 	}

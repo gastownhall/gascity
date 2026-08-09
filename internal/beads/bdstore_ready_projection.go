@@ -21,13 +21,13 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	ids := make([]string, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		// Message (mail) beads are never dependency-blocked ready work, and
-		// bd's denormalized is_blocked column flaps NULL<->false for ephemeral
-		// mail wisps. Enriching them makes the CachingStore reconciler re-emit
-		// bead.updated for every open mail bead on every cycle (an event flood
-		// that starves gc-hook work queries). Leave their IsBlocked at bd's nil
-		// fallback so the reconcile diff converges.
-		if item.ID == "" || item.Status == "closed" || item.IsBlocked != nil || item.Type == "message" {
+		// Message and nudge beads are notifications, not dependency-blocked ready
+		// work, and bd's denormalized is_blocked column can flap NULL<->false for
+		// them. Enriching those rows makes the CachingStore reconciler re-emit
+		// bead.updated on every cycle (an event flood that starves gc-hook work
+		// queries). Leave their IsBlocked at bd's nil fallback so the reconcile
+		// diff converges.
+		if skipBDReadyProjectionEnrichment(item) {
 			continue
 		}
 		if _, ok := seen[item.ID]; ok {
@@ -54,7 +54,7 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	enriched := make([]Bead, len(items))
 	copy(enriched, items)
 	for i := range enriched {
-		if enriched[i].ID == "" || enriched[i].Status == "closed" || enriched[i].IsBlocked != nil || enriched[i].Type == "message" {
+		if skipBDReadyProjectionEnrichment(enriched[i]) {
 			continue
 		}
 		blocked, ok := projection[enriched[i].ID]
@@ -64,6 +64,14 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 		enriched[i].IsBlocked = cloneBoolPtr(&blocked)
 	}
 	return enriched, nil
+}
+
+func skipBDReadyProjectionEnrichment(item Bead) bool {
+	return item.ID == "" ||
+		item.Status == "closed" ||
+		item.IsBlocked != nil ||
+		item.Type == "message" ||
+		beadHasLabel(item, "gc:nudge")
 }
 
 func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
@@ -91,9 +99,30 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 	result := make(map[string]bool, len(ids))
 	wanted := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		if id != "" {
-			wanted[id] = struct{}{}
+		if id == "" {
+			continue
 		}
+		// An id under a relocated class's reserved prefix is not a row of this
+		// ledger, so bd's answer about it would be an empty that reads as
+		// "unblocked-unknown". Drop it from the request rather than refusing the
+		// batch: this projection is handed EVERY active bead by cache
+		// prime/reconcile, and a whole-batch refusal cost every other row its
+		// is_blocked on every cycle, permanently — the call sites only
+		// recordProblem and continue, and the refusal is a pure function of
+		// config, so it never healed. A dropped id keeps its last cached value
+		// (preserveCachedReadyProjectionLocked), which is the documented benign
+		// state and exactly what its absence produced before this guard existed.
+		//
+		// The drop is silent on purpose. Nothing should mint a reserved class
+		// prefix into this ledger — only the relocated class engine mints under
+		// one, and a migration preserves the copied rows' original work-prefix
+		// ids — so this is a should-never-happen that costs one row an
+		// optimization, and a per-cycle log for it would be the reconcile-path
+		// noise skipBDReadyProjectionEnrichment above exists to avoid.
+		if len(s.relocatedClassesForID(id)) > 0 {
+			continue
+		}
+		wanted[id] = struct{}{}
 	}
 	if len(wanted) == 0 {
 		return result, nil

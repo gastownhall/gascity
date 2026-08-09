@@ -131,26 +131,65 @@ if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
   go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
 fi
 
-# Capture the enumeration separately so a build/compile failure here surfaces
-# its output. `go test -list` builds the test binary; if that fails, the bare
-# assignment's non-zero status is swallowed by `set -e` (the script dies before
-# the "no tests discovered" branch below), producing an undebuggable empty
-# shard failure. Check the status explicitly and print what go printed.
-if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
-  echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
-  printf '%s\n' "$list_output" >&2
-  exit 1
-fi
 tests=()
-while IFS= read -r line; do
-  [[ "$line" == Test* ]] || continue
-  tests+=("$line")
-done <<< "$list_output"
+if [[ ${GO_TEST_MANIFEST+x} == x ]]; then
+  if [[ ! -f "$GO_TEST_MANIFEST" || ! -r "$GO_TEST_MANIFEST" ]]; then
+    echo "go test manifest is not readable: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
+  if ! LC_ALL=C tr -d '\000' < "$GO_TEST_MANIFEST" | cmp -s "$GO_TEST_MANIFEST" -; then
+    echo "go test manifest contains NUL bytes or could not be validated: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
 
-if [[ ${#tests[@]} -eq 0 ]]; then
-  echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
-  printf '%s\n' "$list_output" >&2
-  exit 1
+  line_number=0
+  manifest_test_count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    if ! [[ "$line" =~ ^Test$ || "$line" =~ ^Test[A-Z0-9_][A-Za-z0-9_]*$ ]]; then
+      echo "invalid go test manifest entry in ${GO_TEST_MANIFEST} at line ${line_number}: ${line}" >&2
+      exit 1
+    fi
+    if (( manifest_test_count > 0 )); then
+      for existing in "${tests[@]}"; do
+        if [[ "$existing" == "$line" ]]; then
+          echo "duplicate go test manifest entry: ${line}" >&2
+          exit 1
+        fi
+      done
+    fi
+    tests+=("$line")
+    manifest_test_count=$((manifest_test_count + 1))
+  done < "$GO_TEST_MANIFEST"
+
+  if (( manifest_test_count == 0 )); then
+    echo "go test manifest contains no tests: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
+else
+  # Capture the enumeration separately so a build/compile failure here surfaces
+  # its output. `go test -list` builds the test binary; if that fails, the bare
+  # assignment's non-zero status is swallowed by `set -e` (the script dies before
+  # the "no tests discovered" branch below), producing an undebuggable empty
+  # shard failure. Check the status explicitly and print what go printed.
+  if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
+    echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
+    printf '%s\n' "$list_output" >&2
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [[ "$line" == Test* ]] || continue
+    tests+=("$line")
+  done <<< "$list_output"
+
+  if [[ ${#tests[@]} -eq 0 ]]; then
+    echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
+    printf '%s\n' "$list_output" >&2
+    exit 1
+  fi
 fi
 
 selected=()

@@ -256,6 +256,14 @@ func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
 }
 
+func (s *prefixedAliasStore) SetLocalString(id, key, value string) error {
+	return s.base.SetLocalString(s.aliasToBase(id), key, value)
+}
+
+func (s *prefixedAliasStore) GetLocalString(id, key string) (string, error) {
+	return s.base.GetLocalString(s.aliasToBase(id), key)
+}
+
 func (s *prefixedAliasStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
 	if fn == nil {
 		return s.base.Tx(commitMsg, nil)
@@ -341,6 +349,55 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
 	if got := beadPrefix("mcdi3bsyeryols-yyn"); got != "mcdi3bsyeryols" {
 		t.Fatalf("beadPrefix() = %q, want alphanumeric prefix", got)
+	}
+}
+
+// TestResolveStoreByPrefixKeepsRigRouteResolution pins the non-class routing
+// behavior: a self-route ("ga" -> ".") resolves to the rig that owns the routes
+// file, and a cross-rig route ("gb" -> "../beta") resolves to the rig it points
+// at. Both must stay exactly as they are.
+func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
+		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	}
+	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
+		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	}
+}
+
+// TestResolveStoreByPrefixDoesNotCaptureForeignRoute pins that a rig route
+// resolving to a path which is NOT a registered rig no longer answers with that
+// rig's store. The route says the prefix lives elsewhere, so resolution falls
+// through to the by-id candidate scan — which still contains every store, so the
+// bead stays reachable instead of being pinned to the wrong one.
+func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	cityStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	routes := `{"prefix":"ga","path":"."}` + "\n" +
+		`{"prefix":"gb","path":"../beta"}` + "\n" +
+		`{"prefix":"gz","path":"../../elsewhere"}`
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("gz"); got != nil {
+		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	}
+	got := s.beadStoresForID("gz-1")
+	want := []beads.Store{cityStore, alphaStore, betaStore}
+	if len(got) != len(want) {
+		t.Fatalf("beadStoresForID(gz-1) = %v (len %d), want the full candidate scan %v", got, len(got), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("beadStoresForID(gz-1)[%d] = %p, want %p", i, got[i], want[i])
+		}
 	}
 }
 
@@ -1746,8 +1803,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 
 	listReq := httptest.NewRequest("GET", cityURL(state, "/beads?assignee=worker"), nil)
@@ -1857,8 +1914,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want session_name preserved as %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want session_name normalized to canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -1992,8 +2049,8 @@ func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
 		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want repairable session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want repairable session alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
 	if gotSession.Type != session.BeadType {
@@ -2019,8 +2076,8 @@ func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
 		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2045,8 +2102,8 @@ func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("created %d beads, want 1", len(items))
 	}
-	if items[0].Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("created assignee = %q, want alias normalized to session_name %q", items[0].Assignee, sessionBead.Metadata["session_name"])
+	if items[0].Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("created assignee = %q, want canonical alias %q", items[0].Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
