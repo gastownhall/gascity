@@ -341,7 +341,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// resume shape at all. Relaunching it verbatim repeats the same failure at the
 	// same cost, which is the loop this recovery exists to end. Report "not
 	// retried" and let the caller propagate the original start error. Paths that
-	// still hold a key keep their prior behaviour: there the metadata clear and
+	// still hold a key keep their prior behavior: there the metadata clear and
 	// the orphan sweep below are themselves the recovery, so an unchanged
 	// command is still worth relaunching.
 	if sessionKey == "" && freshCmd == resumeCommand {

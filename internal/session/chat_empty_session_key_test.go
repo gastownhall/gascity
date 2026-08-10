@@ -97,7 +97,7 @@ func TestEnsureRunning_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T) {
 		t.Fatalf("Send should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
-	if !sp.Fake.IsRunning(info.SessionName) {
+	if !sp.IsRunning(info.SessionName) {
 		t.Fatal("session should be running after the fresh relaunch")
 	}
 
@@ -163,7 +163,7 @@ func TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T
 		t.Fatalf("StartRuntimeOnly should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
-	if !sp.Fake.IsRunning(info.SessionName) {
+	if !sp.IsRunning(info.SessionName) {
 		t.Fatal("session should be running after the fresh relaunch")
 	}
 
