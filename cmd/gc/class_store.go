@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -376,6 +377,34 @@ func graphClassBinding(routes *storageRoutes) (beads.Store, bool) {
 	return routes.storeFor(coordclassFor(config.BeadClassGraph))
 }
 
+// cityQueryTopology answers the two questions a generated work_query or
+// pool-demand command has to be built against: the bd semantics the city is
+// configured for, and whether its claimable work is spread across stores a
+// single `bd ready` in the agent's work directory cannot reach.
+//
+// The second question is graphClassBinding's, not config's, and the difference
+// is not academic. storageSplitShapeOf reads [storage] alone and answers "no
+// split" for a city whose section was DELETED after it had already served one —
+// the exact edit storage_boot.go's bypass note exists to catch. That city's
+// graph beads are in a binding, its boot refuses, and its routes serve every
+// infrastructure class from refusedClassStore; asking config would build it a
+// `bd ready` command that reads the work ledger and reports "no work" forever,
+// while asking the routes builds it the federated command, which fails loud with
+// the refusal that names the remedy. Same authority as resolveClassStore, same
+// answer, one place.
+//
+// A nil cfg still resolves the routes: cliStorageRoutes reads the city's own
+// city.toml rather than the caller's snapshot, precisely because where a city
+// serves its classes from is a property of the CITY.
+func cityQueryTopology(cityPath string, cfg *config.City) config.QueryTopology {
+	topo := config.QueryTopology{}
+	if cfg != nil {
+		topo.Beads = cfg.Beads
+	}
+	_, topo.FederatedReady = graphClassBinding(cliStorageRoutes(cityPath))
+	return topo
+}
+
 // newCityMailProvider builds the controller's mail provider as a two-store mail
 // provider: message beads persist in the messaging-class store, and mail's
 // session reads/writes for addressing/identity resolution go to the session-class
@@ -414,4 +443,29 @@ func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *co
 		return &unrouted
 	}
 	return &svc
+}
+
+// warnFederationBlindOverrides tells an operator that this agent's own
+// work_query or scale_check will not see the city's relocated coordination
+// class.
+//
+// A custom query is returned verbatim, which is the contract and is not being
+// changed here. What is being changed is the SILENCE around it: on a split city
+// the generated query reads every store and the operator's does not, so the two
+// disagree about what is claimable and the override's answer is a short array
+// with nothing to distinguish it from an empty queue. That is the precise
+// failure the federated reader exits non-zero to close, and an override walks
+// straight back into it.
+//
+// Nothing is printed on a city that relocates nothing, which is every city with
+// no [storage] section: FederationBlindOverrides returns nil there, so the
+// diagnostic cannot become per-tick noise on a legacy deployment.
+func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config.QueryTopology) {
+	if stderr == nil || a == nil {
+		return
+	}
+	for _, key := range a.FederationBlindOverrides(topo) {
+		fmt.Fprintf(stderr, "gc hook: agent %q sets a custom %s, which reads one store; this city serves a coordination class from a relocated binding, so that command cannot see graph-class work (the generated query uses %q)\n", //nolint:errcheck // best-effort stderr
+			a.QualifiedName(), key, "gc ready")
+	}
 }

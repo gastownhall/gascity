@@ -90,6 +90,7 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I12-molecule-membership", func(t *testing.T) { forEachTopology(t, conformanceMoleculeMembership) })
 	t.Run("I13-cli-ready-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceCLIReadyFederation) })
 	t.Run("I14-projection-coherence", func(t *testing.T) { forEachTopology(t, conformanceProjectionCoherence) })
+	t.Run("I15-work-query-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWorkQueryFederation) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -425,25 +426,33 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // this, and the reason is worth stating because the earlier version of this
 // paragraph named it as the slice that would. The gap is a QUERY-federation
 // gap, not a by-id one: the hook only ever claims ids its OWN work query
-// returned, and that query never reaches the binding, so a by-id-routed claim
+// returned, so while that query could not reach the binding a by-id-routed claim
 // mutation would never be handed a class id to route. The two halves it needs
-// are a coordination-class arm in the work-query fan-out — the shape `gc ready`
-// got in ga-oxsyu (#5158) — and an in-process claim for the ids that arm
-// returns, because a relocated binding is not a bd workspace and cannot be
-// expressed as a hookStore{dir, env} at all. That is ga-x0oyt; when it lands,
-// this paragraph goes and the assertions move from claimByID to the command.
+// are a coordination-class arm in the work query — the shape `gc ready` got in
+// ga-oxsyu (#5158) — and an in-process claim for the ids that arm returns,
+// because a relocated binding is not a bd workspace and cannot be expressed as a
+// hookStore{dir, env} at all. That is ga-x0oyt; when the second half lands, this
+// paragraph goes and the assertions move from claimByID to the command.
 // ga-xo8ch — class-routed WRITES from one-shot commands — landed without
 // touching it either: it routes where a coordination-class bead is BORN
 // (`gc order run`'s wisp, `gc formula cook`'s graph pour), and a claim is a
 // by-id mutation of a bead that already exists somewhere.
 //
+// Half (a) HAS since landed, in ga-bvdha, and not in the shape this paragraph
+// predicted: the fan-out gained no leg, the primary leg's COMMAND was swapped to
+// the federated `gc ready` reader, which covers the binding in-process. So the
+// hook now SEES relocated graph work it still cannot claim — I15 pins that
+// asymmetry from the query side and names the drain it produces. The rows below
+// keep their meaning under that swap: they are about the store a CLAIM is issued
+// against, which is still a bd subprocess in a work workspace.
+//
 // The gap is ASSERTED and not merely described, the way I1, I2 and I10 assert
 // theirs — and it is asserted on the seam the CLOSURE has to change, not on one
 // that survives it. hookWorkQueryStores is the whole fan-out the hook queries,
 // and the rows below pin that every leg of it is a bd WORKSPACE naming a WORK
-// scope, on BOTH topologies: relocating graph adds no leg, so no leg can answer
-// for a bead the binding owns. Half (a) of ga-x0oyt is a coordination-class arm
-// IN THIS LIST, so it cannot land without reddening them.
+// scope, on BOTH topologies: relocating graph adds no leg, so no leg can be
+// HANDED a bead the binding owns to claim. Half (b) of ga-x0oyt has to stop
+// being a bd subprocess call, so it cannot land without reddening them.
 //
 // The earlier version of this pin asserted only hookQueryEnv's GC_STORE_SCOPE
 // for the primary leg. That row is kept — the primary leg staying a work scope
@@ -1708,4 +1717,138 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 func fixtureGraphLeg(e splitEnv) beads.Store {
 	binding, relocated := graphClassBinding(e.routes)
 	return relocatedGraphLegFrom(binding, relocated, e.work)
+}
+
+// conformanceWorkQueryFederation (I15) guards the fail-open the work query and
+// the pool-demand count-form share: both are SHELL commands, and on a converged
+// split city the `bd ready` they shell reads the work ledger, where the
+// execution DAG no longer lives. A worker asks for its routed work, gets a
+// valid-looking empty array, and idle-exits; the reconciler asks for its demand,
+// gets zero, and drains the pool. Neither produces an error, which is why this
+// is the capability whose absence is invisible.
+//
+// It asserts three things, in the order they have to hold:
+//
+//  1. The seam answers. cityQueryTopology is the production resolver, and it
+//     rides on graphClassBinding — the same question resolveClassStore asks —
+//     so a city that relocates nothing federates nothing.
+//  2. The command changes, and only in the reader. The single-store row is the
+//     byte-identity claim (its exact bytes are pinned by
+//     internal/config's TestWorkQueryGolden); here it is the command WORD that
+//     matters, because a split city emitting `bd ready` is the blindness.
+//  3. The reader the command names actually answers with the routed graph work,
+//     read through the production leg assembly rather than a restatement of it.
+//
+// KNOWN GAP, pinned rather than asserted as desirable — SEE BUT CANNOT CLAIM.
+// This invariant makes routed graph-class work VISIBLE to the worker's query.
+// `gc hook --claim` then runs its claim against a bd store rooted in the agent's
+// work directory (hookClaimBdStoreContext over hookQueryEnv, the WORK scope I5
+// pins), which cannot reach the relocated class at all. So on a split city the
+// bead this query now surfaces is one the same command cannot claim: the claim
+// errors per candidate, claimsErrored carries it to the drain, and the worker
+// reports action=drain reason=claims_errored instead of doing the work. That is
+// LOUD — distinguishable from the healthy no_work drain, which is why this is
+// shippable at all — but it is not correct, and it is why this slice and the
+// claim-time write routing (ga-601v2) are one deployable pair. The row below
+// asserts today's answer; when the claim routes, it flips and this paragraph
+// goes with it.
+func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
+	agentCfg := e.cfg.Agents[0]
+	topo := cityQueryTopology(e.cityPath, e.cfg)
+	if topo.FederatedReady != e.split {
+		t.Fatalf("cityQueryTopology reports FederatedReady=%v on a split=%v city; the generated query is built from this answer, so a wrong one is silent blindness or a needless federation", topo.FederatedReady, e.split)
+	}
+	workQuery := agentCfg.EffectiveWorkQueryFor(topo)
+	poolDemand := agentCfg.EffectivePoolDemandQueryFor(topo)
+
+	if !e.split {
+		for name, cmd := range map[string]string{"work_query": workQuery, "scale_check": poolDemand} {
+			if strings.Contains(cmd, "gc ready") {
+				t.Errorf("a single-store city's %s reads through the federated reader: %q — its command must be the one it already runs", name, cmd)
+			}
+			if !strings.Contains(cmd, "bd ready") {
+				t.Errorf("a single-store city's %s no longer shells `bd ready`: %q", name, cmd)
+			}
+		}
+		// Nothing is relocated, so no override can be blind to it.
+		blind := (&config.Agent{Name: "custom", WorkQuery: "bd ready --json"}).FederationBlindOverrides(topo)
+		if len(blind) != 0 {
+			t.Errorf("a single-store city reports work_query overrides as federation-blind (%v); there is no second store for them to miss", blind)
+		}
+		return
+	}
+
+	for name, cmd := range map[string]string{"work_query": workQuery, "scale_check": poolDemand} {
+		if strings.Contains(cmd, "bd ready") {
+			t.Fatalf("a split city's %s still shells `bd ready`, which reads the work ledger the graph class was migrated OFF: %q", name, cmd)
+		}
+		if !strings.Contains(cmd, "gc ready") {
+			t.Fatalf("a split city's %s does not name the federated reader: %q", name, cmd)
+		}
+		// The consumer half of the fail-loud rule. `gc ready` exits non-zero on a
+		// dead leg (I13); a tier that captured that exit into an empty result and
+		// fell through would print `[]` and exit 0, which is the same fail-open one
+		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
+		// EXECUTES this; the clause is pinned here so the split-topology row cannot
+		// go green on a command that swallows it.
+		if !strings.Contains(cmd, `|| exit $?`) {
+			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
+		}
+	}
+
+	// The routed tier's own predicate, restated as the reader's flags. The
+	// assertions above pin that the command carries them, so the two cannot
+	// drift apart silently.
+	for _, flag := range []string{
+		`--metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"`,
+		"--unassigned",
+		"--exclude-type=epic",
+	} {
+		if !strings.Contains(workQuery, flag) {
+			t.Fatalf("the split work_query's routed tier lost %q, so the reader flags asserted below are not the ones it runs: %q", flag, workQuery)
+		}
+	}
+
+	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
+	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	rows, err := readyBeadsForOpts(legs, readyOpts{
+		unassigned:     true,
+		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		excludeTypes:   []string{"epic"},
+		sortOrder:      readySortOldest,
+		limit:          20,
+	})
+	if err != nil {
+		t.Fatalf("the reader the split work_query names failed over healthy stores: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == routed.ID {
+			found = true
+		}
+	}
+	if !found {
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		t.Fatalf("the reader the split work_query names answered %v and not the routed graph step %s; the command was swapped but the answer is still work-ledger-only, which is the blindness with extra steps", ids, routed.ID)
+	}
+
+	conformanceWorkQuerySeesButCannotClaim(t, e, routed.ID)
+}
+
+// conformanceWorkQuerySeesButCannotClaim pins the KNOWN GAP above as an
+// assertion: the bead the federated work query now serves is one the store
+// `gc hook --claim` issues its claim against cannot even resolve.
+//
+// The store asserted here is the fixture's WORK leg, because that is what
+// hookQueryEnv's scope resolves to on both topologies (I5 pins that env
+// directly). A gap stated only in prose can close, or widen, without a test
+// moving.
+func conformanceWorkQuerySeesButCannotClaim(t *testing.T, e splitEnv, graphBeadID string) {
+	t.Helper()
+	if _, err := e.work.Get(graphBeadID); err == nil {
+		t.Fatalf("the WORK store resolved the relocated graph bead %s. Either `gc hook --claim` is now class-routed — in which case ga-601v2 has landed: drop I15's KNOWN GAP paragraph and assert the claim instead — or the fixture stopped relocating the graph class, which would make this whole invariant vacuous", graphBeadID)
+	}
 }

@@ -212,7 +212,7 @@ func (s *Server) providerSessionMCPServers(providerName, identity, workDir, tran
 		return nil, nil
 	}
 	synthetic := &config.Agent{Provider: providerName}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, s.state.CityPath(), synthetic, firstNonEmptyString(identity, providerName), workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, s.state.CityPath(), synthetic, firstNonEmptyString(identity, providerName), workDir, queryTopology(s.state))
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -232,6 +232,7 @@ func (s *Server) sessionMCPServers(template, providerName, identity, workDir, tr
 			&agentCfg,
 			firstNonEmptyString(identity, template),
 			workDir,
+			queryTopology(s.state),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)

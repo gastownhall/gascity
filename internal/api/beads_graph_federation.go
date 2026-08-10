@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // relocatedGraphStore returns the graph-class store when — and only when — the
@@ -21,6 +22,21 @@ func relocatedGraphStore(state State) beads.Store {
 		return nil
 	}
 	return graph
+}
+
+// queryTopology answers the city facts a generated work_query or MCP catalog has
+// to be built against, from the API's own view of the city.
+//
+// FederatedReady rides on relocatedGraphStore — the SAME identity gate this file
+// already uses — rather than on a second reading of [storage], so the command
+// this surface renders names the same reader the CLI's cityQueryTopology picks
+// for the same city.
+func queryTopology(state State) config.QueryTopology {
+	topo := config.QueryTopology{FederatedReady: relocatedGraphStore(state) != nil}
+	if cfg := state.Config(); cfg != nil {
+		topo.Beads = cfg.Beads
+	}
+	return topo
 }
 
 // graphPlaneUnavailable is the authoritative failure a dead graph leg produces.

@@ -459,7 +459,21 @@ func buildDesiredStateWithSessionBeads(
 		}
 		backsNamedSession := namedSessionMode != ""
 
-		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
+		// Controller-owned: config.QueryTopology{Beads: ...} and NOT
+		// cityQueryTopology. Resolving the federation fact means asking the
+		// storage routes, and the one-shot funnel that answers for a CLI command
+		// (cliStorageRoutes) is explicitly for the half of the program that
+		// "never builds a CityRuntime" — a controller reaching it would open the
+		// city's binding a second time in a process that already holds it open.
+		// The controller's own routes are the right source; threading them into
+		// this plumbing is a change to controller wiring, not part of swapping
+		// the reader, so it stays with the claim-routing slice (ga-601v2).
+		//
+		// Nothing executes this string on the controller path either: a
+		// default-probe pool counts in-process below (defaultScaleTargets), and a
+		// custom-scale_check pool runs the operator's own command, so the
+		// generated count-form is reached only by the legacy nil-store caller.
+		sp := scaleParamsForTopology(&cfg.Agents[i], config.QueryTopology{Beads: cfg.Beads})
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)

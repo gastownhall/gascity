@@ -348,7 +348,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+	topo := cityQueryTopology(cityPath, cfg)
+	warnFederationBlindOverrides(stderr, &a, topo)
+	workQuery := a.EffectiveWorkQueryFor(topo)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
