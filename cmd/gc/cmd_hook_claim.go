@@ -594,7 +594,28 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	claimed, ok, err := store.Claim(beadID)
+	return hookClaimThroughStore(beadID, assignee,
+		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
+		store.Get)
+}
+
+// hookClaimThroughStore is the post-mutation classification shared by every
+// store a claim can run against: the work-directory bd context here, and the
+// relocated class binding in claim_class_route.go.
+//
+// It is factored out rather than duplicated because the classification IS the
+// contract the caller reads — a lost race must be reported as a rejection and
+// not as an error, a stale projection must not be treated as ours, and a failed
+// canonical readback must be surfaced with ok=true so the caller stops instead
+// of draining. Two copies of that would be two chances to disagree, and the
+// paths that disagree about ownership are this program's recurring bug class.
+//
+// claim and get are the store's own operations: the bd context's Claim takes the
+// assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
+// binding's takes it explicitly, so the caller binds them and this function
+// never has to know which shape it is holding.
+func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+	claimed, ok, err := claim()
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
@@ -602,19 +623,20 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 		// Claim conflict: re-read the bead so the caller can surface who won
 		// the race in the bead.claim_rejected event (ADR-0009). Best-effort —
 		// a read error degrades to a silent no-op (empty bead, no event).
-		current, getErr := store.Get(beadID)
+		current, getErr := get(beadID)
 		if getErr != nil {
 			return beads.Bead{}, false, nil
 		}
 		return current, false, nil
 	}
 	if !hookClaimHasIdentity(claimed.Assignee, []string{assignee}) {
-		// bd reported a successful mutation but the bead is owned by another
-		// claimant (stale projection / lost race). Return it as a non-claim so
-		// the caller can report the rejection rather than treat it as ours.
+		// The store reported a successful mutation but the bead is owned by
+		// another claimant (stale projection / lost race). Return it as a
+		// non-claim so the caller can report the rejection rather than treat it
+		// as ours.
 		return claimed, false, nil
 	}
-	canonical, err := store.Get(beadID)
+	canonical, err := get(beadID)
 	if err != nil {
 		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
 	}

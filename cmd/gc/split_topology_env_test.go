@@ -185,6 +185,56 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 	return e
 }
 
+// withClaimCapableClassLeg returns a copy of e whose class leg is re-opened on a
+// REAL beads.SQLiteStore — the store internal/storebinding/sqlite's OpenEngine
+// actually hands a split city, opened with the same reserved graph prefix.
+//
+// It exists because of a CAPABILITY, not a preference, and the direction of the
+// fidelity gap is the opposite of the one the kit warns about on
+// StrictStore.Count. A relocated-class claim acquires through the closed
+// contract's Claim (storebinding.NewBeadsGraphStore over the binding), which
+// *beads.SQLiteStore implements and beads.MemStore does not — so the kit's
+// default class leaf answers "assignment claim unsupported" and every
+// routed-claim assertion built on it would pin the fixture's limitation instead
+// of the program's behavior.
+//
+// It is scoped to the rows that need it rather than made the suite-wide class
+// leg, and that scoping is itself a finding rather than timidity: the SQLite
+// leaf has a graph applier and the MemStore leaf has none, so swapping it
+// wholesale makes conformanceResidenceSweep's molecule materialization fail with
+// "sqlite graph apply: edge N gcg-x->gcg-y creates a blocking reverse of a
+// parent-child relationship" — the root -> workflow-finalize `blocks` edge
+// internal/formula/compile.go emits, refused by the real backend. That is a
+// production question about graph.v2 on a split city and belongs to its own
+// slice, not to claim routing.
+//
+// Everything else — cfg, city path, work store, rig leg — is shared, so the row
+// still runs the same city on the same two topologies.
+func (e splitEnv) withClaimCapableClassLeg(t *testing.T) splitEnv {
+	t.Helper()
+	if !e.split {
+		t.Fatal("withClaimCapableClassLeg is a split-topology helper; a single-store city has no binding to re-open")
+	}
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("config.ReservedClassPrefix(graph) = ok:false; the fixture has no reserved namespace to open a class store under")
+	}
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("opening the SQLite class store the split binding serves from: %v", err)
+	}
+	t.Cleanup(func() {
+		if closer, ok := leaf.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore()
+		}
+	})
+	binding := splittest.Strict(t, leaf, splittest.SQLiteSemantics)
+	out := e
+	out.class = binding
+	out.routes = splitEnvRoutes(binding)
+	return out
+}
+
 // splitEnvStorageConfig is the [storage] section of a converged split city: work
 // on the reserved binding, all five infrastructure classes on one shared
 // binding. It is the only arrangement this build serves (storageSplitWhole).

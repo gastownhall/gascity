@@ -454,7 +454,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -584,8 +584,24 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // claimHookWork claims routed work for gc hook --claim from the federated store
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
-func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+//
+// The claim ops carry the CLASS axis (claim_class_route.go): every store in the
+// federated set is a bd WORKSPACE, and a relocated coordination class is not
+// one, so the binding is reached through the ops rather than through a leg. On a
+// city that relocates nothing the route is nil and the ops value is the one this
+// function has always passed.
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	route, err := hookClaimClassRouteForCity(cityPath)
+	if err != nil {
+		// The city relocates a class and its front door could not be projected.
+		// Claiming through the work store anyway would write ownership into a
+		// ledger that does not hold the bead, which is the wrong-answer lane
+		// this routing exists to close.
+		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
