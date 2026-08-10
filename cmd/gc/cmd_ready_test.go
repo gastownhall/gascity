@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -523,21 +525,184 @@ func TestRelocatedGraphLegIsGatedOnStoreIdentity(t *testing.T) {
 // has no `partial_errors` field: its whole output is the array, and a short
 // array reads as "no work". So a broken leg must be an error, never a degraded
 // answer assembled from the legs that happened to answer.
+//
+// A leg can break in TWO places, and the rule has to hold at both. The read half
+// is federateBeadLegs. The OPEN half is earlier and was the hole: the leg list is
+// built before a single read runs, so a rig whose store cannot be opened was
+// dropped by the builder and never reached the reader at all — exit 0, a
+// valid-looking short array, and the failure only on stderr, which no work query
+// parses.
 func TestReadyFailsLoudWhenALegErrors(t *testing.T) {
-	city := splittest.NewWorkStore(t, "gc")
-	mustCreateReadyBead(t, city, beads.Bead{Title: "city work", Type: "task"})
-	broken := readyFailingStore{err: errors.New("database is locked")}
+	t.Run("a leg that fails on READ", func(t *testing.T) {
+		city := splittest.NewWorkStore(t, "gc")
+		mustCreateReadyBead(t, city, beads.Bead{Title: "city work", Type: "task"})
+		broken := readyFailingStore{err: errors.New("database is locked")}
 
-	_, err := readyBeadsForOpts([]readyLeg{
-		readyTestLeg("city", city),
-		readyTestLeg("graph", broken),
-	}, readyOpts{})
+		_, err := readyBeadsForOpts([]readyLeg{
+			readyTestLeg("city", city),
+			readyTestLeg("graph", broken),
+		}, readyOpts{})
+		if err == nil {
+			t.Fatal("a dead leg produced a successful answer; a short array is indistinguishable from \"no work\"")
+		}
+		if !strings.Contains(err.Error(), "graph store") || !strings.Contains(err.Error(), "database is locked") {
+			t.Fatalf("error = %v, want it to name the failing leg and the cause", err)
+		}
+	})
+
+	t.Run("a rig leg that cannot be OPENED", func(t *testing.T) {
+		cityDir := newReadyCityWithBrokenRig(t)
+		cityStore, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open city store: %v", err)
+		}
+		mustCreateReadyBead(t, cityStore, beads.Bead{Title: "city work", Type: "task"})
+
+		var stdout, stderr bytes.Buffer
+		code := cmdReady(readyOpts{}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("gc ready exited 0 with the %q rig leg unopened; stdout=%s — a short array is indistinguishable from \"no work\", and stderr is not part of the answer any work query parses", readyBrokenRigName, stdout.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("gc ready emitted %s alongside the failure; a caller that reads stdout on a non-zero exit must not find a plausible answer there", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), readyBrokenRigName) {
+			t.Fatalf("gc ready stderr = %q, want it to name the %q rig whose store could not be opened", stderr.String(), readyBrokenRigName)
+		}
+		if strings.Contains(stderr.String(), "gc supervisor") {
+			t.Fatalf("gc ready stderr = %q, but it reports under another command's name; an operator greps for the command they ran", stderr.String())
+		}
+	})
+}
+
+// TestRigStoreOpenPolicyDiffersByCaller pins the two policies apart over the
+// SAME broken city, because they now share one opener and a future edit to that
+// opener would otherwise silently move one of them.
+//
+// The controller degrades: a rig it cannot open is a rig it cannot supervise,
+// and stopping a whole city over one unmounted rig is worse than running with
+// the rest, so it warns on a stream an operator is already reading. `gc ready`
+// fails: its whole output is a JSON array with nowhere to say it is short, and a
+// caller cannot tell a dropped leg from an empty one.
+func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
+	cityDir := newReadyCityWithBrokenRig(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	stores := buildStandaloneRigStores(cfg, cityDir, &warnings)
+	if _, ok := stores["good"]; !ok {
+		t.Fatalf("the controller's opener returned %v; it must keep supervising the rigs it COULD open", stores)
+	}
+	if _, ok := stores[readyBrokenRigName]; ok {
+		t.Fatalf("the controller's opener returned a store for the unopenable %q rig", readyBrokenRigName)
+	}
+	if !strings.Contains(warnings.String(), "gc supervisor: rig bead store \""+readyBrokenRigName+"\"") {
+		t.Fatalf("controller warnings = %q, want the unchanged supervisor warning naming %q", warnings.String(), readyBrokenRigName)
+	}
+
+	legs, err := readyRigLegStores(cfg, cityDir)
 	if err == nil {
-		t.Fatal("a dead leg produced a successful answer; a short array is indistinguishable from \"no work\"")
+		t.Fatalf("gc ready's opener returned %v and no error; a leg it silently dropped is claimable work missing from an array that has nowhere to say so", legs)
 	}
-	if !strings.Contains(err.Error(), "graph store") || !strings.Contains(err.Error(), "database is locked") {
-		t.Fatalf("error = %v, want it to name the failing leg and the cause", err)
+	if legs != nil {
+		t.Fatalf("gc ready's opener returned stores alongside the failure (%v); a partial leg set is the short answer under another name", legs)
 	}
+	if want := "rig \"" + readyBrokenRigName + "\" store:"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("gc ready's opener error = %v, want it to contain %q", err, want)
+	}
+}
+
+// TestReadyUnboundRigIsSkippedOnBothSurfaces states the decision for the rig
+// declared in city.toml with NO .gc/site.toml binding, which is a different
+// shape from a rig that failed to open and is deliberately NOT promoted to an
+// error here.
+//
+// It is skipped, and it is skipped on both surfaces. An unbound rig has no store
+// at all, so unlike a dead leg there is no claimable row hiding behind it — the
+// fail-open this federation closes is "a store we could not read", not "a rig
+// that was never bound". Erroring would also be a fresh CLI-vs-API divergence in
+// the slice whose acceptance criterion is CLI == API. If an unbound rig should
+// stop a work query, that is a product decision that has to land on both
+// surfaces at once, and this test is what makes it fail until it does.
+func TestReadyUnboundRigIsSkippedOnBothSurfaces(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensuring scoped file store layout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("ensuring file store: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "unboundcity", Prefix: "gc"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Rigs:      []config.Rig{{Name: "unbound"}},
+	}
+
+	stores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("gc ready rejected an unbound rig: %v; it is a rig with no store, not a store the city failed to reach", err)
+	}
+	if _, ok := stores["unbound"]; ok {
+		t.Fatalf("gc ready opened a leg for the unbound rig (%v); an empty path resolves to the CITY scope, which would federate the city store twice under a rig's name", stores)
+	}
+
+	cs := &controllerState{cfg: cfg, cityName: cfg.Workspace.Name, cityPath: cityDir, cacheCtx: context.Background()}
+	if apiStores := cs.buildStores(cfg); len(apiStores) != 0 {
+		t.Fatalf("the API built %v for the unbound rig but gc ready built %v; the two surfaces must skip it identically or this slice's CLI == API criterion is false on the arm it did not change", apiStores, stores)
+	}
+}
+
+// readyBrokenRigName is the rig whose bead store cannot be opened in the
+// open-failure fixture.
+const readyBrokenRigName = "broken"
+
+// newReadyCityWithBrokenRig writes a real on-disk file-provider city with two
+// registered rigs, one of which cannot be opened: its `.gc` is a regular FILE, so
+// resolving the scope's beads.json fails with ENOTDIR the way a wrong mount,
+// a half-deleted rig or a permissions change does in the field.
+//
+// The city is left ambient (GC_CITY) so cmdReady resolves it the way the command
+// does in production, builder included.
+func newReadyCityWithBrokenRig(t *testing.T) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	healthyRig := filepath.Join(cityDir, "rigs", "good")
+	brokenRig := filepath.Join(cityDir, "rigs", readyBrokenRigName)
+	for _, dir := range []string{healthyRig, brokenRig} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("creating rig dir %s: %v", dir, err)
+		}
+	}
+	cityToml := "[workspace]\nname = \"readybroken\"\n\n" +
+		"[beads]\nprovider = \"file\"\n\n" +
+		"[session]\nprovider = \"fake\"\n\n" +
+		"[[rigs]]\nname = \"good\"\npath = " + strconv.Quote(healthyRig) + "\n\n" +
+		"[[rigs]]\nname = " + strconv.Quote(readyBrokenRigName) + "\npath = " + strconv.Quote(brokenRig) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensuring scoped file store layout: %v", err)
+	}
+	for _, scope := range []string{cityDir, healthyRig} {
+		if err := ensurePersistedScopeLocalFileStore(scope); err != nil {
+			t.Fatalf("ensuring file store at %s: %v", scope, err)
+		}
+	}
+	// The break itself: `.gc` as a regular file, so every path under it is
+	// ENOTDIR.
+	if err := os.WriteFile(filepath.Join(brokenRig, ".gc"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatalf("breaking the %q rig: %v", readyBrokenRigName, err)
+	}
+
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() { cityFlag, rigFlag = prevCityFlag, prevRigFlag })
+	t.Setenv("GC_CITY", cityDir)
+	return cityDir
 }
 
 // TestReadyFiltersAreAppliedOverTheMergedSet covers the remaining work_query

@@ -215,10 +215,15 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rigStores, err := readyRigLegStores(cfg, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	legs := readyFederationLegs(
 		loadedCityName(cfg, cityPath),
 		cityStore,
-		buildStandaloneRigStores(cfg, cityPath, stderr),
+		rigStores,
 		relocatedGraphLegStore(cityPath, cityStore),
 	)
 	items, err := readyBeadsForOpts(legs, opts)

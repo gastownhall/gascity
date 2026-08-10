@@ -3655,11 +3655,33 @@ func sessionBeadSnapshotFingerprint(snapshot *sessionBeadSnapshot) string {
 	return snapshot.fingerprint
 }
 
-func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
+// rigStoreOpenFailure names one rig whose bead store could not be opened.
+//
+// The rig name is carried apart from the error rather than pre-formatted into
+// it, because the callers report a dead rig differently on purpose — see
+// openStandaloneRigStores — and a caller that had to strip another surface's
+// prefix back off would be reporting under the wrong command's name.
+type rigStoreOpenFailure struct {
+	rig string
+	err error
+}
+
+// openStandaloneRigStores opens the work store of every BOUND rig in cfg,
+// returning them keyed by rig name plus the rigs that failed to open, in cfg
+// order.
+//
+// It deliberately does NOT decide what a failure means, because the two callers
+// disagree and both are right. The controller (buildStandaloneRigStores) warns
+// and keeps supervising the rigs it could open: halting a whole city because one
+// rig is unmounted is worse than running degraded, and the controller has an
+// operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
+// query: its entire output is a JSON array with nowhere to say it is short.
+func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]beads.Store, []rigStoreOpenFailure) {
 	if cfg == nil || len(cfg.Rigs) == 0 {
-		return nil
+		return nil, nil
 	}
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
+	var failures []rigStoreOpenFailure
 	for _, rig := range cfg.Rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
@@ -3671,13 +3693,21 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 		}
 		store, err := openStoreAtForCity(rig.Path, cityPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", rig.Name, err) //nolint:errcheck // best-effort stderr
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
 			continue
 		}
 		stores[rig.Name] = store
 	}
 	if len(stores) == 0 {
-		return nil
+		return nil, failures
+	}
+	return stores, failures
+}
+
+func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
+	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	for _, f := range failures {
+		fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", f.rig, f.err) //nolint:errcheck // best-effort stderr
 	}
 	return stores
 }

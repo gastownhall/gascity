@@ -1319,6 +1319,64 @@ func conformanceCLIReadyFederation(t *testing.T, e splitEnv) {
 			t.Fatalf("a single-store city resolved a graph leg (%T); its answer is no longer the one it had before the federation existed", graph)
 		}
 	}
+	conformanceCLIReadyDeadRigLeg(t, e)
+}
+
+// conformanceCLIReadyDeadRigLeg pins the one place CLI and API are allowed to
+// answer DIFFERENTLY, so the divergence stays a decision instead of drift.
+//
+// The two surfaces cannot answer the same way here and both be honest. An HTTP
+// body has a `partial_errors` field, so the API serves what it could read and
+// says which rig it could not: Partial 200. A CLI work query has no such field —
+// its whole output is the array — so serving what it could read means serving a
+// short array indistinguishable from "no work", which is the fail-open the whole
+// federation exists to close. Its equivalent of "Partial 200 naming the rig" is
+// therefore "non-zero exit naming the rig", and the correspondence pinned here is
+// exactly that: BOTH surfaces name the dead rig, and NEITHER passes the short
+// answer off as complete.
+//
+// The dead leg is an unavailableStore, which is not a contrivance: it is the
+// value controllerState.buildStores puts in the map when a rig store fails to
+// OPEN (api_state.go), so this is the API's own representation of the field
+// failure — a rig whose .gc is unmounted, half-deleted, or no longer readable.
+func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
+	t.Helper()
+	const deadRig = "rig-DEAD"
+	const cause = "stat .gc/beads.json: not a directory"
+	withDead := make(map[string]beads.Store, len(e.rigStores)+1)
+	for name, store := range e.rigStores {
+		withDead[name] = store
+	}
+	withDead[deadRig] = unavailableStore{err: errors.New(cause)}
+	dead := e
+	dead.rigStores = withDead
+
+	body := apiReadyBody(t, dead)
+	if !body.Partial {
+		t.Fatalf("GET /beads/ready over a dead %q leg reported a COMPLETE read of %d beads; the API's contract for an unreadable rig is a Partial 200", deadRig, len(body.Items))
+	}
+	if !containsSubstring(body.PartialErrors, deadRig) {
+		t.Fatalf("API partial_errors = %v, want the dead rig %q named", body.PartialErrors, deadRig)
+	}
+
+	legs := readyFederationLegs(loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
+	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	if err == nil {
+		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
+	}
+	if !strings.Contains(err.Error(), deadRig) || !strings.Contains(err.Error(), cause) {
+		t.Fatalf("gc ready error = %v, want it to name the dead rig %q and the cause, the way the API's partial_errors do", err, deadRig)
+	}
+}
+
+// containsSubstring reports whether any element contains want.
+func containsSubstring(list []string, want string) bool {
+	for _, s := range list {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // cliReadyIDs runs the `gc ready` reader over the fixture's stores and returns
@@ -1360,6 +1418,31 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 // exactly the dispatch the running controller uses.
 func apiReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
+	body := apiReadyBody(t, e)
+	if body.Partial {
+		t.Fatalf("API reported a partial ready read over healthy stores: %v", body.PartialErrors)
+	}
+	beads.SortBeadsReadyOrder(body.Items)
+	ids := make([]string, 0, len(body.Items))
+	for _, b := range body.Items {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// apiReadyListBody is the decoded 200 body of GET /beads/ready, including the
+// partial tier the CLI has no room for.
+type apiReadyListBody struct {
+	Items         []beads.Bead `json:"items"`
+	Partial       bool         `json:"partial"`
+	PartialErrors []string     `json:"partial_errors"`
+}
+
+// apiReadyBody serves the ready read through the real handler and returns the
+// whole decoded body, so a caller can assert on the partial tier as well as the
+// rows.
+func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
+	t.Helper()
 	cityName := loadedCityName(e.cfg, e.cityPath)
 	state := &controllerState{
 		cfg:           e.cfg,
@@ -1376,22 +1459,11 @@ func apiReadyIDs(t *testing.T, e splitEnv) []string {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /beads/ready = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Items   []beads.Bead `json:"items"`
-		Partial bool         `json:"partial"`
-	}
+	var body apiReadyListBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode /beads/ready: %v (body=%q)", err, rec.Body.String())
 	}
-	if body.Partial {
-		t.Fatalf("API reported a partial ready read over healthy stores: %q", rec.Body.String())
-	}
-	beads.SortBeadsReadyOrder(body.Items)
-	ids := make([]string, 0, len(body.Items))
-	for _, b := range body.Items {
-		ids = append(ids, b.ID)
-	}
-	return ids
+	return body
 }
 
 // fixtureGraphLeg resolves the fixture's graph leg through the SAME identity
