@@ -4441,6 +4441,7 @@ gc storage
 | Subcommand | Description |
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
@@ -4466,6 +4467,34 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage recover-stranded
+
+Copy the infrastructure beads a converged city's proven copy never carried
+out of the retained work store and into the binding that is already serving.
+
+This is the recovery the stranded-write refusal names. It is additive: it moves
+only ids the binding does not hold and the proven-copy manifest does not record,
+it deletes nothing from either store, and it extends the manifest only after
+every moved bead has been proven equal against a closed and reopened
+destination. A bead whose class it cannot state is named and left where it is.
+
+It refuses on a city that has NOT converged — the whole copy is still owed
+there, and `gc storage migrate --from-work` is what owes it. It is not that
+command run twice: the migration is one-shot on purpose, and forcing it to
+re-copy would re-import a serving binding from a source that no longer holds
+what the binding does.
+
+```
+gc storage recover-stranded [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
+| `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 
 ## gc storage status
 
