@@ -1434,6 +1434,22 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 // moment. A var (not a const) so tests can shrink it.
 var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second}
 
+// startupNudgeRetryBudgetFraction caps the total wall-clock time
+// sendStartupNudgeWithRetry may spend on retries (both the backoff sleeps AND
+// the resend attempts themselves — a single send can itself take seconds:
+// NudgeSession's submitEnterAndConfirm polls for the busy indicator for a
+// couple of seconds per attempt before giving up) to this fraction of ctx's
+// *remaining* deadline, measured once on entry. The full backoff ladder sums
+// to 20s worst case even before counting per-attempt cost, but the nudge is
+// a warning-only step (see the call site in launchOrchestration): exhausting
+// it must still leave the majority of whatever startup budget is left for
+// the steps that follow (session_live, etc.), or a robustness feature turns
+// into an outright start failure whenever the busy indicator never appears.
+// Half is a deliberately conservative split: it guarantees a canceled/
+// exhausted ladder never consumes more of the remaining budget than it
+// leaves behind.
+const startupNudgeRetryBudgetFraction = 0.5
+
 // sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
 // ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
 // backoff and calls send again — re-running the whole cycle re-pastes the
@@ -1442,11 +1458,36 @@ var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second
 // a healthy fast boot never pays this cost.
 //
 // ctx is checked before each backoff sleep: if the start is already being
-// cancelled elsewhere (e.g. the supervising startup_timeout deadline), this
+// canceled elsewhere (e.g. the supervising startup_timeout deadline), this
 // stops immediately rather than sleeping through the remainder of the ladder
-// only to hand back the same unconfirmed error a bit later — a cancelled
+// only to hand back the same unconfirmed error a bit later — a canceled
 // start must not be pushed past the budget it's trying to protect.
+//
+// The ladder is additionally bounded by startupNudgeRetryBudgetFraction of
+// ctx's remaining deadline (if any), computed once on entry: a retry (the
+// backoff sleep AND the resend that follows it) is only taken if the actual
+// wall-clock time already spent in this function, plus the next backoff,
+// still fits inside that budget. Wall-clock elapsed — not just the sum of
+// intended sleep durations — is what's measured, because the dominant cost
+// of an unconfirmed attempt is usually the busy-indicator poll inside send
+// itself, not the backoff between attempts; bounding only the sleeps would
+// let a handful of slow, always-unconfirmed sends alone blow through the
+// deadline. This keeps a fully-exhausted ladder from silently eating the
+// whole startup deadline before the warning-and-continue path (the caller's
+// fallback for ErrNudgeSubmitUnconfirmed) gets a chance to return — the
+// retry exists to make startup more robust, not to spend the deadline the
+// rest of startup needs.
 func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration)) error {
+	start := time.Now()
+	budget := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			budget = time.Duration(float64(remaining) * startupNudgeRetryBudgetFraction)
+		} else {
+			budget = 0
+		}
+	}
+
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = send()
@@ -1459,7 +1500,11 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 		if ctx.Err() != nil {
 			return err
 		}
-		sleep(startupNudgeRetryBackoffs[attempt])
+		next := startupNudgeRetryBackoffs[attempt]
+		if budget >= 0 && time.Since(start)+next > budget {
+			return err
+		}
+		sleep(next)
 	}
 }
 

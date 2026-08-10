@@ -1074,13 +1074,13 @@ func TestSendStartupNudgeWithRetry_SucceedsImmediatelyNeverSleeps(t *testing.T) 
 	}
 }
 
-// TestSendStartupNudgeWithRetry_CancelledContextStopsWithoutSleeping proves
-// that a start already being cancelled elsewhere (e.g. the supervising
+// TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping proves
+// that a start already being canceled elsewhere (e.g. the supervising
 // startup_timeout deadline) does not sleep through the remainder of the
 // backoff ladder: the helper must notice cancellation and return the current
 // unconfirmed error immediately instead of burning up to ~20s of retries
 // against a start that is already being torn down.
-func TestSendStartupNudgeWithRetry_CancelledContextStopsWithoutSleeping(t *testing.T) {
+func TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
 	var sleeps []time.Duration
@@ -1099,7 +1099,66 @@ func TestSendStartupNudgeWithRetry_CancelledContextStopsWithoutSleeping(t *testi
 		t.Fatalf("send calls = %d, want 1 (cancellation should stop further attempts)", calls)
 	}
 	if len(sleeps) != 0 {
-		t.Fatalf("sleeps = %v, want none (a cancelled context must not sleep through the backoff ladder)", sleeps)
+		t.Fatalf("sleeps = %v, want none (a canceled context must not sleep through the backoff ladder)", sleeps)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline proves the
+// ladder never spends more than startupNudgeRetryBudgetFraction of ctx's
+// remaining deadline on retries: a caller with a short startup_timeout must
+// keep the majority of its remaining budget for the steps after the nudge
+// (see launchOrchestration's warning-and-continue path), even when the busy
+// indicator never appears and every attempt comes back unconfirmed.
+//
+// send itself sleeps a little on every call, standing in for
+// NudgeSession/submitEnterAndConfirm's real busy-indicator polling, which is
+// the dominant cost of an unconfirmed attempt in production — not the
+// backoff between attempts. A budget that only bounded the sum of the
+// backoffs (ignoring how long each send call actually took) would let a
+// handful of slow, always-unconfirmed sends alone blow through the ctx
+// deadline; this proves wall-clock time is what's actually bounded.
+func TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline(t *testing.T) {
+	origBackoffs := startupNudgeRetryBackoffs
+	const perSendCost = 30 * time.Millisecond
+	startupNudgeRetryBackoffs = []time.Duration{perSendCost, perSendCost, perSendCost, perSendCost}
+	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+
+	// Deliberately short so the test runs fast: the ladder's own worst case
+	// (4 sends + 4 backoffs, each perSendCost) is well over budget for this
+	// deadline, so the bound must cut retries short.
+	const ctxTimeout = 80 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+	defer cancel()
+
+	calls := 0
+	send := func() error {
+		calls++
+		time.Sleep(perSendCost) // stand-in for submitEnterAndConfirm's real polling cost
+		return ErrNudgeSubmitUnconfirmed
+	}
+	var sleeps []time.Duration
+	start := time.Now()
+	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		time.Sleep(d)
+	})
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+
+	budget := time.Duration(float64(ctxTimeout) * startupNudgeRetryBudgetFraction)
+	if elapsed > budget+perSendCost {
+		// Allow one perSendCost of slack: the mandatory first attempt always
+		// runs regardless of budget, so total elapsed = first attempt + the
+		// bounded retries.
+		t.Fatalf("elapsed = %v, want <= ~%v (budget %v + first attempt): ladder must leave room for the rest of startup", elapsed, budget+perSendCost, budget)
+	}
+	if calls >= len(startupNudgeRetryBackoffs)+1 {
+		t.Fatalf("calls = %d, want fewer than the full ladder (%d): the deadline should have cut retries short", calls, len(startupNudgeRetryBackoffs)+1)
+	}
+	if calls != len(sleeps)+1 {
+		t.Fatalf("calls = %d, want %d (one send per sleep plus the initial attempt)", calls, len(sleeps)+1)
 	}
 }
 
