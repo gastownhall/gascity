@@ -359,18 +359,6 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
 	}
-	sorted := append([]RelocatedClass(nil), matched...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Class < sorted[j].Class })
-
-	parts := make([]string, 0, len(sorted))
-	for _, class := range sorted {
-		where := strings.TrimSpace(class.Location)
-		if where == "" {
-			where = "another store"
-		}
-		parts = append(parts, fmt.Sprintf("%s-class beads (id prefix %q) are served from %s", class.Class, class.IDPrefix+"-", where))
-	}
-
 	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
 		"prefixes, so a read scoped to one cannot match here — and bd does not fail: it runs the read successfully "+
 		"against this ledger and returns an empty result indistinguishable from a real one. Read these beads with "+
@@ -384,5 +372,71 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		"so enumerating a molecule's full membership takes one invocation per status and cannot reach a deferred member "+
 		"at all. There is no federated equivalent of `bd list --all` yet. "+
 		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
-		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
+		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
+}
+
+// RelocatedClassFrontierRefusal is RelocatedClassRefusal for a verb whose whole
+// RESULT SET omits a relocated class, no matter what arguments it is given.
+//
+// # Why this is a different refusal from the selector one
+//
+// RelocatedClassRefusal answers a read whose TEXT named a relocated namespace:
+// the operator asked about beads that are somewhere else, and the empty answer
+// is provably wrong for that predicate. The trigger there is the argv, and it
+// has to be — `bd list --title-contains gcg-1` is a question this ledger really
+// can answer.
+//
+// A frontier verb has no such predicate to inspect. `bd ready` computes "the
+// claimable work in this store" and takes no selector that could reach another
+// one, so on a city that serves a coordination class elsewhere its answer is
+// the WORK-CLASS SUBSET of the city's ready set — short by exactly the beads
+// the split moved, for every invocation, including the bare one with no flags
+// at all. Anchoring on argv would guard the rare call that happens to name a
+// relocated id and leave the common one — the one an operator actually types,
+// and the one the original measurement used — answering a confident short list
+// with exit 0. So the trigger is the TOPOLOGY: the class assignment in
+// [storage.classes], which is a fact about the city and not about the command.
+//
+// # Why it does not offer a by-id escape
+//
+// RelocatedClassRefusal steers to `gc bd show <id>` because the read it refused
+// named an id. A refused frontier has no id to show — the question was "what is
+// ready", and only a federated reader answers it. `gc ready` is that reader:
+// flag-compatible with `bd ready` on purpose, ordered over the city store, the
+// rig stores and the relocated binding, and loud on a leg it cannot open rather
+// than short by that leg's rows.
+//
+// Like its sibling, this message leaves GC_BD_ALLOW_RELOCATED_CLASS_READ to the
+// CLI seam that can honor it.
+func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
+	if len(matched) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
+		"prefixes, so the frontier this verb computes is the work-class SUBSET of the city's ready set — and bd does not "+
+		"fail: it runs the read successfully against this ledger and returns that short list with exit 0, "+
+		"indistinguishable from the city's whole ready set. The refusal is decided by the TOPOLOGY and not by the "+
+		"arguments, because this verb takes no selector that could reach another store: no argv makes its answer "+
+		"complete. Use `gc ready`, which is flag-compatible with `bd ready`, federates the city store, the rig stores "+
+		"and the relocated binding as ordered legs, and fails loud on a leg it cannot read instead of returning a short "+
+		"array",
+		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
+}
+
+// describeRelocatedClasses renders the matched classes for an operator: what
+// moved, the id namespace it mints, and where it is served from now. Shared by
+// both refusals so the two cannot describe the same topology differently.
+func describeRelocatedClasses(matched []RelocatedClass) string {
+	sorted := append([]RelocatedClass(nil), matched...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Class < sorted[j].Class })
+
+	parts := make([]string, 0, len(sorted))
+	for _, class := range sorted {
+		where := strings.TrimSpace(class.Location)
+		if where == "" {
+			where = "another store"
+		}
+		parts = append(parts, fmt.Sprintf("%s-class beads (id prefix %q) are served from %s", class.Class, class.IDPrefix+"-", where))
+	}
+	return strings.Join(parts, "; ")
 }

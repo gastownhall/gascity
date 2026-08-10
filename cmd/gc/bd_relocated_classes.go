@@ -116,14 +116,16 @@ func bdRelocatedClassOverrideEnabled() bool {
 // opposite failure semantics is worse than either one alone, because an
 // operator who learned the loud one trusts the quiet one.
 //
-// `ready` and `search` are the same projection over the same flag: bdflags
-// lists --metadata-field for `ready`, bd registers it for `search`, and both
-// answer no-match with `[]` and exit 0. Guarding `list` alone would have minted
-// the asymmetry it retired — one verb over, on the same molecule, through the
-// same selector — and inside `gc bd ready` itself, whose --parent/--mol
-// spellings the by-id door already refuses loudly. They share `list`'s scan
-// because they share bd's selector dialect, so the negatives that keep a
-// free-text search answerable hold for all three unchanged.
+// `search` is the same projection over the same flag: bd registers
+// --metadata-field for it too, and it answers no-match with `[]` and exit 0.
+// Guarding `list` alone would have minted the asymmetry it retired — one verb
+// over, on the same molecule, through the same selector. It shares `list`'s
+// scan because it shares bd's selector dialect, so the negatives that keep a
+// free-text search answerable hold for both unchanged.
+//
+// `ready` takes --metadata-field as well but is NOT here: it is refused by
+// topology instead, in bdRelocatedClassBlindVerbs, which strictly subsumes what
+// this scan would have caught for it. See there for why.
 //
 // The other verbs are unguarded because they are no longer blind, not because
 // they were ever safe:
@@ -142,15 +144,61 @@ func bdRelocatedClassOverrideEnabled() bool {
 // The selector surface is COMPLETE, and that is checkable rather than hopeful:
 // --metadata-field — the only bd flag whose value side is a key=value predicate
 // on a read — is registered on exactly three subcommands (list.go, ready.go,
-// search.go in the pinned beads module), and all three are in this map.
+// search.go in the pinned beads module), and every one of them is refused by
+// this map or by bdRelocatedClassBlindVerbs.
 // TestBdRelocatedClassGuardCoversEverySelectorVerb pins that against bdflags so
 // a fourth cannot appear unguarded.
 var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 	"sql":    beads.RelocatedClassesInSQL,
 	"query":  beads.RelocatedClassesInQueryExpr,
 	"list":   beads.RelocatedClassesInSelector,
-	"ready":  beads.RelocatedClassesInSelector,
 	"search": beads.RelocatedClassesInSelector,
+}
+
+// bdRelocatedClassBlindVerbs are the bd read verbs whose whole RESULT SET omits
+// a relocated class, so the trigger is the city's topology and not the argv.
+//
+// # Why `ready` is here and `list` is not
+//
+// The selector guard above classifies TEXT: it fires when an argument names a
+// relocated id namespace in an id-shaped position, because that is the case
+// where the empty answer is provably wrong for the predicate that was asked.
+// That is the right trigger for `list` and `search`, whose selectors span the
+// whole ledger — `bd list --status open` is a question about the rows THIS
+// ledger holds and bd answers it correctly.
+//
+// `ready` is not that shape. It computes a FRONTIER — "the claimable work in
+// this store" — and takes no selector that could reach another store, so on a
+// city that serves a coordination class from a binding its result is the
+// work-class subset of the city's ready set, short by exactly the beads the
+// split moved, for every invocation. Measured on a converged split city, `gc
+// ready` returned 9 beads including 3 graph-resident ones and matched the API
+// id-for-id, while `gc bd ready` returned 5 with none of them, exit 0 — and it
+// still returned exit 0 with the relocated binding chmod-000, which is the
+// state a loud failure exists for (ga-jbn6f). Scanning argv would have guarded
+// the rare `gc bd ready --metadata-field gc.root_bead_id=<gcg root>` and left
+// the bare `gc bd ready` — the invocation an operator types, and the one the
+// original report measured — answering short and quiet. So the trigger is the
+// class assignment in [storage.classes]: a fact about the city, checked before
+// any argument is read.
+//
+// The topology trigger strictly subsumes the selector one for this verb, which
+// is why `ready` was removed from bdRelocatedClassGuardedVerbs rather than
+// added here alongside it — two triggers for one verb, where one always fires
+// first, is a dead branch that reads as coverage.
+//
+// A city that relocates nothing has no entry to match against, so a
+// single-store `gc bd ready` is byte-identical: same argv, same bd binary, same
+// exit code. bdSQLRelocatedClassRefusal returns early on an empty relocated
+// set, before this map is consulted at all.
+//
+// Not guarded here: a `ready` hidden behind an unrecognized root flag, which
+// bdRelocatedClassVerb cannot locate. That case already fails closed for TEXT
+// (every dialect scan runs over the remaining arguments), and bd itself rejects
+// the unknown flag before running anything, so the invocation cannot produce a
+// short answer either way.
+var bdRelocatedClassBlindVerbs = map[string]bool{
+	"ready": true,
 }
 
 // bdRelocatedClassScan classifies one argument's text in one bd dialect.
@@ -197,6 +245,11 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 		return "", false
 	}
 	verb, verbArgs, resolved := bdRelocatedClassVerb(bdArgs)
+	// The topology arm runs first and reads no argument: a frontier verb is
+	// short by the relocated class whatever it was given.
+	if resolved && bdRelocatedClassBlindVerbs[verb] {
+		return beads.RelocatedClassFrontierRefusal("bd "+verb, relocated).Error(), true
+	}
 	scans, op := bdRelocatedClassScans(verb, resolved)
 	if len(scans) == 0 {
 		return "", false
@@ -237,10 +290,29 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 // query whose value legitimately holds a relocated id (gc.drain_control_id) is
 // indistinguishable from a class-scoped one. An escape hatch nobody can find is
 // not an escape hatch, so it travels with the refusal that stopped them.
-func bdRelocatedClassEscapeHint() string {
+//
+// frontier selects the wording for the topology arm, where there is no argument
+// to have misclassified. That refusal is never a false positive — the class
+// really is served elsewhere and the frontier really is short — so the sentence
+// cannot be about a misread predicate. What it names instead is the narrower
+// question the short answer does answer, because a rig-local or one-ledger
+// frontier is a thing an operator sometimes wants on purpose.
+func bdRelocatedClassEscapeHint(frontier bool) string {
+	if frontier {
+		return fmt.Sprintf(" If the work-class subset is the answer you want — a deliberate look at this one ledger "+
+			"rather than the city's frontier — %s=1 runs it anyway.", bdRelocatedClassOverrideEnvVar)
+	}
 	return fmt.Sprintf(" If this read is about work rows that merely REFERENCE such an id — a metadata comparison on "+
 		"gc.drain_control_id, say — it is a question this ledger can answer, and %s=1 runs it anyway.",
 		bdRelocatedClassOverrideEnvVar)
+}
+
+// bdRelocatedClassInvocationIsBlindVerb reports whether an argv names a verb
+// refused by the city's topology rather than by its argument text, so the CLI
+// can print the escape hint that matches the arm that fired.
+func bdRelocatedClassInvocationIsBlindVerb(bdArgs []string) bool {
+	verb, _, resolved := bdRelocatedClassVerb(bdArgs)
+	return resolved && bdRelocatedClassBlindVerbs[verb]
 }
 
 // bdRelocatedClassScans returns the dialect scans to run over an invocation's

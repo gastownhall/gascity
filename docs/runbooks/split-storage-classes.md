@@ -127,6 +127,27 @@ converged — the proven-copy size, the stranded count, and how many the
 binding's own garbage collection has removed since cutover. It exits non-zero
 while the city is unconverged, so a deployment script can gate on it.
 
+### `gc bd ready` stops answering, on purpose
+
+After the split, `gc bd ready` is refused with exit 1 on this city no matter
+what arguments it is given, and the refusal names the relocated class and the
+binding. It is not a bug and it is not scoped to the arguments: `bd ready`
+computes a frontier over the one ledger `bd` resolves from the working
+directory, and takes no selector that could reach the binding, so its answer is
+the work-class subset of the city's ready set and nothing distinguishes that
+from the whole of it.
+
+Use `gc ready` instead. It is flag-compatible with `bd ready`, federates the
+city store, the rig stores and the binding, and exits non-zero naming the leg
+it could not read rather than returning a short array. Every worker's generated
+work query is already swapped onto it, so this affects operators and ad-hoc
+scripts, not the work loop. `GC_BD_ALLOW_RELOCATED_CLASS_READ=1` runs the
+one-ledger read anyway when that is what you actually want.
+
+Make sure the `gc` on every agent's `PATH` is the build that has `gc ready`:
+the generated work query shells out to it by name, and an older `gc` on `PATH`
+fails every hook with `running work query: exit status 1`.
+
 ## Rolling back
 
 **Before cutover, rollback is free** — nothing moved, so nothing is lost. How

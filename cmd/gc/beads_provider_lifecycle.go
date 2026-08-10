@@ -1655,6 +1655,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 	if err := ensureBeadsDir(fs, filepath.Dir(path)); err != nil {
 		return err
 	}
+	announceStorageModeChange(fs, path, "server", doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
@@ -1662,6 +1663,71 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 		DoltDatabase: doltDatabase,
 	})
 	return err
+}
+
+// storageModeChangeSink is where a canonicalization announces that it changed a
+// scope's storage mode. os.Stderr by default so the operator running the
+// command sees it and the controller's log captures it; tests redirect it.
+//
+// It is a package sink rather than a threaded io.Writer because the flip has
+// SIX entry points — `gc init`, `gc start`, `gc supervisor run`, `gc rig add`,
+// the controller's rig-create handler, and `gc dolt config write-managed` — and
+// three of them reach ensureCanonicalScopeMetadata through initAndHookDir,
+// whose signature is the rig.Deps.InitAndHook contract. Threading a writer
+// through that boundary to carry one warning would have been a wider change
+// than the guard itself, and a sink that some callers pass io.Discard to is how
+// this went unseen in the first place: normalizeCanonicalBdScopeFiles already
+// takes a warn writer, and `gc rig add` passes io.Discard to it.
+// defaultV2MigrationWarnSink and cliStorageStderr are the in-tree precedents
+// for the shape.
+var storageModeChangeSink io.Writer = os.Stderr
+
+// announceStorageModeChange reports a canonicalization that is about to change
+// which bead database a scope reads, before it happens.
+//
+// The rewrite itself is deliberate and load-bearing: gc's managed bead store is
+// a Dolt SERVER that many processes — the controller, every agent's bd, the
+// dashboard — open concurrently, and an embedded scope opens the Dolt directory
+// in-process, which those concurrent readers cannot share. Canonicalising to
+// server mode is what makes a scope usable by a running city at all, so this
+// does not refuse it. What it stops being is SILENT: metadata.json is the only
+// thing that says which database holds a scope's beads, and rewriting it moves
+// the ledger a workspace reads without moving a single row.
+//
+// The consequence is named when it is knowable. If the mode being replaced
+// still has a populated Dolt repository on disk, that repository is what the
+// scope will stop reading, and the line says so with its path — which is the
+// difference between an operator seeing "my beads are gone" and seeing where
+// they are. When the previous mode has no database on disk there is nothing to
+// orphan and the line reports only the change.
+//
+// Nothing is announced when the mode is unchanged, absent, or unreadable: a
+// scope gc initialized is already canonical and re-canonicalizing it every boot
+// must stay quiet, or the signal is worth nothing.
+func announceStorageModeChange(fs fsys.FS, metadataPath, want, doltDatabase string) {
+	previous, ok, err := contract.ReadDoltMode(fs, metadataPath)
+	if err != nil || !ok {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(previous), strings.TrimSpace(want)) {
+		return
+	}
+	scopeRoot := filepath.Dir(filepath.Dir(filepath.Clean(metadataPath)))
+	if recorded, ok, err := contract.ReadDoltDatabase(fs, metadataPath); err == nil && ok {
+		doltDatabase = recorded
+	}
+	orphan, orphaned := beads.BeadDatabaseDirForDoltMode(scopeRoot, previous, doltDatabase)
+	if orphaned {
+		_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; %s holds a Dolt "+
+			"bead database that this scope will STOP reading, and no rows are copied out of it. Export from a copy of it "+
+			"and import into the %q store if it holds beads you still need — reads that come back empty while it is "+
+			"there are refused rather than answered (`gc doctor`, check bd-split-store).\n",
+			scopeRoot, strings.TrimSpace(previous), want, orphan, want)
+		return
+	}
+	_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; no %q bead database is "+
+		"present, so nothing is left behind.\n",
+		scopeRoot, strings.TrimSpace(previous), want, strings.TrimSpace(previous))
 }
 
 func ensureCanonicalDoltliteScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {

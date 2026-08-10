@@ -281,6 +281,13 @@ nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
 scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
 binding answers.
 
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given: it computes a frontier over one ledger and takes no selector that
+could reach another, so its answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which is flag-compatible and
+federates every store the city spreads work across. A city that relocates no
+class is unaffected.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
