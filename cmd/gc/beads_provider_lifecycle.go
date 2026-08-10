@@ -1675,9 +1675,9 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 // three of them reach ensureCanonicalScopeMetadata through initAndHookDir,
 // whose signature is the rig.Deps.InitAndHook contract. Threading a writer
 // through that boundary to carry one warning would have been a wider change
-// than the guard itself, and a sink that some callers pass io.Discard to is how
-// this went unseen in the first place: normalizeCanonicalBdScopeFiles already
-// takes a warn writer, and `gc rig add` passes io.Discard to it.
+// than the warning itself, and a sink that some callers pass io.Discard to is
+// how this went unseen in the first place: normalizeCanonicalBdScopeFiles
+// already takes a warn writer, and `gc rig add` passes io.Discard to it.
 // defaultV2MigrationWarnSink and cliStorageStderr are the in-tree precedents
 // for the shape.
 var storageModeChangeSink io.Writer = os.Stderr
@@ -1695,11 +1695,25 @@ var storageModeChangeSink io.Writer = os.Stderr
 // the ledger a workspace reads without moving a single row.
 //
 // The consequence is named when it is knowable. If the mode being replaced
-// still has a populated Dolt repository on disk, that repository is what the
-// scope will stop reading, and the line says so with its path — which is the
-// difference between an operator seeing "my beads are gone" and seeing where
-// they are. When the previous mode has no database on disk there is nothing to
-// orphan and the line reports only the change.
+// still has a Dolt repository on disk, that repository is what the scope will
+// stop reading, and the line says so with its path — which is the difference
+// between an operator seeing "my beads are gone" and seeing where they are.
+// When the previous mode has no database on disk there is nothing to leave
+// behind and the line reports only the change.
+//
+// What it does NOT claim is that the directory holds rows. `bd init` creates
+// the embedded repository whether or not a bead is ever filed in it, so a
+// freshly initialized workspace and a year-old one are the same directory shape
+// (beads.BeadDatabaseDirForDoltMode) and telling them apart requires opening the
+// database. The line names the path and the remediation and leaves the count to
+// `gc doctor`, which enumerates both stores.
+//
+// The remediation is the durable one, and it is `gc doctor`'s own
+// (splitStoreFixHint): export, review with `bd import --dry-run`, import, keep
+// both directories until reconciled. Editing dolt_mode back is deliberately not
+// offered — every lifecycle command re-canonicalizes the scope to server mode,
+// so that edit is undone by the next `gc start`, and a recovery gc itself
+// reverts sends an operator round a loop.
 //
 // Nothing is announced when the mode is unchanged, absent, or unreadable: a
 // scope gc initialized is already canonical and re-canonicalizing it every boot
@@ -1716,13 +1730,16 @@ func announceStorageModeChange(fs fsys.FS, metadataPath, want, doltDatabase stri
 	if recorded, ok, err := contract.ReadDoltDatabase(fs, metadataPath); err == nil && ok {
 		doltDatabase = recorded
 	}
-	orphan, orphaned := beads.BeadDatabaseDirForDoltMode(scopeRoot, previous, doltDatabase)
-	if orphaned {
-		_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; %s holds a Dolt "+
-			"bead database that this scope will STOP reading, and no rows are copied out of it. Export from a copy of it "+
-			"and import into the %q store if it holds beads you still need — reads that come back empty while it is "+
-			"there are refused rather than answered (`gc doctor`, check bd-split-store).\n",
-			scopeRoot, strings.TrimSpace(previous), want, orphan, want)
+	left, leftBehind := beads.BeadDatabaseDirForDoltMode(scopeRoot, previous, doltDatabase)
+	if leftBehind {
+		_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; %s is a Dolt "+
+			"bead database that this scope will STOP reading, and no rows are copied out of it. Reads answer from the %q "+
+			"store from now on, so if beads you expect stop appearing, that directory is still where they are. Run `gc "+
+			"doctor` (check bd-split-store) to see what each store holds, then export from a copy of the inactive one, review with "+
+			"`bd import --dry-run`, and import into the active one; keep both directories until reconciled. Editing "+
+			"dolt_mode back does not hold — every `gc start`, `gc rig add` and `gc supervisor run` re-canonicalizes this "+
+			"scope to %q.\n",
+			scopeRoot, strings.TrimSpace(previous), want, left, want, want)
 		return
 	}
 	_, _ = fmt.Fprintf(storageModeChangeSink, "gc: changing the bead storage mode of %s from %q to %q; no %q bead database is "+

@@ -830,11 +830,20 @@ func TestGcBdReadyRefusesTheWholeFrontierOnASplitCity(t *testing.T) {
 					strings.Join(args, " "), stdout.String())
 			}
 			// A refused frontier has no id to show, so the steer is the
-			// federated reader and nothing else.
-			for _, want := range []string{"graph-class beads", `"gcg-"`, splitEnvBinding, "gc ready", "TOPOLOGY", bdRelocatedClassOverrideEnvVar} {
+			// federated reader and nothing else. The escape hint must be the
+			// FRONTIER wording: there is no argument here to have misclassified,
+			// so the selector arm's "this read is about work rows that merely
+			// REFERENCE such an id" would describe a read nobody performed.
+			for _, want := range []string{
+				"graph-class beads", `"gcg-"`, splitEnvBinding, "gc ready", "TOPOLOGY",
+				bdRelocatedClassOverrideEnvVar, "the work-class subset is the answer you want",
+			} {
 				if !strings.Contains(stderr.String(), want) {
 					t.Errorf("the refusal does not name %q; stderr=%q", want, stderr.String())
 				}
+			}
+			if strings.Contains(stderr.String(), "merely REFERENCE such an id") {
+				t.Errorf("the frontier refusal carries the SELECTOR arm's escape hint, which describes a predicate this read never had; stderr=%q", stderr.String())
 			}
 			if _, err := os.Stat(capture); err == nil {
 				data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
@@ -860,6 +869,10 @@ func TestGcBdReadyIsByteIdenticalOnASingleStoreCity(t *testing.T) {
 		"json":                  {"ready", "--json"},
 		"pool demand":           {"ready", "--metadata-field", "gc.routed_to=demo/worker", "--unassigned", "--json"},
 		"graph-shaped selector": {"ready", "--metadata-field", "gc.root_bead_id=gcg-abc123", "--json"},
+		"list --ready":          {"list", "--ready", "--json"},
+		"list --ready=true":     {"list", "--ready=true", "--json"},
+		"list --ready=false":    {"list", "--ready=false", "--json"},
+		"list --reverse":        {"list", "-r", "--json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			capture := bdSQLRefusalCity(t, "")
@@ -875,6 +888,72 @@ func TestGcBdReadyIsByteIdenticalOnASingleStoreCity(t *testing.T) {
 			}
 			if !strings.Contains(string(data), strings.Join(args, " ")) {
 				t.Fatalf("bd received %q, want %v forwarded verbatim", data, args)
+			}
+		})
+	}
+}
+
+// TestGcBdListReadyIsTheSameFrontierAndIsRefusedToo closes the spelling the
+// verb-keyed topology arm missed.
+//
+// bd registers --ready on `list` as "Show only ready issues (no active
+// blockers, same semantics as bd ready)" and dispatches it to the same
+// GetReadyWork store methods `bd ready` calls, so it computes the identical
+// short frontier over the identical one ledger and exits 0 — including while
+// the relocated binding is unreadable, which is the state ga-jbn6f exists for.
+// Refusing the verb and answering the flag would have minted the inversion the
+// guard's own rationale calls worse than either failure alone: `gc bd list
+// --ready --metadata-field gc.root_bead_id=<gcg>` was refused by the argv scan
+// while the bare frontier `gc bd list --ready` was answered short.
+//
+// Red before the fix, on bdSQLRefusalSplitStorage with the live short answer
+// stubbed:
+//
+//	doBd([list --ready --json])      = 0; bd got "list --ready --json"; stdout = the 5-row work-class-only array
+//	doBd([list --ready=true --json]) = 0; doBd([list --json --ready]) = 0
+//	bdSQLRelocatedClassRefusal(splitCityConfig(), [list --ready --json]) = ("", false)
+func TestGcBdListReadyIsTheSameFrontierAndIsRefusedToo(t *testing.T) {
+	for name, args := range map[string][]string{
+		"flag":                {"list", "--ready", "--json"},
+		"inline true":         {"list", "--ready=true", "--json"},
+		"after a root flag":   {"list", "--json", "--ready"},
+		"with a selector too": {"list", "--ready", "--metadata-field", "gc.root_bead_id=gcg-abc123", "--json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+			t.Setenv("BD_STUB_STDOUT", bdReadyLiveShortAnswer)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("`gc bd %s` exited 0 with stdout=%q; that is the same confident short frontier `gc bd ready` is refused for, one flag over",
+					strings.Join(args, " "), stdout.String())
+			}
+			// The refusal must name the read the operator typed, or they go
+			// looking for a selector they never wrote.
+			for _, want := range []string{"bd list --ready", "graph-class beads", "gc ready", "TOPOLOGY"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("the refusal does not name %q; stderr=%q", want, stderr.String())
+				}
+			}
+			if _, err := os.Stat(capture); err == nil {
+				data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+				t.Fatalf("bd was invoked despite the refusal: %q", data)
+			}
+		})
+	}
+
+	// --ready=false runs an ordinary ledger query, and `-r` is bd's --reverse
+	// shorthand, not a frontier switch (cmd/bd/list.go BoolP("reverse", "r")).
+	// Refusing either would be a false positive on a read this ledger answers.
+	for name, args := range map[string][]string{
+		"explicitly off":    {"list", "--ready=false", "--json"},
+		"reverse shorthand": {"list", "-r", "--json"},
+		"ordinary status":   {"list", "--status", "open", "--json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, refused := bdSQLRelocatedClassRefusal(splitCityConfig(), args); refused {
+				t.Fatalf("`gc bd %s` is refused as a frontier read; it is an ordinary question about this ledger's own rows",
+					strings.Join(args, " "))
 			}
 		})
 	}
@@ -975,6 +1054,45 @@ func TestBdRelocatedClassGuardCoversEverySelectorVerb(t *testing.T) {
 	for sub := range bdRelocatedClassBlindVerbs {
 		if _, alsoScanned := bdRelocatedClassGuardedVerbs[sub]; alsoScanned {
 			t.Errorf("bd %q is refused by topology AND registered for an argv scan; the scan is unreachable", sub)
+		}
+	}
+}
+
+// TestBdRelocatedClassGuardCoversEveryFrontierSurface is the other half of the
+// completeness claim, and it is the one that was missing: the selector pin above
+// derives its surface from --metadata-field, a VALUE flag, so it is structurally
+// blind to a frontier expressed as a BOOL flag. `bd list --ready` sat in that
+// blind spot — refused as a verb, answered as a flag.
+//
+// The requirement is derived from bdflags.BoolFlags rather than restated, so a
+// verb that grows --ready is covered without an edit to the guard, and a verb
+// that loses it stops being asserted about.
+func TestBdRelocatedClassGuardCoversEveryFrontierSurface(t *testing.T) {
+	surfaces := 0
+	for _, sub := range bdflags.Subcommands() {
+		if !bdflags.BoolFlags(sub)[bdRelocatedClassFrontierFlag] {
+			continue
+		}
+		surfaces++
+		for _, args := range [][]string{
+			{sub, bdRelocatedClassFrontierFlag},
+			{sub, bdRelocatedClassFrontierFlag + "=true"},
+			{sub, "--json", bdRelocatedClassFrontierFlag},
+		} {
+			if _, refused := bdSQLRelocatedClassRefusal(splitCityConfig(), args); !refused {
+				t.Errorf("`gc bd %s` computes bd's ready frontier over the one work ledger and is answered exit 0 on a split city",
+					strings.Join(args, " "))
+			}
+		}
+	}
+	if surfaces == 0 {
+		t.Fatalf("bdflags registers %q on no subcommand; either the manifest regressed or the frontier flag was renamed, and this pin is asserting nothing",
+			bdRelocatedClassFrontierFlag)
+	}
+	// Every blind VERB is a frontier surface too, whatever argv it carries.
+	for sub := range bdRelocatedClassBlindVerbs {
+		if _, refused := bdSQLRelocatedClassRefusal(splitCityConfig(), []string{sub}); !refused {
+			t.Errorf("`gc bd %s` is a blind verb that is not refused", sub)
 		}
 	}
 }

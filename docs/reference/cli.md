@@ -282,11 +282,14 @@ scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
 binding answers.
 
 "gc bd ready" is refused outright on such a city, whatever arguments it is
-given: it computes a frontier over one ledger and takes no selector that
-could reach another, so its answer is the work-class subset of the city's
-ready set with no way to tell. Use "gc ready", which is flag-compatible and
-federates every store the city spreads work across. A city that relocates no
-class is unaffected.
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to

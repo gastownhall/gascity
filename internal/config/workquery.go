@@ -41,8 +41,12 @@ func (t QueryTopology) includeEphemeralReady() bool {
 // Ready reader commands. bdReadyCommand reads exactly one store — whichever one
 // `bd` resolves from the working directory — and is what every city runs today.
 // gcReadyCommand is the in-process federation over every store a city spreads
-// work across (cmd/gc's `gc ready`); it is flag-compatible with `bd ready` on
-// purpose, so the swap is the command word and nothing else.
+// work across (cmd/gc's `gc ready`); it accepts every flag the queries in this
+// file generate, so the swap is the command word and nothing else. That is a
+// claim about THESE queries, not about all of `bd ready`: `gc ready` registers
+// the generated subset and rejects the rest of bd's ready surface, which is why
+// the operator-facing refusals that steer at it say so
+// (internal/beads/bdsql_relocation.go RelocatedClassFrontierRefusal).
 const (
 	bdReadyCommand = "bd ready"
 	gcReadyCommand = "gc ready"

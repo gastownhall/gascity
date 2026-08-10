@@ -386,25 +386,36 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 // has to be — `bd list --title-contains gcg-1` is a question this ledger really
 // can answer.
 //
-// A frontier verb has no such predicate to inspect. `bd ready` computes "the
-// claimable work in this store" and takes no selector that could reach another
-// one, so on a city that serves a coordination class elsewhere its answer is
-// the WORK-CLASS SUBSET of the city's ready set — short by exactly the beads
-// the split moved, for every invocation, including the bare one with no flags
-// at all. Anchoring on argv would guard the rare call that happens to name a
-// relocated id and leave the common one — the one an operator actually types,
-// and the one the original measurement used — answering a confident short list
-// with exit 0. So the trigger is the TOPOLOGY: the class assignment in
-// [storage.classes], which is a fact about the city and not about the command.
+// A frontier read has no such predicate to inspect. `bd ready` — and `bd list
+// --ready`, which bd documents as the same semantics and dispatches to the same
+// store methods — computes "the claimable work in this store" and takes no
+// selector that could reach another one, so on a city that serves a
+// coordination class elsewhere its answer is the WORK-CLASS SUBSET of the
+// city's ready set: short by exactly the beads the split moved, for every
+// invocation, including the bare one with no flags at all. Anchoring on argv
+// would guard the rare call that happens to name a relocated id and leave the
+// common one — the one an operator actually types, and the one the original
+// measurement used — answering a confident short list with exit 0. So the
+// trigger is the TOPOLOGY: the class assignment in [storage.classes], which is
+// a fact about the city and not about the command.
 //
 // # Why it does not offer a by-id escape
 //
 // RelocatedClassRefusal steers to `gc bd show <id>` because the read it refused
 // named an id. A refused frontier has no id to show — the question was "what is
 // ready", and only a federated reader answers it. `gc ready` is that reader:
-// flag-compatible with `bd ready` on purpose, ordered over the city store, the
-// rig stores and the relocated binding, and loud on a leg it cannot open rather
-// than short by that leg's rows.
+// ordered over the city store, the rig stores and the relocated binding, and
+// loud on a leg it cannot open rather than short by that leg's rows.
+//
+// The steer states its LIMITS for the same reason RelocatedClassRefusal states
+// its own: overstating the escape is the same failure as the silent empty — a
+// confident answer to a question that was not asked. `gc ready` is flag
+// compatible with the `bd ready` invocation the generated work query builds,
+// which is a subset of bd's ready surface, and an operator sent to a command
+// that rejects their invocation has been sent to a dead end. The authority for
+// what it takes is the flag set `gc ready` actually registers, so cmd/gc's
+// TestGcReadySteerDescribesTheFlagsItActuallyAccepts derives both sides from
+// cobra and bdflags and fails if this sentence drifts from either.
 //
 // Like its sibling, this message leaves GC_BD_ALLOW_RELOCATED_CLASS_READ to the
 // CLI seam that can honor it.
@@ -413,13 +424,19 @@ func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s: %s. This bd ledger does not serve those classes and holds no row under their reserved id "+
-		"prefixes, so the frontier this verb computes is the work-class SUBSET of the city's ready set — and bd does not "+
+		"prefixes, so the frontier this read computes is the work-class SUBSET of the city's ready set — and bd does not "+
 		"fail: it runs the read successfully against this ledger and returns that short list with exit 0, "+
 		"indistinguishable from the city's whole ready set. The refusal is decided by the TOPOLOGY and not by the "+
-		"arguments, because this verb takes no selector that could reach another store: no argv makes its answer "+
-		"complete. Use `gc ready`, which is flag-compatible with `bd ready`, federates the city store, the rig stores "+
-		"and the relocated binding as ordered legs, and fails loud on a leg it cannot read instead of returning a short "+
-		"array",
+		"arguments, because this read takes no selector that could reach another store: no argv makes its answer "+
+		"complete. Use `gc ready`, which federates the city store, the rig stores and the relocated binding as ordered "+
+		"legs and fails loud on a leg it cannot read instead of returning a short array. It is flag-compatible with the "+
+		"`bd ready` invocation the generated work query builds — NOT with all of `bd ready`: it takes --assignee, "+
+		"--unassigned, --metadata-field, --exclude-type, --exclude-label, --sort, --limit, --include-ephemeral, --status "+
+		"and --json, and rejects the rest of bd's ready surface (--label, --label-any, --parent, --type, --priority, "+
+		"--offset, --has-metadata-key, --mol, --include-deferred, --gated, --claim, and every single-letter shorthand), "+
+		"with --sort taking oldest|newest rather than bd's priority|hybrid|oldest. A query only bd's surface can express "+
+		"has no federated spelling yet: narrow with --metadata-field, or read the relocated class directly from the "+
+		"binding",
 		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
 }
 

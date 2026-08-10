@@ -2366,25 +2366,7 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 }
 
 // List returns beads matching the query via bd list and bd query.
-//
-// An empty result is checked before it is returned: a scope whose .beads/ holds
-// a bead database its metadata no longer points at gets ErrOrphanedBeadStore
-// instead of an empty slice, because that empty slice is a claim about a ledger
-// the caller is not reading. See orphaned_store.go.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
-	result, err := s.list(query)
-	if err != nil || len(result) > 0 {
-		return result, err
-	}
-	if untrustworthy := s.emptyReadIsUntrustworthy("bd list"); untrustworthy != nil {
-		return nil, untrustworthy
-	}
-	return result, nil
-}
-
-// list runs the query against bd. It is the body List wraps so the empty-result
-// check has exactly one place to sit, across all three tier modes.
-func (s *BdStore) list(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
@@ -2782,10 +2764,6 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 
 // Ready returns open ready beads via bd ready, including ephemeral rows for
 // wisp-aware tier modes.
-//
-// An empty frontier is checked before it is returned, the same way List's empty
-// result is: it is the answer a work query spends as "no work", so it must not
-// come from a ledger this scope no longer points at. See orphaned_store.go.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
@@ -2815,14 +2793,6 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			return nil, fmt.Errorf("bd ready: %w", parseErr)
 		}
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
-	}
-	// An empty frontier is the answer a work query spends as "no work", so it is
-	// the one that must not come from a ledger this scope no longer points at.
-	// See orphaned_store.go.
-	if len(result) == 0 {
-		if untrustworthy := s.emptyReadIsUntrustworthy("bd ready"); untrustworthy != nil {
-			return nil, untrustworthy
-		}
 	}
 	return result, nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
@@ -125,7 +126,10 @@ func bdRelocatedClassOverrideEnabled() bool {
 //
 // `ready` takes --metadata-field as well but is NOT here: it is refused by
 // topology instead, in bdRelocatedClassBlindVerbs, which strictly subsumes what
-// this scan would have caught for it. See there for why.
+// this scan would have caught for it. See there for why. `list` stays here
+// because its selectors span this ledger's own rows — except when it carries
+// --ready, which is not a selector at all but a switch onto the same frontier
+// query, and is refused by the same topology arm.
 //
 // The other verbs are unguarded because they are no longer blind, not because
 // they were ever safe:
@@ -158,7 +162,7 @@ var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 // bdRelocatedClassBlindVerbs are the bd read verbs whose whole RESULT SET omits
 // a relocated class, so the trigger is the city's topology and not the argv.
 //
-// # Why `ready` is here and `list` is not
+// # Why `ready` is here and bare `list` is not
 //
 // The selector guard above classifies TEXT: it fires when an argument names a
 // relocated id namespace in an id-shaped position, because that is the case
@@ -200,6 +204,24 @@ var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 var bdRelocatedClassBlindVerbs = map[string]bool{
 	"ready": true,
 }
+
+// bdRelocatedClassFrontierFlag is the bd flag that switches a verb which is not
+// a frontier verb onto the frontier query anyway.
+//
+// Refusing the VERB `ready` and answering `bd list --ready` would have been the
+// same asymmetry the selector guard exists to retire, one flag over instead of
+// one verb over: bd registers --ready on `list` as "Show only ready issues (no
+// active blockers, same semantics as bd ready)" (cmd/bd/list.go), and it
+// dispatches to the same GetReadyWork store methods `bd ready` calls. So it
+// computes the identical short frontier over the identical one ledger, exits 0,
+// and does so with the relocated binding unreadable — the state ga-jbn6f exists
+// for. An operator refused on `gc bd ready` who retried with `gc bd list
+// --ready` would have got the confident short answer back.
+//
+// Which verbs accept it is derived from bdflags rather than restated, so a verb
+// that grows the flag is covered without an edit here, and
+// TestBdRelocatedClassGuardCoversEveryFrontierSurface pins that derivation.
+const bdRelocatedClassFrontierFlag = "--ready"
 
 // bdRelocatedClassScan classifies one argument's text in one bd dialect.
 type bdRelocatedClassScan func([]beads.RelocatedClass, string) []beads.RelocatedClass
@@ -245,10 +267,10 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 		return "", false
 	}
 	verb, verbArgs, resolved := bdRelocatedClassVerb(bdArgs)
-	// The topology arm runs first and reads no argument: a frontier verb is
-	// short by the relocated class whatever it was given.
-	if resolved && bdRelocatedClassBlindVerbs[verb] {
-		return beads.RelocatedClassFrontierRefusal("bd "+verb, relocated).Error(), true
+	// The topology arm runs first and reads no predicate: a frontier read is
+	// short by the relocated class whatever selector it was given.
+	if op, frontier := bdRelocatedClassFrontierRead(verb, verbArgs, resolved); frontier {
+		return beads.RelocatedClassFrontierRefusal(op, relocated).Error(), true
 	}
 	scans, op := bdRelocatedClassScans(verb, resolved)
 	if len(scans) == 0 {
@@ -307,12 +329,59 @@ func bdRelocatedClassEscapeHint(frontier bool) string {
 		bdRelocatedClassOverrideEnvVar)
 }
 
-// bdRelocatedClassInvocationIsBlindVerb reports whether an argv names a verb
-// refused by the city's topology rather than by its argument text, so the CLI
-// can print the escape hint that matches the arm that fired.
-func bdRelocatedClassInvocationIsBlindVerb(bdArgs []string) bool {
-	verb, _, resolved := bdRelocatedClassVerb(bdArgs)
-	return resolved && bdRelocatedClassBlindVerbs[verb]
+// bdRelocatedClassInvocationComputesFrontier reports whether an argv is refused
+// by the city's topology rather than by its argument text, so the CLI can print
+// the escape hint that matches the arm that fired.
+func bdRelocatedClassInvocationComputesFrontier(bdArgs []string) bool {
+	verb, verbArgs, resolved := bdRelocatedClassVerb(bdArgs)
+	_, frontier := bdRelocatedClassFrontierRead(verb, verbArgs, resolved)
+	return frontier
+}
+
+// bdRelocatedClassFrontierRead reports whether an invocation computes bd's
+// ready frontier — by verb or by flag — and the name the refusal reports the
+// read under.
+//
+// The name carries the flag when the flag is what made it a frontier, because
+// an operator who typed `gc bd list --ready` and read a refusal about "bd list"
+// would look for a selector they never wrote.
+func bdRelocatedClassFrontierRead(verb string, verbArgs []string, resolved bool) (string, bool) {
+	if !resolved {
+		return "", false
+	}
+	if bdRelocatedClassBlindVerbs[verb] {
+		return "bd " + verb, true
+	}
+	if !bdflags.BoolFlags(verb)[bdRelocatedClassFrontierFlag] {
+		return "", false
+	}
+	for _, arg := range verbArgs {
+		if bdRelocatedClassFrontierFlagIsOn(arg) {
+			return "bd " + verb + " " + bdRelocatedClassFrontierFlag, true
+		}
+	}
+	return "", false
+}
+
+// bdRelocatedClassFrontierFlagIsOn reports whether one argv token turns the
+// frontier flag on.
+//
+// A bool flag arrives bare (`--ready`) or inline (`--ready=true`), and only the
+// inline spelling can turn it OFF — `--ready=false` really does run an ordinary
+// ledger query, so refusing it would be a false positive on a selector this
+// ledger can answer. A value bd's own flag parser would reject fails CLOSED:
+// bd exits before running anything, so the invocation produces no answer to be
+// short, and a guard a typo can switch off is not a guard.
+func bdRelocatedClassFrontierFlagIsOn(arg string) bool {
+	name, value, inline := strings.Cut(arg, "=")
+	if name != bdRelocatedClassFrontierFlag {
+		return false
+	}
+	if !inline {
+		return true
+	}
+	on, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err != nil || on
 }
 
 // bdRelocatedClassScans returns the dialect scans to run over an invocation's

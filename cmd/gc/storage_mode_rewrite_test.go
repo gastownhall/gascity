@@ -3,27 +3,27 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // This file covers ga-qi9km: `gc rig add` and `gc supervisor run` silently
-// rewrite a city's .beads/metadata.json from embedded to server, orphaning the
-// database that holds the beads, after which every work-store read answers `[]`
-// with exit 0.
+// rewrite a city's .beads/metadata.json from embedded to server, re-pointing
+// the scope at a database that does not hold its beads, after which every
+// work-store read answers `[]` with exit 0.
 //
-// It is a fail-open on the WORK leg and it defeats a federated reader from the
-// inside. `gc ready` fails loudly on a dead rig or an unreadable binding, but
-// if the city work leg answers empty because its metadata was rewritten
-// underneath it, the federation reports a confident short answer with every
-// leg "healthy". Nothing here is split-store specific: the fixtures below carry
-// no [storage] section, because a single-store city is bitten identically.
+// What lands here is the half that is DECIDABLE: the rewrite becomes visible,
+// with the path it stops reading and the durable remediation attached. The
+// read-time refusal that was tried alongside it does not land, and the last two
+// tests in this file are why — they are the cases a refusal keyed on "a `.dolt`
+// directory exists under the other mode's subdirectory" gets wrong, and that
+// fact is the only evidence available without opening the second database.
 //
 // Both fixtures are real directories with real files. The defect survived a
 // suite that passes precisely because it lives in the disagreement between a
@@ -31,8 +31,8 @@ import (
 // bug away.
 
 // embeddedScopeWithBeads builds a scope whose .beads/ is an embedded-mode bd
-// workspace with a populated Dolt repository — what `bd init -p <prefix>`
-// leaves behind, and what the live proof's city had before gc touched it.
+// workspace with a Dolt repository under it — what `bd init -p <prefix>` leaves
+// behind, and what the live proof's city had before gc touched it.
 //
 // The Dolt repository is represented by the directory shape gc itself uses to
 // recognize one (a `.dolt` subdirectory, the same test gc doctor's
@@ -110,11 +110,111 @@ func TestCanonicalizingAScopeAnnouncesAStorageModeChange(t *testing.T) {
 	if mode := readScopeDoltMode(t, scope); mode != "server" {
 		t.Fatalf("dolt_mode = %q after canonicalization, want %q", mode, "server")
 	}
-	orphan := filepath.Join(scope, ".beads", "embeddeddolt", "jc")
-	for _, want := range []string{scope, "embedded", "server", orphan, "STOP reading"} {
+	left := filepath.Join(scope, ".beads", "embeddeddolt", "jc")
+	for _, want := range []string{scope, "embedded", "server", left, "STOP reading"} {
 		if !strings.Contains(notices.String(), want) {
 			t.Errorf("the storage-mode change never names %q; notices=%q", want, notices.String())
 		}
+	}
+}
+
+// TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot is the
+// operator-guidance half of ga-qi9km, and it pins the two ways this message can
+// be worse than useless.
+//
+// The first is advice gc itself undoes. ensureCanonicalScopeMetadata forces
+// dolt_mode=server unconditionally, and `gc start`, `gc rig add`, `gc supervisor
+// run` and the controller's rig-create handler all run it — so "point
+// metadata.json back at the embedded database" works until the next boot and
+// then silently stops, leaving the operator in a loop and, in between, on a
+// mode internal/beads/contract's preflight checker FAILS the native store on.
+// The message must not offer it, and must say the edit does not hold.
+//
+// The second is overstating what is on disk. `bd init` creates the embedded
+// repository before a single bead exists, so "holds a Dolt bead database" is
+// all that is knowable — a claim that it holds ROWS is one gc cannot make
+// without opening it, and a message that overstates gets ignored the next time
+// it is right.
+//
+// The remediation named is `gc doctor`'s own (splitStoreFixHint), word for
+// word on the load-bearing clause, so the two do not send an operator in
+// different directions about the same two directories.
+func TestTheStorageModeAnnouncementNamesARecoveryThatSURVIVESTheNextBoot(t *testing.T) {
+	scope := embeddedScopeWithBeads(t, "jc")
+	notices := captureStorageModeChanges(t)
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadataForInit: %v", err)
+	}
+	notice := notices.String()
+
+	for _, want := range []string{
+		"gc doctor",
+		"bd import --dry-run",
+		// gc doctor's splitStoreFixHint prescribes exactly this state; the
+		// announcement must not tell the operator to undo it.
+		"keep both directories until reconciled",
+		// The edit an operator reaches for first is the one gc reverts.
+		"re-canonicalizes",
+	} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the announcement does not name %q: %q", want, notice)
+		}
+	}
+	// Not a restatement: the check the announcement names is run against the
+	// scope the announcement was printed for, so a drift in either text or a
+	// regression that makes the check silent on this shape fails here.
+	result := doctor.NewBDSplitStoreCheck(scope).Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("gc doctor's bd-split-store check reports %v (%q) for the scope the announcement steers it at; a diagnostic that answers OK on the state an operator was just warned about is a false all-clear",
+			result.Status, result.Message)
+	}
+	if !strings.Contains(result.FixHint, "keep both directories until reconciled") {
+		t.Errorf("gc doctor's fix hint %q no longer carries the clause the announcement mirrors; the two have drifted", result.FixHint)
+	}
+	for _, forbidden := range []string{
+		// Naming this edit as a recovery sends the operator round a loop.
+		`"dolt_mode": "embedded"`,
+		"point .beads/metadata.json back",
+		// Nothing on disk supports these.
+		"lost", "deleted", "corrupt",
+	} {
+		if strings.Contains(strings.ToLower(notice), strings.ToLower(forbidden)) {
+			t.Errorf("the announcement claims %q, which gc either cannot know or immediately reverts: %q", forbidden, notice)
+		}
+	}
+}
+
+// TestEveryDoorThatFlipsTheStorageModeAnnouncesIt closes the gap a
+// per-command warning always has.
+//
+// `gc rig set-endpoint` and `gc beads city use-managed`/`use-external` reach
+// their own canonicalizer (ensureCanonicalScopeMetadataIfPresent in
+// cmd_rig_endpoint.go) rather than the init one, and they perform the identical
+// embedded→server rewrite. A warning that depends on which command the operator
+// happened to run is a warning nobody can rely on.
+func TestEveryDoorThatFlipsTheStorageModeAnnouncesIt(t *testing.T) {
+	for name, canonicalize := range map[string]func(scope string) error{
+		"init path": func(scope string) error {
+			return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc")
+		},
+		"endpoint path": func(scope string) error {
+			return ensureCanonicalScopeMetadataIfPresent(fsys.OSFS{}, scope)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scope := embeddedScopeWithBeads(t, "jc")
+			notices := captureStorageModeChanges(t)
+			if err := canonicalize(scope); err != nil {
+				t.Fatalf("canonicalize: %v", err)
+			}
+			if mode := readScopeDoltMode(t, scope); mode != "server" {
+				t.Fatalf("dolt_mode = %q, want %q", mode, "server")
+			}
+			left := filepath.Join(scope, ".beads", "embeddeddolt", "jc")
+			if !strings.Contains(notices.String(), left) {
+				t.Fatalf("the rewrite did not name %q; notices=%q", left, notices.String())
+			}
+		})
 	}
 }
 
@@ -141,22 +241,17 @@ func TestCanonicalizingAnAlreadyCanonicalScopeIsSilent(t *testing.T) {
 	}
 }
 
-// TestWorkStoreReadRefusesTheEmptyAnswerAfterAStorageModeRewrite is priority
-// (2), and it is the whole defect end to end: the real rewrite, then the real
-// read, with only bd's subprocess faked — and faked to do exactly what it does
-// on a healthy server, which is answer `[]` and exit 0.
+// TestTheStorageModeAnnouncementDoesNotChangeWhatAReadAnswers is the mutation
+// proof for the announcement: it is a WARNING, and a warning that changes the
+// answer is not a warning.
 //
-// Red before the fix, for both reads:
-//
-//	List:  got 0 beads, err = <nil>
-//	Ready: got 0 beads, err = <nil>
-//
-// That nil is the fail-open. `gc ready`'s city leg returns it, the federation
-// merges it with the rig legs, every leg reports healthy, and the caller is
-// told the city has no work while its entire ledger sits unread one directory
-// over. A dead rig fails loudly and an unreadable binding fails loudly; this
-// did not, which made the loud legs worth less than they looked.
-func TestWorkStoreReadRefusesTheEmptyAnswerAfterAStorageModeRewrite(t *testing.T) {
+// A scope whose metadata was just re-pointed away from the database holding its
+// rows still answers `[]` with nil, exactly as it did before this change, on
+// every read shape. That is the fail-open ga-qi9km reported and it is still
+// open — deliberately, because closing it at read time needs evidence gc does
+// not have (see the two tests below). What is no longer true is that it happens
+// silently.
+func TestTheStorageModeAnnouncementDoesNotChangeWhatAReadAnswers(t *testing.T) {
 	scope := embeddedScopeWithBeads(t, "jc")
 	captureStorageModeChanges(t)
 	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
@@ -165,97 +260,138 @@ func TestWorkStoreReadRefusesTheEmptyAnswerAfterAStorageModeRewrite(t *testing.T
 
 	store := beads.NewBdStore(scope, emptyBdRunner)
 	for name, read := range map[string]func() ([]beads.Bead, error){
-		"List":  func() ([]beads.Bead, error) { return store.List(beads.ListQuery{AllowScan: true}) },
-		"Ready": func() ([]beads.Bead, error) { return store.Ready() },
+		"List":     func() ([]beads.Bead, error) { return store.List(beads.ListQuery{AllowScan: true}) },
+		"Ready":    func() ([]beads.Bead, error) { return store.Ready() },
+		"Children": func() ([]beads.Bead, error) { return store.Children("jc-1") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := read()
-			if err == nil {
-				t.Fatalf("%s returned %d beads and err = <nil> from a store whose metadata was just re-pointed away from the database holding its rows; that empty answer is the fail-open on the work leg", name, len(got))
-			}
-			if !errors.Is(err, beads.ErrOrphanedBeadStore) {
-				t.Fatalf("%s error = %v, want beads.ErrOrphanedBeadStore", name, err)
-			}
-			orphan := filepath.Join(scope, ".beads", "embeddeddolt", "jc")
-			for _, want := range []string{scope, orphan, "gc doctor"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("%s refusal does not name %q: %v", name, want, err)
-				}
+			if err != nil || len(got) != 0 {
+				t.Fatalf("%s = (%d beads, %v), want (0, nil)", name, len(got), err)
 			}
 		})
 	}
 }
 
-// TestWorkStoreReadIsUnchangedWhenNothingIsOrphaned is the mutation proof, and
-// it carries the compatibility claim this fix owes every city in the field.
+// TestAnEmptyReadIsNotEvidenceTheScopeIsReadingTheWrongDatabase is the first of
+// the two cases that keep a read-time refusal out of this change, and it is the
+// one a populated city hits every minute.
 //
-// A scope gc created has no .beads/embeddeddolt at all, so an empty ledger is
-// an empty ledger and answers as one. A scope that answers with ROWS is not
-// checked even when a stale directory is present: the store bd opened is
-// demonstrably the populated one, and refusing there would brick a city that
-// migrated deliberately and left the old directory behind.
-func TestWorkStoreReadIsUnchangedWhenNothingIsOrphaned(t *testing.T) {
-	t.Run("no stale database", func(t *testing.T) {
-		scope := t.TempDir()
-		writeScopeMetadata(t, scope, map[string]string{
-			"database": "dolt", "backend": "dolt", "dolt_mode": "server", "dolt_database": "jc",
-		})
-		store := beads.NewBdStore(scope, emptyBdRunner)
-		got, err := store.List(beads.ListQuery{AllowScan: true})
-		if err != nil || len(got) != 0 {
-			t.Fatalf("List = (%d beads, %v), want (0, nil) on a scope with one database", len(got), err)
+// A refusal keyed on the presence of a second Dolt directory fires on the
+// RESULT of one call, not on the store: `Ready()` returning zero rows is the
+// steady state of an idle city and of every assignee-scoped probe, and the
+// filtered reads below are answered by a store bd just handed rows for. A city
+// that migrated deliberately and kept the old directory — which is the state
+// `gc doctor`'s own fix hint tells operators to sit in — would have every one
+// of these turn into an error, and `federateBeadLegs` aborts the whole
+// federation on any leg error, so `gc ready` exits non-zero for the city and
+// every worker's generated work query fails with it.
+//
+// Red before this change, on a scope with metadata pointing at the server store
+// and a retained .beads/embeddeddolt/jc:
+//
+//	List  = (1 beads, <nil>)                    ← the active store is populated
+//	Ready = (0 beads, bead store read returned empty while an unread bead database sits beside it…)
+func TestAnEmptyReadIsNotEvidenceTheScopeIsReadingTheWrongDatabase(t *testing.T) {
+	scope := embeddedScopeWithBeads(t, "jc")
+	captureStorageModeChanges(t)
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadataForInit: %v", err)
+	}
+	answering := func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "ready" {
+			return []byte(`[]`), nil
 		}
-		if got, err := store.Ready(); err != nil || len(got) != 0 {
-			t.Fatalf("Ready = (%d beads, %v), want (0, nil)", len(got), err)
-		}
-	})
+		return []byte(`[{"id":"jc-1","title":"real row","status":"open","assignee":"alice"}]`), nil
+	}
+	store := beads.NewBdStore(scope, answering)
 
-	t.Run("stale database but the read answers", func(t *testing.T) {
-		scope := embeddedScopeWithBeads(t, "jc")
-		captureStorageModeChanges(t)
-		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jc"); err != nil {
-			t.Fatalf("ensureCanonicalScopeMetadataForInit: %v", err)
-		}
-		answering := func(_, _ string, _ ...string) ([]byte, error) {
-			return []byte(`[{"id":"jc-1","title":"real row","status":"open"}]`), nil
-		}
-		store := beads.NewBdStore(scope, answering)
-		got, err := store.List(beads.ListQuery{AllowScan: true})
-		if err != nil || len(got) != 1 {
-			t.Fatalf("List = (%d beads, %v), want (1, nil): a store that answers is the one being read", len(got), err)
-		}
-	})
-
-	t.Run("an empty directory is not a database", func(t *testing.T) {
-		scope := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(scope, ".beads", "embeddeddolt", "jc"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		writeScopeMetadata(t, scope, map[string]string{
-			"database": "dolt", "backend": "dolt", "dolt_mode": "server", "dolt_database": "jc",
+	got, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("List = (%d beads, %v), want (1, nil): this store is demonstrably the populated one", len(got), err)
+	}
+	for name, read := range map[string]func() ([]beads.Bead, error){
+		// The frontier is empty because nothing is claimable right now.
+		"empty frontier on a populated store": func() ([]beads.Bead, error) { return store.Ready() },
+		// bd answered with a row; the in-process assignee filter dropped it.
+		"per-assignee frontier": func() ([]beads.Bead, error) {
+			return store.Ready(beads.ReadyQuery{Assignee: "demo/worker"})
+		},
+		// bd answered with a row; the wisp-tier filter dropped it.
+		"wisp tier over issue rows": func() ([]beads.Bead, error) {
+			return store.Ready(beads.ReadyQuery{TierMode: beads.TierWisps})
+		},
+		// A leaf really has no children, and 26 non-test call sites walk them.
+		"children of a leaf": func() ([]beads.Bead, error) { return store.Children("jc-9") },
+		// An empty inbox is the normal state of a mail poll.
+		"mail poll with no mail": func() ([]beads.Bead, error) {
+			return store.List(beads.ListQuery{Type: "message", Status: "open", Assignee: "demo/worker"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := read()
+			if err != nil {
+				t.Fatalf("read returned %d beads and err = %v; an empty answer from a demonstrably populated store is a real answer, and refusing it fails `gc ready` for the whole city", len(got), err)
+			}
 		})
-		store := beads.NewBdStore(scope, emptyBdRunner)
-		if got, err := store.List(beads.ListQuery{AllowScan: true}); err != nil || len(got) != 0 {
-			t.Fatalf("List = (%d beads, %v), want (0, nil): a directory with no .dolt repository holds no beads", len(got), err)
-		}
-	})
+	}
 }
 
-// TestOrphanedStoreGuardIsNotSplitStoreSpecific states the scope of the fix
-// out loud, because the program it lands in is a split-store program and the
-// reflex is to assume this rides along with it.
+// TestAdoptingAFreshlyInitializedWorkspaceStillReads is the second case, and it
+// is why narrowing the refusal to "the active store is provably empty" does not
+// rescue it either.
+//
+// `bd init` defaults to embedded mode and creates .beads/embeddeddolt/<db>/.dolt
+// before a single bead exists (bd's own cmd/bd/init_embedded_test.go asserts
+// that file). Adopting such a workspace with `gc rig add` canonicalizes it to
+// server mode, and from that moment BOTH databases are empty — which is the
+// same on-disk shape as a populated workspace that was re-pointed at an empty
+// server store. Presence of a `.dolt` directory cannot tell them apart; only
+// opening the second database can, and that is a store open, a lock and a
+// possible schema migration on a directory the operator was told to preserve.
+//
+// So the fresh rig reads as a fresh rig: zero beads, nil error. Refusing here
+// would break the adoption path this change's own announcement exists to keep
+// usable, and would fail `gc rig add` itself —
+// verifyCanonicalBdScopeStoreReady requires List(AllowScan, Limit 1) to return
+// a nil error, retried 20 times at 500ms.
+//
+// Red before this change:
+//
+//	List(AllowScan, Limit 1) = (0 beads, bead store read returned empty while an unread bead database sits beside it…)
+//	Ready()                  = (0 beads, bead store read returned empty while an unread bead database sits beside it…)
+func TestAdoptingAFreshlyInitializedWorkspaceStillReads(t *testing.T) {
+	scope := embeddedScopeWithBeads(t, "jkq") // `bd init -p jkq`: empty repo, embedded mode
+	notices := captureStorageModeChanges(t)
+	if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, scope, "jkq"); err != nil {
+		t.Fatalf("ensureCanonicalScopeMetadataForInit: %v", err)
+	}
+	if notices.Len() == 0 {
+		t.Fatal("adopting a bd-initialized workspace changed its storage mode silently")
+	}
+
+	store := beads.NewBdStore(scope, emptyBdRunner)
+	// The readiness probe `gc rig add` and `gc start` gate adoption on.
+	if got, err := store.List(beads.ListQuery{AllowScan: true, Limit: 1}); err != nil || len(got) != 0 {
+		t.Fatalf("List(AllowScan, Limit 1) = (%d beads, %v), want (0, nil): a rig with no beads yet is not a broken rig", len(got), err)
+	}
+	if got, err := store.Ready(); err != nil || len(got) != 0 {
+		t.Fatalf("Ready = (%d beads, %v), want (0, nil)", len(got), err)
+	}
+}
+
+// TestTheStorageModeAnnouncementIsNotSplitStoreSpecific states the scope of the
+// fix out loud, because the program it lands in is a split-store program and
+// the reflex is to assume this rides along with it.
 //
 // The fixture carries no [storage] section and no relocated coordination class.
 // Everything about the defect — the metadata rewrite, the re-pointed workspace,
 // the `[]` with exit 0 — happens on a city with exactly one store, and the
-// guard fires there. What changes for a single-store city is precisely this: an
-// empty answer from a scope holding an unread bead database becomes an error
-// instead of an empty slice. A single-store city with one database is untouched
-// (TestWorkStoreReadIsUnchangedWhenNothingIsOrphaned).
-func TestOrphanedStoreGuardIsNotSplitStoreSpecific(t *testing.T) {
+// announcement fires there.
+func TestTheStorageModeAnnouncementIsNotSplitStoreSpecific(t *testing.T) {
 	scope := embeddedScopeWithBeads(t, "hq")
-	if orphan, active, ok := beads.OrphanedBeadDatabase(scope); ok {
-		t.Fatalf("an embedded scope pointing at its own database reported %q orphaned (active %q); nothing has been rewritten yet", orphan, active)
+	if _, present := beads.BeadDatabaseDirForDoltMode(scope, "server", "hq"); present {
+		t.Fatal("the fixture has a server database; nothing has been rewritten yet")
 	}
 
 	notices := captureStorageModeChanges(t)
@@ -265,14 +401,11 @@ func TestOrphanedStoreGuardIsNotSplitStoreSpecific(t *testing.T) {
 	if notices.Len() == 0 {
 		t.Fatal("the rewrite was silent on a single-store city")
 	}
-	orphan, active, ok := beads.OrphanedBeadDatabase(scope)
-	if !ok {
-		t.Fatal("no orphaned database reported after the rewrite on a single-store city")
+	left, present := beads.BeadDatabaseDirForDoltMode(scope, "embedded", "hq")
+	if !present {
+		t.Fatal("the embedded database gc stopped reading is no longer resolvable")
 	}
-	if active != "dolt" {
-		t.Errorf("active store = %q, want %q", active, "dolt")
-	}
-	if want := filepath.Join(scope, ".beads", "embeddeddolt", "hq"); orphan != want {
-		t.Errorf("orphaned database = %q, want %q", orphan, want)
+	if !strings.Contains(notices.String(), left) {
+		t.Errorf("the announcement does not name %q; notices=%q", left, notices.String())
 	}
 }

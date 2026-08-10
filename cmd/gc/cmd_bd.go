@@ -95,11 +95,14 @@ scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
 binding answers.
 
 "gc bd ready" is refused outright on such a city, whatever arguments it is
-given: it computes a frontier over one ledger and takes no selector that
-could reach another, so its answer is the work-class subset of the city's
-ready set with no way to tell. Use "gc ready", which is flag-compatible and
-federates every store the city spreads work across. A city that relocates no
-class is unaffected.
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
@@ -256,13 +259,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// passthroughs to bd, and bd answers about the bd ledger only. On a split
 	// city a read that names a relocated class's beads comes back empty and exit
 	// 0 — a confident wrong answer, and the one that reported live molecule roots
-	// as missing. `gc bd ready` is refused on the same seam for a different
-	// reason: its whole result set is short by the relocated class whatever the
-	// argv. Refuse both here, where the class routing is known; bd cannot know a
-	// class was relocated.
+	// as missing. A frontier read (`gc bd ready`, or `gc bd list --ready`, which
+	// runs the same query) is refused on the same seam for a different reason:
+	// its whole result set is short by the relocated class whatever the argv.
+	// Refuse both here, where the class routing is known; bd cannot know a class
+	// was relocated.
 	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
 		if !bdRelocatedClassOverrideEnabled() {
-			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint(bdRelocatedClassInvocationIsBlindVerb(bdArgs))) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint(bdRelocatedClassInvocationComputesFrontier(bdArgs))) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Overridden, but never silently: the operator asked for a read this

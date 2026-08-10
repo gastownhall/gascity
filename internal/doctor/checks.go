@@ -760,6 +760,9 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	serverExists := splitStoreDirExists(serverDir)
 	embeddedExists := splitStoreDirExists(embeddedDir)
 	if !serverExists || !embeddedExists {
+		if unread := c.unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir); unread != nil {
+			return unread
+		}
 		r.Status = StatusOK
 		r.Message = "no legacy split store detected"
 		return r
@@ -811,6 +814,58 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
 	r.FixHint = splitStoreFixHint(activeStore)
 	return r
+}
+
+// unreadStoreBesideTheActiveOne reports a bead database sitting in the mode
+// directory the scope's metadata does NOT point at, when the mode it does point
+// at has no directory of its own yet.
+//
+// That shape is the one gc's own storage-mode change produces, and it is the
+// one the announcement steers here for: canonicalizing an embedded workspace to
+// server mode re-points the ledger before any .beads/dolt exists, so the
+// both-directories test above answers "no legacy split store detected" for
+// exactly the scope that has one. A diagnostic an operator is told to run and
+// which reports OK on the state they were warned about is worse than no
+// diagnostic — it converts a real warning into a false all-clear.
+//
+// The evidential standard is the one this check already applies: a `.dolt`
+// repository under the inactive mode's directory, without opening it. A
+// repository `bd init` created and never wrote to reports the same as a
+// populated one, which is why this is a WARNING that names both paths and never
+// an error — see splitStoreDetails for the recovery it prescribes.
+//
+// It answers nothing when the active store is unidentifiable, when the inactive
+// directory is absent, or when it holds no repository: each of those is a scope
+// with one ledger, which is the ordinary case.
+func (c *BDSplitStoreCheck) unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir string) *CheckResult {
+	activeSource, activeStore := c.activeBDStore(beadsDir)
+	inactiveStore, inactiveDir := "embeddeddolt", embeddedDir
+	switch activeStore {
+	case "dolt":
+	case "embeddeddolt":
+		inactiveStore, inactiveDir = "dolt", serverDir
+	default:
+		return nil
+	}
+	if !splitStoreDirExists(inactiveDir) {
+		return nil
+	}
+	inactiveRepos, err := doltReposUnder(inactiveDir)
+	if err != nil || len(inactiveRepos) == 0 {
+		return nil
+	}
+	serverRepos, embeddedRepos := inactiveRepos, []string(nil)
+	if inactiveStore == "embeddeddolt" {
+		serverRepos, embeddedRepos = nil, inactiveRepos
+	}
+	return &CheckResult{
+		Name:   c.Name(),
+		Status: StatusWarning,
+		Message: fmt.Sprintf("unread bead database beside the active store: active .beads/%s (%s), unread .beads/%s contains %d Dolt repo(s)",
+			activeStore, activeSource, inactiveStore, len(inactiveRepos)),
+		Details: splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos),
+		FixHint: splitStoreFixHint(activeStore),
+	}
 }
 
 // CanFix returns false; reconciliation requires explicit user review.
