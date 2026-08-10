@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 200,
+  "next_id": 201,
   "permanent_ids": [
     {
       "name": "help",
@@ -3090,6 +3090,21 @@
       "classification": "prompt-synth",
       "owner": "immediate",
       "id": 117
+    },
+    {
+      "path": "gc ready",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "ready",
+      "owner": "immediate",
+      "id": 200
     },
     {
       "path": "gc register",

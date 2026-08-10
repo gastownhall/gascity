@@ -65,6 +65,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -3223,6 +3224,44 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc ready
+
+List ready, claimable work as a JSON array, federating the city store, the
+rig stores, and — on a split city — the relocated graph store where molecule
+roots, step beads and control beads live.
+
+It is the in-process, city-wide drop-in for the single-store "bd ready" work
+query, so workers and the control plane see graph-class work instead of an
+authoritative-looking short answer. On a city that relocates no coordination
+class it reads the one store, unchanged.
+
+The flags mirror the "bd ready" contract the default work_query builds:
+  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+           --exclude-type=epic --exclude-label "hold:mayor" \
+           --sort oldest --limit 20 --json
+
+Rows are emitted in canonical ready order (priority, created_at, id) unless
+--sort selects a created_at order, and --limit is applied last, so a bounded
+read is the true top-N of the merged set rather than the top-N of whichever
+store answered first.
+
+```
+gc ready [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | only work assigned to this identity |
+| `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
+| `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--include-ephemeral` | bool |  | include the wisp/ephemeral tier |
+| `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--limit` | int |  | max beads to return (0 = unlimited) |
+| `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
+| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
+| `--unassigned` | bool |  | only unassigned work |
 
 ## gc register
 

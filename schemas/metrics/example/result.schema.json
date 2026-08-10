@@ -209,7 +209,8 @@
               "pack-registry-requests",
               "events-reemit-execution",
               "storage-migrate",
-              "storage-status"
+              "storage-status",
+              "ready"
             ]
           },
           "event_id": {

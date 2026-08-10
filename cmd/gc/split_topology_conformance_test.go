@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
@@ -83,6 +88,7 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I10-wake-ownership-fast-path", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWakeOwnershipFastPath) })
 	t.Run("I11-read-path-consistency", func(t *testing.T) { forEachTopology(t, conformanceReadPathConsistency) })
 	t.Run("I12-molecule-membership", func(t *testing.T) { forEachTopology(t, conformanceMoleculeMembership) })
+	t.Run("I13-cli-ready-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceCLIReadyFederation) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -1248,4 +1254,152 @@ func beadIDsOf(list []beads.Bead) []string {
 		ids = append(ids, b.ID)
 	}
 	return ids
+}
+
+// conformanceCLIReadyFederation (I13) is the CLI half of the split-store ready
+// federation whose API half PR #5148 landed, and it asserts the one thing that
+// makes the CLI half checkable: CLI == API.
+//
+// The bug it guards is the one measured on a live split city — `gc bd ready`
+// answered with 5 beads and ZERO `gcg-`, while GET /v0/beads/ready answered with
+// 22, 14 of them `gcg-`, at the same moment. The whole execution DAG was
+// invisible to the CLI behind an answer that looked authoritative, and a work
+// query that returns a short array is indistinguishable from one that returns
+// "no work".
+//
+// The oracle is NOT invented. internal/api's humaHandleBeadReady carries an
+// executable FEDERATION CONTRACT written for this invariant: legs city → rigs
+// ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
+// first-leg-wins, and — the load-bearing part — BOTH sides compared after
+// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
+// deterministic but not canonical across leg kinds (a caching-wrapped work store
+// emits (priority, created_at, id); the canonical relocated binding emits
+// (created_at, id) with no priority term). So this runs the real API handler and
+// the real CLI reader over the SAME three stores and compares the two answers.
+//
+// The single-store row is not a formality: it is the byte-identity claim. There
+// the graph class is not relocated, both surfaces federate the same two work
+// legs, and the answer must be exactly the one a legacy city already got.
+func conformanceCLIReadyFederation(t *testing.T, e splitEnv) {
+	cityWork, err := e.work.Create(beads.Bead{Title: "city work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed city work: %v", err)
+	}
+	rigWork, err := e.rig.Create(beads.Bead{Title: "rig work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed rig work: %v", err)
+	}
+	// Orchestration work is wisps, not durable rows: an invariant seeded only
+	// with durable beads has already missed a live incident.
+	wisp := e.mintWispWith(t, wispOpts{title: "graph step wisp"})
+	durable := mintDurableGraphBead(t, e, "graph control bead", "")
+
+	cliIDs := cliReadyIDs(t, e)
+	apiIDs := apiReadyIDs(t, e)
+
+	if !reflect.DeepEqual(cliIDs, apiIDs) {
+		t.Fatalf("gc ready = %v but GET /v0/beads/ready = %v over the same stores; the CLI and the API disagree about what is claimable, which is the split-store blindness this federation exists to close", cliIDs, apiIDs)
+	}
+	// Orchestration work — the wisp — has to be in there on BOTH topologies, and
+	// it gets there by two different routes: the single-store front door is
+	// policy-wrapped, so it lands the wisp on the ephemeral tier and expands a
+	// default ready read to reach it; the relocated class store has no policy
+	// layer, so the same create lands a durable row that a plain ready read
+	// already sees (see the fixture header). Either way an orchestration bead
+	// that is claimable must be claimable through this reader.
+	for _, want := range []string{cityWork.ID, rigWork.ID, durable.ID, wisp.ID} {
+		if !containsString(cliIDs, want) {
+			t.Errorf("federated ready is missing %s; it is claimable on both topologies (graph front door policy-wrapped = %v)", want, e.policyWrapped(e.graphStore()))
+		}
+	}
+	if !e.split {
+		// Byte identity: no second store exists, so the federation must not have
+		// invented a leg. Every id came from the two work legs.
+		if graph := fixtureGraphLeg(e); graph != nil {
+			t.Fatalf("a single-store city resolved a graph leg (%T); its answer is no longer the one it had before the federation existed", graph)
+		}
+	}
+}
+
+// cliReadyIDs runs the `gc ready` reader over the fixture's stores and returns
+// the ids it emits, in the order it emits them (already canonical — the CLI
+// applies beads.SortBeadsReadyOrder so a bounded read cuts the true top-N).
+//
+// The legs are assembled through the production helpers, including the identity
+// gate, so this exercises the leg-selection decision rather than restating it.
+func cliReadyIDs(t *testing.T, e splitEnv) []string {
+	t.Helper()
+	legs := readyFederationLegs(
+		loadedCityName(e.cfg, e.cityPath),
+		e.work,
+		e.rigStores,
+		fixtureGraphLeg(e),
+	)
+	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	if err != nil {
+		t.Fatalf("gc ready over the fixture stores: %v", err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	return ids
+}
+
+// apiReadyIDs serves GET /v0/city/{city}/beads/ready through the REAL API
+// handler over the same stores, and returns its ids normalized with
+// beads.SortBeadsReadyOrder.
+//
+// The normalization is the contract's, not a convenience: the API's merged order
+// is leg concatenation and deliberately NOT re-sorted, because a global sort
+// would change the bytes a multi-rig single-store city already serves. Both
+// sides are therefore compared in canonical order.
+//
+// The state is a controllerState — the production api.State — built from the
+// fixture, so BeadStores(), CityBeadStore() and GraphBeadStore() resolve through
+// exactly the dispatch the running controller uses.
+func apiReadyIDs(t *testing.T, e splitEnv) []string {
+	t.Helper()
+	cityName := loadedCityName(e.cfg, e.cityPath)
+	state := &controllerState{
+		cfg:           e.cfg,
+		cityName:      cityName,
+		cityPath:      e.cityPath,
+		cityBeadStore: e.work,
+		beadStores:    e.rigStores,
+		storageRoutes: e.routes,
+	}
+	mux := api.NewSupervisorMux(&singleCityStateResolver{state: state}, nil, false, "test", "", time.Now()).WithAnyHostAllowed()
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+cityName+"/beads/ready", nil)
+	rec := httptest.NewRecorder()
+	mux.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /beads/ready = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items   []beads.Bead `json:"items"`
+		Partial bool         `json:"partial"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /beads/ready: %v (body=%q)", err, rec.Body.String())
+	}
+	if body.Partial {
+		t.Fatalf("API reported a partial ready read over healthy stores: %q", rec.Body.String())
+	}
+	beads.SortBeadsReadyOrder(body.Items)
+	ids := make([]string, 0, len(body.Items))
+	for _, b := range body.Items {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// fixtureGraphLeg resolves the fixture's graph leg through the SAME identity
+// gate production uses: the routes answer whether the class is relocated, and a
+// binding that resolved back to the work store is not a second store. Restating
+// the rule here instead would let the fixture model a topology production does
+// not serve.
+func fixtureGraphLeg(e splitEnv) beads.Store {
+	binding, relocated := graphClassBinding(e.routes)
+	return relocatedGraphLegFrom(binding, relocated, e.work)
 }
