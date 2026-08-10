@@ -92,7 +92,7 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 }
 
 func TestStoreHealthFromInputsUnknownOmitsTimestampKeepsStatus(t *testing.T) {
-	h := storeHealthFromInputs("/c", 1_000_000, 1, time.Time{}, storehealth.StatusUnknown)
+	h := storeHealthFromInputs("/c", 1_000_000, 1, true, time.Time{}, storehealth.StatusUnknown)
 	if h.LastGCAt != "" {
 		t.Errorf("LastGCAt = %q, want empty for unknown (no timestamp known)", h.LastGCAt)
 	}
@@ -113,7 +113,7 @@ func TestStoreHealthFromInputsUnknownOmitsTimestampKeepsStatus(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockUnknown(t *testing.T) {
-	h := storeHealthFromInputs("/c", 50_000_000, 221, time.Time{}, storehealth.StatusUnknown)
+	h := storeHealthFromInputs("/c", 50_000_000, 221, true, time.Time{}, storehealth.StatusUnknown)
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 

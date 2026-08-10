@@ -132,30 +132,58 @@ const StatusUnknown = "unknown"
 // below a size that is already cheap to scan.
 const minScanWindow = 8 * 1024 * 1024
 
-// busyCityDailyRotationBytes matches events.defaultRotationMaxSize
-// (internal/events/recorder.go): the events log rotates at 256 MiB, sized
-// so a busy city rotates roughly once per day. ListTail only ever reads
-// the active (post-rotation) file, so it can never usefully see more than
-// one rotation's worth of bytes — a window larger than this buys nothing.
+// busyCityDailyRotationBytes is the fallback throughput/cap figure used when
+// a caller cannot supply the effective configured rotation size (activeCapBytes
+// <= 0 in [ScanWindow] — e.g. no config loaded). It matches
+// events.DefaultEventsRotationMaxSizeBytes (internal/config/config.go), which
+// mirrors events.defaultRotationMaxSize (internal/events/recorder.go): the
+// events log rotates at 256 MiB by default, sized so a busy city rotates
+// roughly once per day.
 const busyCityDailyRotationBytes = 256 * 1024 * 1024
 
-// ScanWindow returns the LastMaintenance windowed-scan bound for a
-// maintenance loop with the given cadence: enough of the active log's
-// tail to cover interval at busyCityDailyRotationBytes/day of throughput,
-// floored at minScanWindow and capped at busyCityDailyRotationBytes since
-// ListTail cannot see past the active file regardless of window size.
-// interval <= 0 falls back to the 168h (weekly) maintenance default.
-func ScanWindow(interval time.Duration) int64 {
-	if interval <= 0 {
-		interval = 168 * time.Hour
+// ScanWindow returns the LastMaintenance windowed-scan bound: a fixed,
+// deliberately small minScanWindow, capped above by activeCapBytes so the
+// window never claims more coverage than ListTail can ever deliver.
+//
+// This used to scale up with the maintenance interval (days :=
+// interval/24h; window := days*activeCapBytes) on the theory that a
+// longer maintenance cadence needs a deeper look-back to cover a full
+// cycle's worth of events. That theory didn't hold: ListTail only ever
+// reads the active (post-rotation) file, so no window can see further
+// back than the active file's current size regardless of interval — a
+// week's worth of events for a busy city is mostly in rotated .gz
+// archives ListTail never reads anyway. Worse, for any interval >= 1 day
+// (every default: 168h/weekly), days >= 1 made days*activeCapBytes >=
+// activeCapBytes, so the cap clause always won and window ==
+// activeCapBytes exactly. Since the active file's size is itself bounded
+// by activeCapBytes (that's what makes it rotate), the window could never
+// be smaller than the file it was scanning — the "bound" was a no-op for
+// every default-cadence city, and LastMaintenance silently regressed to
+// the unbounded walk-to-byte-0 behavior #4427 exists to fix (measured:
+// 4.86s to scan a 260 MiB active file with no matching event under the
+// old default-config window, vs. 56ms with the fixed 8 MiB window below —
+// see #4418). Interval-based sizing has been removed; the window is now
+// independent of maintenance cadence.
+//
+// activeCapBytes should be the effective configured events-rotation
+// max_size_bytes (see config.EventsRotationConfig.MaxSizeBytesOrDefault).
+// activeCapBytes <= 0 (no config available) falls back to
+// busyCityDailyRotationBytes, the historical hardcoded default; this only
+// matters when it is smaller than minScanWindow, e.g. a test or a city
+// configured to rotate below 8 MiB.
+//
+// Tradeoff: a fixed small window means a maintenance event that has
+// scrolled out of the window (i.e. the active file has grown past
+// minScanWindow bytes since that event) reports [StatusUnknown] rather
+// than a real timestamp, in exchange for the scan actually staying cheap
+// under every cadence, not just short ones.
+func ScanWindow(activeCapBytes int64) int64 {
+	if activeCapBytes <= 0 {
+		activeCapBytes = busyCityDailyRotationBytes
 	}
-	days := interval.Hours() / 24
-	window := int64(days * float64(busyCityDailyRotationBytes))
-	if window < minScanWindow {
-		window = minScanWindow
-	}
-	if window > busyCityDailyRotationBytes {
-		window = busyCityDailyRotationBytes
+	window := int64(minScanWindow)
+	if window > activeCapBytes {
+		window = activeCapBytes
 	}
 	return window
 }

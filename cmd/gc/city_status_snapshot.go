@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -150,11 +149,11 @@ func buildCityStoreHealth(cityPath string, store beads.Store, cfg *config.City, 
 			_ = closer.Close()
 		}
 	}()
-	var interval time.Duration
-	if cfg != nil {
-		interval = cfg.Maintenance.Dolt.IntervalOrDefault()
+	var rotationCapBytes int64
+	if cfg != nil && cfg.Events.Rotation.EnabledOrDefault() {
+		rotationCapBytes = cfg.Events.Rotation.MaxSizeBytesOrDefault()
 	}
-	return collectStoreHealth(cityPath, store, ep, interval)
+	return collectStoreHealth(cityPath, store, ep, rotationCapBytes)
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {

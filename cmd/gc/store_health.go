@@ -52,15 +52,14 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsM
 // maintenance event via ep, returning a populated *StoreHealth.
 // liveRowCount provides the live row count and whether it was actually
 // measured; callers without a store pass nil and the count is unmeasured.
-// maintenanceInterval and rotationCapBytes size the LastMaintenance scan
-// window (see storehealth.ScanWindow); pass 0 for maintenanceInterval to get
-// the 168h default, and 0 for rotationCapBytes when the effective
-// events-rotation max_size_bytes is unknown or rotation is disabled (falls
-// back to storehealth's hardcoded default).
-func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider, maintenanceInterval time.Duration, rotationCapBytes int64) *StoreHealth {
+// rotationCapBytes sizes the LastMaintenance scan window (see
+// storehealth.ScanWindow); pass 0 when the effective events-rotation
+// max_size_bytes is unknown or rotation is disabled (falls back to
+// storehealth's hardcoded default).
+func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider, rotationCapBytes int64) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows, measured := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep, storehealth.ScanWindow(maintenanceInterval, rotationCapBytes))
+	lastAt, lastStatus := storehealth.LastMaintenance(ep, storehealth.ScanWindow(rotationCapBytes))
 	return storeHealthFromInputs(cityPath, size, rows, measured, lastAt, lastStatus)
 }
 

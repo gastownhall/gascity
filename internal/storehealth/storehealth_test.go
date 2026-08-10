@@ -215,7 +215,7 @@ func TestWalkSizeSumsFiles(t *testing.T) {
 }
 
 // testWindow is a stand-in ScanWindow value for tests that don't care about
-// the interval-derived sizing, only about LastMaintenance's own behavior.
+// window sizing, only about LastMaintenance's own behavior.
 const testWindow = 8 * 1024 * 1024
 
 func TestLastMaintenanceNilProvider(t *testing.T) {
@@ -470,29 +470,52 @@ func TestLastMaintenanceBoundedScan_EventBeforeWindowReportsUnknown(t *testing.T
 	}
 }
 
-// TestScanWindow pins the interval->window derivation: floored at
-// minScanWindow, capped at busyCityDailyRotationBytes (ListTail can never
-// usefully see more than one active-file rotation regardless of interval),
-// and scaling with interval in between.
+// TestScanWindow pins the window derivation: a fixed minScanWindow, capped
+// above by the caller-supplied activeCapBytes (ListTail can never usefully
+// see more than one active-file rotation, so the window must never exceed
+// it). The window no longer varies with maintenance interval at all — see
+// [ScanWindow]'s doc for why interval-based scaling was the #4418
+// regression. activeCapBytes<=0 falls back to busyCityDailyRotationBytes,
+// the historical hardcoded default, for callers with no config available.
 func TestScanWindow(t *testing.T) {
 	cases := []struct {
 		name     string
-		interval time.Duration
+		capBytes int64
 		want     int64
 	}{
-		{"zero uses weekly default", 0, busyCityDailyRotationBytes},
-		{"negative uses weekly default", -time.Hour, busyCityDailyRotationBytes},
-		{"thirty minutes floors at minScanWindow", 30 * time.Minute, minScanWindow},
-		{"one day", 24 * time.Hour, busyCityDailyRotationBytes},
-		{"one week caps at busyCityDailyRotationBytes", 168 * time.Hour, busyCityDailyRotationBytes},
-		{"one year caps at busyCityDailyRotationBytes", 365 * 24 * time.Hour, busyCityDailyRotationBytes},
+		{"no cap uses fallback default, which exceeds minScanWindow", 0, minScanWindow},
+		{"configured cap larger than minScanWindow does not inflate the window", 32 * 1024 * 1024, minScanWindow},
+		{"configured cap much larger than minScanWindow does not inflate the window", 512 * 1024 * 1024, minScanWindow},
+		{"configured cap below minScanWindow overrides the floor", 1024 * 1024, 1024 * 1024},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := ScanWindow(c.interval)
+			got := ScanWindow(c.capBytes)
 			if got != c.want {
-				t.Fatalf("ScanWindow(%v) = %d, want %d", c.interval, got, c.want)
+				t.Fatalf("ScanWindow(%d) = %d, want %d", c.capBytes, got, c.want)
 			}
 		})
+	}
+}
+
+// TestScanWindow_BindsUnderDefaultConfig is the regression test #4427 was
+// missing: the prior table exercised either an artificially short interval
+// or asserted (incorrectly, as it turned out) that the window should equal
+// the rotation cap under default config. Neither shape would have caught
+// the #4418 regression, which manifested for every default-cadence city
+// (interval >= 1 day) once the rotation cap was at its real-world default
+// (256 MiB). ScanWindow no longer takes an interval at all, so this now
+// just pins that the default rotation cap alone still produces a window
+// strictly smaller than the cap.
+func TestScanWindow_BindsUnderDefaultConfig(t *testing.T) {
+	const defaultRotationCap = 256 * 1024 * 1024
+
+	got := ScanWindow(defaultRotationCap)
+
+	if got >= defaultRotationCap {
+		t.Fatalf("ScanWindow(%d) = %d: window is not smaller than the rotation cap, so it cannot bind the backward scan below a full active-file walk (#4418)", defaultRotationCap, got)
+	}
+	if got != minScanWindow {
+		t.Fatalf("ScanWindow(%d) = %d, want minScanWindow (%d)", defaultRotationCap, got, minScanWindow)
 	}
 }

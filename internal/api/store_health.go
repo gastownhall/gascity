@@ -87,11 +87,11 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	var interval time.Duration
-	if cfg := s.state.Config(); cfg != nil {
-		interval = cfg.Maintenance.Dolt.IntervalOrDefault()
+	var rotationCapBytes int64
+	if cfg := s.state.Config(); cfg != nil && cfg.Events.Rotation.EnabledOrDefault() {
+		rotationCapBytes = cfg.Events.Rotation.MaxSizeBytesOrDefault()
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider(), storehealth.ScanWindow(interval))
+	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider(), storehealth.ScanWindow(rotationCapBytes))
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, so rows here is always a
 	// real measurement.
