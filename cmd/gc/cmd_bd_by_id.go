@@ -96,10 +96,17 @@ package main
 // nothing about what this surface implements.
 //
 // Ownership is read from an id in an ID POSITION and never from an id-shaped
-// value. A `gc bd list --metadata-field workflow_id=gcg-…` probe is a work
-// question that quotes a class id: the work store answers for its own rows and
-// must keep doing so. A `--parent gcg-…` names a class bead, and letting the
+// value. A `gc bd list --metadata-field workflow_id=gcg-…` probe quotes a class
+// id rather than addressing one, so this surface declines it — OWNERSHIP is not
+// what is wrong with it. A `--parent gcg-…` names a class bead, and letting the
 // work store answer that returns a silent empty result.
+//
+// Declining is not forwarding. That same selector is refused one pre-flight
+// earlier, by bd_relocated_classes.go, and for a different reason: `list` is a
+// PROJECTION over a class this ledger cannot see, so its `[]` is a confident
+// wrong answer whatever the id's position. The two doors ask different
+// questions — "who owns this bead" and "can this ledger answer this verb at
+// all" — and only the first one is answered here.
 //
 // # What entering costs, and who pays it
 //
@@ -785,9 +792,16 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 //
 // An id is ADDRESSED when it is a positional token, or the value of a flag that
 // takes a bead id. It is merely QUOTED when it is the value of any other flag,
-// and a quoted id decides nothing: `gc bd list --metadata-field
-// workflow_id=gcg-…` is a work question about work rows, and refusing it
-// exec-fails the consumer that asks it.
+// and a quoted id decides nothing ABOUT OWNERSHIP: `gc bd list --metadata-field
+// workflow_id=gcg-…` selects work rows by a field they carry, so no bead of the
+// relocated class is being addressed and this walk returns false for it.
+//
+// False here does not mean forwarded. The selector dialect guard in
+// bd_relocated_classes.go runs first and refuses that same argv on servability
+// — a projection whose predicate names a namespace this ledger holds no row
+// under cannot answer it, and `[]` is a confident wrong answer. What this walk
+// must not do is claim OWNERSHIP from a quoted id, because that decides which
+// STORE serves the read, and a quoted id says nothing about that.
 //
 // The value/positional split comes from bdflags — the tree's own manifest of
 // what each subcommand's flags consume — rather than from a local list, so a

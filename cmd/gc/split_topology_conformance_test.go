@@ -1568,12 +1568,25 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 // city always ran them. A guard that started refusing there would fail here
 // first.
 //
-// # A refusal has to be actionable
+// # A refusal has to be actionable, and honest about how far it goes
 //
 // Loud is necessary and not sufficient: refusing a question nothing can answer
-// just moves the dead end. So the last leg asserts the way OUT that the refusal
+// just moves the dead end. So the last legs assert the way OUT that the refusal
 // names — the federated `gc ready` reader — returns the molecule's members on
 // BOTH topologies, from the store that owns them.
+//
+// They also assert its LIMIT, on a molecule that is not all open, because the
+// modal case is a stuck one: a molecule with no claimable step is exactly the
+// molecule an operator lists, and the escape's default spelling returns []
+// there. The refusal text states that (one status per invocation, no --all, no
+// deferred) and this row is what keeps the statement true — a fixture where
+// every step is open would let the steering silently become wrong again.
+//
+// # The verbs move together
+//
+// `ready` is asserted alongside `list` because they take the SAME selector and
+// answer no-match the same way. Guarding one and not the other reproduces the
+// asymmetry this invariant exists to forbid, one verb over.
 func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	root := mintDurableGraphBead(t, e, "projection coherence molecule root", "")
 	step, err := e.graphStore().Create(beads.Bead{
@@ -1583,6 +1596,21 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	})
 	if err != nil {
 		t.Fatalf("create molecule step: %v", err)
+	}
+	// A mid-flight sibling: the molecule is not all-open, which is the state a
+	// stuck one is actually in when someone reaches for `bd list`. Stores mint
+	// every bead open, so the status is a second write.
+	inFlight, err := e.graphStore().Create(beads.Bead{
+		Title:    "graph step already claimed",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("create in-flight molecule step: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := e.graphStore().Update(inFlight.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("put the molecule step in flight: %v", err)
 	}
 	// A work-store bead under a DIFFERENT root: without it a projection that
 	// returned everything would pass the last leg.
@@ -1595,7 +1623,9 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 		t.Fatalf("create decoy work bead: %v", err)
 	}
 
-	listArgs := []string{"list", "--metadata-field", beadmeta.RootBeadIDMetadataKey + "=" + root.ID, "--json"}
+	selector := beadmeta.RootBeadIDMetadataKey + "=" + root.ID
+	listArgs := []string{"list", "--metadata-field", selector, "--json"}
+	readyArgs := []string{"ready", "--metadata-field", selector, "--json"}
 	depTreeArgs := []string{"dep", "tree", root.ID}
 
 	// `dep tree` must stay UNSERVED in process, or the arm being compared here is
@@ -1605,19 +1635,28 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	}
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
+	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
 	_, depTreeRefused := bdArgsNameClassOwnedBead(depTreeArgs)
 
 	if listRefused != depTreeRefused {
-		t.Fatalf("`gc bd list --metadata-field %s=%s` refused = %v but `gc bd dep tree %s` refused = %v on the same molecule; two projections over the same data must not disagree about what happens when a class cannot be seen",
-			beadmeta.RootBeadIDMetadataKey, root.ID, listRefused, root.ID, depTreeRefused)
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` refused = %v on the same molecule; two projections over the same data must not disagree about what happens when a class cannot be seen",
+			selector, listRefused, root.ID, depTreeRefused)
+	}
+	if readyRefused != listRefused {
+		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",
+			selector, readyRefused, listRefused)
 	}
 	if listRefused != e.split {
 		t.Fatalf("the projections over %s refused = %v on a split=%v city; a relocated class must refuse and a legacy city must pass through byte-identically", root.ID, listRefused, e.split)
 	}
 	if e.split {
 		// Loud is not enough: the refusal has to say which class, where it is
-		// served, and what to run instead.
-		for _, want := range []string{"graph-class beads", `"gcg-"`, splitEnvBinding, "gc ready --metadata-field"} {
+		// served, what to run instead, and how far that gets.
+		for _, want := range []string{
+			"graph-class beads", `"gcg-"`, splitEnvBinding,
+			"gc ready --metadata-field",
+			"with no --status it returns only claimable work",
+		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the list refusal does not name %q: %s", want, msg)
 			}
@@ -1626,23 +1665,38 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 
 	// The way out the refusal names, on both topologies.
 	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		status:         "open",
-		metadataFields: []string{beadmeta.RootBeadIDMetadataKey + "=" + root.ID},
-	})
-	if err != nil {
-		t.Fatalf("the federated reader the refusal steers to failed: %v", err)
+	readyIDs := func(status string) []string {
+		t.Helper()
+		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
+		if err != nil {
+			t.Fatalf("the federated reader the refusal steers to failed on --status %q: %v", status, err)
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		return ids
 	}
-	ids := make([]string, 0, len(rows))
-	for _, row := range rows {
-		ids = append(ids, row.ID)
+
+	open := readyIDs("open")
+	if !containsString(open, step.ID) {
+		t.Errorf("`gc ready --metadata-field %s --status open` = %v, missing the molecule step %s; the refusal steers operators here, so an empty answer here is the original bug one command over",
+			selector, open, step.ID)
 	}
-	if !containsString(ids, step.ID) {
-		t.Errorf("`gc ready --metadata-field %s=%s` = %v, missing the molecule step %s; the refusal steers operators here, so an empty answer here is the original bug one command over",
-			beadmeta.RootBeadIDMetadataKey, root.ID, ids, step.ID)
-	}
-	if containsString(ids, decoy.ID) {
+	if containsString(open, decoy.ID) {
 		t.Errorf("the federated reader returned %s, which carries a different root id; the metadata filter is not filtering", decoy.ID)
+	}
+
+	// The limit the refusal now states, asserted rather than assumed: the
+	// spelling an operator copies verbatim cannot see a step that is already in
+	// flight, and reaching it takes a second invocation naming its status.
+	if bare := readyIDs(""); containsString(bare, inFlight.ID) {
+		t.Errorf("`gc ready --metadata-field %s` (no --status) returned the in-flight step %s; the refusal text says that spelling returns only claimable work, so either the text or this expectation is now wrong",
+			selector, inFlight.ID)
+	}
+	if byStatus := readyIDs("in_progress"); !containsString(byStatus, inFlight.ID) {
+		t.Errorf("`gc ready --metadata-field %s --status in_progress` = %v, missing %s; the refusal tells operators to enumerate a mid-flight molecule one status at a time, and this is that leg",
+			selector, byStatus, inFlight.ID)
 	}
 }
 

@@ -245,14 +245,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// `gc bd sql` and `gc bd query` are passthroughs to bd, and bd answers about
-	// the bd ledger only. On a split city a read that names a relocated class's
-	// beads comes back empty and exit 0 — a confident wrong answer, and the one
-	// that reported live molecule roots as missing. Refuse it here, where the
-	// class routing is known; bd cannot know a class was relocated.
+	// `gc bd sql`, `gc bd query` and the selector verbs (`list`, `ready`,
+	// `search`) are passthroughs to bd, and bd answers about the bd ledger only.
+	// On a split city a read that names a relocated class's beads comes back
+	// empty and exit 0 — a confident wrong answer, and the one that reported
+	// live molecule roots as missing. Refuse it here, where the class routing is
+	// known; bd cannot know a class was relocated.
 	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
 		if !bdRelocatedClassOverrideEnabled() {
-			fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint()) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// Overridden, but never silently: the operator asked for a read this
