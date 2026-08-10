@@ -437,11 +437,20 @@ func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 // by-id mutation of a bead that already exists somewhere.
 //
 // The gap is ASSERTED and not merely described, the way I1, I2 and I10 assert
-// theirs: hookQueryEnv is the production seam that decides which store the
-// hook's claim runs against, and the row below pins that it answers a WORK scope
-// rooted at the city path on BOTH topologies — identically on a city whose graph
-// class lives in a binding of its own. A gap stated in prose and nowhere else
-// can close, or widen, without a single test moving.
+// theirs — and it is asserted on the seam the CLOSURE has to change, not on one
+// that survives it. hookWorkQueryStores is the whole fan-out the hook queries,
+// and the rows below pin that every leg of it is a bd WORKSPACE naming a WORK
+// scope, on BOTH topologies: relocating graph adds no leg, so no leg can answer
+// for a bead the binding owns. Half (a) of ga-x0oyt is a coordination-class arm
+// IN THIS LIST, so it cannot land without reddening them.
+//
+// The earlier version of this pin asserted only hookQueryEnv's GC_STORE_SCOPE
+// for the primary leg. That row is kept — the primary leg staying a work scope
+// is part of the claim — but on its own it was not a tripwire at all: the
+// closure ADDS an arm and changes nothing about the city leg, so it would have
+// stayed green through the very change it claimed to watch. A gap stated in
+// prose and nowhere else can close, or widen, without a single test moving; a
+// gap pinned on the wrong seam does the same thing while looking watched.
 //
 // `gc bd update --claim` is already routed (#5132, cmd_bd_by_id.go) and probes
 // the same way, so the resolver is not the only class-aware claim path — it is
@@ -471,6 +480,28 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	}
 	if got := hookEnv["GC_STORE_ROOT"]; got != e.cityPath {
 		t.Errorf("`gc hook --claim` resolves store root %q, want the city work root %q — a claim it issues for a relocated class id runs against the work ledger, and that is the gap this row pins", got, e.cityPath)
+	}
+
+	// The tripwire: the WHOLE fan-out, which is what ga-x0oyt has to change.
+	// Every leg is a (dir, env) pair pointing a bd subprocess at a work
+	// workspace, and there are exactly as many as the city has work scopes —
+	// relocating graph adds none.
+	hookAgent := &config.Agent{Name: splitEnvPoolAgent}
+	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
+		hookAgent.QualifiedName(),
+		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
+		mergeRuntimeEnv(nil, hookEnv), hookEnv)
+	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {
+		t.Errorf("`gc hook --claim` fans out over %d store(s), want %d (city + %d rig) — a leg appeared or vanished; if it is the coordination-class arm, ga-x0oyt has landed: drop this invariant's KNOWN GAP paragraph and move the claim assertions from claimByID onto the command", len(fanout), want, len(e.cfg.Rigs))
+	}
+	for i, leg := range fanout {
+		scope := hookStoreEnvValue(leg, "GC_STORE_SCOPE")
+		if scope != "city" && scope != "rig" {
+			t.Errorf("`gc hook --claim` fan-out leg %d names store scope %q, want a WORK scope (\"city\" or \"rig\") — a leg that names a coordination class is the ga-x0oyt arm landing, and the claim mutation has to stop being a bd subprocess call with it", i, scope)
+		}
+		if root := hookStoreEnvValue(leg, "GC_STORE_ROOT"); root == "" {
+			t.Errorf("`gc hook --claim` fan-out leg %d names no GC_STORE_ROOT; every leg here is a bd workspace, and a relocated binding cannot be expressed as one", i)
+		}
 	}
 
 	if !e.split {
@@ -592,6 +623,18 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 		}
 		e.assertClaimedIn(t, tt.id, assignee, want)
 	}
+}
+
+// hookStoreEnvValue reads one variable out of a hook fan-out leg's subprocess
+// environment. Last assignment wins, matching exec's own resolution.
+func hookStoreEnvValue(leg hookStore, key string) string {
+	value := ""
+	for _, entry := range leg.env {
+		if name, v, ok := strings.Cut(entry, "="); ok && name == key {
+			value = v
+		}
+	}
+	return value
 }
 
 // conformanceStrictCrossStoreDeps (I6) guards the cross-store dependency class:

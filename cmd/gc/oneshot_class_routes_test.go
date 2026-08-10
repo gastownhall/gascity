@@ -707,12 +707,31 @@ func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 // it does not live in, and the run's work associations vanish from the event
 // stream while the step facts still look right.
 //
-// It is asserted on the helper rather than through the cobra command because no
-// one-shot cook can reach the two-leg state today: PrepareInvocation only mints
-// an input convoy for a targeted invocation, and the --attach arms — the only
-// targeted ones — run wholly on the scope store (see the deferral comment in
-// cmd_formula.go). The helper is where the leg assignment lives, so it is where
-// a collapse is catchable.
+// It is asserted on the helper because the helper is where the leg ASSIGNMENT
+// lives, and a collapse of the two legs into one store value is only visible
+// there. It is not a substitute for driving the command, and the earlier
+// version of this paragraph — "no one-shot cook can reach the two-leg state
+// today … the --attach arms … run wholly on the scope store" — was a claim
+// about production standing in for coverage of it, which is exactly how a leg
+// mismatch ships green: by-id routing moved PrepareInvocation off the scope
+// store, the convoy went with it, the work leg did not, and this file did not
+// move.
+//
+// So the command is asserted too, on the FACT rather than on the arguments:
+// TestFormulaCookAttachEmitsTheWorkAssociationOnASplitCity drives the real
+// cobra `gc formula cook --attach` on a split city and requires an
+// execution.work_associated naming the attach bead. It fails when the convoy
+// leg names a store that does not hold the convoy, which the residence
+// assertions around it cannot see — DepList on a convoy a store never held
+// answers EMPTY, not an error.
+//
+// What keeps the two legs equal in production is a REFUSAL, not an accident:
+// the one shape that would split them, a graph.v2 graft onto a bead the class
+// binding owns, cannot mint its work-class input convoy in either ledger and is
+// refused by name (ga-2orlf,
+// TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused). If that refusal
+// is ever lifted, the two legs diverge again and BOTH tests are the ones that
+// have to answer for it.
 func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T) {
 	cityPath := t.TempDir()
 	graph := splittest.NewClassStore(t, config.BeadClassGraph)

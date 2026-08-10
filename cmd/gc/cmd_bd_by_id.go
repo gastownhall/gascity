@@ -624,6 +624,18 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// truth, and the passthrough answers it byte-identically.
 		return 0, false
 	}
+	if !resolution.Found {
+		// Reserved-prefix id with no row: it has nowhere else to live.
+		//
+		// This runs BEFORE the --rig refusal below, and the order is the
+		// diagnosis. The refusal's whole claim is that the binding owns this
+		// bead and the named rig's work store does not hold it — a sentence
+		// that is false when nothing holds it. A mistyped reserved-prefix id
+		// under --rig is an id error, not a scope error, and blaming the flag
+		// sends the operator to fix the one thing that was not wrong.
+		printBdByIDNotFound(stderr, op.ID)
+		return 1, true
+	}
 	if rig := strings.TrimSpace(rigName); rig != "" {
 		// The invocation pins a WORK rig scope and names a bead the class
 		// binding owns. Both answers available here are wrong: serving it
@@ -631,11 +643,6 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// honoring it sends the read to a ledger that does not hold the bead.
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
-	}
-	if !resolution.Found {
-		// Reserved-prefix id with no row: it has nowhere else to live.
-		printBdByIDNotFound(stderr, op.ID)
-		return 1, true
 	}
 	switch op.Verb {
 	case bdByIDShow:

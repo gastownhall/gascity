@@ -21,6 +21,43 @@ type hookStore struct {
 // a real bd subprocess.
 type hookStoreRunner func(command, dir string, env []string) (string, error)
 
+// hookWorkQueryStores is the whole fan-out `gc hook` queries, in probe order.
+//
+// A cross-store-eligible (city-scoped) agent federates its work query across all
+// stores — its own first, then every rig store — matched on its own identity
+// (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead queries its own
+// <rig> store FIRST: its routed work lives there, but its city-scoped
+// work-query env does not reach it, so without this the hook returns empty and
+// the spawned session exits with nothing to do. The rig store goes first (as the
+// primary entry, not a best-effort federated extra) so a rig-store work-query
+// timeout still surfaces to the reconciler via bestStoreWithWork's
+// emit-on-timeout contract — the agent's (work-less) city-scoped env stays as a
+// best-effort secondary. This extends the #2877 city-scoped cross-store delivery
+// to rig-scoped agents.
+//
+// Every leg is a bd WORKSPACE: a directory plus the env that points bd at it.
+// That is the shape of the I5 known gap — a relocated coordination class is not
+// a bd workspace, so no leg of this list can answer for a bead the binding owns,
+// and `gc hook --claim` never sees a class id to route. This function is the
+// seam that pins it (conformanceClaimRouting); closing the gap adds a leg here.
+func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
+	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	if agentIsCrossStoreEligible(a) {
+		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
+	}
+	rig := rigScopedHookRig(cfg, agentForQuery)
+	if rig == "" {
+		return stores
+	}
+	if rigStores := appendOneRigHookStore(nil, cityPath, cfg, a, rig, identityOverrides); len(rigStores) > 0 {
+		stores = append(rigStores, stores...)
+	}
+	// A rig-backed agent's own env above is ALSO rig-scoped, so without this no
+	// entry reaches the CITY store and root-only beads assigned to the agent
+	// stay invisible. Best-effort tertiary; see appendCityHookStore.
+	return appendCityHookStore(stores, cityPath, cfg, a, identityOverrides)
+}
+
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
 // every federated store attempt — the query always matches the agent's OWN
 // identity (gc.routed_to / assignee == this identity) regardless of which store

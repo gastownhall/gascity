@@ -128,6 +128,45 @@ func TestBdByIDRefusesAnExplicitRigScopeOnAClassOwnedBead(t *testing.T) {
 	}
 }
 
+// TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist pins the ORDER of
+// the two refusals, which is the difference between a correct diagnosis and a
+// wrong one.
+//
+// The --rig refusal asserts a fact: the binding owns this bead and the named
+// rig's work store does not hold it. For a mistyped reserved-prefix id that
+// sentence is false — nothing holds it — and the operator is sent to fix the
+// flag, which was the one thing that was not wrong. The not-found answer has to
+// come first.
+func TestBdByIDRigRuleDoesNotBlameTheFlagForAnIDThatDoesNotExist(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	missing := reservedClassID(t, "9999")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", missing}, &stdout, &stderr)
+	if !handled || code != 1 {
+		t.Fatalf("show %s under --rig exited %d (handled=%v), want a handled failure: %s", missing, code, handled, stderr.String())
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "no issue found") {
+		t.Errorf("show %s under --rig reported %q, want the not-found answer — the id is what is wrong here, not the scope", missing, msg)
+	}
+	if strings.Contains(msg, "drop --rig") {
+		t.Errorf("show %s under --rig blamed the flag: %q. The refusal claims the binding owns the bead and the rig store does not hold it; nothing holds it, so that claim is false", missing, msg)
+	}
+
+	// The control: the same city, the same flag, an id the binding DOES own
+	// still refuses. Without this row the fix could be "stop refusing".
+	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "owned by the binding", Type: "task"})
+	stdout.Reset()
+	stderr.Reset()
+	if code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", bead.ID}, &stdout, &stderr); !handled || code != 1 {
+		t.Fatalf("show %s under --rig exited %d (handled=%v), want the refusal", bead.ID, code, handled)
+	}
+	if !strings.Contains(stderr.String(), "drop --rig") {
+		t.Errorf("show %s under --rig lost the refusal: %q", bead.ID, stderr.String())
+	}
+}
+
 // TestBdByIDRigScopeLeavesWorkStoreIDsToThePassthrough is the carve-out that
 // keeps the rule from becoming "any --rig is refused on a split city". A rig id
 // under --rig is exactly what the flag is for, the class store never held it,
