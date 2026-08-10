@@ -67,6 +67,28 @@ func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.
 	}
 }
 
+func TestResolveOpenCodeTranscriptBySessionOrder(t *testing.T) {
+	root := t.TempDir()
+	workDir := "/data/projects/opencode-project"
+	const provider = "opencode"
+
+	startA := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	startB := startA.Add(30 * time.Second)
+
+	pathA := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-3591-7532-a1ef-8b9e882bea2f", startA)
+	writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-ffff-7000-a1ef-8b9e882bea2f", startB)
+
+	sessions := []Info{
+		infoFromPersistedBead(sleptCodexSessionBead("sess-a", workDir, provider, startA)),
+		infoFromPersistedBead(sleptCodexSessionBead("sess-b", workDir, provider, startB)),
+	}
+
+	got := ResolveCodexTranscriptBySessionOrder([]string{root}, provider, workDir, "sess-a", sessions)
+	if got != pathA {
+		t.Fatalf("ResolveCodexTranscriptBySessionOrder(opencode) = %q, want %q", got, pathA)
+	}
+}
+
 func TestResolveKeyedTranscriptPathCodexUsesExactSessionKey(t *testing.T) {
 	root := t.TempDir()
 	workDir := "/data/projects/keyed-codex"
