@@ -1398,15 +1398,22 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			// The startup nudge has no retry-capable caller: the keystrokes
-			// reached tmux and the session is verified alive above, so an
-			// unconfirmed submit is a warning, not a start failure. Any other
-			// error still fails the start.
+		if err := sendStartupNudgeWithRetry(ctx, func() error { return ops.sendKeys(name, cfg.Nudge) }, time.Sleep); err != nil {
+			// A resume-mode (or cold-start) session's startup nudge races the
+			// TUI's own boot: readiness detection and the TUI actually being
+			// able to accept input are not the same moment, so a submit
+			// injected right after waitForReady returns can land unconfirmed
+			// even though the session itself is alive and verified above
+			// (see sendStartupNudgeWithRetry). The startup nudge has no
+			// retry-capable caller beyond the bounded ladder just spent, so
+			// exhausting it is a warning, not a start failure: the session
+			// starts, but the agent may sit silently idle with the nudge
+			// still drafted in its input line rather than acted on. Any
+			// other error still fails the start.
 			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
 		}
 	}
 
@@ -1417,6 +1424,43 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
+}
+
+// startupNudgeRetryBackoffs are the delays between resend attempts when the
+// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
+// submit injected right after readiness is observed (~0.3s into a booting
+// claude TUI) sits unconfirmed, while the same injection ~6s later lands —
+// readiness detection and the TUI actually accepting input are not the same
+// moment. A var (not a const) so tests can shrink it.
+var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second}
+
+// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
+// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
+// backoff and calls send again — re-running the whole cycle re-pastes the
+// nudge text, which self-heals a draft the still-booting TUI cleared or
+// redrew. Any other error, or exhausting the backoffs, returns immediately so
+// a healthy fast boot never pays this cost.
+//
+// ctx is checked before each backoff sleep: if the start is already being
+// cancelled elsewhere (e.g. the supervising startup_timeout deadline), this
+// stops immediately rather than sleeping through the remainder of the ladder
+// only to hand back the same unconfirmed error a bit later — a cancelled
+// start must not be pushed past the budget it's trying to protect.
+func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration)) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = send()
+		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			return err
+		}
+		if attempt >= len(startupNudgeRetryBackoffs) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		sleep(startupNudgeRetryBackoffs[attempt])
+	}
 }
 
 // runSessionSetup runs session_setup commands then session_setup_script.
