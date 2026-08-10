@@ -943,14 +943,19 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 // without touching the call sites. Unlike coordClassStoreCandidates it has no
 // cfg/suspended context (the retirement scans run per session bead without a
 // suspension frame), so it fans out across all live rig stores by name.
-func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) []beads.Store {
+//
+// extra appends the stores a caller knows can ALSO hold work this session owns
+// but that are not work stores — today the relocated coordination-class binding,
+// which claim-time routing (claim_class_route.go) can write an in_progress
+// assignee into on a split city. A caller whose leading store already IS that
+// binding passes nothing: duplicates are dropped, so the leg cannot be scanned
+// twice. It goes LAST because it is the ledger of last resort, the same order
+// the claim reaches it in.
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store {
 	if store == nil {
 		return nil
 	}
 	stores := []beads.Store{store}
-	if len(rigStores) == 0 {
-		return stores
-	}
 	names := make([]string, 0, len(rigStores))
 	for name, rs := range rigStores {
 		if rs == nil {
@@ -962,7 +967,31 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) [
 	for _, name := range names {
 		stores = append(stores, rigStores[name])
 	}
+	for _, candidate := range extra {
+		if candidate == nil || workAssignmentStoresHave(stores, candidate) {
+			continue
+		}
+		stores = append(stores, candidate)
+	}
 	return stores
+}
+
+// workAssignmentStoresHave reports whether candidate is already a leg. The
+// sessions and graph classes are served from ONE binding on a converged split
+// (openStorageRoutes keys every assigned class to the engine it opened), so a
+// reconciler scan led by the sessions-class store is already reading the store a
+// caller would add here.
+func workAssignmentStoresHave(stores []beads.Store, candidate beads.Store) bool {
+	key, ok := storePointerKey(candidate)
+	if !ok {
+		return false
+	}
+	for _, existing := range stores {
+		if existingKey, ok := storePointerKey(existing); ok && existingKey == key {
+			return true
+		}
+	}
+	return false
 }
 
 // unclaimResult reports the outcome of one unassign sweep over a retired
@@ -982,12 +1011,21 @@ type unclaimResult struct {
 	Failed   int
 }
 
+// unclaimWorkAssignedToRetiredSessionBead detaches every work bead a retired
+// session still owns, across the reachability scan workAssignmentStores builds.
+//
+// classStores are the non-work ledgers this caller knows can also hold work the
+// session owns. The reconciler leads with the sessions-class store, which on a
+// converged split IS the binding, so it passes none; a caller that leads with
+// the WORK store — `gc session close` — passes the relocated graph binding, or a
+// claim that claim_class_route.go routed there would be released by nothing.
 func unclaimWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBead beads.Bead,
 	fallbackRoute string,
 	stderr io.Writer,
+	classStores ...beads.Store,
 ) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
 		return
@@ -997,7 +1035,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {

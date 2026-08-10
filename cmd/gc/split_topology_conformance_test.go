@@ -659,13 +659,12 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 // --claim` ISSUES, through the production ops seam, for the three id shapes a
 // split city can hand it.
 //
-// The class leg is re-opened capability-faithfully (withClaimCapableClassLeg):
-// a routed claim acquires through the binding's own CAS, which the production
-// SQLite binding has and the kit's MemStore leaf does not. The route is then
-// opened over that binding — what graphClassBinding(ce.routes) resolves to — so
-// the write lands where the row minted the bead. The base Claim is bound to the
-// fixture's real WORK store, so the not-found that opens the escalation is the
-// store's own answer rather than a restatement of one.
+// The route is opened over the fixture's class leg — a real beads.SQLiteStore,
+// what graphClassBinding(e.routes) resolves to — so the routed claim acquires
+// through the binding's own compare-and-swap and the write lands where the row
+// minted the bead. The base Claim is bound to the fixture's real WORK store, so
+// the not-found that opens the escalation is the store's own answer rather than
+// a restatement of one.
 //
 // The CO-RESIDENT row is the one that states the tie-break, and it is the
 // migrated-city steady state: `gc storage migrate` copies with ids preserved and
@@ -674,9 +673,8 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 // work row (#5148 leg order, ready_federation.go). A class-first claim here would
 // leave the reader's work row open and re-serve the bead every tick — the exact
 // treadmill ga-601v2 closes.
-func conformanceHookClaimClassRouting(t *testing.T, base splitEnv, workBeadID string) {
+func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID string) {
 	t.Helper()
-	e := base.withClaimCapableClassLeg(t)
 	route, err := newHookClaimClassRoute(e.class)
 	if err != nil {
 		t.Fatalf("opening the claim-time class front door over the fixture's class store: %v", err)
@@ -723,60 +721,79 @@ func conformanceHookClaimClassRouting(t *testing.T, base splitEnv, workBeadID st
 		}
 	}
 
-	assertClassRoutedClaimHasNoReleaseTier(t, e)
+	assertClassRoutedClaimIsReleasable(t, e)
 }
 
-// assertClassRoutedClaimHasNoReleaseTier is the KNOWN GAP the routed claim
-// CREATES, pinned rather than described — the release tier does not follow the
-// claim.
+// assertClassRoutedClaimIsReleasable is the other half of the routed claim: the
+// release tier reaches what the claim can now write.
 //
-// Everything that takes a claim back is still work-only:
+// The claim can leave an in_progress assignee in the BINDING, so a crashed
+// worker would strand a graph step forever if nothing that takes a claim back
+// could see it. Two scans have to be checked, and they lead with different
+// stores:
 //
-//   - the crash-recovery work-query tier (`bd list --status in_progress` in the
-//     agent's work directory, plus its `bd show` enrichment),
-//   - on_death and on_boot (`bd list` + `bd update`, likewise),
-//   - the post-close sweep unclaimWorkAssignedToRetiredSessionBead, whose store
-//     set is workAssignmentStores(city, rigs) and whose call site in
-//     cmd_session.go says in as many words that it "is WORK-class and stays on
-//     the generic store".
+//   - the reconciler's (stranded-repair, named retirement, the closeBead
+//     cascade) leads with the SESSIONS-class store, which on a converged split
+//     is the same engine the graph class is served from — openStorageRoutes keys
+//     every assigned class to the one store it opened — so it already reads the
+//     binding. That is a property of the topology rather than of any call site,
+//     which is exactly why it is asserted rather than assumed.
+//   - `gc session close` leads with the WORK store (openCityStore), so it cannot
+//     see the binding on its own and is handed the graph binding as a class leg.
 //
-// internal/config's TestQueryKindsWithoutAReadyReadAreTopologyBlind pins the
-// first two from the query side. This row pins the third and states the
-// consequence, which the claim routing changes in KIND: before it, a relocated
-// graph step never reached in_progress at all (the claim failed and the tier
-// re-served it, loudly, every tick); after it, the step goes in_progress in the
-// binding, and if the worker dies there nothing that could release it can see
-// it. The loud treadmill is gone and a quiet strand is possible in its place.
-//
-// It is NOT closed here, deliberately. A federated release is a status LIST and
-// a WRITE across stores on the session-retirement path — a different seam from
-// claim-time write routing, with its own failure modes — and this program has a
-// standing rule against widening a slice past what it was scoped to. It is
-// ga-zp3uj; when that lands, this row flips to found-and-released and this
-// paragraph goes with it.
-func assertClassRoutedClaimHasNoReleaseTier(t *testing.T, e splitEnv) {
+// What is NOT closed here, and is ga-zp3uj: the agent-side recovery tiers
+// (`bd list --status in_progress`, on_death, on_boot) are raw bd commands in the
+// agent's work directory, so they stay topology-blind — internal/config's
+// TestQueryKindsWithoutAReadyReadAreTopologyBlind pins that from the query side.
+// Those re-serve a strand rather than losing it, because the reconciler scan
+// above is what releases it.
+func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 	t.Helper()
-	for i, store := range workAssignmentStores(e.work, e.rigStores) {
-		if sameStorePtr(store, e.class) {
-			t.Fatalf("workAssignmentStores leg %d is the class binding; the release tier now follows the claim, so this KNOWN GAP row and its paragraph should be replaced by a found-and-released assertion", i)
+	for _, tt := range []struct {
+		name    string
+		leading beads.Store
+		class   []beads.Store
+	}{
+		{
+			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
+			leading: e.sessionsStore(),
+		},
+		{
+			name:    "gc session close — leads with the work store and is handed the binding",
+			leading: e.work,
+			class:   []beads.Store{e.class},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !workAssignmentStoresReach(workAssignmentStores(tt.leading, e.rigStores, tt.class...), e.class) {
+				t.Fatalf("no leg of the release scan is the class binding; a claim routed there is released by nothing")
+			}
+			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
+			step := e.mintWispWith(t, wispOpts{
+				title:    "graph step claimed by a session that then died",
+				status:   "in_progress",
+				assignee: sessionBead.ID,
+			})
+			unclaimWorkAssignedToRetiredSessionBead(tt.leading, e.rigStores, sessionBead, "", io.Discard, tt.class...)
+			released, err := e.class.Get(step.ID)
+			if err != nil {
+				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
+			}
+			if !strings.EqualFold(strings.TrimSpace(released.Status), "open") || strings.TrimSpace(released.Assignee) != "" {
+				t.Fatalf("the retired-session sweep left the binding-resident step %s as status=%q assignee=%q; a routed claim whose session died must be released, not stranded", step.ID, released.Status, released.Assignee)
+			}
+		})
+	}
+}
+
+// workAssignmentStoresReach reports whether want is one of the scanned legs.
+func workAssignmentStoresReach(stores []beads.Store, want beads.Store) bool {
+	for _, store := range stores {
+		if sameStorePtr(store, want) {
+			return true
 		}
 	}
-
-	sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
-	step := e.mintWispWith(t, wispOpts{
-		title:    "graph step claimed by a session that then died",
-		status:   "in_progress",
-		assignee: sessionBead.ID,
-	})
-	unclaimWorkAssignedToRetiredSessionBead(e.work, e.rigStores, sessionBead, "", io.Discard)
-	stranded, err := e.class.Get(step.ID)
-	if err != nil {
-		t.Fatalf("reading the claimed graph step back from the binding: %v", err)
-	}
-	if !strings.EqualFold(strings.TrimSpace(stranded.Status), "in_progress") ||
-		strings.TrimSpace(stranded.Assignee) != sessionBead.ID {
-		t.Fatalf("the retired-session sweep released the binding-resident step %s (status=%q assignee=%q); the release tier reaches the binding now, so this KNOWN GAP has closed: replace this row with a found-and-released assertion and drop its paragraph", step.ID, stranded.Status, stranded.Assignee)
-	}
+	return false
 }
 
 // defaultedHookClaimOps is the production claim-op set with every seam filled —
@@ -1280,9 +1297,20 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 	}
 }
 
-// conformanceGraphRecipe is the durable graph.v2 workflow shape: a root plus one
-// finalize step, wired parent-child and blocks the way a compiled v2 formula
-// wires them.
+// conformanceGraphRecipe is the durable graph.v2 workflow shape a compiled v2
+// formula actually produces: a root plus one finalize step, wired with the ONE
+// root -> finalize `blocks` edge and no parent-child edge at all.
+//
+// The missing parent-child edge is the point. internal/formula/compile.go gates
+// both of its parent-child emitters on `!graphWorkflow`, and addWorkflowRootDeps
+// emits only the blocks edge, so a graph.v2 recipe carries zero parent-child
+// deps — measured over the core pack's v2 formulas. This recipe used to add one
+// by hand, which is the only reason materializing it on the real SQLite backend
+// tripped sqlite_store_graph_apply.go's reverse-of-a-parent-child guard: that
+// guard reads sqliteGraphApplyParentDepPairs, which is built from ParentID,
+// which on a recipe plan is set only by a `parent-child` dep. A fixture that
+// carries an edge the compiler cannot emit turns a production-shaped invariant
+// into a statement about the fixture.
 func conformanceGraphRecipe() *formula.Recipe {
 	return &formula.Recipe{
 		Name: "conformance-graph",
@@ -1305,7 +1333,6 @@ func conformanceGraphRecipe() *formula.Recipe {
 			},
 		},
 		Deps: []formula.RecipeDep{
-			{StepID: "conformance-graph.workflow-finalize", DependsOnID: "conformance-graph", Type: "parent-child"},
 			{StepID: "conformance-graph", DependsOnID: "conformance-graph.workflow-finalize", Type: "blocks"},
 		},
 	}
@@ -1947,13 +1974,14 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 //     closing the gap must not spend it — a routed claim removes the common
 //     cause of the skip, not the skip.
 //
-// What the closure does NOT reach is the RELEASE tier: crash recovery
-// (`bd list --status in_progress`), on_death/on_boot, and the retired-session
-// sweep are all still work-only, so a routed claim can now strand a
-// binding-resident step in_progress where nothing that could release it can see
-// it. That gap is ga-zp3uj, pinned on I5
-// (assertClassRoutedClaimHasNoReleaseTier) and, from the query side, by
-// internal/config's TestQueryKindsWithoutAReadyReadAreTopologyBlind.
+// The RELEASE tier follows the claim, and is asserted on I5 rather than assumed
+// (assertClassRoutedClaimIsReleasable): the reconciler's retired-session scan
+// leads with the sessions-class store, which on a converged split is the engine
+// the graph class is served from, and `gc session close` — which leads with the
+// work store — is handed the binding as a class leg. What stays topology-blind
+// is the AGENT-side recovery (`bd list --status in_progress`, on_death,
+// on_boot), which is raw bd in the agent's work directory: that is ga-zp3uj, and
+// it re-serves rather than loses, because the reconciler scan releases.
 func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 	agentCfg := e.cfg.Agents[0]
 	topo := cityQueryTopology(e.cityPath, e.cfg)
@@ -2056,14 +2084,11 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 // reaches claimFirstReadyHookAssignment, whose unresolvable-id branch is
 // separate code.
 //
-// The class leg is re-opened capability-faithfully (withClaimCapableClassLeg)
-// and BOTH halves — the reader assertion and the claim — run against it, so the
-// chain stays unbroken: the leg that serves the bead is the leg the claim writes
-// to. The caller's earlier rows already proved the same reader over the suite's
-// default class leg, so nothing is skipped by the swap.
-func conformanceWorkQueryClaimsWhatItSees(t *testing.T, base splitEnv) {
+// BOTH halves — the reader assertion and the claim — run against the same class
+// leg, so the chain stays unbroken: the leg that serves the bead is the leg the
+// claim writes to.
+func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	t.Helper()
-	e := base.withClaimCapableClassLeg(t)
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
 	assertFederatedReaderServes(t, e, routed.ID, "routed", readyOpts{

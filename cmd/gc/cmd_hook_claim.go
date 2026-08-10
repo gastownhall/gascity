@@ -70,6 +70,13 @@ type hookClaimOps struct {
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
 	Now           func() time.Time
+	// ClassRoute is the relocated coordination-class binding these seams
+	// escalate to, or nil on a city that relocates nothing. It is not a seam:
+	// it is here so claimHookWorkWithRunner — the only caller that knows the
+	// whole work fan-out — can hand the route its leg set, which is what lets a
+	// not-found from ONE leg be checked against the others before it opens the
+	// escalation. See claim_class_route.go.
+	ClassRoute *hookClaimClassRoute
 }
 
 type (
@@ -263,13 +270,20 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
-			if !ok && hookClaimBeadIsElsewhere(err) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
 				// context, which cannot resolve it. That is not an unresolved
 				// mutation on a bead we own here — this store holds no such bead —
 				// so skip it and let the federated caller try the store that does.
+				//
+				// A binding that refuses the claim CAS outright carries the same
+				// proof and is skipped for the same reason: the escalation only
+				// ran because a work store returned not-found, and the refusal
+				// lands before any write (hookClaimBindingRefusedTheClaim). One
+				// bead no store can claim must not stop this session claiming
+				// the work that other stores can.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
