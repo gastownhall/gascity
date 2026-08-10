@@ -77,6 +77,8 @@ run_in_test_env() {
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
