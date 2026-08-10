@@ -125,6 +125,28 @@ func RelocatedClassesInQueryExpr(relocated []RelocatedClass, expr string) []Relo
 	return relocatedClassesNamedIn(relocated, expr, atQueryValueStart)
 }
 
+// RelocatedClassesInListSelector is the same scan for one `bd list` selector
+// argument — `--metadata-field gc.root_bead_id=gcg-abc`, `--id gcg-abc`, and
+// the rest of the key=value predicates bd list accepts.
+//
+// It shares atQueryValueStart with the query DSL because the two dialects pose
+// the same question in the same shape: a comparison whose VALUE side names an
+// id. The difference is only where the text comes from — one expression for
+// `bd query`, one token per selector flag for `bd list` — so a whole-token
+// value (`--id gcg-abc`) anchors at offset 0 and a value quoted inside prose
+// (`--title-contains "fix gcg-1 regression"`) does not anchor at all, which is
+// exactly the split the anchor rule already draws.
+//
+// It is named separately rather than aliased at the call site because `list` is
+// a PROJECTION, not an ad-hoc read: bd runs it successfully against the work
+// ledger and answers `[]` with exit 0 for a class that ledger does not serve,
+// which is the same confident empty answer the sql/query guard exists for, and
+// naming the dialect keeps that reason at the definition instead of in a
+// comment on a map entry.
+func RelocatedClassesInListSelector(relocated []RelocatedClass, selector string) []RelocatedClass {
+	return relocatedClassesNamedIn(relocated, selector, atQueryValueStart)
+}
+
 // relocatedClassesNamedIn is the shared scan. anchored decides what counts as
 // an id-shaped position for the dialect being scanned; everything else — the
 // case folding, the trailing-boundary rule, the per-class loop — is common.
@@ -249,6 +271,20 @@ func isIDBodyByte(b byte) bool {
 // lane does. `gc bd dep tree <id>` is not served there, and on a relocated id
 // that surface refuses it rather than forwarding it, so it is named as
 // unavailable rather than offered as an escape.
+//
+// The set-returning escape is named too, because a by-ID read is no answer at
+// all to a refused PROJECTION: an operator listing a molecule's members by
+// gc.root_bead_id has no single id to show. `gc ready` federates the city
+// store, the rig stores and the relocated binding as ordered legs and fails
+// loud on any leg it cannot read (cmd/gc/ready_federation.go), so it answers a
+// class-scoped question without a controller.
+//
+// `gc beads list` is deliberately NOT offered, under the same rule that keeps a
+// blind verb out of this message. Its API lane federates, but its fallback lane
+// opens the city and rig stores only (openAllConvoyStoresAt) — so on a city
+// whose controller is down it would return exactly the confident empty answer
+// being refused here, and the operator hitting this at 2am is often hitting it
+// BECAUSE the controller is down.
 func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 	if len(matched) == 0 {
 		return nil
@@ -271,6 +307,9 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		"`gc bd show <id>`, which answers a reserved-prefix id in process from the binding its class is served from "+
 		"and needs no controller, or with `gc beads show <id>`, which routes by class through the controller API "+
 		"(GET /v0/city/{cityName}/bead/{id}) and falls back to a work-store scan when no controller is reachable. "+
+		"For a SET of beads rather than one id, use `gc ready --metadata-field \"key=value\" [--status <status>]`, "+
+		"which federates the city store, the rig stores and the relocated binding as ordered legs and fails loud on a "+
+		"leg it cannot read. "+
 		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
 		ErrBdSQLClassRelocated, op, strings.Join(parts, "; "))
 }

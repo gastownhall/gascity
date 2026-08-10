@@ -24,10 +24,12 @@ import (
 //
 // 60 - 13 + 1 = 48, so dependency reachability returned exactly the set the
 // adopt-pr driver wanted. It did so by coincidence. Spec sidecars are built
-// with no dependency edges at all — formula.newSourceSpecStep clears
-// DependsOn, Needs and WaitsFor — and this molecule linked none of them by
-// hand, so the set dep-reachability dropped happened to equal the set the
-// consumer was filtering out anyway.
+// with no dependency edges at all — formula.newSourceSpecStep returns a fresh
+// Step literal that never SETS DependsOn, Needs or WaitsFor, and
+// formula.namespaceSourceSpecStep is the one place that actively nils them,
+// on the clone a ralph iteration re-namespaces — and this molecule linked none
+// of them by hand, so the set dep-reachability dropped happened to equal the
+// set the consumer was filtering out anyway.
 //
 // That is a property of one graph's shape, not a contract, and it fails in
 // both directions:

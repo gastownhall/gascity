@@ -35,8 +35,9 @@ const gcgArnRootID = "gcg-arn"
 // buildGcgArnShape reconstructs the measured gcg-arn molecule: one root, 60
 // beads carrying gc.root_bead_id == root, of which 13 are gc.kind=spec
 // sidecars with no dependency edge of any kind — the shape
-// formula.newSourceSpecStep produces, since it clears DependsOn, Needs and
-// WaitsFor on the step it serializes. The remaining 47 hang off the root
+// formula.newSourceSpecStep produces, since it builds the sidecar as a fresh
+// Step literal and never sets DependsOn, Needs or WaitsFor on it. The
+// remaining 47 hang off the root
 // through the blocks/parent-child edges molecule.Instantiate authors, so a
 // dependency walk from the root reaches 1 + 47 == gcgArnDepTreeSize beads.
 //

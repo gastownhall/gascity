@@ -161,6 +161,21 @@ func TestBdSQLRelocatedClassRefusalOnASplitCity(t *testing.T) {
 		"a flag that looks like an id": {[]string{"sql", "--json", "select 1"}, false},
 		"no args":                      {nil, false},
 
+		// `bd list` is the third ad-hoc dialect: its selector flags carry
+		// key=value predicates whose value side names ids exactly the way bd's
+		// query DSL does, and a no-match answer is `[]` with exit 0. Both
+		// spellings of every selector are covered because a guard a `=` can
+		// switch off is not a guard.
+		"list on a graph root id":              {[]string{"list", "--metadata-field", "gc.root_bead_id=gcg-abc123"}, true},
+		"list on a graph root id inline":       {[]string{"list", "--metadata-field=gc.root_bead_id=gcg-abc123"}, true},
+		"list on a graph id behind --json":     {[]string{"list", "--json", "--metadata-field", "gc.root_bead_id=gcg-abc123"}, true},
+		"list on a nudge id":                   {[]string{"list", "--metadata-field", "gc.nudge_id=gcn-1"}, true},
+		"list on a work root id":               {[]string{"list", "--metadata-field", "gc.root_bead_id=demo-abc"}, false},
+		"list with a metadata key only":        {[]string{"list", "--has-metadata-key", "gc.root_bead_id"}, false},
+		"list whose text mentions a graph id":  {[]string{"list", "--title-contains", "fix gcg-1 regression"}, false},
+		"list on a prefix continuation":        {[]string{"list", "--metadata-field", "gc.root_bead_id=gcgx-1"}, false},
+		"list on a graph id in a rig-scoped q": {[]string{"--json", "list", "--metadata-field", "gc.root_bead_id=gcg-abc123"}, true},
+
 		// A query about the work ledger that merely mentions a relocated id is
 		// answered correctly and non-emptily by bd, so it must pass.
 		"sql matching work rows that reference a graph id": {[]string{"sql", "select id from issues where metadata like '%gcg-abc%'"}, false},
@@ -233,6 +248,8 @@ func TestBdSQLRelocatedClassRefusalIsInertOnASingleStoreCity(t *testing.T) {
 		"sql":                    {"sql", "select * from issues where id = 'gcg-abc'"},
 		"sql behind a root flag": {"--json", "sql", "select * from issues where id = 'gcg-abc'"},
 		"query":                  {"query", "id=gcg-abc"},
+		"list":                   {"list", "--metadata-field", "gc.root_bead_id=gcg-abc"},
+		"list inline":            {"list", "--metadata-field=gc.root_bead_id=gcg-abc"},
 		"unrecognized flag":      {"--frobnicate", "x", "sql", "select * from issues where id = 'gcg-abc'"},
 	}
 	for name, cfg := range map[string]*config.City{
@@ -305,7 +322,11 @@ dolt.auto-start: false
 
 	binDir := t.TempDir()
 	capture = filepath.Join(t.TempDir(), "bd-invocation.txt")
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\n"), 0o755); err != nil {
+	// The stub records every invocation and, when BD_STUB_STDOUT is set, answers
+	// with that body and exit 0 — which is how a projection's confident empty
+	// answer (`[]`, exit 0) is reproduced without a real ledger. It exits 0
+	// explicitly so an unset BD_STUB_STDOUT does not leak the test's exit code.
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\nif [ -n \"${BD_STUB_STDOUT}\" ]; then printf '%s\\n' \"${BD_STUB_STDOUT}\"; fi\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -389,6 +410,147 @@ func TestGcBdQueryRefusesAGraphClassQueryOnASplitCity(t *testing.T) {
 	}
 	if _, err := os.Stat(capture); err == nil {
 		t.Fatal("bd was invoked despite the refusal")
+	}
+}
+
+// bdListGraphProjection is win-mc-forge's measurement row #2, verbatim: a
+// set-returning `gc bd list` whose selector names a graph-class molecule root.
+var bdListGraphProjection = []string{"list", "--metadata-field", "gc.root_bead_id=gcg-abc123", "--json"}
+
+// TestGcBdListRefusesAGraphClassProjectionOnASplitCity is the measurement this
+// whole program started from, as a test.
+//
+// On a converged split city the command below answered `[]` with exit 0. Every
+// piece of that was working as designed: the guard was scoped to `sql`/`query`,
+// --metadata-field is not an id-valued flag so cmd_bd_by_id.go's by-id door
+// never fired, and bd ran the projection successfully against the one ledger
+// that holds no gcg- row. The value named an id, but the VERB is a projection —
+// and a projection that cannot see a class must fail loudly rather than answer
+// with the empty set (ga-iaj7k Invariant 0).
+//
+// The stub answers `[]` and exits 0, so this test fails in exactly the shape the
+// live city produced if the guard is removed: a well-formed empty array,
+// indistinguishable from "this molecule has no members".
+func TestGcBdListRefusesAGraphClassProjectionOnASplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv("BD_STUB_STDOUT", "[]")
+
+	var stdout, stderr bytes.Buffer
+	code := doBd(bdListGraphProjection, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("`gc bd %s` exited 0 with stdout=%q; that empty array is the silent-empty this refusal exists to remove", strings.Join(bdListGraphProjection, " "), stdout.String())
+	}
+	for _, want := range []string{"graph-class beads", `"gcg-"`, "gc beads show <id>", "gc ready --metadata-field"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("refusal is missing %q; stderr=%q", want, stderr.String())
+		}
+	}
+	if _, err := os.Stat(capture); err == nil {
+		data, _ := os.ReadFile(capture) //nolint:errcheck // diagnostic only
+		t.Fatalf("bd was invoked despite the refusal: %q", data)
+	}
+}
+
+// TestGcBdProjectionsAgreeOnAClassTheyCannotSee is the coherence assertion, and
+// it is the reason this fix is not just "one more guarded verb".
+//
+// `gc bd dep tree <gcg id>` and `gc bd list --metadata-field <k>=<gcg id>` are
+// two projections over the same data, asked through the same command, on the
+// same city. Before this change they disagreed about what happens when the class
+// cannot be seen: dep tree refused with exit 1 while list answered `[]` with exit
+// 0. Two failure semantics for one fact is worse than either one alone, because
+// an operator who learned the loud one trusts the quiet one.
+//
+// The assertion is the correspondence, not the wording: BOTH exit non-zero,
+// BOTH name the id namespace that cannot be seen AND the binding it is served
+// from, and NEITHER reaches the ledger that cannot answer. Those three are what
+// an operator needs and what a script can rely on.
+//
+// The two messages are deliberately not compared verbatim, because they are
+// produced by different arms answering different questions and the difference
+// is real: `dep tree` is refused by the by-id door, which knows the exact bead
+// and reports OWNERSHIP of it, while `list` is refused by the dialect guard,
+// which knows only that the query names the namespace and reports that. Pinning
+// identical wording would force one arm to say something it does not know.
+func TestGcBdProjectionsAgreeOnAClassTheyCannotSee(t *testing.T) {
+	for name, args := range map[string][]string{
+		"dep tree": {"dep", "tree", "gcg-abc123"},
+		"list":     bdListGraphProjection,
+	} {
+		t.Run(name, func(t *testing.T) {
+			capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+			t.Setenv("BD_STUB_STDOUT", "[]")
+			resetCLIStorageRoutes(t)
+			captureCLIStorageStderr(t)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd(%v) exited 0; stdout=%q", args, stdout.String())
+			}
+			for _, want := range []string{"gcg", "infra"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("the refusal does not name %q — the namespace that cannot be seen and the binding it is served from; stderr=%q", want, stderr.String())
+				}
+			}
+			if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), strings.Join(args, " ")) {
+				t.Fatalf("the blind projection was forwarded to bd: %q", data)
+			}
+		})
+	}
+}
+
+// TestGcBdListIsUnchangedOnASingleStoreCity is the mutation proof for the new
+// arm: the exact invocation a split city refuses reaches bd verbatim, and
+// answers, when nothing has been relocated.
+func TestGcBdListIsUnchangedOnASingleStoreCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, "")
+	t.Setenv("BD_STUB_STDOUT", "[]")
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd(bdListGraphProjection, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd = %d on a single-store city; stderr=%q", code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("bd was not invoked on a single-store city: %v", err)
+	}
+	if !strings.Contains(string(data), strings.Join(bdListGraphProjection, " ")) {
+		t.Fatalf("bd received %q, want the projection forwarded verbatim", data)
+	}
+	if strings.TrimSpace(stdout.String()) != "[]" {
+		t.Fatalf("stdout = %q, want bd's own answer passed through untouched", stdout.String())
+	}
+}
+
+// TestGcBdListOverrideRunsTheProjectionLoudly pins the escape hatch on the arm
+// that needs it most.
+//
+// The work ledger legitimately carries gcg- strings in its metadata —
+// ensureDrainUnitConvoy stamps gc.drain_control_id = <graph control id> on a
+// convoy coordclass deliberately keeps work-class — so a
+// `--metadata-field gc.drain_control_id=gcg-…` projection is a real question
+// about real work rows, and indistinguishable from a class-scoped one by text.
+// The operator says "I know, run it", and gc says so on stderr rather than
+// letting the override be silent.
+func TestGcBdListOverrideRunsTheProjectionLoudly(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	t.Setenv(bdRelocatedClassOverrideEnvVar, "1")
+	t.Setenv("BD_STUB_STDOUT", "[]")
+
+	args := []string{"list", "--metadata-field", "gc.drain_control_id=gcg-abc123", "--json"}
+	var stdout, stderr bytes.Buffer
+	if code := doBd(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd = %d with the override set; stderr=%q", code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("bd was not invoked with the override set: %v", err)
+	}
+	if !strings.Contains(string(data), strings.Join(args, " ")) {
+		t.Fatalf("bd received %q, want the unmodified projection", data)
+	}
+	if !strings.Contains(stderr.String(), bdRelocatedClassOverrideEnvVar) {
+		t.Errorf("override was honored silently; stderr=%q", stderr.String())
 	}
 }
 

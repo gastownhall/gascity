@@ -11,8 +11,9 @@ import (
 // control dispatcher runs on. Fan-out, retry, ralph, drain and scope all
 // resolve their member set through beads.DirectMembers
 // (beads.MembershipDirectRootID), and this is why: a gc.kind=spec sidecar
-// carries the root id and NOTHING else — formula.newSourceSpecStep clears
-// DependsOn, Needs and WaitsFor — so a dependency walk cannot see it, while
+// carries the root id and NOTHING else — formula.newSourceSpecStep builds it as
+// a fresh Step literal that never sets DependsOn, Needs or WaitsFor — so a
+// dependency walk cannot see it, while
 // findSpecBead must. Swapping the fan-out's membership for dependency
 // reachability would not empty the member set; it would silently shrink it,
 // and the first symptom would be a retry that cannot find the step it is

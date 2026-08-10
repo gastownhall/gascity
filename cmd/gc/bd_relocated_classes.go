@@ -94,27 +94,77 @@ func bdRelocatedClassOverrideEnabled() bool {
 	}
 }
 
-// bdRelocatedClassGuardedVerbs are the bd read verbs whose positional text
-// names ids in a dialect this guard can classify.
+// bdRelocatedClassGuardedVerbs are the bd read verbs whose argument text names
+// ids in a dialect this guard can classify.
 //
 // `sql` and `query` are the two ad-hoc ones: both take an expression an
 // operator or agent wrote by hand, both resolve it against the bd ledger alone,
 // and both answer no-match with an empty result and exit 0.
 //
-// list/ready are left alone — they answer about the ledger they are scoped to
-// and claim nothing more. show/dep tree are left alone too, but NOT because
-// they are safe: they are raw bd passthroughs against the same blind ledger
-// (doBd ends at exec.Command(bdPath, bdArgs...) with no class routing). They
-// stay unguarded because a bare id is not a dialect this scan can read without
-// refusing every work-store id that starts with the same letters, and because
-// the refusal now steers to `gc beads show` instead of to them.
+// `list` is here for the same reason and it is the one that took longest to
+// see, because the flag it arrives through does not look like an id position.
+// `gc bd list --metadata-field gc.root_bead_id=<gcg root>` answered `[]` with
+// exit 0 on a converged split city: --metadata-field is not id-VALUED, so the
+// by-id door in cmd_bd_by_id.go correctly declined it (a quoted id decides
+// nothing about ownership), and bd then ran the projection successfully against
+// the one ledger that holds no gcg- row. The value named an id but the VERB is
+// a PROJECTION over a class this ledger cannot see, and a projection that
+// cannot see a class must fail loudly rather than answer with the empty set.
+// That is the whole of ga-iaj7k's Invariant 0, and it is what makes `list`
+// COHERENT with `dep tree`, which already refuses a relocated id — two
+// projections over the same data with opposite failure semantics is worse than
+// either one alone, because an operator who learned the loud one trusts the
+// quiet one.
+//
+// The other verbs are unguarded because they are no longer blind, not because
+// they were ever safe:
+//
+//   - `show`, `update` (including `--claim`), `release-if-current` and
+//     `dep list` are answered IN PROCESS from the binding their class is served
+//     from — cmd_bd_by_id.go, wired into doBd immediately after this scan — so
+//     they never reach the subprocess for a class-owned bead.
+//   - `dep tree` is not served in process, and on a class-owned id that same
+//     surface REFUSES it (exit 1, naming the bead and the binding) rather than
+//     forwarding it.
+//   - Every other bd subcommand that ADDRESSES a reserved-prefix id — in a
+//     positional or an id-valued flag — is refused there too, by ownership
+//     rather than by servability.
+//
+// `ready` stays out: its selectors name templates and labels, not bead ids, so
+// there is nothing in its argv for this scan to classify, and the federated
+// answer to a claimable-work question already exists as `gc ready`.
 var bdRelocatedClassGuardedVerbs = map[string]bdRelocatedClassScan{
 	"sql":   beads.RelocatedClassesInSQL,
 	"query": beads.RelocatedClassesInQueryExpr,
+	"list":  beads.RelocatedClassesInListSelector,
 }
 
-// bdRelocatedClassScan classifies one positional argument in one bd dialect.
+// bdRelocatedClassScan classifies one argument's text in one bd dialect.
 type bdRelocatedClassScan func([]beads.RelocatedClass, string) []beads.RelocatedClass
+
+// bdRelocatedClassScanText returns the part of an argument a dialect scan
+// should read, and whether there is one.
+//
+// A separated flag value arrives as its own token (`--metadata-field
+// gc.root_bead_id=gcg-1`) and is scanned as a positional. The INLINE spelling
+// of the same selector (`--metadata-field=gc.root_bead_id=gcg-1`) is one token
+// that begins with a dash, and skipping it wholesale — which is what this scan
+// used to do — let a single `=` switch the guard off on the exact query it was
+// added for. So the flag NAME is dropped and everything after the first `=` is
+// scanned, which is the value bd itself parses out of that token.
+//
+// A flag carrying no value (`--json`, `-q`) has no value text and is skipped,
+// which is what keeps `bd sql --json 'select 1'` from classifying its own flags.
+func bdRelocatedClassScanText(arg string) (string, bool) {
+	if !strings.HasPrefix(arg, "-") {
+		return arg, true
+	}
+	_, value, inline := strings.Cut(arg, "=")
+	if !inline {
+		return "", false
+	}
+	return value, true
+}
 
 // bdSQLRelocatedClassRefusal reports whether a `gc bd` invocation is an ad-hoc
 // read that names the id namespace of a class this city serves elsewhere, and
@@ -132,11 +182,12 @@ func bdSQLRelocatedClassRefusal(cfg *config.City, bdArgs []string) (string, bool
 	var matched []beads.RelocatedClass
 	seen := make(map[string]bool, len(relocated))
 	for _, arg := range verbArgs {
-		if strings.HasPrefix(arg, "-") {
+		text, scannable := bdRelocatedClassScanText(arg)
+		if !scannable {
 			continue
 		}
 		for _, namedIn := range scans {
-			for _, class := range namedIn(relocated, arg) {
+			for _, class := range namedIn(relocated, text) {
 				if seen[class.Class] {
 					continue
 				}

@@ -89,6 +89,7 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I11-read-path-consistency", func(t *testing.T) { forEachTopology(t, conformanceReadPathConsistency) })
 	t.Run("I12-molecule-membership", func(t *testing.T) { forEachTopology(t, conformanceMoleculeMembership) })
 	t.Run("I13-cli-ready-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceCLIReadyFederation) })
+	t.Run("I14-projection-coherence", func(t *testing.T) { forEachTopology(t, conformanceProjectionCoherence) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -1234,6 +1235,14 @@ func splitEnvPoolSessionBead(qualified, sessionName string) beads.Bead {
 // projection that cannot see a class must ERROR, not return [] — and it is not
 // closed. When it closes, the split arm below flips from "0 members" to "an
 // error naming the class", and both arms move together.
+//
+// The gap here is the OBJECT-MODEL one and I14 did not close it. I14 closed the
+// CLI half — `gc bd list --metadata-field gc.root_bead_id=<root>` refuses
+// instead of answering [] — by classifying the argv before any store is opened.
+// This half is a beads.DirectMembers call handed the wrong store, and nothing in
+// that signature says which classes the store serves, so closing it means giving
+// a store the ability to refuse a class it does not hold. That is a behavior
+// change on every DirectMembers consumer, not a read-path guard.
 func conformanceMoleculeMembership(t *testing.T, e splitEnv) {
 	front := e.graphStore()
 	root := mintDurableGraphBead(t, e, "membership molecule root", "")
@@ -1517,6 +1526,124 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 		t.Fatalf("decode /beads/ready: %v (body=%q)", err, rec.Body.String())
 	}
 	return body
+}
+
+// conformanceProjectionCoherence (I14) pins that the two `gc bd` PROJECTIONS
+// over a molecule agree about what happens when the class cannot be seen.
+//
+// The bug is win-mc-forge's measurement row #2, and it survived the by-id lane
+// because it does not look like a by-id read. On a converged split city:
+//
+//	gc bd dep tree <gcg root>                          → exit 1, refused
+//	gc bd list --metadata-field gc.root_bead_id=<root> → 0 rows, exit 0
+//
+// Two projections, the same molecule, the same command, opposite failure
+// semantics. `dep tree` names the bead in an id POSITION so the by-id door
+// decides ownership and refuses; --metadata-field is not id-valued, so that door
+// correctly declines (a QUOTED id decides nothing about ownership — see
+// cmd_bd_by_id.go) and the passthrough asks the one ledger that holds no gcg-
+// row, which answers `[]` and exits 0. The value named an id; the VERB is a
+// projection. Invariant 0 of ga-iaj7k: a projection that cannot see a class must
+// fail LOUDLY, and `[]` is forbidden.
+//
+// The asymmetry is what makes it urgent rather than merely wrong. An operator
+// who has learned that this CLI refuses what it cannot see reads the empty array
+// as a fact about the molecule.
+//
+// # What this asserts, and why on the argv predicates
+//
+// The two fates are decided before any store is touched, by two pure functions
+// of (config, argv): bdSQLRelocatedClassRefusal for `list` and
+// bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
+// checkable exactly where it is decided, and the row runs on both topologies
+// without opening a binding. The end-to-end proof through the real command —
+// real doBd, real refusals, a bd stub that answers `[]` and exits 0 — is
+// TestGcBdProjectionsAgreeOnAClassTheyCannotSee.
+//
+// # The single-store row is the byte-identity claim
+//
+// It is not a formality and it is not hardcoded: the fixture mints work-prefixed
+// ids on that topology, so the SAME two argvs carry no reserved prefix, name no
+// relocated class, and both projections pass through to bd exactly as a legacy
+// city always ran them. A guard that started refusing there would fail here
+// first.
+//
+// # A refusal has to be actionable
+//
+// Loud is necessary and not sufficient: refusing a question nothing can answer
+// just moves the dead end. So the last leg asserts the way OUT that the refusal
+// names — the federated `gc ready` reader — returns the molecule's members on
+// BOTH topologies, from the store that owns them.
+func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
+	root := mintDurableGraphBead(t, e, "projection coherence molecule root", "")
+	step, err := e.graphStore().Create(beads.Bead{
+		Title:    "graph step carrying the root id",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("create molecule step: %v", err)
+	}
+	// A work-store bead under a DIFFERENT root: without it a projection that
+	// returned everything would pass the last leg.
+	decoy, err := e.work.Create(beads.Bead{
+		Title:    "work bead under another root",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-some-other-root"},
+	})
+	if err != nil {
+		t.Fatalf("create decoy work bead: %v", err)
+	}
+
+	listArgs := []string{"list", "--metadata-field", beadmeta.RootBeadIDMetadataKey + "=" + root.ID, "--json"}
+	depTreeArgs := []string{"dep", "tree", root.ID}
+
+	// `dep tree` must stay UNSERVED in process, or the arm being compared here is
+	// not the refusal arm and the coherence claim is about something else.
+	if _, served := parseBdByIDOp(depTreeArgs); served {
+		t.Fatalf("`gc bd dep tree` is now served in process; I14 compares the REFUSAL arms, so re-point this row at the served answer")
+	}
+
+	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
+	_, depTreeRefused := bdArgsNameClassOwnedBead(depTreeArgs)
+
+	if listRefused != depTreeRefused {
+		t.Fatalf("`gc bd list --metadata-field %s=%s` refused = %v but `gc bd dep tree %s` refused = %v on the same molecule; two projections over the same data must not disagree about what happens when a class cannot be seen",
+			beadmeta.RootBeadIDMetadataKey, root.ID, listRefused, root.ID, depTreeRefused)
+	}
+	if listRefused != e.split {
+		t.Fatalf("the projections over %s refused = %v on a split=%v city; a relocated class must refuse and a legacy city must pass through byte-identically", root.ID, listRefused, e.split)
+	}
+	if e.split {
+		// Loud is not enough: the refusal has to say which class, where it is
+		// served, and what to run instead.
+		for _, want := range []string{"graph-class beads", `"gcg-"`, splitEnvBinding, "gc ready --metadata-field"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the list refusal does not name %q: %s", want, msg)
+			}
+		}
+	}
+
+	// The way out the refusal names, on both topologies.
+	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	rows, err := readyBeadsForOpts(legs, readyOpts{
+		status:         "open",
+		metadataFields: []string{beadmeta.RootBeadIDMetadataKey + "=" + root.ID},
+	})
+	if err != nil {
+		t.Fatalf("the federated reader the refusal steers to failed: %v", err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	if !containsString(ids, step.ID) {
+		t.Errorf("`gc ready --metadata-field %s=%s` = %v, missing the molecule step %s; the refusal steers operators here, so an empty answer here is the original bug one command over",
+			beadmeta.RootBeadIDMetadataKey, root.ID, ids, step.ID)
+	}
+	if containsString(ids, decoy.ID) {
+		t.Errorf("the federated reader returned %s, which carries a different root id; the metadata filter is not filtering", decoy.ID)
+	}
 }
 
 // fixtureGraphLeg resolves the fixture's graph leg through the SAME identity

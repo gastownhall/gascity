@@ -37,6 +37,7 @@ func TestRelocatedClassRefusalNamesEverythingAnOperatorNeeds(t *testing.T) {
 		"cannot match here",                 // stated as a property of the prefix, not of this query's result
 		"gc beads show <id>",                // the verb that is actually class-routed
 		"GET /v0/city/{cityName}/bead/{id}", // and the route it uses
+		"gc ready --metadata-field",         // the SET-returning escape, for a refused projection
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal is missing %q:\n%v", want, err)
@@ -156,6 +157,45 @@ func TestRelocatedClassesInQueryExprMatchesTheValueSide(t *testing.T) {
 	}
 }
 
+// TestRelocatedClassesInListSelectorMatchesTheSelectorValue covers the third
+// dialect, and the one that produced the measurement this guard family was
+// opened for: `gc bd list --metadata-field gc.root_bead_id=<gcg root>` answered
+// `[]` with exit 0 on a converged split city. `list` is a PROJECTION — bd runs
+// it successfully against the work ledger and matches nothing, because no gcg-
+// row is there to match — so the empty array is a confident wrong answer about
+// a class the ledger does not serve.
+//
+// The negatives matter as much as the positives: a `list` whose selector merely
+// contains a relocated id is a search over THIS ledger's own text columns and
+// must keep being answered, because refusing it would break a query bd answers
+// correctly and non-emptily.
+func TestRelocatedClassesInListSelectorMatchesTheSelectorValue(t *testing.T) {
+	relocated := []RelocatedClass{graphRelocated()}
+	for name, tc := range map[string]struct {
+		selector string
+		want     bool
+	}{
+		"metadata field on the root id":  {"gc.root_bead_id=gcg-abc123", true},
+		"metadata field on a step ref":   {"gc.step_ref=gcg-abc123.mol.work", true},
+		"whole-token id":                 {"gcg-abc123", true},
+		"quoted value":                   {`gc.root_bead_id="gcg-abc123"`, true},
+		"uppercase":                      {"gc.root_bead_id=GCG-ABC123", true},
+		"metadata field on a work root":  {"gc.root_bead_id=demo-abc123", false},
+		"metadata key with no value":     {"gc.root_bead_id", false},
+		"title search mentioning an id":  {"fix gcg-1 regression", false},
+		"prefix continuation":            {"gc.root_bead_id=gcgx-1", false},
+		"prefix without the hyphen":      {"gc.root_bead_id=gcgabc", false},
+		"a status the work store serves": {"open", false},
+		"empty":                          {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := len(RelocatedClassesInListSelector(relocated, tc.selector)) > 0; got != tc.want {
+				t.Fatalf("RelocatedClassesInListSelector(%q) matched = %v, want %v", tc.selector, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRelocatedClassesInSQLIsInertWithoutRelocation is the single-store
 // compatibility proof for the text scanner: the exact query that a split city
 // refuses is not even examined when nothing is relocated.
@@ -165,6 +205,9 @@ func TestRelocatedClassesInSQLIsInertWithoutRelocation(t *testing.T) {
 	}
 	if got := RelocatedClassesInQueryExpr(nil, "id=gcg-abc"); len(got) != 0 {
 		t.Fatalf("RelocatedClassesInQueryExpr with no relocated classes matched %v, want none", got)
+	}
+	if got := RelocatedClassesInListSelector(nil, "gc.root_bead_id=gcg-abc"); len(got) != 0 {
+		t.Fatalf("RelocatedClassesInListSelector with no relocated classes matched %v, want none", got)
 	}
 }
 
