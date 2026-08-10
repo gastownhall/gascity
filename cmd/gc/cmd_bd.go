@@ -85,6 +85,15 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
 "update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
@@ -257,7 +266,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// It runs BEFORE the release-if-current arm below because that arm resolves
 	// only the work scope: on a split city it would release against the ledger
 	// the bead was moved off. See cmd_bd_by_id.go.
-	if code, handled := maybeRouteBdByID(cityPath, bdArgs, stdout, stderr); handled {
+	//
+	// rigName is the explicit --rig, and it travels because the WORK scope this
+	// function just resolved and the class binding are two different ledgers: a
+	// class-owned subject under an explicit --rig is refused rather than served
+	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
+	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
+	// travel — see refuseRigScopedClassOwnedTarget.
+	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
 		return code
 	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {

@@ -658,7 +658,7 @@ conflicting live workflow from the same source is an error.`,
 			// was handed on every city that relocates nothing, so a single-store
 			// cook runs against the one store it always did.
 			//
-			// The --attach arms are excluded — see the deferral comment on each.
+			// The --attach arms route BY ID instead — see attachStore below.
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
@@ -668,30 +668,51 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 				}
+				// A graft is a TWO-ENDED edge, so both arms below run whole
+				// against the store that holds the ATTACH BEAD, resolved by id
+				// — parent read, sub-DAG materialization and the blocking dep
+				// alike. That is the half of the two-store attach this routing
+				// can answer, and it is what keeps the edge co-resident: move
+				// only the sub-DAG root and the other store records a `blocks`
+				// row naming an id it cannot resolve, which no backend rejects
+				// (bd passes a cross-prefix target through as an external ref;
+				// SQLite's deps table has no foreign key) and which every Ready
+				// implementation reads as a blocker that never clears. That is
+				// the dangling edge #5150 reproduced as "attach bead gc-1 is
+				// not Ready after the whole workflow closed", and it is not
+				// re-shipped here.
+				//
+				// STILL DEFERRED, and it is the other half: on a split city
+				// whose attach bead lives in the WORK ledger, the sub-DAG is
+				// graph class and stays in the work ledger with it. Relocating
+				// it needs the block REPRESENTED across the store boundary —
+				// a mechanism that does not exist, in beads or here, and whose
+				// absence is why the edge must stay co-resident rather than be
+				// split. See the ga-k8pzw notes.
+				//
+				// Behavior change is confined to one case: an attach bead the
+				// class binding owns, which today fails outright because the
+				// scope store cannot read it. Every city that relocates
+				// nothing, and every split city whose attach bead is work
+				// resident, gets back the exact store value resolveFormulaScope
+				// opened.
+				attachStore, err := classRoutedStoreForID(cityPath, attach, store)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 				if isGraphFormula {
-					// NOT routed at the graph class, deliberately — the same
-					// deferral the legacy molecule.Attach arm below carries, for
-					// the same reason. A graft is a two-ended edge: the sub-DAG
-					// root is graph class, the attach bead is whatever class owns
-					// it, and ensureFormulaCookAttachDep writes a `blocks` row
-					// binding them. Move only the root and the work store records
-					// an edge naming an id it cannot resolve. No backend rejects
-					// that write (internal/beads/splittest documents both: bd
-					// passes a cross-prefix target through as an external ref,
-					// SQLite's deps table has no foreign key), and every Ready
-					// implementation treats an unresolvable blocker as open — so
-					// the caller's own work bead silently leaves Ready forever
-					// and the documented graft gate is void. Splitting it needs
-					// the attach bead's owning store resolved by id — the shared
-					// by-id class resolver, ga-k8pzw — plus a cross-boundary
-					// representation of the block, which is a production behavior
-					// change rather than wiring. Whole arm stays on the scope
-					// store until then, root and dep co-resident.
+					// Every read, create and dep in this arm runs against
+					// attachStore, so the graft and the bead it hangs off stay
+					// in ONE store. The store-ref stamp keeps naming the SCOPE
+					// root, which is what the standalone graph.v2 arm below
+					// stamps on a graph-resident root too — the ref identifies
+					// the work scope a run belongs to, not the database its
+					// rows sit in.
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					var syntheticInputConvoyID string
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
-						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+						inv, err := graphv2.PrepareInvocation(cmd.Context(), attachStore, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
@@ -709,25 +730,25 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, attachStore, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
 							unlock := graphv2.LockKey(graphRootKey)
 							defer unlock()
 						}
-						if err := closeFormulaCookFailedGraphV2Roots(store, recipe); err != nil {
+						if err := closeFormulaCookFailedGraphV2Roots(attachStore, recipe); err != nil {
 							return err
 						}
-						existing, err := existingFormulaCookGraphV2Root(store, recipe)
+						existing, err := existingFormulaCookGraphV2Root(attachStore, recipe)
 						if err != nil {
 							return err
 						}
 						if existing != nil {
 							result = existing
-							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+							return ensureFormulaCookAttachDep(attachStore, attach, result.RootID)
 						}
-						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
+						if roots, err := formulaCookLiveInputConvoyGraphRoots(attachStore, inv.InputConvoy, graphRootKey); err != nil {
 							return err
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -735,7 +756,7 @@ conflicting live workflow from the same source is an error.`,
 								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
 							}
 						}
-						if roots, err := sourceworkflow.ListLiveRoots(store, attach, storeRef, storeRef); err != nil {
+						if roots, err := sourceworkflow.ListLiveRoots(attachStore, attach, storeRef, storeRef); err != nil {
 							return fmt.Errorf("checking live workflows for %s: %w", attach, err)
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -743,30 +764,30 @@ conflicting live workflow from the same source is an error.`,
 								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
 							}
 						}
-						source, err := store.Get(attach)
+						source, err := attachStore.Get(attach)
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
-						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+						result, err = molecule.Instantiate(cmd.Context(), attachStore, recipe, molecule.Options{
 							Title:            title,
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
 							PriorityOverride: cloneFormulaCookPriority(source.Priority),
 						})
 						if err != nil {
-							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
+							if cleanupErr := closeFormulaCookFailedGraphV2Roots(attachStore, recipe); cleanupErr != nil {
 								return errors.Join(err, cleanupErr)
 							}
 							return err
 						}
-						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
-						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						emitFormulaCookExecutionFacts(attachStore, store, cityPath, result, stderr)
+						return ensureFormulaCookAttachDep(attachStore, attach, result.RootID)
 					})
 					if err != nil {
 						// A post-prepare failure discards the invocation; close the
 						// synthetic input convoy it minted (the success path threads the
 						// convoy into the started workflow, so err == nil never reaches here).
-						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+						graphv2.CloseSyntheticInputConvoy(attachStore, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
@@ -793,7 +814,7 @@ conflicting live workflow from the same source is an error.`,
 					return nil
 				}
 
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), attachStore, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -808,17 +829,14 @@ conflicting live workflow from the same source is an error.`,
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
-				// NOT routed at the graph class, deliberately. molecule.Attach is a
-				// one-store operation that reads the attach bead, materializes the
-				// sub-DAG and writes the blocking dep through the SAME store, and
-				// on a split city those are two classes: the attach bead is
-				// whatever class owns it, while every sub-DAG bead is graph (Attach
-				// stamps the parent's gc.root_bead_id onto each step). Answering
-				// that needs the attach bead's owning store resolved by id — the
-				// shared by-id class resolver, ga-k8pzw — and a two-store Attach,
-				// which is a production behavior change rather than wiring. Left on
-				// the scope store until then.
-				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
+				// molecule.Attach reads the attach bead, materializes the
+				// sub-DAG and writes the blocking dep through ONE store, so it
+				// is handed the one that HOLDS the attach bead. That is the
+				// whole of the two-store attach this arm can express: the edge
+				// stays co-resident, and the sub-DAG follows its parent rather
+				// than its class. See the attachStore comment above for the
+				// half that is still deferred.
+				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1342,6 +1360,18 @@ since it was spawned.`,
 			}
 
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
+			if err != nil {
+				return err
+			}
+			// version-check's subject is a molecule/workflow bead, which is the
+			// graph class: on a city that relocates graph, every root this
+			// command is about is minted in the binding and the scope store has
+			// never held it. Reading it there reported "not found" for a live
+			// root — a by-id read answering about the wrong ledger, which is
+			// the same defect the `gc bd` by-id surface exists to close.
+			// classRoutedStoreForID returns the exact store value passed in on
+			// every city that relocates nothing.
+			store, err = classRoutedStoreForID(cityPath, beadID, store)
 			if err != nil {
 				return err
 			}

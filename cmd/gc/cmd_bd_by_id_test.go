@@ -179,7 +179,7 @@ func TestBdByIDServesAClassBeadFromANonBuiltInProviderBinding(t *testing.T) {
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "lives in the binding", Type: "task"})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"show", bead.ID, "--json"}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", bead.ID, "--json"}, &stdout, &stderr)
 	if !handled {
 		t.Fatalf("a class-owned id fell through to the bd subprocess: stderr %q", stderr.String())
 	}
@@ -212,7 +212,7 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 
 	t.Setenv("BEADS_ACTOR", "by-id-tester")
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, []string{"update", subject.ID, "--claim"}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"update", subject.ID, "--claim"}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("claiming %s = (%d, %t): %s", subject.ID, code, handled, stderr.String())
 	}
 	claimed, err := classStore.Get(subject.ID)
@@ -225,7 +225,7 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code, handled := maybeRouteBdByID(cityPath, []string{"release-if-current", subject.ID, "by-id-tester"}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"release-if-current", subject.ID, "by-id-tester"}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("releasing %s = (%d, %t): %s", subject.ID, code, handled, stderr.String())
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "released" {
@@ -234,7 +234,7 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code, handled := maybeRouteBdByID(cityPath, []string{"dep", "list", subject.ID, "--json"}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"dep", "list", subject.ID, "--json"}, &stdout, &stderr)
 	if !handled || code != 0 {
 		t.Fatalf("listing %s dependencies = (%d, %t): %s", subject.ID, code, handled, stderr.String())
 	}
@@ -259,7 +259,7 @@ func TestBdByIDReservedPrefixAbsenceIsNotAFallThrough(t *testing.T) {
 	missing := reservedClassID(t, "notthere")
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"show", missing}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", missing}, &stdout, &stderr)
 	if !handled {
 		t.Fatal("an absent reserved-prefix id fell through to the bd subprocess")
 	}
@@ -291,7 +291,7 @@ func TestBdByIDRoutesAWorkShapedIDResidentInTheClassBinding(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"show", created.ID, "--json"}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", created.ID, "--json"}, &stdout, &stderr)
 	if !handled {
 		t.Fatalf("a class-resident work-shaped id fell through to the bd subprocess: %q", stderr.String())
 	}
@@ -318,7 +318,7 @@ func TestBdByIDServesTheStepCompletionWrite(t *testing.T) {
 	step := mustCreateClassBead(t, classStore, beads.Bead{Title: "the step", Type: "task"})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"update", step.ID, "--set-metadata", "gc.outcome=pass", "--status", "closed"}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", step.ID, "--set-metadata", "gc.outcome=pass", "--status", "closed"}, &stdout, &stderr)
 	if !handled {
 		t.Fatalf("the step-completion write fell through to the bd subprocess: %q", stderr.String())
 	}
@@ -340,7 +340,7 @@ func TestBdByIDServesTheStepCompletionWrite(t *testing.T) {
 	other := mustCreateClassBead(t, classStore, beads.Bead{Title: "the other step", Type: "task"})
 	stdout.Reset()
 	stderr.Reset()
-	if code, handled := maybeRouteBdByID(cityPath, []string{"update", other.ID, "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--status=closed"}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"update", other.ID, "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--status=closed"}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("the inline-equals spelling = (%d, %t): %s", code, handled, stderr.String())
 	}
 	afterOther, err := classStore.Get(other.ID)
@@ -373,7 +373,7 @@ func TestBdByIDShowRendersTheWholeRecord(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, []string{"show", bead.ID}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", bead.ID}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("showing %s = (%d, %t): %s", bead.ID, code, handled, stderr.String())
 	}
 	out := stdout.String()
@@ -403,7 +403,7 @@ func TestBdByIDLeavesWorkStoreIDsToThePassthrough(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, []string{"show", "gc-abc123"}, &stdout, &stderr); handled {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", "gc-abc123"}, &stdout, &stderr); handled {
 		t.Fatalf("a work-store id was answered here (exit %d): %s%s", code, stdout.String(), stderr.String())
 	}
 }
@@ -420,7 +420,7 @@ func TestBdByIDDoesNotRouteAnIDInAValuePosition(t *testing.T) {
 		{"list", "--label", quoted},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code, handled := maybeRouteBdByID(cityPath, args, &stdout, &stderr); handled {
+		if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
 			t.Errorf("%v was answered here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
 		}
 	}
@@ -435,7 +435,7 @@ func TestBdByIDRefusesAnUnservedVerbOnAClassOwnedBead(t *testing.T) {
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "not yours to close", Type: "task"})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"close", bead.ID}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID}, &stdout, &stderr)
 	if !handled {
 		t.Fatal("an unserved mutation of a class-owned bead was handed to the bd subprocess")
 	}
@@ -477,7 +477,7 @@ func TestBdByIDRefusesRatherThanFallsThroughWhenTheWorkspaceIsNotThere(t *testin
 
 	missing := reservedClassID(t, "unreachable")
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"show", missing}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", missing}, &stdout, &stderr)
 	if !handled {
 		t.Fatal("a city whose infrastructure workspace is missing fell through to the bd subprocess")
 	}
@@ -521,7 +521,7 @@ func TestBdByIDReadFailureIsAnErrorNotAbsence(t *testing.T) {
 	failClassBindingReads(t, cityPath, failure)
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"show", present}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"show", present}, &stdout, &stderr)
 	if !handled {
 		t.Fatal("a failing class-store read fell through to the bd subprocess")
 	}
@@ -567,7 +567,7 @@ func TestBdByIDLeavesAnUnrelocatedCityAlone(t *testing.T) {
 	captureCLIStorageStderr(t)
 
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, []string{"show", reservedClassID(t, "anything")}, &stdout, &stderr); handled {
+	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", reservedClassID(t, "anything")}, &stdout, &stderr); handled {
 		t.Fatalf("an unrelocated city routed a by-id read here (exit %d): %s%s", code, stdout.String(), stderr.String())
 	}
 }
@@ -698,7 +698,7 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 			resetCLIStorageRoutes(t)
 			registries := countStorageRegistryConstructions(t)
 			var stdout, stderr bytes.Buffer
-			maybeRouteBdByID(cityPath, tc.args, &stdout, &stderr)
+			maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
 			entered := *registries > 0
 			if entered != tc.enter {
 				t.Errorf("%v entered the storage funnel = %t, want %t", tc.args, entered, tc.enter)
@@ -794,7 +794,7 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 	for _, args := range refused {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code, handled := maybeRouteBdByID(cityPath, args, &stdout, &stderr)
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
 			if !handled {
 				t.Fatalf("%v fell through to the bd subprocess", args)
 			}
@@ -817,7 +817,7 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 	} {
 		t.Run("served "+strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code, handled := maybeRouteBdByID(cityPath, args, &stdout, &stderr)
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
 			if !handled {
 				t.Fatalf("%v fell through to the bd subprocess", args)
 			}
@@ -834,7 +834,7 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 	} {
 		t.Run("passthrough "+strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code, handled := maybeRouteBdByID(cityPath, args, &stdout, &stderr); handled {
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
 				t.Errorf("%v was answered here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
 			}
 		})
@@ -852,7 +852,7 @@ func TestBdByIDRefusalNamesTheUnrepresentableFlag(t *testing.T) {
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "step", Type: "task"})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, []string{"update", bead.ID, "--set-metadata", "gc.outcome=pass", "--status=closed", "--notes", "done"}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", bead.ID, "--set-metadata", "gc.outcome=pass", "--status=closed", "--notes", "done"}, &stdout, &stderr)
 	if !handled || code == 0 {
 		t.Fatalf("the unrepresentable update was not refused: (%d, %t) %s", code, handled, stderr.String())
 	}

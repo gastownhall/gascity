@@ -272,6 +272,15 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
