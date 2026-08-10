@@ -46,15 +46,38 @@ import (
 // TestMoleculeMembershipPinsTheMeasuredGcgArnShape pins the numbers above
 // against this package's implementations.
 //
+// # No rule here has a tier axis
+//
+// Every rule below spans BOTH bead storage tiers. That has to be stated
+// because it is not what a ListQuery does by default: ListQuery's zero-value
+// TierMode is TierIssues, which drops every Ephemeral row, so a projection
+// that just fills in a Metadata filter answers a strictly narrower question
+// than the one it names. DirectMembers avoids that by reading through
+// HandlesFor(store).Live, which forces TierBoth.
+//
+// The tier is not an edge case for molecules. A wisp molecule materializes
+// with EVERY node in ephemeral storage — the wisp bead policy resolves to
+// ephemeral storage under bd-1.0.5 ready semantics, and molecule
+// instantiation stamps gc.root_bead_id on every node — so a tier-scoped
+// membership read of a wisp molecule returns the root and nothing else. Bead
+// Get is tier-agnostic, so the root always resolves and the read always
+// succeeds: the molecule reads as complete and empty rather than as missing.
+// If a surface ever does want a tier restriction, this vocabulary needs a
+// tier axis and the value it publishes must say so — an unqualified
+// "direct-root-id" is what a consumer will assert against.
+//
 // # Which surface implements which rule
 //
 //	beads.DirectMembers .............................. MembershipDirectRootID
 //	dispatch fan-out / retry / ralph / drain / scope .. MembershipDirectRootID
 //	                                                    (via DirectMembers)
-//	api snapshotFromStore + workflowSQLQueryWorkflowBeads
+//	api workflowSQLQueryWorkflowBeads (Dolt fast path)
 //	                                                 .. MembershipDirectRootID
-//	                                                    (re-expressed inline and in SQL;
-//	                                                    same rule, different read handle)
+//	                                                    (re-expressed in SQL, both
+//	                                                    tier tables)
+//	api snapshotFromStore fallback ................... MembershipDirectRootID
+//	                                                    MINUS the ephemeral tier —
+//	                                                    a known divergence, see below
 //	storebinding graphHasOpenDescendants ............. MembershipDirectRootID first,
 //	                                                    parent/dep walk only as a fallback
 //	molecule.ListSubtree ............................. MembershipRootIDAndParentClosure
@@ -69,6 +92,29 @@ import (
 //	bd graph ......................................... MembershipDirectRootID
 //	gc graph ......................................... none: the named ids, with only
 //	                                                    convoys expanded
+//
+// # The outstanding divergence between the direct-root-id implementations
+//
+// MembershipDirectRootID has three Go/SQL expressions: DirectMembers,
+// api.workflowSQLQueryWorkflowBeads, and api.snapshotFromStore's fallback.
+// They do NOT agree today, and the disagreement is not drift waiting to
+// happen or a cache-staleness window — it is a permanent whole-tier set
+// difference that is present right now:
+//
+//   - DirectMembers reads TierBoth (via the LIVE handle).
+//   - workflowSQLQueryWorkflowBeads reads both the issues and wisps tables,
+//     so it is TierBoth too.
+//   - snapshotFromStore's fallback lists at the zero-value TierMode, so it is
+//     TierIssues and cannot see a wisp molecule's members at all.
+//
+// The last two are the two branches of ONE endpoint, selected by whether the
+// Dolt server is reachable, so that endpoint's answer for a wisp molecule
+// depends on which branch ran. Collapsing the Go copies onto DirectMembers
+// (with an option selecting the read handle, so a hot dashboard path is not
+// silently moved onto a cache-bypassing read) plus a conformance test that
+// the SQL path and the fallback return the same set is the fix; it is a
+// behavior change on a dashboard read path and is deliberately not made
+// here. Tracked as ga-212sl.
 type Membership string
 
 const (
@@ -91,22 +137,47 @@ const (
 	MembershipDepReachable Membership = "dep-reachable"
 
 	// MembershipRootIDAndParentClosure is MembershipDirectRootID unioned with
-	// the transitive parent-child closure of the root. It is a superset:
-	// materialization sets ParentID from parent-child edges as well as
-	// stamping the root id, so the closure adds only beads reparented onto
-	// the molecule after the fact.
+	// the transitive parent-child closure taken over that whole set, not over
+	// the root alone: a member reparented outside the molecule still
+	// contributes its own descendants. It is a superset of
+	// MembershipDirectRootID — materialization sets ParentID from parent-child
+	// edges as well as stamping the root id, so the closure adds only beads
+	// attached to a member after the fact.
+	//
+	// Like MembershipDirectRootID it has no tier axis: the ephemeral (wisp)
+	// tier is in scope, because a wisp molecule's beads are ALL ephemeral and
+	// a tier-scoped answer would report one as empty rather than as missing.
 	MembershipRootIDAndParentClosure Membership = "direct-root-id+parent-closure"
 
 	// MembershipRootIDParentClosureAndConvoy is
-	// MembershipRootIDAndParentClosure plus the members of the root when the
-	// root is a container (convoy) bead. Convoy membership is a tracks-edge
-	// relation, not a root-id relation, so it is named separately rather than
-	// folded into the parent closure.
+	// MembershipRootIDAndParentClosure widened with the members of the root
+	// when the root is a container (convoy) bead. Convoy membership is a
+	// tracks-edge relation, not a root-id relation, so it is named separately
+	// rather than folded into the parent closure — but the parent closure is
+	// then taken over the convoy's members too, so their descendants come with
+	// them. That is the point of the rule for a display consumer: a convoy
+	// graph that stopped at each member and hid its subtree would be a
+	// different, less useful answer.
 	MembershipRootIDParentClosureAndConvoy Membership = "direct-root-id+parent-closure+convoy-members"
 )
 
 // String returns the wire spelling of the membership rule.
 func (m Membership) String() string { return string(m) }
+
+// AllMemberships returns every rule this vocabulary defines, in declaration
+// order. It exists so a wire schema can be checked against the vocabulary
+// rather than against a second hand-maintained copy of it: an OpenAPI enum
+// naming a rule no constant defines is a typo that would otherwise reach a
+// generated client. TestAllMembershipsCoversEveryDeclaredConstant keeps this
+// list from going stale.
+func AllMemberships() []Membership {
+	return []Membership{
+		MembershipDirectRootID,
+		MembershipDepReachable,
+		MembershipRootIDAndParentClosure,
+		MembershipRootIDParentClosureAndConvoy,
+	}
+}
 
 // DirectMembers returns the MembershipDirectRootID member set of the workflow
 // rooted at rootID: the root bead first, then every bead whose

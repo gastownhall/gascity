@@ -174,6 +174,16 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 // through the LIVE handle, which on a caching store bypasses the cache — a
 // correctness win for the dispatcher writing the molecule, an unwanted cost on
 // this dashboard read path. The RULE is shared; the read handle is not.
+//
+// KNOWN DIVERGENCE (ga-212sl): the fallback lists at the zero-value
+// TierMode, so it is TierIssues and drops every ephemeral row, while the SQL
+// fast path above queries the wisps table as well. A wisp molecule's beads are
+// all ephemeral, so the two branches of this one function return different
+// sets for one — and which branch runs depends only on whether the Dolt server
+// was reachable, which is exactly the coupling workflowSQLQueryWorkflowBeads's
+// doc says must not exist. Fixing it moves this read onto beads.DirectMembers
+// (or onto TierBoth), which changes what this endpoint returns for wisp
+// molecules; that is its own slice.
 func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, storesScanned []string, listPartial bool, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Try direct SQL path — ~500x faster than N+1 bd subprocess calls.
 	var (

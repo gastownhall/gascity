@@ -1248,12 +1248,12 @@ type BeadGraphResponse struct {
 	Beads *[]Bead                `json:"beads"`
 	Deps  *[]WorkflowDepResponse `json:"deps"`
 
-	// Membership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+	// Membership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
 	Membership BeadGraphResponseMembership `json:"membership"`
 	Root       Bead                        `json:"root"`
 }
 
-// BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+// BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
 type BeadGraphResponseMembership string
 
 // BeadUpdateBody defines model for BeadUpdateBody.

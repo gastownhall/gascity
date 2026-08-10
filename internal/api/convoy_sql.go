@@ -99,10 +99,14 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 
 // workflowSQLQueryWorkflowBeads is beads.MembershipDirectRootID expressed as a
 // WHERE clause: the root row, plus every row whose gc.root_bead_id metadata
-// equals the root id. It must stay equivalent to beads.DirectMembers — this is
-// the fast path for the same question snapshotFromStore's fallback answers, and
-// a divergence would make the dashboard's step list depend on whether the Dolt
-// server happened to be reachable.
+// equals the root id. It runs over every available table set, issues and wisps
+// alike, which is what makes it tier-complete like beads.DirectMembers.
+//
+// It must stay equivalent to beads.DirectMembers — this is the fast path for
+// the same question snapshotFromStore's fallback answers, and a divergence
+// would make the dashboard's step list depend on whether the Dolt server
+// happened to be reachable. One such divergence exists today and is recorded
+// on snapshotFromStore: the fallback is tier-scoped and this path is not.
 func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) ([]beads.Bead, map[string]beads.Bead, error) {
 	workflowBeads := make([]beads.Bead, 0, 100)
 	beadIndex := make(map[string]beads.Bead)

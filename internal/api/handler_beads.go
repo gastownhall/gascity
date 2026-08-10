@@ -447,7 +447,7 @@ type BeadGraphResponse struct {
 	Root       beads.Bead            `json:"root"`
 	Beads      []beads.Bead          `json:"beads"`
 	Deps       []workflowDepResponse `json:"deps"`
-	Membership beads.Membership      `json:"membership" enum:"direct-root-id+parent-closure,direct-root-id+parent-closure+convoy-members" doc:"Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, and their transitive parent-child closure — plus the root's convoy members when the root is a convoy. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars."`
+	Membership beads.Membership      `json:"membership" enum:"direct-root-id+parent-closure,direct-root-id+parent-closure+convoy-members" doc:"Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars."`
 }
 
 // collectBeadGraph resolves the member set of the graph rooted at root and the
@@ -461,6 +461,24 @@ type BeadGraphResponse struct {
 // dependency walk returns 48 of the 61 beads this returns, dropping every
 // gc.kind=spec sidecar, because spec steps are built with no dependency edges.
 // See beads.Membership.
+//
+// Both list arms read beads.TierBoth because the declared rule has no tier
+// axis. beads.DirectMembers reads both tiers (HandlesFor(store).Live forces
+// it), so a tier-scoped read here would answer a strictly different question
+// from the one the wire names: a wisp molecule materializes with every node in
+// ephemeral storage (the wisp bead policy maps to ephemeral under bd-1.0.5
+// semantics, and molecule instantiation stamps gc.root_bead_id on every node),
+// so the default TierIssues would drop every member of one while still
+// answering 200 with an unqualified "direct-root-id+parent-closure" — an empty
+// wisp molecule is indistinguishable from a finished one. The read handle is
+// deliberately still the store's own, not the LIVE handle beads.DirectMembers
+// uses: this is a hot dashboard path and bypassing the cache is a separate
+// change (see beads.Membership's note on the duplicated implementations).
+//
+// The parent-child walk is seeded from the whole accumulated member set, so
+// the closure covers the convoy members too and a convoy member brings its own
+// subtree. That is what the "+parent-closure" half of both spellings means; it
+// is not the closure of the root alone.
 func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
@@ -492,6 +510,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	metadataChildren, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
@@ -548,6 +567,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 			IncludeClosed: true,
 			AllowScan:     true,
 			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
