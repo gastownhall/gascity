@@ -395,6 +395,14 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
 	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	// On a split city the ready tiers of workQuery are already city-wide, so
+	// running the whole query once per store re-asks the same question R+1 times
+	// and re-opens every leg each time. Pin the city-wide read to the primary
+	// entry and leave the extras on the single-store command they ran before the
+	// swap, which still covers the per-store crash-recovery and ephemeral tiers
+	// `gc ready` does not answer. No-op on a single-store city and for a custom
+	// work_query, where both forms are the same string.
+	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -661,6 +669,30 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 	return agentutil.RoutedToIdentity(a)
+}
+
+// singleStoreHookWorkQuery returns the agent's work query built for the SAME
+// city with the federated reader turned off — the command the hook ran against
+// every store before the reader was swapped. It is the command
+// scopeFederatedHookStores gives the federated extras, so their cost and
+// coverage stay exactly what they were.
+//
+// It returns "" on a city that federates nothing, so the caller's scoping is a
+// no-op there rather than a second build of the identical string.
+func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) string {
+	if !topo.FederatedReady || cfg == nil || a == nil {
+		return ""
+	}
+	singleStore := topo
+	singleStore.FederatedReady = false
+	// A custom work_query is returned verbatim for both topologies; scoping then
+	// no-ops on the equality check, and expanding it twice would repeat its
+	// template diagnostic, so stop before that.
+	command := a.EffectiveWorkQueryFor(singleStore)
+	if command == a.EffectiveWorkQueryFor(topo) {
+		return ""
+	}
+	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)
 }
 
 func hookSessionAgentForQuery() string {

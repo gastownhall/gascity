@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1740,18 +1743,28 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 //     read through the production leg assembly rather than a restatement of it.
 //
 // KNOWN GAP, pinned rather than asserted as desirable — SEE BUT CANNOT CLAIM.
-// This invariant makes routed graph-class work VISIBLE to the worker's query.
-// `gc hook --claim` then runs its claim against a bd store rooted in the agent's
-// work directory (hookClaimBdStoreContext over hookQueryEnv, the WORK scope I5
-// pins), which cannot reach the relocated class at all. So on a split city the
-// bead this query now surfaces is one the same command cannot claim: the claim
-// errors per candidate, claimsErrored carries it to the drain, and the worker
-// reports action=drain reason=claims_errored instead of doing the work. That is
-// LOUD — distinguishable from the healthy no_work drain, which is why this is
-// shippable at all — but it is not correct, and it is why this slice and the
-// claim-time write routing (ga-601v2) are one deployable pair. The row below
-// asserts today's answer; when the claim routes, it flips and this paragraph
-// goes with it.
+// This invariant makes graph-class work VISIBLE to the worker's query. `gc hook
+// --claim` then runs its claim against a bd store rooted in the agent's work
+// directory (hookClaimBdStoreContext over hookQueryEnv, the WORK scope I5 pins),
+// which cannot reach the relocated class at all. So on a split city the bead
+// this query now surfaces is one the same command cannot claim.
+//
+// What that costs is bounded, and the bound is asserted below rather than
+// asserted in prose. On BOTH federated tiers — routed
+// (claimFirstEligibleHookCandidate) and assigned (claimFirstReadyHookAssignment,
+// the tier a graph step assigned to this worker arrives on) — a claim that fails
+// because this store does not hold the id is SKIPPED, not fatal: claimsErrored
+// carries it to the shared drain, the worker reports action=drain
+// reason=claims_errored (distinguishable from the healthy no_work drain), and
+// the federated loop still reaches claimable work in another store. The cost is
+// that ONE bead, not the tick. Only an error that leaves ownership unresolved —
+// a write timeout, store contention — still fails closed.
+//
+// That is why this is shippable ahead of the claim-time write routing
+// (ga-601v2), though the two remain a coherent pair: until the claim is
+// class-routed, an assigned graph step is re-served and re-skipped every tick
+// and no worker ever runs it. The rows below assert today's answer; when the
+// claim routes, they flip and this paragraph goes with them.
 func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 	agentCfg := e.cfg.Agents[0]
 	topo := cityQueryTopology(e.cityPath, e.cfg)
@@ -1846,9 +1859,142 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 // hookQueryEnv's scope resolves to on both topologies (I5 pins that env
 // directly). A gap stated only in prose can close, or widen, without a test
 // moving.
-func conformanceWorkQuerySeesButCannotClaim(t *testing.T, e splitEnv, graphBeadID string) {
+//
+// It covers BOTH federated tiers, because they are different claim paths and
+// the reviewer's tautology was that only the routed one was ever exercised. The
+// routed tier reaches claimFirstEligibleHookCandidate; the assigned tier — the
+// one a graph step assigned to this worker arrives on — reaches
+// claimFirstReadyHookAssignment, whose unresolvable-id branch is separate code.
+func conformanceWorkQuerySeesButCannotClaim(t *testing.T, e splitEnv, routedGraphBeadID string) {
 	t.Helper()
-	if _, err := e.work.Get(graphBeadID); err == nil {
-		t.Fatalf("the WORK store resolved the relocated graph bead %s. Either `gc hook --claim` is now class-routed — in which case ga-601v2 has landed: drop I15's KNOWN GAP paragraph and assert the claim instead — or the fixture stopped relocating the graph class, which would make this whole invariant vacuous", graphBeadID)
+	assertClaimStoreCannotResolve(t, e, routedGraphBeadID, "routed")
+
+	// The ASSIGNED shape, minted the way graphroute produces it: an OPEN graph
+	// step carrying this worker's identity as its assignee
+	// (graphroute.ApplyGraphRouteBinding sets step.Assignee for a non-pool,
+	// non-direct binding, and molecule materialization writes it through).
+	assigned := e.mintWispWith(t, wispOpts{title: "assigned graph step", assignee: e.qualified})
+	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	rows, err := readyBeadsForOpts(legs, readyOpts{
+		assignee:  e.qualified,
+		sortOrder: readySortOldest,
+		limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("the reader the split work_query's assigned tier names failed over healthy stores: %v", err)
+	}
+	found := false
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+		if row.ID == assigned.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the assigned tier's reader answered %v and not the assigned graph step %s; the tier this slice federates is the one a graph step assigned to this worker arrives on, so a pin that never sees it pins nothing", ids, assigned.ID)
+	}
+	assertClaimStoreCannotResolve(t, e, assigned.ID, "assigned")
+
+	conformanceAssignedTierDoesNotStrandClaimableWork(t, e, assigned.ID)
+}
+
+// assertClaimStoreCannotResolve pins today's answer for one federated tier's
+// bead: the store `gc hook --claim` roots its BdStore in cannot resolve it, and
+// it fails with the not-found the claim path classifies as "the bead lives in
+// another store" (hookClaimBeadIsElsewhere). Both halves matter — the first is
+// the gap, the second is what keeps the gap a skipped candidate instead of a
+// bare exit 1 that strands every other store's work.
+func assertClaimStoreCannotResolve(t *testing.T, e splitEnv, graphBeadID, tier string) {
+	t.Helper()
+	_, err := e.work.Get(graphBeadID)
+	if err == nil {
+		t.Fatalf("the WORK store resolved the relocated %s-tier graph bead %s. Either `gc hook --claim` is now class-routed — in which case ga-601v2 has landed: drop I15's KNOWN GAP paragraph and assert the claim instead — or the fixture stopped relocating the graph class, which would make this whole invariant vacuous", tier, graphBeadID)
+	}
+	if !hookClaimBeadIsElsewhere(err) {
+		t.Fatalf("the WORK store failed on the relocated %s-tier graph bead %s with %v, which the claim path does not classify as \"this store does not hold it\"; the assigned tier would then fail closed and strand every other store's claimable work", tier, graphBeadID, err)
+	}
+}
+
+// conformanceAssignedTierDoesNotStrandClaimableWork is the behavioral half of
+// the KNOWN GAP: the visible-but-unclaimable assigned graph step must cost the
+// worker that ONE bead, not its whole tick.
+//
+// bestStoreWithWork ranks an assigned candidate ahead of a routed one, so the
+// store holding the unclaimable graph step is selected FIRST. If the assigned
+// tier answered its unresolvable claim with a terminal exit, the federated
+// drop-and-retry loop would never run and the claimable work-ledger bead below
+// would go unclaimed every tick.
+//
+// The claim is driven through the fixture's real WORK store, so the not-found is
+// the store's own answer rather than a restatement of it.
+func conformanceAssignedTierDoesNotStrandClaimableWork(t *testing.T, e splitEnv, assignedGraphBeadID string) {
+	t.Helper()
+	claimable, err := e.work.Create(beads.Bead{
+		Title:    "claimable work-ledger bead",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: e.qualified},
+	})
+	if err != nil {
+		t.Fatalf("minting claimable work-ledger bead: %v", err)
+	}
+	stores := []hookStore{
+		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=assigned"}},
+		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=routed"}},
+	}
+	run := func(_, _ string, env []string) (string, error) {
+		if len(env) > 0 && env[0] == "GC_HOOK_LEG=assigned" {
+			return `[{"id":"` + assignedGraphBeadID + `","status":"open","assignee":"` + e.qualified + `"}]`, nil
+		}
+		return `[{"id":"` + claimable.ID + `","status":"open","metadata":{"` + beadmeta.RoutedToMetadataKey + `":"` + e.qualified + `"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Claim:             splitEnvStoreClaim(e.work),
+		EmitClaimRejected: func(string, string, string) {},
+		ResolveWorkBranch: func(string) string { return "" },
+		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
+			return nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           e.qualified,
+		IdentityCandidates: []string{e.qualified},
+		RouteTargets:       []string{e.qualified},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("gc ready --json", e.cityPath, stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc hook --claim exited %d with the relocated assigned step %s ranked first; one unclaimable graph step must not strand the worker's other claimable work (stdout=%q stderr=%q)", code, assignedGraphBeadID, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("gc hook --claim stdout is not JSON: %v\nraw: %q", err, stdout.String())
+	}
+	if result.BeadID != claimable.ID {
+		t.Fatalf("gc hook --claim result = %+v, want the claimable work-ledger bead %s reached past the unclaimable assigned step", result, claimable.ID)
+	}
+}
+
+// splitEnvStoreClaim expresses hookClaimWithBdStore's contract over a
+// beads.Store: resolve the bead in the store the claim is rooted in, take it,
+// and report the STORE's own error when it cannot — which is what makes the
+// relocated-id case a real not-found rather than a fixture assertion about one.
+func splitEnvStoreClaim(store beads.Store) hookClaimFunc {
+	return func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		if _, err := store.Get(beadID); err != nil {
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, err)
+		}
+		inProgress := "in_progress"
+		if err := store.Update(beadID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, err)
+		}
+		claimed, err := store.Get(beadID)
+		if err != nil {
+			return beads.Bead{}, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
+		}
+		return claimed, true, nil
 	}
 }

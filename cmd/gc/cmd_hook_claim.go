@@ -113,8 +113,10 @@ type hookClaimResult struct {
 	// candidates' claim mutations errored and nothing was ultimately claimed. It
 	// lets the shared no-work drain report a distinct "claims_errored" reason
 	// instead of a healthy "no_work", so an operational write failure (store
-	// contention or a controller-socket flap in the read→write window) is not
-	// laundered into an idle signal. Meaningless on a terminal result.
+	// contention or a controller-socket flap in the read→write window) — or an
+	// assigned candidate this store cannot resolve at all, the split-city
+	// see-but-cannot-claim shape — is not laundered into an idle signal.
+	// Meaningless on a terminal result.
 	claimsErrored bool
 }
 
@@ -182,7 +184,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if readyResult.terminal {
 		return readyResult
 	}
-	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	eligibleResult := claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	// A skipped assigned-tier claim error must survive the handoff to the routed
+	// tier: both tiers feed ONE shared drain, and dropping the flag here would
+	// launder an assigned-tier write failure into a healthy no_work.
+	if !eligibleResult.terminal && readyResult.claimsErrored {
+		eligibleResult.claimsErrored = true
+	}
+	return eligibleResult
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -225,9 +234,17 @@ func (ops *hookClaimOps) applyDefaults() {
 // already assigned to this session. Continuation preassignment deliberately
 // leaves later group members open, so a resumed session must still run the
 // store's idempotent claim mutation before it reports the bead as workable.
+//
+// A candidate whose claim errors because THIS store cannot resolve the id is
+// skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
+// caller can try the store that actually holds it; the returned result's
+// claimsErrored flag carries the skip to the shared drain. Every other claim
+// error still fails closed: ownership is unresolved on a bead this session
+// already owns, and claiming unrelated fresh work would strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
+	claimsErrored := false
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
@@ -246,6 +263,17 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
+			if !ok && hookClaimBeadIsElsewhere(err) {
+				// The read federated and the write did not: the assigned tier
+				// reads city-wide, so a graph step in a relocated class store
+				// arrives here while the claim runs against this store's bd
+				// context, which cannot resolve it. That is not an unresolved
+				// mutation on a bead we own here — this store holds no such bead —
+				// so skip it and let the federated caller try the store that does.
+				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
+				claimsErrored = true
+				continue
+			}
 			if ok {
 				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
 			} else {
@@ -294,7 +322,22 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
 	}
-	return hookClaimResult{}
+	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// hookClaimBeadIsElsewhere reports whether a failed claim proves the bead is not
+// in the store this claim ran against, rather than that the write itself failed.
+//
+// It exists because the assigned-ready work-query tier reads city-wide on a
+// split city (`gc ready --assignee`) while the claim still runs against the
+// agent's work-directory bd context, so a graph step in a relocated class store
+// is visible-but-unclaimable until the claim is class-routed (ga-601v2).
+// beads.ErrNotFound is the ONLY error that carries that proof: BdStore.Claim
+// wraps it when bd reports no such issue, and every other failure — a write
+// timeout, store contention, a controller-socket flap — leaves ownership
+// unresolved and must keep failing closed.
+func hookClaimBeadIsElsewhere(err error) bool {
+	return errors.Is(err, beads.ErrNotFound)
 }
 
 // claimFirstEligibleHookCandidate claims the first unassigned, route-matched

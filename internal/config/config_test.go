@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -5758,16 +5759,43 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	cmd := exec.Command("sh", "-c", shellCmd)
-	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
 	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+		commandEnv = append(commandEnv, k+"="+v)
 	}
-	out, err := cmd.Output()
+	stdout, stderr, exit := runShellCommandCapture(t, shellCmd, commandEnv)
+	if exit != 0 {
+		t.Fatalf("run shell with fake bd: exit %d: %s", exit, stderr)
+	}
+	return stdout
+}
+
+// runShellCommandCapture is this package's single test seam for EXECUTING a
+// generated command: it runs command through `sh -c` with exactly env and
+// reports stdout, stderr and exit status separately, failing the test only when
+// the process could not be run at all.
+//
+// Every helper in the package that has to execute a generated command routes
+// through here rather than constructing its own process, which is what keeps
+// the package at one subprocess call site per concern instead of one per helper
+// (test/test-resources.toml: "each process-owning test removes or replaces its
+// source call site").
+func runShellCommandCapture(t *testing.T, command string, env []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = env
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
 	if err != nil {
-		t.Fatalf("run shell with fake bd: %v", err)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run shell command: %v", err)
+		}
+		exit = exitErr.ExitCode()
 	}
-	return string(out)
+	return outBuf.String(), errBuf.String(), exit
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
