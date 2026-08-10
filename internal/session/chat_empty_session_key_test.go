@@ -144,3 +144,64 @@ func TestEnsureRunning_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testi
 		t.Fatalf("expected exactly one launch attempt with nothing to strip, got %d: %q", len(sp.commands), sp.commands)
 	}
 }
+
+// TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh covers the
+// second start call site. ensureRunning and ensureRunningRuntimeOnly carry
+// separate copies of the recovery branch, and the reconciler reaches the
+// runtime-only one: startPreparedStartCandidate calls StartResolved, which
+// lands on StartRuntimeOnly. That is the path the supervisor retries, so it is
+// the path the measured start loop ran on, and a test that only drives Send
+// would leave it unpinned.
+func TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T) {
+	mgr, sp, info, sessionKey := newSuspendedResumableSession(t)
+
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	sp.commands = nil
+	sp.armed = true
+
+	if err := mgr.StartRuntimeOnly(context.Background(), info.ID, resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("StartRuntimeOnly should recover with a fresh start when session_key is empty, got: %v", err)
+	}
+
+	if !sp.Fake.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after the fresh relaunch")
+	}
+
+	if len(sp.commands) != 2 {
+		t.Fatalf("expected the doomed start plus one fresh relaunch, got %d command(s): %q", len(sp.commands), sp.commands)
+	}
+	relaunch := sp.commands[1]
+	if strings.Contains(relaunch, "--resume") {
+		t.Errorf("relaunch must not carry the resume flag, got %q", relaunch)
+	}
+	if strings.Contains(relaunch, sessionKey) {
+		t.Errorf("relaunch must not carry the stale session key, got %q", relaunch)
+	}
+	if relaunch != "claude --dangerously" {
+		t.Errorf("relaunch = %q, want the bare start command %q", relaunch, "claude --dangerously")
+	}
+}
+
+// TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch is the
+// runtime-only twin of the decline case. The "nothing to strip" branch is
+// duplicated per call site rather than shared, so this pins the copy that the
+// Send-driven test cannot reach.
+func TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testing.T) {
+	mgr, sp, info, _ := newSuspendedResumableSession(t)
+
+	freshCmd := "claude --dangerously"
+	sp.commands = nil
+	sp.armed = true
+
+	err := mgr.StartRuntimeOnly(context.Background(), info.ID, freshCmd, runtime.Config{WorkDir: "/tmp"})
+	if err == nil {
+		t.Fatal("StartRuntimeOnly should fail when the start dies and there is no resume shape to strip")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Errorf("error should wrap ErrSessionDiedDuringStartup, got: %v", err)
+	}
+
+	if len(sp.commands) != 1 {
+		t.Fatalf("expected exactly one launch attempt with nothing to strip, got %d: %q", len(sp.commands), sp.commands)
+	}
+}
