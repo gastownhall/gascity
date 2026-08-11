@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -337,6 +338,13 @@ type BdStore struct {
 	// mode plus the once-per-store degrade latch, under its own mutex
 	// (disjoint from condWriteMu's capability state; no nesting).
 	condWritesStamp
+
+	// unreadStore memoizes, per STORE, whether an empty whole-ledger read from
+	// this scope can be believed while a second bead database sits unread in
+	// its .beads/. See unread_store_notice.go.
+	unreadStore unreadStoreGuard
+	// noticeSink redirects operator notices away from stderr; nil is stderr.
+	noticeSink io.Writer
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
@@ -2371,6 +2379,22 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
+	found, err := s.listByTier(query)
+	// An unfiltered scan that came back empty is the one List shape whose
+	// emptiness is a claim about the STORE rather than about a predicate, so it
+	// is the only one that can reach the unread-store notice. The result is
+	// returned unchanged either way — see unread_store_notice.go for why this
+	// never becomes a refusal.
+	if err == nil && len(found) == 0 && listReadIsWholeLedger(query) {
+		s.noticeIfStoreCannotSeeItsLedger("bd list")
+	}
+	return found, err
+}
+
+// listByTier runs the query against bd. It is the body List wraps, so the
+// empty-result notice has exactly one place to sit across all three tier modes.
+
+func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	switch query.TierMode {
 	case TierWisps:
 		return s.listWispsTier(query)
@@ -2432,6 +2456,10 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	// Latched from what bd RETURNED, before applyListQuery: a store that
+	// answered with rows is the populated one, whatever this query's filters
+	// then reduce that to.
+	s.noteServerRows(len(issues))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
@@ -2541,6 +2569,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd query (wisps): %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	s.noteServerRows(len(issues))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
@@ -2773,6 +2802,10 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	// Same latch as List, and for the same reason: the tier, assignee and limit
+	// filters below can empty a frontier bd answered with rows, and that says
+	// nothing about which database answered.
+	s.noteServerRows(len(issues))
 	result := make([]Bead, 0, len(issues))
 	now := time.Now().UTC()
 	for i := range issues {
@@ -2793,6 +2826,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			return nil, fmt.Errorf("bd ready: %w", parseErr)
 		}
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
+	}
+	if len(result) == 0 && readyReadIsWholeFrontier(q) {
+		s.noticeIfStoreCannotSeeItsLedger("bd ready")
 	}
 	return result, nil
 }

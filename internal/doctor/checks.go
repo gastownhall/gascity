@@ -991,11 +991,23 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 	return details
 }
 
+// splitStoreFixHint prescribes the reconciliation, and names what the operator
+// will see while they are in the middle of it.
+//
+// "Keep both directories until reconciled" parks a scope in the exact shape
+// BdStore's read-time guard notices (internal/beads/unread_store_notice.go): an
+// active store with no rows beside a second bead database. That guard is a
+// notice and never a refusal precisely so this advice stays safe to follow —
+// but an operator who takes it and then sees an unexplained line on every empty
+// `gc ready` has been sent into a state the diagnostic did not warn them about.
+// Naming the override here is what keeps the two from contradicting each other.
 func splitStoreFixHint(activeStore string) string {
+	silence := "; keep both directories until reconciled — reads from an empty active store print a one-time notice while both exist, which " +
+		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	if activeStore == "" || activeStore == "unknown" {
-		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store; keep both directories until reconciled"
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
 	}
-	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + silence
 }
 
 func describeRepoList(repos []string) string {
