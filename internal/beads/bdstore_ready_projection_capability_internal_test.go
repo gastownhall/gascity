@@ -65,7 +65,11 @@ func activeWorkBeads() []Bead {
 // subprocess, forever.
 //
 // The refusal is a permanent property of the ledger in front of the process, so
-// it is latched: bd is asked exactly once.
+// it is latched: bd is asked exactly once and the operator is told once. The
+// latch silences the SUBPROCESS and the NOTICE, not the verdict — every later
+// enrichment still reports the degrade, because that error is how each cache
+// over this scope learns to send its readiness reads to the live backing
+// (CachingStore.readyReadsMustGoLive).
 func TestReadyProjectionLatchesOnTheEmbeddedModeRefusal(t *testing.T) {
 	runner := embeddedSQLRunner()
 	notices := &bytes.Buffer{}
@@ -84,10 +88,10 @@ func TestReadyProjectionLatchesOnTheEmbeddedModeRefusal(t *testing.T) {
 		}
 	}
 
-	var laterErrs []error
+	var silentCycles []int
 	for i := 2; i <= 5; i++ {
-		if _, err := s.enrichReadyProjectionForCache(activeWorkBeads()); err != nil {
-			laterErrs = append(laterErrs, fmt.Errorf("enrich #%d: %w", i, err))
+		if _, err := s.enrichReadyProjectionForCache(activeWorkBeads()); !errors.Is(err, ErrReadyProjectionUnsupported) {
+			silentCycles = append(silentCycles, i)
 		}
 	}
 
@@ -100,8 +104,8 @@ func TestReadyProjectionLatchesOnTheEmbeddedModeRefusal(t *testing.T) {
 	if sqlCalls != 1 {
 		t.Fatalf("bd sql ran %d times across 5 enrichments (calls=%v); the latch must spend exactly one", sqlCalls, runner.calls)
 	}
-	if len(laterErrs) != 0 {
-		t.Fatalf("the latched projection kept reporting failures instead of degrading quietly: %v", laterErrs)
+	if len(silentCycles) != 0 {
+		t.Fatalf("enrich cycles %v stopped naming the degrade; a cache that primes on one of them would serve readiness from a projection it does not have", silentCycles)
 	}
 	if got := strings.Count(notices.String(), "ready-projection enrichment disabled"); got != 1 {
 		t.Fatalf("operator notice printed %d times, want exactly 1:\n%s", got, notices.String())
@@ -129,15 +133,11 @@ func TestReadyProjectionRefusesAnUnimplementedBackendWithoutSpawningBd(t *testin
 
 	for i := 1; i <= 3; i++ {
 		out, err := s.enrichReadyProjectionForCache(activeWorkBeads())
-		if i == 1 {
-			if !errors.Is(err, ErrReadyProjectionUnsupported) {
-				t.Fatalf("first enrich error = %v, want ErrReadyProjectionUnsupported", err)
-			}
-			if !strings.Contains(err.Error(), `unsupported backend "postgres"`) {
-				t.Errorf("degrade does not name the backend: %v", err)
-			}
-		} else if err != nil {
-			t.Fatalf("enrich #%d after the gate latched: %v", i, err)
+		if !errors.Is(err, ErrReadyProjectionUnsupported) {
+			t.Fatalf("enrich #%d error = %v, want ErrReadyProjectionUnsupported on every cycle", i, err)
+		}
+		if !strings.Contains(err.Error(), `unsupported backend "postgres"`) {
+			t.Errorf("degrade #%d does not name the backend: %v", i, err)
 		}
 		for _, b := range out {
 			if b.IsBlocked != nil {
@@ -151,6 +151,95 @@ func TestReadyProjectionRefusesAnUnimplementedBackendWithoutSpawningBd(t *testin
 	}
 	if got := strings.Count(notices.String(), "ready-projection enrichment disabled"); got != 1 {
 		t.Fatalf("operator notice printed %d times, want exactly 1:\n%s", got, notices.String())
+	}
+}
+
+// TestReadyProjectionVerdictIsPerScopeAcrossStoreRebuilds is the bound that
+// makes "once" mean anything.
+//
+// Nothing in gc holds one BdStore per scope for the life of the process:
+// cmd/gc's scoped stores are built per request, and the control-dispatcher
+// readiness scan rebuilds a store per scope every controlReadyCacheTTL (3s) and
+// primes it immediately, so a verdict memoized on the store object is
+// re-derived — and re-announced — a few times a minute, forever. That is the
+// same defect the sibling unread-store notice already had to fix, so this
+// reuses its registry pattern.
+//
+// The verdict is still REPORTED to every rebuilt store, because each one backs a
+// fresh cache that must learn to send readiness reads live; what the scope bound
+// removes is the repeated notice and the repeated failing subprocess.
+func TestReadyProjectionVerdictIsPerScopeAcrossStoreRebuilds(t *testing.T) {
+	rebuild := func(t *testing.T, scope string, notices *bytes.Buffer) [][]string {
+		t.Helper()
+		var calls [][]string
+		for i := 1; i <= 5; i++ {
+			runner := embeddedSQLRunner()
+			s := NewBdStore(scope, runner.run, WithBdStoreNoticeSink(notices))
+			if _, err := s.enrichReadyProjectionForCache(activeWorkBeads()); !errors.Is(err, ErrReadyProjectionUnsupported) {
+				t.Fatalf("rebuild #%d enrich error = %v, want ErrReadyProjectionUnsupported", i, err)
+			}
+			calls = append(calls, runner.calls...)
+		}
+		return calls
+	}
+
+	t.Run("backend gate", func(t *testing.T) {
+		scope := t.TempDir()
+		writeScopeMetadata(t, scope, map[string]any{"database": "dolt", "backend": "postgres"})
+		notices := &bytes.Buffer{}
+		calls := rebuild(t, scope, notices)
+		if len(calls) != 0 {
+			t.Fatalf("rebuilt stores spent %v; the gate must spend no subprocess", calls)
+		}
+		if got := strings.Count(notices.String(), "ready-projection enrichment disabled"); got != 1 {
+			t.Fatalf("operator notice printed %d times across 5 stores over one scope, want exactly 1:\n%s", got, notices.String())
+		}
+	})
+
+	t.Run("runtime latch", func(t *testing.T) {
+		scope := t.TempDir()
+		writeScopeMetadata(t, scope, map[string]any{"database": "dolt", "backend": "dolt", "dolt_mode": "server"})
+		notices := &bytes.Buffer{}
+		calls := rebuild(t, scope, notices)
+		sqlCalls := 0
+		for _, call := range calls {
+			if len(call) > 1 && call[1] == "sql" {
+				sqlCalls++
+			}
+		}
+		if sqlCalls != 1 {
+			t.Fatalf("bd sql ran %d times across 5 stores over one scope (calls=%v); the latch must survive the rebuild", sqlCalls, calls)
+		}
+		if got := strings.Count(notices.String(), "ready-projection enrichment disabled"); got != 1 {
+			t.Fatalf("operator notice printed %d times across 5 stores over one scope, want exactly 1:\n%s", got, notices.String())
+		}
+	})
+}
+
+// TestReadyProjectionNoticeDoesNotClaimReadinessIsUnaffected pins the operator
+// line to what actually happens. An earlier draft said "no work is lost", which
+// named the wrong risk: the degraded predicate is permissive, not lossy, so the
+// cache would OFFER work whose gate has not opened. The notice must say where
+// readiness comes from instead.
+func TestReadyProjectionNoticeDoesNotClaimReadinessIsUnaffected(t *testing.T) {
+	scope := t.TempDir()
+	writeScopeMetadata(t, scope, map[string]any{"database": "dolt", "backend": "postgres"})
+	notices := &bytes.Buffer{}
+	s := NewBdStore(scope, embeddedSQLRunner().run, WithBdStoreNoticeSink(notices))
+	if _, err := s.enrichReadyProjectionForCache(activeWorkBeads()); !errors.Is(err, ErrReadyProjectionUnsupported) {
+		t.Fatalf("enrich error = %v, want ErrReadyProjectionUnsupported", err)
+	}
+
+	notice := notices.String()
+	for _, banned := range []string{"no work is lost", "dependency-derived readiness"} {
+		if strings.Contains(notice, banned) {
+			t.Errorf("notice claims %q, which is not what the degrade does:\n%s", banned, notice)
+		}
+	}
+	for _, want := range []string{"live `bd ready`", "other cached reads keep serving", "no further bd sql is spent"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("notice does not say %q:\n%s", want, notice)
+		}
 	}
 }
 

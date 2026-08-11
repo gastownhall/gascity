@@ -255,6 +255,16 @@ type unreadStoreGuard struct {
 // handful — and entries live for the process because the verdict does.
 var scopeGuards sync.Map // map[string]*unreadStoreGuard
 
+// scopeGuardKey is the registry key every per-scope verdict shares: the
+// resolved scope path, or "" for a store with no directory. Sharing it keeps
+// two guards over the same scope on the same key.
+func scopeGuardKey(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
+
 // guardForScope returns the shared guard for dir, creating it on first use.
 //
 // LoadOrStore, not a mutex: the losing racer discards a two-field struct and
@@ -262,10 +272,7 @@ var scopeGuards sync.Map // map[string]*unreadStoreGuard
 // has. A store with no directory gets the empty key, which is harmless —
 // UnreadBeadDatabase declines that shape before any evidence is gathered.
 func guardForScope(dir string) *unreadStoreGuard {
-	key := ""
-	if strings.TrimSpace(dir) != "" {
-		key = filepath.Clean(dir)
-	}
+	key := scopeGuardKey(dir)
 	if g, ok := scopeGuards.Load(key); ok {
 		return g.(*unreadStoreGuard)
 	}

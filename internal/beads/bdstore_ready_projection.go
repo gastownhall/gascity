@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/deps"
@@ -17,16 +19,90 @@ const bdReadyProjectionMinVersion = "1.0.5"
 // its backing store cannot serve the ready projection AT ALL, as opposed to
 // having failed to serve it this cycle.
 //
-// It is a degrade rather than a partial result because the enrichment is an
-// optimization: IsBlocked==nil is the documented fallback and cachedBeadReady
-// derives readiness from dependencies instead, so the snapshot is whole. The
-// distinction is load-bearing — a cache that folds this into primePartialErr
-// declines every cache-only read for the life of the process.
+// It is a degrade rather than a partial result because it costs the snapshot
+// exactly one column: the ROWS are whole, so List/Get/DepList keep serving from
+// cache. That distinction is load-bearing — a cache that folds this into
+// primePartialErr declines every cache-only read for the life of the process
+// and sends each one to a live bd subprocess.
 //
-// It is reported exactly once per store: the verdict is latched, so the first
-// prime or reconcile after the discovery carries the cause onto the problem log
-// and an operator notice, and every later cycle degrades quietly.
+// It does NOT mean readiness is unaffected. Without the column every bead's
+// IsBlocked is nil, and cachedBeadReady then derives readiness from the bead's
+// OWN direct blocks/waits-for/conditional-blocks deps. That predicate is weaker
+// than bd's is_blocked, which propagates blocked-ness transitively down
+// parent-child edges: a child of a blocked parent reads blocked to bd and ready
+// to the cache. The error direction is permissive — the cache would OFFER work
+// whose gate has not opened — which for the control dispatcher is worse than
+// hiding it (#3218). So readiness reads decline the cache and take their live
+// backing.Ready fallback (CachingStore.readyReadsMustGoLive) while every other
+// cached read keeps being served.
+//
+// It is reported exactly once per SCOPE: the verdict is latched in a registry
+// keyed by scope path, not on the store object, because cmd/gc rebuilds a store
+// per request and the control dispatcher rebuilds one every few seconds. Each
+// cache over the scope still learns the verdict — it must, to decline its ready
+// reads — but the operator notice and the failing subprocess are spent once.
 var ErrReadyProjectionUnsupported = errors.New("ready projection unsupported by this bead store")
+
+// readyProjectionDegrade is the latched verdict for one scope: the reason its
+// ledger cannot answer the ready projection.
+type readyProjectionDegrade struct {
+	cause error
+}
+
+// readyProjectionScopeGuard bounds the degrade verdict, its operator notice,
+// and the subprocess that discovers it to one per SCOPE.
+//
+// Per-scope rather than per-store object is the same correction unreadStoreGuard
+// already carries (scopeGuards, unread_store_notice.go). A verdict memoized on
+// the store object is memoized on nothing: cmd/gc's scoped stores are built per
+// request, and cmd/gc's control-ready path rebuilds a store per
+// controlReadyCacheTTL (3s) per scope for the life of the dispatcher. Bounding
+// there turns "once per store" into "once per rebuild" — an unbounded operator
+// notice, and a latch that never actually saves the failing 6-16s `bd sql` it
+// exists to save.
+type readyProjectionScopeGuard struct {
+	// degrade latches the reason this scope cannot serve the projection. It is
+	// never cleared: a ledger in front of a running process does not grow the
+	// capability, and re-probing costs a guaranteed-failing subprocess per
+	// cache prime and per reconcile.
+	degrade atomic.Pointer[readyProjectionDegrade]
+	// announced bounds the operator notice to one per scope. Compare-and-swap
+	// rather than sync.Once for the reason verdictClaimed is: the winner writes
+	// to a sink an operator owns, and no other caller should wait behind it.
+	announced atomic.Bool
+}
+
+// readyProjectionGuards memoizes one guard per resolved scope path. It grows by
+// one small entry per distinct bead scope a process reads — a city and its
+// rigs — and entries live for the process because the verdict does.
+var readyProjectionGuards sync.Map // map[string]*readyProjectionScopeGuard
+
+// readyProjectionGuardForScope returns the shared guard for dir, creating it on
+// first use. LoadOrStore, not a mutex: the losing racer discards a two-field
+// struct and takes the winner's. A store with no directory gets the empty key,
+// which is the right bucket rather than a leak: those stores run bd in the
+// process's working directory, so they all address one scope.
+func readyProjectionGuardForScope(dir string) *readyProjectionScopeGuard {
+	key := scopeGuardKey(dir)
+	if g, ok := readyProjectionGuards.Load(key); ok {
+		return g.(*readyProjectionScopeGuard)
+	}
+	g, _ := readyProjectionGuards.LoadOrStore(key, &readyProjectionScopeGuard{})
+	return g.(*readyProjectionScopeGuard)
+}
+
+// readyProjectionGuard returns this store's scope guard. Stores built by
+// NewBdStore resolve it once at construction; the lookup here is the fallback
+// for a zero-value BdStore.
+func (s *BdStore) readyProjectionGuard() *readyProjectionScopeGuard {
+	if s == nil {
+		return nil
+	}
+	if s.readyProjectionScope != nil {
+		return s.readyProjectionScope
+	}
+	return readyProjectionGuardForScope(s.dir)
+}
 
 type bdReadyProjectionRow struct {
 	ID        string       `json:"id"`
@@ -94,6 +170,14 @@ func skipBDReadyProjectionEnrichment(item Bead) bool {
 }
 
 func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
+	// The scope verdict outranks anything this store object knows: a store
+	// built after some other store over the same scope reached it must neither
+	// re-spend the discovery nor re-announce it. It still REPORTS the degrade,
+	// on every call, because that error is how each cache over the scope learns
+	// to decline its readiness reads.
+	if cause := s.latchedReadyProjectionDegrade(); cause != nil {
+		return false, fmt.Errorf("bd ready projection scope verdict: %w: %w", ErrReadyProjectionUnsupported, cause)
+	}
 	s.readyProjectionMu.Lock()
 	defer s.readyProjectionMu.Unlock()
 	// Probe the capability once per process. Operators must restart gc after
@@ -136,9 +220,10 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 // runtime (contract.RegisteredBackends). A scope served through the linked
 // beads library under any other name is one gc knows nothing about, so
 // assuming its `bd sql` works, and that its schema carries gc's issues/wisps
-// projection, is a guess. Withholding the call is the honest default and costs
-// that scope one optimization whose absence is already the documented benign
-// state (IsBlocked==nil falls back to dependency-derived readiness).
+// projection, is a guess. Withholding the call is the honest default, and it
+// costs that scope the enrichment rather than its correctness: readiness reads
+// there decline the cache and take bd's own verdict live (see
+// ErrReadyProjectionUnsupported), while every other cached read keeps serving.
 //
 // A scope naming a registered backend — including metadata that names none, and
 // including metadata gc cannot read — reaches nil here and takes exactly the
@@ -154,8 +239,8 @@ func (s *BdStore) readyProjectionBackendRefusal() error {
 	return err
 }
 
-// disableReadyProjectionLocked latches the projection off for the life of this
-// store and states the reason once. Callers hold readyProjectionMu.
+// disableReadyProjectionLocked latches the projection off for this scope and
+// states the reason once. Callers hold readyProjectionMu.
 //
 // The latch is one-way for the same reason the conditional-release one is: the
 // ledger in front of the process cannot grow a capability mid-run, and
@@ -164,20 +249,52 @@ func (s *BdStore) readyProjectionBackendRefusal() error {
 func (s *BdStore) disableReadyProjectionLocked(reason error) {
 	s.readyProjectionEnabled = false
 	s.readyProjectionChecked = true
+	s.latchReadyProjectionDegrade(reason)
+}
+
+// latchReadyProjectionDegrade records the scope verdict and announces it once.
+//
+// The notice states what actually changes for the operator: readiness reads on
+// this scope stop being served from cache and take a live `bd ready` instead,
+// every other cached read keeps serving, and the failing `bd sql` is not spent
+// again. It deliberately does not claim the cache is unaffected — the
+// dependency-derived predicate the cache would otherwise use is not equivalent
+// to bd's is_blocked (see ErrReadyProjectionUnsupported).
+func (s *BdStore) latchReadyProjectionDegrade(cause error) {
+	g := s.readyProjectionGuard()
+	if g == nil {
+		return
+	}
+	g.degrade.CompareAndSwap(nil, &readyProjectionDegrade{cause: cause})
+	if !g.announced.CompareAndSwap(false, true) {
+		return
+	}
 	_, _ = fmt.Fprintf(s.noticeWriter(),
 		"gc: ready-projection enrichment disabled for %s: %v\n"+
-			"gc: cached ready falls back to dependency-derived readiness; no work is lost and no further bd sql is spent.\n",
-		s.dir, reason)
+			"gc: ready reads on this scope answer from a live `bd ready` instead of the cache; other cached reads keep serving and no further bd sql is spent.\n",
+		s.dir, cause)
+}
+
+// latchedReadyProjectionDegrade returns the reason this SCOPE cannot serve the
+// ready projection, or nil when no store over it has reached that verdict.
+func (s *BdStore) latchedReadyProjectionDegrade() error {
+	g := s.readyProjectionGuard()
+	if g == nil {
+		return nil
+	}
+	verdict := g.degrade.Load()
+	if verdict == nil {
+		return nil
+	}
+	return verdict.cause
 }
 
 // latchReadyProjectionUnsupported records bd's own refusal of `bd sql`, so no
-// later cycle spends the call again.
+// later cycle — and no store built later over the same scope — spends the call
+// again.
 func (s *BdStore) latchReadyProjectionUnsupported(cause error) {
 	s.readyProjectionMu.Lock()
 	defer s.readyProjectionMu.Unlock()
-	if s.readyProjectionChecked && !s.readyProjectionEnabled {
-		return
-	}
 	s.disableReadyProjectionLocked(cause)
 }
 

@@ -373,6 +373,12 @@ type BdStore struct {
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
+	// readyProjectionScope memoizes, per SCOPE PATH, the verdict that this
+	// ledger cannot serve the ready projection at all. Shared with every other
+	// store rooted at the same directory, because cmd/gc rebuilds a store per
+	// request and the control dispatcher rebuilds one every few seconds. See
+	// bdstore_ready_projection.go.
+	readyProjectionScope *readyProjectionScopeGuard
 
 	// condReleaseLatchedUnsupported records that this bd rejected the
 	// conditional-release flags, pinning ReleaseIfCurrent to the raw-SQL
@@ -472,11 +478,12 @@ func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStor
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
 	s := &BdStore{
-		dir:          dir,
-		runner:       runner,
-		idPrefix:     normalizeIDPrefix(idPrefix),
-		unreadStore:  guardForScope(dir),
-		localStrings: newLocalSidecar(bdLocalSidecarPath(dir)),
+		dir:                  dir,
+		runner:               runner,
+		idPrefix:             normalizeIDPrefix(idPrefix),
+		unreadStore:          guardForScope(dir),
+		readyProjectionScope: readyProjectionGuardForScope(dir),
+		localStrings:         newLocalSidecar(bdLocalSidecarPath(dir)),
 	}
 	for _, opt := range opts {
 		if opt != nil {

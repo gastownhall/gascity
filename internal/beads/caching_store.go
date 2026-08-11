@@ -42,6 +42,13 @@ type CachingStore struct {
 	mutationSeq     uint64
 	primePartialErr error
 
+	// readyProjectionDegraded latches when the backing store reported it cannot
+	// serve the ready projection at all. It is deliberately NOT primePartialErr:
+	// see readyReadsMustGoLive for what each flag costs which reads. Atomic
+	// rather than mu-guarded because it is set from the prime/reconcile paths
+	// and read under mu by the readiness readers.
+	readyProjectionDegraded atomic.Bool
+
 	reconciling    atomic.Bool
 	syncFailures   int
 	circuitTripped bool
@@ -1246,13 +1253,16 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 // and returns the failure that leaves the snapshot INCOMPLETE, having already
 // recorded every failure on the problem log.
 //
-// A projection the backing store cannot serve at all is not an incomplete
-// snapshot: IsBlocked==nil is the documented fallback and cachedBeadReady
-// derives readiness from dependencies instead, so the rows are whole and the
-// cache degrades to a named state rather than a partial one. Folding it into
-// primePartialErr — which nothing but a clean prime clears — declined every
-// cache-only read for the life of the process and sent each one to a live 5-6s
-// bd subprocess, which is the shape maintainer-city was stuck in.
+// A projection the backing store cannot serve AT ALL costs the snapshot one
+// column, not rows: the cache latches readyProjectionDegraded, its readiness
+// reads decline to the live backing, and every other cached read keeps serving.
+// Folding that into primePartialErr — which nothing but a clean prime clears —
+// declined every cache-only read for the life of the process and sent each one
+// to a live 5-6s bd subprocess, which is the shape maintainer-city was stuck in.
+//
+// A projection that merely failed THIS cycle is a different verdict: the store
+// can answer, so the rows really are missing an answer they should have, and the
+// snapshot stays partial.
 func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, error) {
 	enriched, err := c.enrichReadyProjectionForCache(items)
 	if err == nil {
@@ -1260,9 +1270,33 @@ func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, er
 	}
 	c.recordProblem(op, err)
 	if errors.Is(err, ErrReadyProjectionUnsupported) {
+		c.readyProjectionDegraded.Store(true)
 		return items, nil
 	}
 	return items, err
+}
+
+// readyReadsMustGoLive reports whether readiness reads must decline the cache
+// and take their live-backing fallback.
+//
+// It latches when the backing store reported ErrReadyProjectionUnsupported,
+// which leaves every bead's IsBlocked nil. cachedBeadReady then derives
+// readiness from each bead's OWN direct blocks/waits-for/conditional-blocks
+// deps, and that predicate is WEAKER than bd's is_blocked: bd propagates
+// blocked-ness transitively down parent-child edges, so a child of a blocked
+// parent is blocked to bd and ready to the cache. Serving it would offer work
+// whose molecule gate has not opened to the control dispatcher — the exact
+// regression #3218 closed by mirroring bd's projection in the first place.
+//
+// Only readiness declines. List/Get/DepList keep serving from cache, because
+// the rows themselves are whole; that separation is the whole point of not
+// folding this verdict into primePartialErr.
+//
+// The latch is one-way to match the backing store's own: once a scope's ledger
+// is known not to serve the projection, later primes are told so without
+// spending a subprocess, so a cleared flag could never be re-derived.
+func (c *CachingStore) readyReadsMustGoLive() bool {
+	return c.readyProjectionDegraded.Load()
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {
