@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -206,7 +207,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
-	_, _ time.Duration,
+	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
@@ -222,11 +223,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		leaked, finalErr := g.waitForFinalScanToClear(enumerate, initial, graceInitialInterval, graceMaxElapsedTime)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
-		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
+		} else if len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
@@ -241,6 +242,49 @@ func (g *doltLeakGuardedTestingM) runWith(
 		return 1
 	}
 	return code
+}
+
+// waitForFinalScanToClear polls the final process-table scan, diffing
+// against initial each time, until it shows no candidates or
+// maxElapsedTime is exhausted. It tolerates the ordinary tail latency of a
+// dolt sql-server's graceful shutdown (already signaled to stop, not yet
+// reaped from the process table) without weakening detection of a process
+// still present when the grace window closes: the last observed diff is
+// what gets reported and reaped in that case, identical to a single
+// immediate scan finding the same result.
+func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
+	enumerate func() ([]DoltProcInfo, error),
+	initial map[int]DoltProcInfo,
+	initialInterval, maxElapsedTime time.Duration,
+) ([]DoltProcInfo, error) {
+	var leaked []DoltProcInfo
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = initialInterval
+	bo.MaxElapsedTime = maxElapsedTime
+
+	err := backoff.Retry(func() error {
+		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		if finalErr != nil {
+			return backoff.Permanent(finalErr)
+		}
+		leaked = diffDoltProcessSnapshots(initial, final)
+		if len(leaked) == 0 {
+			return nil
+		}
+		return fmt.Errorf("%d dolt sql-server process(es) still present", len(leaked))
+	}, bo)
+	if err != nil {
+		var permErr *backoff.PermanentError
+		if errors.As(err, &permErr) {
+			return nil, permErr.Err
+		}
+		// Retries exhausted with a non-empty diff on the last poll: leaked
+		// already holds that observation, and the sentinel error above
+		// carries no information beyond "still non-empty" — fall through
+		// and report leaked, exactly like the old single-scan path did.
+	}
+	return leaked, nil
 }
 
 func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
