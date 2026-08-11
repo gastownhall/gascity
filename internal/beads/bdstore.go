@@ -339,10 +339,12 @@ type BdStore struct {
 	// (disjoint from condWriteMu's capability state; no nesting).
 	condWritesStamp
 
-	// unreadStore memoizes, per STORE, whether an empty whole-ledger read from
-	// this scope can be believed while a second bead database sits unread in
-	// its .beads/. See unread_store_notice.go.
-	unreadStore unreadStoreGuard
+	// unreadStore memoizes, per SCOPE PATH, whether an empty whole-ledger read
+	// from this scope can be believed while a second bead database sits unread
+	// in its .beads/. Shared with every other store rooted at the same
+	// directory, because the API builds a throwaway store per request. See
+	// unread_store_notice.go.
+	unreadStore *unreadStoreGuard
 	// noticeSink redirects operator notices away from stderr; nil is stderr.
 	noticeSink io.Writer
 
@@ -414,6 +416,7 @@ func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opt
 		dir:          dir,
 		runner:       runner,
 		idPrefix:     normalizeIDPrefix(idPrefix),
+		unreadStore:  guardForScope(dir),
 		localStrings: newLocalSidecar(bdLocalSidecarPath(dir)),
 	}
 	for _, opt := range opts {
@@ -2393,7 +2396,6 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 
 // listByTier runs the query against bd. It is the body List wraps, so the
 // empty-result notice has exactly one place to sit across all three tier modes.
-
 func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	switch query.TierMode {
 	case TierWisps:

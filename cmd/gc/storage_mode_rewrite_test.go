@@ -519,4 +519,17 @@ func TestTheThreeMessagesAboutOneUnreadDatabaseAgree(t *testing.T) {
 	if !strings.Contains(readNotice.String(), beads.AllowUnreadStoreReadEnvVar) {
 		t.Errorf("the read-time notice does not name its own override: %q", readNotice.String())
 	}
+	// And doctor has to promise the bound the guard actually holds. The guard
+	// memoizes per SCOPE PATH inside one process, and cmd/gc builds a throwaway
+	// bd store per request on the paths internal/api reads through — so "a
+	// one-time notice" was false there, at status-rebuild rate, in a tree with
+	// a documented log-flood history. Telling an operator to expect less noise
+	// than they will get is the same class of false statement as telling them
+	// rows are gone.
+	if strings.Contains(diagnostic.FixHint, "one-time notice") {
+		t.Errorf("gc doctor promises a one-time notice; the guard bounds it per scope per process, and the API rebuilds its store per request: %q", diagnostic.FixHint)
+	}
+	if !strings.Contains(diagnostic.FixHint, "one notice per gc process") {
+		t.Errorf("gc doctor does not state the bound the guard holds (one notice per gc process): %q", diagnostic.FixHint)
+	}
 }

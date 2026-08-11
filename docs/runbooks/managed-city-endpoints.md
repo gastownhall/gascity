@@ -212,11 +212,16 @@ Three things now tell you:
    is about to stop reading, before it happens.
 2. `gc doctor`'s `bd-split-store` check enumerates both databases.
 3. An empty **whole-ledger** read (`gc ready`'s city leg, an
-   unfiltered `List`) from a store that has never returned a row
-   prints a one-time notice naming the unread database. It is a
-   notice, never a refusal — a workspace `bd init` created and never
-   filed a bead into is the same shape on disk, and separating them
-   would mean opening the database you were told to preserve.
+   unfiltered `List`) from a scope that has not returned a row in
+   that process prints **one notice per `gc` process**, naming the
+   unread database. It is a notice, never a refusal, and it spends
+   no `bd` subprocess of its own — a workspace `bd init` created and
+   never filed a bead into is the same shape on disk, an idle ledger
+   reads the same way, and separating them would mean either opening
+   the database you were told to preserve or asking `bd` a second
+   question on the caller's read deadline. Expect it on any scope
+   that still has two bead databases, including healthy ones; that
+   is the price of a notice that cannot cost a read.
 
 Recovery is `gc doctor`'s: export from a copy of the unread
 database, review with `bd import --dry-run`, import into the active

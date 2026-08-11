@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -59,12 +60,33 @@ import (
 //     `|| exit $?`, and the API ready arm hits totalOutage(). A city that is
 //     merely IDLE would fail closed.
 //
-// So this states what is knowable — this store has never answered with a row,
-// an unfiltered probe of it finds no row, and a second bead database sits
-// unread beside it — on stderr, once per store, and lets the read succeed. It
-// carries `gc doctor`'s remediation word for word so the two never send an
-// operator in different directions, and names an override because a store-layer
-// guard with no escape is the difference between a warning and an outage.
+// So this states what is knowable — no read of this scope has returned a row in
+// this process, and a second bead database sits unread beside the one that
+// answered — on stderr, once per scope, and lets the read succeed. It carries
+// `gc doctor`'s remediation word for word so the two never send an operator in
+// different directions, and names an override because a store-layer guard with
+// no escape is the difference between a warning and an outage.
+//
+// # Why it spends no subprocess
+//
+// The first shape of this notice confirmed the active store was empty with one
+// more `bd list --limit 1`, synchronously, inside List and Ready. Store.List
+// and Store.Ready take no context, so the store cannot see the budget its
+// caller is holding, and that probe was charged to it: with the API's
+// per-store status deadline at 250ms and bd answering the probe in 400ms, a
+// List bd had ALREADY answered successfully came back to the handler as "list
+// timed out: context deadline exceeded". A diagnostic that can turn a
+// successful read into an error is worse than the silence it diagnoses, and no
+// arrangement of a synchronous subprocess avoids it — binding the child to the
+// caller's context kills the child but still spends the budget, and "skip when
+// the deadline is close" needs a threshold nobody can pick.
+//
+// So the probe is gone rather than rescheduled, and the notice runs on evidence
+// the read already paid for: the row latch, the on-disk shape (one file read
+// and up to two stats), and nothing else. The price is a wider notice — an idle
+// ledger reads the same as a re-pointed one from here — which the message says
+// out loud. The question the probe was asking belongs to `gc doctor`, which
+// enumerates both databases with no caller waiting on it.
 
 // AllowUnreadStoreReadEnvVar silences the unread-store notice for a process
 // that already knows about the second database.
@@ -145,10 +167,10 @@ func UnreadBeadDatabase(scopeRoot string) (unread, activeStore string, ok bool) 
 	return "", "", false
 }
 
-// UnreadStoreNotice builds the line an empty whole-ledger read prints when the
-// store that answered it has never produced a row and a second bead database
-// sits unread in the same .beads/. op names the read, and activeStore is the
-// .beads/ subdirectory the read was answered from.
+// UnreadStoreNotice builds the line an empty whole-ledger read prints when no
+// read of the scope that answered it has produced a row in this process and a
+// second bead database sits unread in the same .beads/. op names the read, and
+// activeStore is the .beads/ subdirectory the read was answered from.
 //
 // It is exported so the three places that talk about this one situation — the
 // announcement at flip time (cmd/gc), `gc doctor`'s bd-split-store check, and
@@ -160,102 +182,153 @@ func UnreadBeadDatabase(scopeRoot string) (unread, activeStore string, ok bool) 
 // not consulted, why nothing errored, why this is not being treated as proof of
 // a fault, the remediation, and the way to silence it.
 //
-// It deliberately does NOT claim rows were lost, nor that this scope is broken.
-// A workspace `bd init` created and never filed a bead into produces this exact
-// shape, and a message that overstates gets ignored the next time it is right.
+// It deliberately does NOT claim rows were lost, nor that this scope is broken,
+// nor that the active store is empty. A workspace `bd init` created and never
+// filed a bead into produces this exact shape, an idle ledger answers the same
+// way, and a message that overstates gets ignored the next time it is right.
+// What it can say is that no read of this scope has returned a row in this
+// process and that a second database is on disk, and it says exactly that.
 func UnreadStoreNotice(op, scopeRoot, unread, activeStore string) string {
-	return fmt.Sprintf("gc: %s returned no rows for %s from the %q bead store, and an unfiltered probe of that store "+
-		"found no row at all, while %s is a Dolt bead database this scope's .beads/metadata.json does not point at. "+
+	return fmt.Sprintf("gc: %s returned no rows for %s from the %q bead store, no read of this scope has returned a row "+
+		"in this process, and %s is a Dolt bead database this scope's .beads/metadata.json does not point at. "+
 		"Nothing failed — bd opened the store its metadata names, ran the read successfully and matched nothing — so this "+
 		"empty answer is indistinguishable from a real one while a second ledger sits unread beside it. gc canonicalizes "+
 		"a managed scope's metadata to dolt_mode=server on `gc rig add`, `gc start`, `gc supervisor run`, `gc rig "+
 		"set-endpoint` and `gc beads city use-managed|use-external`, which re-points a workspace initialized in embedded "+
-		"mode without moving its rows. This is a notice and not a refusal because a workspace `bd init` created and never "+
-		"filed a bead into looks the same on disk, and telling the two apart means opening the unread database. Run `gc "+
-		"doctor` (check bd-split-store) to see what each store holds, then export from a copy of the unread one, review "+
-		"with `bd import --dry-run`, and import into the active one; keep both directories until reconciled. Set %s=1 to "+
-		"silence this while you reconcile.\n",
+		"mode without moving its rows. This is a notice and not a refusal, and it spends no bd subprocess of its own: an "+
+		"idle ledger and a workspace `bd init` created but never filed a bead into look the same from here, and the only "+
+		"ways to tell them apart are to open the database you were told to keep or to ask bd a second question on your "+
+		"read's deadline. Run `gc doctor` (check bd-split-store) to see both databases and which one is active, then "+
+		"export from a copy of the unread one, review with `bd import --dry-run`, and import into the active one; keep "+
+		"both directories until reconciled. Set %s=1 to silence this while you reconcile.\n",
 		op, scopeRoot, activeStore, unread, AllowUnreadStoreReadEnvVar)
 }
 
-// unreadStoreGuard is the per-STORE verdict behind the notice.
+// unreadStoreGuard is the per-SCOPE verdict behind the notice.
 //
-// Per-store is the whole correction. The first version of this guard judged
-// per-CALL and refused an empty Ready() on a demonstrably populated store,
-// because "this call returned nothing" and "this store holds nothing" are
-// different claims and only the second one is evidence. sawRows latches the
-// first, cheapest possible disproof — the store answered a read with a row —
-// and once latched the guard is inert for the life of the store.
+// Per-scope rather than per-call is the whole correction. The first version of
+// this guard judged per-CALL and refused an empty Ready() on a demonstrably
+// populated store, because "this call returned nothing" and "this scope holds
+// nothing" are different claims and only the second one is evidence. sawRows
+// latches the first, cheapest possible disproof — bd answered a read of this
+// scope with a row — and once latched the guard is inert for the life of the
+// process.
 //
-// verdictClaimed carries the expensive half: the on-disk shape check and, only
-// if that matches, ONE unfiltered `bd list --limit 1` against the active store.
-// The hot path never pays for it twice, and a healthy city never pays for it at
-// all — it stops at an atomic load, or at the metadata read when a read
-// genuinely comes back empty.
+// Per-scope rather than per-STORE is what makes the one-shot bound true where
+// it is actually needed. cmd/gc's scopedBdStoreForCity/scopedBdStoreForRig build
+// a brand new BdStore for every request that needs a context-bound bd child, and
+// internal/api's status handler reaches them through State.ScopedStoreLike on
+// every /status — so a verdict memoized on the store degraded to once per READ
+// there, and statusWorkCounts fans out over city plus every rig at once. Keying
+// on the resolved scope path means a throwaway store inherits the verdict the
+// process already reached.
 //
-// It is a compare-and-swap latch rather than a sync.Once on purpose. once.Do
-// makes every concurrent caller WAIT for the winner, and the winner here runs a
-// bd subprocess; on a supervisor with a goroutine per rig that turns one slow
-// probe into a stall across all of them. Losing the race means the verdict is
-// already being reached by someone else, and the right thing for a diagnostic
-// to do about that is nothing.
+// verdictClaimed carries the rest: the override check and the on-disk shape —
+// one metadata read and up to two stats. It is a compare-and-swap latch rather
+// than a sync.Once on purpose. once.Do makes every concurrent caller WAIT for
+// the winner, and the winner here touches the filesystem and writes to stderr;
+// on a supervisor with a goroutine per rig a single slow sink would become a
+// stall across all of them. Losing the race means the verdict is already being
+// reached by someone else, and the right thing for a diagnostic to do about
+// that is nothing.
 //
 // It is claimed BEFORE the evidence is gathered, so the cheap negative — a
 // scope with one ledger, which is every healthy city — costs one metadata read
-// for the life of the store and two atomic loads on every read after it. The
-// cost of that ordering is that a store held across a mode flip performed by
-// ANOTHER process keeps its verdict; the process doing the flip announces it
-// and builds its own stores afterwards, and "memoized per BdStore" is what
-// makes this affordable on List and Ready at all.
+// for the life of the process and two atomic loads on every read after it. The
+// cost of that ordering is that a verdict survives a mode flip performed by
+// another process; the process doing the flip announces it, and one notice per
+// scope is the bound this is trading for.
 type unreadStoreGuard struct {
-	// sawRows latches when this store's bd answered any read with at least one
-	// row, BEFORE client-side filtering. It is the disproof, so it is checked
-	// first and is never unlatched: a store that once held rows is not a
-	// workspace pointed at the wrong database.
+	// sawRows latches when bd answered any read of this scope with at least
+	// one row, BEFORE client-side filtering. It is the disproof, so it is
+	// checked first and is never unlatched: a scope that once handed back rows
+	// is not a workspace pointed at the wrong database.
 	sawRows atomic.Bool
-	// verdictClaimed bounds the probe and the notice to one per store, without
-	// making any other read wait for them.
+	// verdictClaimed bounds the shape check and the notice to one per scope,
+	// without making any other read wait for them.
 	verdictClaimed atomic.Bool
 }
 
-// noteServerRows records that bd handed this store rows for some read.
+// scopeGuards memoizes one unreadStoreGuard per resolved scope path, so the
+// notice is bounded per SCOPE rather than per store object. It grows by one
+// small entry per distinct bead scope a process reads — a city and its rigs, a
+// handful — and entries live for the process because the verdict does.
+var scopeGuards sync.Map // map[string]*unreadStoreGuard
+
+// guardForScope returns the shared guard for dir, creating it on first use.
+//
+// LoadOrStore, not a mutex: the losing racer discards a two-field struct and
+// takes the winner's, which is the same non-blocking property verdictClaimed
+// has. A store with no directory gets the empty key, which is harmless —
+// UnreadBeadDatabase declines that shape before any evidence is gathered.
+func guardForScope(dir string) *unreadStoreGuard {
+	key := ""
+	if strings.TrimSpace(dir) != "" {
+		key = filepath.Clean(dir)
+	}
+	if g, ok := scopeGuards.Load(key); ok {
+		return g.(*unreadStoreGuard)
+	}
+	g, _ := scopeGuards.LoadOrStore(key, &unreadStoreGuard{})
+	return g.(*unreadStoreGuard)
+}
+
+// unreadGuard returns this store's scope guard. Stores built by NewBdStore
+// resolve it once at construction; the lookup here is the fallback for a
+// zero-value BdStore.
+func (s *BdStore) unreadGuard() *unreadStoreGuard {
+	if s == nil {
+		return nil
+	}
+	if s.unreadStore != nil {
+		return s.unreadStore
+	}
+	return guardForScope(s.dir)
+}
+
+// noteServerRows records that bd handed this scope rows for some read.
 //
 // It is called with the count of rows bd RETURNED, not the count the caller
 // received, because client-side filtering (assignee, tier, limit, parent) can
 // reduce a real answer to nothing and that reduction says nothing about the
 // store. Two atomics in the common case, one in the steady state.
 func (s *BdStore) noteServerRows(rows int) {
-	if s == nil || rows <= 0 || s.unreadStore.sawRows.Load() {
+	if s == nil || rows <= 0 {
 		return
 	}
-	s.unreadStore.sawRows.Store(true)
+	g := s.unreadGuard()
+	if g == nil || g.sawRows.Load() {
+		return
+	}
+	g.sawRows.Store(true)
 }
 
 // noticeIfStoreCannotSeeItsLedger prints the unread-store notice at most once
-// per store, when an UNFILTERED whole-ledger read came back empty and the
+// per scope, when an UNFILTERED whole-ledger read came back empty and the
 // evidence supports it.
 //
 // Callers must only reach this from a read with no selector: a filtered empty
 // result is evidence of nothing, which is the second correction this guard
-// carries. The cost ladder is deliberate, in increasing order of expense:
+// carries. The cost ladder is deliberate, in increasing order of expense, and
+// it stops short of a subprocess on purpose (see the file header):
 //
 //  1. sawRows and verdictClaimed — two atomic loads. The first is true for
-//     every store that has ever answered with a row, which is every store on a
-//     working city that holds work; the second is true for every store whose
-//     one-shot verdict has already been reached.
+//     every scope that has ever answered with a row, which is every working
+//     city that holds work; the second is true for every scope whose one-shot
+//     verdict has already been reached.
 //  2. the override env var and the on-disk shape — a getenv, one file read and
-//     up to two stats, paid once per store.
-//  3. the probe — one `bd list --json --all --limit 1` subprocess, paid once
-//     per store and ONLY when a second bead database is actually on disk.
+//     up to two stats, paid once per scope.
 //
-// A probe that fails, or that finds a row, ends the matter: neither outcome
-// establishes that the active store is empty, and this says nothing it cannot
-// establish.
+// There is no step 3. Confirming the active store is empty would mean asking bd
+// a second question inside a read whose budget the caller already set, and a
+// diagnostic that can spend a caller's deadline can fail the read it was meant
+// to annotate. The notice describes the shape instead, and says so.
 func (s *BdStore) noticeIfStoreCannotSeeItsLedger(op string) {
-	if s == nil || s.unreadStore.sawRows.Load() || s.unreadStore.verdictClaimed.Load() {
+	g := s.unreadGuard()
+	if g == nil || g.sawRows.Load() || g.verdictClaimed.Load() {
 		return
 	}
-	if !s.unreadStore.verdictClaimed.CompareAndSwap(false, true) {
+	if !g.verdictClaimed.CompareAndSwap(false, true) {
 		return
 	}
 	if strings.TrimSpace(os.Getenv(AllowUnreadStoreReadEnvVar)) != "" {
@@ -265,43 +338,7 @@ func (s *BdStore) noticeIfStoreCannotSeeItsLedger(op string) {
 	if !ok {
 		return
 	}
-	populated, err := s.holdsAnyRow()
-	if err != nil || populated {
-		if populated {
-			s.unreadStore.sawRows.Store(true)
-		}
-		return
-	}
 	_, _ = io.WriteString(s.unreadStoreNoticeSink(), UnreadStoreNotice(op, s.dir, unread, activeStore))
-}
-
-// holdsAnyRow reports whether the ACTIVE store holds a single row of any kind.
-//
-// This is the per-store question the notice is actually about, and it is asked
-// with no selector at all — every status, infra rows and gate rows included —
-// capped at one row so the answer costs the same on an empty ledger and on a
-// hundred-thousand-bead one.
-//
-// It builds its own argv rather than routing through listViaBDList because that
-// path forces a client-side limit for the default (issues) tier and would send
-// `--limit 0`, fetching the entire ledger to answer a yes/no question.
-//
-// The flags are the ones listViaBDList passes unconditionally, deliberately:
-// `--include-templates` would widen the question slightly (a scope holding only
-// template rows probes as empty) but bd 1.0.4 rejects flags this tree still
-// gates behind a version opt-in, and a probe that errors on an older bd silently
-// disables the notice. A narrower question that always runs beats a wider one
-// that sometimes does not.
-func (s *BdStore) holdsAnyRow() (bool, error) {
-	out, err := s.runBDTransientRead("list", "--json", "--all", "--include-infra", "--include-gates", "--limit", "1")
-	if err != nil {
-		return false, err
-	}
-	issues, parseErr := parseIssuesTolerant(extractJSON(out))
-	if len(issues) > 0 {
-		return true, nil
-	}
-	return false, parseErr
 }
 
 // unreadStoreNoticeSink returns where this store's notice is written. os.Stderr

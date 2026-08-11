@@ -19,16 +19,19 @@ func BenchmarkUnreadStoreGuardOnANonEmptyRead(b *testing.B) {
 }
 
 // BenchmarkUnreadStoreGuardOnAnEmptyRead is what an EMPTY whole-ledger read
-// pays once the per-store verdict has been reached, across the three states a
+// pays once the per-scope verdict has been reached, across the three states a
 // live process is in:
 //
-//   - latched — this store has answered with a row at some point.
+//   - latched — this scope has answered with a row at some point.
 //   - no-second-database — the steady state of every city with one ledger. The
 //     verdict cost a metadata read and a stat, once.
 //   - notice-already-printed — the scope that DID have a second database. The
-//     probe subprocess was spent once per store and is never spent again.
+//     notice was written once and is never written again, however many stores
+//     the process builds over that scope.
 //
-// All three are two atomic loads: the row latch and the verdict latch.
+// All three are two atomic loads: the row latch and the verdict latch. None of
+// them is ever a subprocess — see unread_store_notice.go on why a diagnostic
+// inside List/Ready may not ask bd anything of its own.
 func BenchmarkUnreadStoreGuardOnAnEmptyRead(b *testing.B) {
 	latched := NewBdStore(benchScope(b, true), benchEmptyRunner, WithBdStoreNoticeSink(&bytes.Buffer{}))
 	latched.noteServerRows(1)

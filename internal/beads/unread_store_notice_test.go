@@ -60,8 +60,10 @@ func (r *recordingRunner) run(_, name string, args ...string) ([]byte, error) {
 	return []byte(noRows), nil
 }
 
-// probes counts the unfiltered population probes the guard spent on this store.
-// It is the cost assertion: a store the guard never had to ask about answers 0.
+// probes counts the population probes the guard spent on this store. The guard
+// no longer has one — a subprocess inside List/Ready is charged to the caller's
+// read deadline — so this is the regression assertion that it stays gone, and
+// every caller of it wants 0.
 func (r *recordingRunner) probes() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -314,20 +316,28 @@ func TestFreshBdInitAdoptionIsNeverRefused(t *testing.T) {
 	}
 }
 
-// TestUnreadStoreVerdictIsPerStoreAndPaidOnce pins the memoization, which is
-// what makes the probe affordable on the two most-called reads in the system.
+// TestUnreadStoreVerdictIsPerScopeAndCostsNoSubprocess pins both halves of the
+// bound the message claims, on the shape that broke the first one.
 //
-// The ladder is: one atomic load for a store that has answered with rows, one
-// metadata read for a store that has not, and at most ONE `bd list --limit 1`
-// subprocess per store — reached only when a second bead database is actually
-// on disk.
-func TestUnreadStoreVerdictIsPerStoreAndPaidOnce(t *testing.T) {
+// cmd/gc's scopedBdStoreForCity/scopedBdStoreForRig construct a BRAND NEW
+// BdStore on every call, and internal/api's status handler reaches them through
+// State.ScopedStoreLike on every request — so a verdict memoized on the store
+// object degraded to once per READ, and `statusWorkCounts` fans that out over
+// city plus every rig concurrently. Ten throwaway stores over one scope is that
+// call pattern, and it must produce exactly one notice.
+//
+// The second half is the cost: a diagnostic inside List/Ready spends the
+// caller's read budget, so it spends no bd subprocess at all. The ladder stops
+// at one metadata read.
+func TestUnreadStoreVerdictIsPerScopeAndCostsNoSubprocess(t *testing.T) {
 	scope := scopeWithUnreadDatabase(t)
 	runner := newRecordingRunner(map[string]string{})
 	var notices bytes.Buffer
-	s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
 
-	for i := 0; i < 25; i++ {
+	for i := 0; i < 10; i++ {
+		// Exactly what scopedBdStoreForCity does per request: a throwaway
+		// store, freshly constructed, over the same scope.
+		s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
 		if _, err := s.Ready(); err != nil {
 			t.Fatalf("Ready() #%d error = %v", i, err)
 		}
@@ -335,42 +345,38 @@ func TestUnreadStoreVerdictIsPerStoreAndPaidOnce(t *testing.T) {
 			t.Fatalf("List #%d error = %v", i, err)
 		}
 	}
-	if n := runner.probes(); n != 1 {
-		t.Fatalf("the guard probed the active store %d times across 50 empty reads, want exactly 1", n)
+	if n := runner.probes(); n != 0 {
+		t.Fatalf("the guard spent %d probe subprocess(es); a diagnostic inside a read spends the caller's deadline", n)
 	}
 	if n := strings.Count(notices.String(), "does not point at"); n != 1 {
-		t.Fatalf("the notice printed %d times across 50 empty reads, want exactly 1:\n%s", n, notices.String())
+		t.Fatalf("the notice printed %d times across 10 request-scoped stores over one scope, want exactly 1:\n%s", n, notices.String())
 	}
 }
 
-// TestUnreadStoreProbeNeverBlocksAnotherRead pins the one thing a diagnostic on
-// the hottest read path in the system must never do: make other readers wait.
+// TestUnreadStoreNoticeNeverBlocksAnotherRead pins the one thing a diagnostic
+// on the hottest read path in the system must never do: make other readers
+// wait.
 //
-// The verdict costs a bd subprocess, and a sync.Once would park every
-// concurrent empty read behind it — on a supervisor with a goroutine per rig,
-// one slow probe becomes a stall across all of them, which is a worse outcome
-// than the silence being diagnosed. A compare-and-swap latch means the losers
-// return immediately and the answer they were computing is unaffected.
-func TestUnreadStoreProbeNeverBlocksAnotherRead(t *testing.T) {
+// A sync.Once would park every concurrent empty read behind whoever is reaching
+// the verdict, and that winner touches the filesystem and writes to a sink it
+// does not control — on a supervisor with a goroutine per rig, one blocked
+// stderr becomes a stall across all of them, which is a worse outcome than the
+// silence being diagnosed. A compare-and-swap latch means the losers return
+// immediately and the answer they were computing is unaffected.
+func TestUnreadStoreNoticeNeverBlocksAnotherRead(t *testing.T) {
 	scope := scopeWithUnreadDatabase(t)
-	probeStarted := make(chan struct{})
+	writing := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
-	runner := func(_, name string, args ...string) ([]byte, error) {
-		if name+" "+strings.Join(args, " ") == probeCmd {
-			once.Do(func() { close(probeStarted) })
-			<-release
-		}
+	sink := &blockingSink{entered: writing, release: release}
+	s := beads.NewBdStore(scope, func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(noRows), nil
-	}
-	var notices bytes.Buffer
-	s := beads.NewBdStore(scope, runner, beads.WithBdStoreNoticeSink(&notices))
+	}, beads.WithBdStoreNoticeSink(sink))
 
 	go func() { _, _ = s.Ready() }()
 	select {
-	case <-probeStarted:
+	case <-writing:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the probe never started")
+		t.Fatal("the notice never started writing")
 	}
 
 	done := make(chan struct{})
@@ -386,9 +392,23 @@ func TestUnreadStoreProbeNeverBlocksAnotherRead(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		close(release)
-		t.Fatal("reads queued behind the in-flight probe; the verdict must not be a barrier")
+		t.Fatal("reads queued behind the in-flight notice; the verdict must not be a barrier")
 	}
 	close(release)
+}
+
+// blockingSink stalls inside the notice write, standing in for a stderr nobody
+// is draining.
+type blockingSink struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSink) Write(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return len(p), nil
 }
 
 // TestUnreadStoreNoticeStaysQuietOnAScopeWithOneLedger is the false-positive
@@ -492,21 +512,73 @@ func TestUnreadStoreNoticeHonorsTheOverride(t *testing.T) {
 	}
 }
 
-// TestUnreadStoreProbeFailureSaysNothing keeps the guard inside what it can
-// establish. A probe that errors has not shown the active store is empty, and a
-// notice on that evidence would fire on any transient bd failure — the same
-// overreach, one layer down.
-func TestUnreadStoreProbeFailureSaysNothing(t *testing.T) {
+// TestTheNoticeAsksBdNothingOfItsOwn is the deadline safety property stated at
+// the layer it lives on, and it is the reason the population probe is gone.
+//
+// Store.List and Store.Ready take no context, so the store cannot see the
+// budget its caller is holding. Any bd subprocess it adds is charged to that
+// budget: with internal/api's per-store status deadline at 250ms and bd
+// answering a probe in 400ms, a List bd had ALREADY answered successfully came
+// back to the handler as "list timed out: context deadline exceeded". The only
+// bd invocations a read may make are the ones the caller asked for.
+func TestTheNoticeAsksBdNothingOfItsOwn(t *testing.T) {
 	scope := scopeWithUnreadDatabase(t)
-	runner := newRecordingRunner(map[string]string{}).fail(probeCmd, fmt.Errorf("dial tcp 127.0.0.1:3306: connection refused"))
+	runner := newRecordingRunner(map[string]string{})
 	var notices bytes.Buffer
 	s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
 
 	if _, err := s.Ready(); err != nil {
-		t.Fatalf("Ready() error = %v, want nil: a failed probe must not change the read's answer", err)
+		t.Fatalf("Ready() error = %v, want nil", err)
+	}
+	runner.mu.Lock()
+	afterReady := append([]string(nil), runner.commands...)
+	runner.mu.Unlock()
+	if len(afterReady) != 1 || afterReady[0] != readyCmd {
+		t.Fatalf("Ready() ran %v; want exactly the caller's own read %q and nothing else", afterReady, readyCmd)
+	}
+	if _, err := s.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("List error = %v, want nil", err)
+	}
+	runner.mu.Lock()
+	all := append([]string(nil), runner.commands...)
+	runner.mu.Unlock()
+	if len(all) != 2 {
+		t.Fatalf("an empty Ready plus an empty List ran %d bd command(s) (%v); want 2 — the two the caller asked for", len(all), all)
+	}
+	if !strings.Contains(notices.String(), "does not point at") {
+		t.Fatalf("the notice did not fire without the probe: %q", notices.String())
+	}
+	if !strings.Contains(notices.String(), "spends no bd subprocess of its own") {
+		t.Fatalf("the notice does not state the bound it now holds: %q", notices.String())
+	}
+}
+
+// TestABrokenBdDoesNotSilenceOrChangeTheNotice is what the removed probe's
+// failure case turns into. The old guard asked bd a second question and went
+// quiet whenever that question failed, so a transient Dolt hiccup disabled the
+// diagnostic. With no probe there is nothing to fail: a scope whose every bd
+// invocation errors still gets its error back, unchanged, and a scope whose
+// read succeeds empty still gets the notice.
+func TestABrokenBdDoesNotSilenceOrChangeTheNotice(t *testing.T) {
+	scope := scopeWithUnreadDatabase(t)
+	wantErr := fmt.Errorf("dial tcp 127.0.0.1:3306: connection refused")
+	runner := newRecordingRunner(map[string]string{}).fail(readyCmd, wantErr)
+	var notices bytes.Buffer
+	s := beads.NewBdStore(scope, runner.run, beads.WithBdStoreNoticeSink(&notices))
+
+	if _, err := s.Ready(); !strings.Contains(fmt.Sprint(err), "connection refused") {
+		t.Fatalf("Ready() error = %v, want the caller's own bd failure surfaced verbatim", err)
 	}
 	if notices.Len() != 0 {
-		t.Fatalf("a failed probe printed a notice anyway: %q", notices.String())
+		t.Fatalf("a read that FAILED printed the unread-store notice: %q", notices.String())
+	}
+	// The failed read is not a verdict either: the next read that genuinely
+	// answers empty still gets the notice.
+	if _, err := s.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("List error = %v, want nil", err)
+	}
+	if !strings.Contains(notices.String(), "does not point at") {
+		t.Fatalf("a prior bd failure suppressed the notice on a later successful empty read: %q", notices.String())
 	}
 }
 
@@ -628,10 +700,12 @@ func TestUnreadStoreNoticeNamesWhatAnOperatorNeeds(t *testing.T) {
 		"/cities/demo",
 		"/cities/demo/.beads/embeddeddolt/jc",
 		`"dolt"`,
-		"unfiltered probe",
+		"no read of this scope has returned a row in this process",
 		"Nothing failed",
 		"indistinguishable from a real one",
 		"notice and not a refusal",
+		"spends no bd subprocess of its own",
+		"idle ledger",
 		"gc doctor",
 		"bd import --dry-run",
 		"keep both directories until reconciled",
@@ -646,6 +720,14 @@ func TestUnreadStoreNoticeNamesWhatAnOperatorNeeds(t *testing.T) {
 	for _, forbidden := range []string{"lost", "deleted", "corrupt"} {
 		if strings.Contains(strings.ToLower(notice), forbidden) {
 			t.Errorf("the notice claims %q, which the on-disk evidence does not support:\n%s", forbidden, notice)
+		}
+	}
+	// Nor may it claim the active store is empty. Without a probe that is not
+	// established, and the message that overstates here is the one that gets an
+	// operator to delete the wrong directory.
+	for _, forbidden := range []string{"found no row", "holds nothing", "store is empty"} {
+		if strings.Contains(notice, forbidden) {
+			t.Errorf("the notice claims %q about the active store, which nothing here established:\n%s", forbidden, notice)
 		}
 	}
 }
@@ -673,8 +755,8 @@ func BenchmarkReadyOnAPopulatedStore(b *testing.B) {
 }
 
 // BenchmarkReadyOnAnEmptyStoreAfterTheVerdict measures the OTHER steady state:
-// an idle store whose one-shot verdict has already been reached. Every read
-// after the first pays an atomic load and a sync.Once fast path.
+// an idle scope whose one-shot verdict has already been reached. Every read
+// after the first pays two atomic loads.
 func BenchmarkReadyOnAnEmptyStoreAfterTheVerdict(b *testing.B) {
 	scope := b.TempDir()
 	if err := os.MkdirAll(filepath.Join(scope, ".beads", "embeddeddolt", "jc", ".dolt"), 0o755); err != nil {

@@ -1001,8 +1001,12 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 // but an operator who takes it and then sees an unexplained line on every empty
 // `gc ready` has been sent into a state the diagnostic did not warn them about.
 // Naming the override here is what keeps the two from contradicting each other.
+//
+// The bound stated here is the one the guard actually holds: once per scope per
+// process. A `gc` command is one process, so an operator sees it once per
+// command; a supervisor sees it once for the life of the daemon.
 func splitStoreFixHint(activeStore string) string {
-	silence := "; keep both directories until reconciled — reads from an empty active store print a one-time notice while both exist, which " +
+	silence := "; keep both directories until reconciled — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
 		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	if activeStore == "" || activeStore == "unknown" {
 		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
