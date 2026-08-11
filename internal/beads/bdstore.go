@@ -373,6 +373,11 @@ type BdStore struct {
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
+	// readyProjectionVersionErr memoizes the ErrReadyProjectionUnsupported this
+	// store owes every later caller when the bd on PATH predates the is_blocked
+	// projection. Store-local rather than scope-latched: the bd binary is a
+	// property of the process, not of the ledger. See bdstore_ready_projection.go.
+	readyProjectionVersionErr error
 	// readyProjectionScope memoizes, per SCOPE PATH, the verdict that this
 	// ledger cannot serve the ready projection at all. Shared with every other
 	// store rooted at the same directory, because cmd/gc rebuilds a store per
@@ -412,6 +417,12 @@ type BdStore struct {
 	unreadStore *unreadStoreGuard
 	// noticeSink redirects operator notices away from stderr; nil is stderr.
 	noticeSink io.Writer
+
+	// inlineDeps records whether bd's list JSON has been seen to carry each
+	// row's dependency edges beside it, which is what lets a CachingStore over
+	// this store serve down-deps and complete-ready reads from the snapshot.
+	// See bdstore_inline_deps.go.
+	inlineDeps inlineDependencyProjection
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
@@ -525,10 +536,6 @@ func (s *BdStore) Dir() string {
 // label hydration.
 func (s *BdStore) ListSkipLabelsEnabled() bool {
 	return s != nil && s.listSkipLabelsEnabled
-}
-
-func (s *BdStore) listIncludesCompleteDependencies() bool {
-	return false
 }
 
 // Init initializes a beads database via bd init --server. This is an admin
@@ -773,10 +780,16 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
-	Ephemeral    bool         `json:"ephemeral,omitempty"`
-	NoHistory    bool         `json:"no_history,omitempty"`
-	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
-	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
+	// DependencyCount is bd's own count of this row's BLOCKING edges,
+	// projected from the same dependency table and the same query as
+	// Dependencies. It is the control that turns "bd carried edges inline"
+	// into a falsifiable claim — see bdstore_inline_deps.go. A pointer so a bd
+	// that omits the field stays distinguishable from one reporting zero.
+	DependencyCount *int         `json:"dependency_count,omitempty"`
+	Ephemeral       bool         `json:"ephemeral,omitempty"`
+	NoHistory       bool         `json:"no_history,omitempty"`
+	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
+	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
@@ -2532,6 +2545,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	for i := range issues {
 		result[i] = issues[i].toBead()
 	}
+	s.noteInlineDependencyProjection(issues, result)
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) == 0 {
@@ -2644,6 +2658,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		result[i].Ephemeral = true
 		result[i].NoHistory = false
 	}
+	s.noteInlineDependencyProjection(issues, result)
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {

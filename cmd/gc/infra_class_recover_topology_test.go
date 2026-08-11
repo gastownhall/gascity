@@ -465,9 +465,8 @@ func (s transientDepListSource) List(query beads.ListQuery) ([]beads.Bead, error
 // bd/Postgres backend answers `operation "IssueRelations" not supported by the
 // postgres backend`, and that is a fact about the adapter. A locked database, a
 // lost connection or a subprocess that failed to fork is a fact about a moment.
-// Reading the second as the first swaps a trustworthy read for one the codebase
-// itself marks incomplete (BdStore.listIncludesCompleteDependencies is false),
-// and does it for the whole run.
+// Reading the second as the first swaps the relation read for a projection this
+// reader has not witnessed, and does it for the whole run.
 //
 // Red-before, on the reader that latched on ANY probe error:
 //

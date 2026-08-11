@@ -568,8 +568,9 @@ func TestCheckVersionCompatSummariesAreStableWhereItAlreadyPassed(t *testing.T) 
 // shape from ga-40qh1: a rig scope IS a git repo, so `bd context` succeeds and
 // every check can actually run. Before the fix the version compare was the only
 // FAIL, and it fired for a question it could not ask — dropping a healthy scope
-// to BdStore, where listIncludesCompleteDependencies() is hardcoded false and
-// complete-ready cache reads are permanently declined.
+// to BdStore, which at the time answered listIncludesCompleteDependencies() with
+// a hardcoded false, so its complete-ready cache reads were permanently declined
+// (ga-tgpfm).
 func TestPreflightEligibleOnReplacedBeadsModuleWithReadableBDContext(t *testing.T) {
 	scope := "/city/rigs/gascity"
 	fs := fsys.NewFake()

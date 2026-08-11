@@ -184,17 +184,12 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	// changing bd versions or re-pointing a scope at another backend to
 	// re-evaluate ready-projection support.
 	if s.readyProjectionChecked {
-		return s.readyProjectionEnabled, nil
+		return s.readyProjectionEnabled, s.readyProjectionVersionErr
 	}
 	if reason := s.readyProjectionBackendRefusal(); reason != nil {
 		s.disableReadyProjectionLocked(reason)
 		return false, fmt.Errorf("bd ready projection backend gate: %w: %w", ErrReadyProjectionUnsupported, reason)
 	}
-	// A bd that predates the projection is not a degraded state to announce:
-	// the feature never existed for it, the pinned toolchain version is
-	// something operators already manage through deps.env, and the absence
-	// costs only the enrichment. The verdicts below this comment are about the
-	// LEDGER, and those do announce themselves.
 	out, err := s.runner(s.dir, "bd", "version")
 	if err != nil {
 		return false, fmt.Errorf("bd ready projection version gate: %w", err)
@@ -203,9 +198,32 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("bd ready projection version gate: %w", err)
 	}
-	s.readyProjectionEnabled = deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
 	s.readyProjectionChecked = true
-	return s.readyProjectionEnabled, nil
+	// A bd that predates the projection leaves every IsBlocked nil, which is the
+	// same state as a ledger that refuses `bd sql`, and owes the same fail-safe.
+	// It used to return (false, nil) — no error, so no degrade — on the reading
+	// that "the absence costs only the enrichment". That held only while
+	// depsComplete was hardcoded false on this store: with the snapshot's own
+	// edges now serving readiness (bdstore_inline_deps.go), a silent (false, nil)
+	// hands every readiness handle to the dependency-derived predicate, which
+	// does not propagate down parent-child and so offers the control dispatcher
+	// work whose gate has not opened (#3218). Naming the degrade costs an old bd
+	// its CACHED readiness read — those take a live `bd ready`, every other
+	// cached read keeps serving — and costs a current bd nothing.
+	//
+	// Unlike the backend and runtime refusals it is memoized on the STORE rather
+	// than latched in the scope guard: which bd is on PATH is a property of the
+	// process, not of the ledger sitting in that directory, and the guard is
+	// never cleared. Latching it there would let one store's verdict outlive a
+	// bd upgrade for every later store over the same scope.
+	if deps.CompareVersions(version, bdReadyProjectionMinVersion) < 0 {
+		s.readyProjectionEnabled = false
+		s.readyProjectionVersionErr = fmt.Errorf("bd ready projection version gate: %w: bd %s predates %s, which introduced the is_blocked projection",
+			ErrReadyProjectionUnsupported, version, bdReadyProjectionMinVersion)
+		return false, s.readyProjectionVersionErr
+	}
+	s.readyProjectionEnabled = true
+	return true, nil
 }
 
 // readyProjectionBackendRefusal reports why this scope's backend cannot answer

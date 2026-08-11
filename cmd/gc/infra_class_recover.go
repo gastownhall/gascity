@@ -258,10 +258,10 @@ type strandedBeadDump struct {
 // adapter: it stays true for every bead and every retry, so one probe answers
 // for the store. `database is locked`, a dropped connection, a subprocess that
 // could not fork are facts about a moment, and a moment is no evidence about a
-// capability. Reading the second as the first swaps a trustworthy read for one
-// this codebase itself marks incomplete — BdStore.listIncludesCompleteDependencies
-// returns false, which is why CachingStore refuses to serve down-deps from the
-// inline projection — and it does so for the whole run, under a zero exit code.
+// capability. Reading the second as the first swaps the relation read for the
+// inline projection unconditionally — a projection this reader only trusts once
+// it has WITNESSED it live below — and it does so for the whole run, under a
+// zero exit code.
 //
 // Text matching is what is available: the refusal crosses the adapter boundary
 // as a string and neither side carries a sentinel for it. It degrades in the
