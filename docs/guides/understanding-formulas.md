@@ -796,8 +796,8 @@ The two frameworks above compose. Find your situation, read across:
 A **split city** serves the graph coordination class from its own `[storage]`
 binding: workflow roots, step beads and control beads live in a second
 database, and ordinary work stays in the work ledger. Most of
-`gc formula cook --attach` is **not supported yet** there and refuses rather
-than serving.
+`gc formula cook --attach` **in city scope** is **not supported yet** there
+and refuses rather than serving.
 
 The reason is that a graft is graph class whatever the formula's version.
 Every bead an attach materializes carries `gc.root_bead_id`, which is what
@@ -805,11 +805,19 @@ classifies a bead as graph — so the sub-DAG belongs in the binding while the
 blocking dependency belongs beside the attach bead, and a split city cannot
 have both ends in one store.
 
-| Attach bead lives in | Formula | Outcome |
-|---|---|---|
-| the work ledger | v1 or v2 | **refused** — writing the sub-DAG beside the attach bead strands graph-class beads in the work store; writing it into the binding leaves an unresolvable `blocks` row that never clears |
-| the binding | v2 (graph.v2) | **refused** — a v2 invocation mints a work-class input convoy, which can live in neither store |
-| the binding | v1 | served — the sub-DAG and its blocking dependency are both written to the binding |
+| Scope | Attach bead lives in | Formula | Outcome |
+|---|---|---|---|
+| city | the city's work ledger | v1 or v2 | **refused** — writing the sub-DAG beside the attach bead strands graph-class beads in the work store; writing it into the binding leaves an unresolvable `blocks` row that never clears |
+| city | the binding | v2 (graph.v2) | **refused** — a v2 invocation mints a work-class input convoy, which can live in neither store |
+| city | the binding | v1 | served — the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store | v1 or v2 | served, unaffected — a rig scope is never relocated |
+
+A **rig scope** — `--rig`, the `GC_RIG` the controller sets on every rig
+agent, or a cwd inside a rig — is unaffected. `gc storage migrate` copies
+only the city work store, and the class routes hold one city-level store per
+class with no per-rig binding to route to, so a rig's ledger keeps both ends
+of the graft. Nothing it writes can be stranded, and the recovery verb below
+would not read that store anyway.
 
 Single-store cities — every city that authors no `[storage]` section — are
 unaffected: `--attach` behaves exactly as it always has, on both contracts.

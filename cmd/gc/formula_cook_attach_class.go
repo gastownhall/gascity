@@ -16,6 +16,11 @@ package main
 // stranded write the city's own containment check counts, `gc storage status`
 // exits 1 on, and every later command carries as a permanent alarm.
 //
+// "The work ledger" here means the CITY's. A relocation moves one city-level
+// store per class and leaves every rig store exactly where it was, so a
+// rig-scoped graft is co-resident in the rig's own ledger and is not a stranded
+// write at all — see the scope gate in attachGraftClassRefusal.
+//
 // The other placement is worse and is not re-shipped: #5150 moved the sub-DAG
 // to the binding and left the work store holding a `blocks` row naming an id it
 // could not resolve, which no backend rejects and every Ready implementation
@@ -40,22 +45,38 @@ import (
 // attachGraftClassRefusal returns the reason a graft onto attachBeadID cannot
 // be expressed on this city, or nil when it can.
 //
-// scope is the store the command resolved for its own formula scope — the work
-// ledger — and attachStore is the store classRoutedStoreForID found the attach
-// bead in. Three gates, in the order that keeps a single-store city untouched:
+// scopeRoot is the directory resolveFormulaScope selected, scope is the store
+// opened for it, and attachStore is the store classRoutedStoreForID found the
+// attach bead in. Four gates, in the order that keeps a single-store city
+// untouched:
 //
 //   - the city relocates nothing, so there is no second store and no class to
 //     be on the wrong side of. Returns before reading anything, which is what
 //     makes an unsplit `--attach` byte-identical to what it always did.
+//   - the scope is a RIG, whose store the relocation never touched.
+//     controlScopeTakesGraphClass is the dispatcher's own predicate for this and
+//     the reason is the same one stated there: `gc storage migrate` copies only
+//     the CITY work store (openInfraMigrationSource), resolveClassStore holds a
+//     single city-level store per class with no per-scope binding to route a rig
+//     to, and controlGraphStore hands a rig scope back the store it was given.
+//     A rig graft is therefore co-resident in the rig's own ledger and cannot be
+//     stranded — the city-level containment check never reads that store, and
+//     the remedy this refusal names, which reads the city work store, would
+//     repair nothing there. Asking the city question and applying it to a rig
+//     store refused a shape that has always worked, and GC_RIG is ambient on
+//     every controller-spawned agent, so the answer had to be scoped.
 //   - the binding holds the attach bead, so the graft lands in the binding with
 //     it: graph-class beads in the graph store, co-resident with the edge. That
 //     is the shape the v1 arm serves today and it stays served.
 //   - the work ledger does not hold it either, so this is a bad id rather than
 //     a bad topology. The arms' own "attach bead <id>: bead not found" is a
 //     better answer than a topology lecture, so it is left to them.
-func attachGraftClassRefusal(cityPath, attachBeadID string, scope, attachStore beads.Store) error {
+func attachGraftClassRefusal(cityPath, scopeRoot, attachBeadID string, scope, attachStore beads.Store) error {
 	class, relocated := graphClassBinding(cliStorageRoutes(cityPath))
 	if !relocated || class == nil || class == scope {
+		return nil
+	}
+	if !controlScopeTakesGraphClass(cityPath, scopeRoot) {
 		return nil
 	}
 	if attachStore != scope {

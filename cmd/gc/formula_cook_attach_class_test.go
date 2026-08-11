@@ -9,16 +9,23 @@ package main
 // in the work store — the stranded write a converged city's own containment
 // check counts and every later command refuses on (ga-99xhy, live-proven on a
 // throwaway split city as `stranded: 4` with `gc storage status` exiting 1).
+//
+// "The work ledger" is the CITY's. The relocation never moves a rig store, so a
+// rig-scoped graft is co-resident in the rig's own ledger and stays served —
+// TestFormulaCookAttachInRigScopeStaysServedOnASplitCity is that row.
 
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -183,6 +190,159 @@ func TestFormulaCookLegacyAttachOnAWorkResidentBeadIsRefusedOnSplitCity(t *testi
 	}
 	assertAttachRefusalNamesItsReason(t, out, source.ID)
 	assertRefusedGraftWroteNothing(t, work, graph, source.ID, before)
+}
+
+// rigScopedSplitCookCity is the fixture for the OTHER scope: the same split
+// city, plus a bound rig with its own file-backed ledger, entered the way every
+// controller-spawned agent enters one — the ambient GC_RIG the controller sets,
+// which resolveFormulaScope honors even when cwd is elsewhere.
+//
+// It returns the rig's store, the city work store and the binding, so a test
+// can tell all three apart. The rig gets its own control-dispatcher agent
+// because a graph.v2 cook in rig scope decorates its recipe against one; that
+// requirement predates this bead and is not what is under test.
+func rigScopedSplitCookCity(t *testing.T) (rig, cityWork, graph beads.Store) {
+	t.Helper()
+	cityDir := oneShotCookCity(t)
+	rigDir := filepath.Join(cityDir, "wf")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	cityTOML := filepath.Join(cityDir, "city.toml")
+	declared, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("read city.toml: %v", err)
+	}
+	declared = append(declared, []byte(testControlDispatcherAgentTOML("wf"))...)
+	declared = append(declared, []byte("\n[[rigs]]\nname = \"wf\"\n")...)
+	if err := os.WriteFile(cityTOML, declared, 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeCatalogFile(t, cityDir, ".gc/site.toml", fmt.Sprintf("[[rig]]\nname = \"wf\"\npath = %q\n", rigDir))
+
+	// Scoped file-store roots, so the rig has a ledger of its own rather than
+	// aliasing the city's — without the marker every scope shares one file and
+	// the fixture would prove nothing.
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, root := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(root); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", root, err)
+		}
+	}
+
+	graph = splittest.NewClassStore(t, config.BeadClassGraph)
+	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+
+	// GC_RIG with no --rig is the shape under test: the persistent flag is the
+	// higher-priority tier, so a value another test left on the package global
+	// would resolve a different scope and the ambient path would go unexercised.
+	prevRigFlag := rigFlag
+	t.Cleanup(func() { rigFlag = prevRigFlag })
+	rigFlag = ""
+	t.Setenv("GC_RIG", "wf")
+
+	if rig, err = openStoreAtForCity(rigDir, cityDir); err != nil {
+		t.Fatalf("open rig store: %v", err)
+	}
+	if cityWork, err = openStoreAtForCity(cityDir, cityDir); err != nil {
+		t.Fatalf("open city work store: %v", err)
+	}
+	if got := beadIDs(allBeads(t, cityWork)); len(got) != 0 {
+		t.Fatalf("the city work store already holds %v; the fixture's premise is that only the rig ledger does", got)
+	}
+	return rig, cityWork, graph
+}
+
+// TestFormulaCookAttachInRigScopeStaysServedOnASplitCity is the scope half of
+// the class gate, and the reason the gate asks controlScopeTakesGraphClass
+// before it asks anything else.
+//
+// A relocation is a CITY-scope event. `gc storage migrate` copies only the city
+// work store (openInfraMigrationSource -> openStoreAtForCity(cityPath,
+// cityPath)), resolveClassStore holds one city-level store per class with no
+// per-rig binding to route to, and controlGraphStore hands a rig scope back the
+// very store it was given — the three facts controlScopeTakesGraphClass's own
+// doc comment states. So a rig's ledger holds BOTH ends of a graft, the city's
+// containment check never reads it, and nothing a rig-scoped cook writes can be
+// stranded. Refusing it would also hand the operator an inoperative remedy:
+// `gc storage recover-stranded --from-work` reads the city work store.
+//
+// GC_RIG is ambient on every controller-spawned agent, so a gate that asked the
+// city question and applied it to the rig store took `--attach` away from
+// essentially every agent on a split city with rigs.
+//
+// Red-before, with the scope gate removed — both rows:
+//
+//	gc formula cook legacy-work --attach gc-1 was refused in RIG scope on a
+//	split city: exit
+//	gc formula cook: --attach gc-1: gc-1 is work class and lives in a WORK
+//	store rather than in the graph binding, and the sub-DAG a graft
+//	materializes is graph class whatever the formula's version ...
+//	a rig store is never relocated, so both ends of the graft are co-resident
+//	in it and nothing it writes can be stranded
+func TestFormulaCookAttachInRigScopeStaysServedOnASplitCity(t *testing.T) {
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		t.Run(formulaName, func(t *testing.T) {
+			rig, cityWork, graph := rigScopedSplitCookCity(t)
+
+			source, err := rig.Create(beads.Bead{Title: "attach target", Type: "task"})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+
+			out, err := cookFormulaErr(t, formulaName, "--attach", source.ID)
+			if err != nil {
+				t.Fatalf("gc formula cook %s --attach %s was refused in RIG scope on a split city: %v\n%s\na rig store is never relocated, so both ends of the graft are co-resident in it and nothing it writes can be stranded", formulaName, source.ID, err, out)
+			}
+			assertGraftIsCoResidentIn(t, rig, source.ID)
+			if got := beadIDs(allBeads(t, cityWork)); len(got) != 0 {
+				t.Errorf("the city work store holds %v after a rig-scoped graft; a rig scope writes to its own ledger", got)
+			}
+			if got := allBeads(t, graph); len(got) != 0 {
+				t.Errorf("the binding holds %d bead(s) after a rig-scoped graft: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// assertGraftIsCoResidentIn requires the graft to be a real graft in ONE store:
+// the attach bead gained a blocking dep, the store resolves its target, and the
+// store holds GRAPH-class beads the graft minted. The last part is what makes
+// this the same shape the city-scope gate refuses — a rig graft is served
+// because of WHERE it lands, not because its beads are somehow work class.
+//
+// Not every grafted bead is graph class: a graph.v2 invocation also mints a
+// synthetic input convoy, which coordclass classifies as WORK by design. In a
+// rig scope both classes land in the one ledger, which is exactly why nothing
+// here is cross-store.
+func assertGraftIsCoResidentIn(t *testing.T, store beads.Store, attachBeadID string) {
+	t.Helper()
+	deps, err := store.DepList(attachBeadID, "down")
+	if err != nil {
+		t.Fatalf("listing attach deps: %v", err)
+	}
+	if len(deps) == 0 {
+		t.Fatalf("attach bead %s has no blocking dep; the graft was never wired", attachBeadID)
+	}
+	for _, dep := range deps {
+		if _, err := store.Get(dep.DependsOnID); err != nil {
+			t.Errorf("the rig store holds dep %s -> %s (%s) whose target it cannot resolve: %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
+		}
+	}
+	graphClass := 0
+	for _, b := range allBeads(t, store) {
+		if b.ID == attachBeadID {
+			continue
+		}
+		if coordclass.Classify(b) == coordclass.ClassGraph {
+			graphClass++
+		}
+	}
+	if graphClass == 0 {
+		t.Fatalf("the rig store holds no %v-class bead from the graft (%v); the premise is that a rig graft mints the same class the city-scope gate refuses", coordclass.ClassGraph, beadIDs(allBeads(t, store)))
+	}
 }
 
 // assertAttachRefusalNamesItsReason requires the refusal to carry everything an

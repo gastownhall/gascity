@@ -648,11 +648,17 @@ version — every bead it materializes carries `gc.root_bead_id` — so the
 sub-DAG belongs in the binding while the blocking dependency belongs beside
 the attach bead, and one store cannot hold both:
 
-| Attach bead lives in | Formula | Outcome |
-|---|---|---|
-| the work ledger | v1 or v2 | refused: the sub-DAG would be stranded in the work ledger, or the work store would keep a `blocks` row naming an id it cannot resolve |
-| the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
-| the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
+| Scope | Attach bead lives in | Formula | Outcome |
+|---|---|---|---|
+| city | the city's work ledger | v1 or v2 | refused: the sub-DAG would be stranded in the work ledger, or the work store would keep a `blocks` row naming an id it cannot resolve |
+| city | the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
+| city | the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store | v1 or v2 | served, unaffected: relocation is a city-scope property, so a rig's ledger holds both ends of the graft |
+
+Relocation applies to the CITY scope only: the migration copies the city work
+store alone and the class routes hold one city-level store per class, so a
+rig scope — `--rig`, `GC_RIG`, or a cwd inside a rig — keeps serving
+`--attach` exactly as it always has, and nothing it writes is stranded.
 
 Both refusals are lifted by the same missing mechanism, a cross-class
 membership edge (`ga-2orlf`). Cities that author no `[storage]` section are

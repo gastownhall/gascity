@@ -630,24 +630,27 @@ source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
 
 On a city that serves the graph class from its own [storage] binding, most
-of --attach is NOT SUPPORTED YET and refuses rather than serving. A graft is
-graph class whatever the formula's version — every bead it creates carries
-gc.root_bead_id — so the sub-DAG belongs in the binding while the blocking
-dependency belongs beside the attach bead, and a split city cannot have
-both:
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
 
-  * attach bead in the WORK ledger — refused. Writing the sub-DAG beside it
-    strands graph-class beads in the work store, which gc storage status
-    reports and exits non-zero on; writing it into the binding leaves the
-    work store holding a blocks row naming an id it cannot resolve, which
-    never clears. Representing that block across the store boundary needs a
-    cross-class membership edge: ga-2orlf.
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
   * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
     normalizes its target into a synthetic input convoy, which is a work
     bead that can live in neither store; its membership edge to the target
     would be cross-class. Same remedy: ga-2orlf.
   * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
     blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
 
 Single-store cities are unaffected: --attach behaves exactly as it always
 has. If an earlier cook already stranded beads in a split city's work
@@ -686,9 +689,11 @@ store, copy them into the binding with
 			// The --attach arms do not use this: a graft follows its PARENT,
 			// not its class, so they route by the attach bead's id instead —
 			// see attachStore below. Following the parent is only sound when
-			// the parent's store may hold graph-class beads, which on a split
-			// city means the binding; attachGraftClassRefusal is the gate that
-			// keeps the two rules from contradicting each other.
+			// the parent's store may hold graph-class beads, which in a split
+			// city's CITY scope means the binding; attachGraftClassRefusal is
+			// the gate that keeps the two rules from contradicting each other,
+			// and it asks the scope question first because a rig store holds
+			// its own graph-class beads and the relocation never moves it.
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
@@ -728,7 +733,10 @@ store, copy them into the binding with
 				// ledger, which is a stranded write. Neither placement is
 				// expressible on a split city, so the graft is refused before
 				// either arm runs — see formula_cook_attach_class.go, ga-99xhy.
-				if err := attachGraftClassRefusal(cityPath, attach, store, attachStore); err != nil {
+				// The scope root travels with the store because relocation is a
+				// CITY-scope property: a rig store is never relocated, so a
+				// rig-scoped graft is co-resident and stays served.
+				if err := attachGraftClassRefusal(cityPath, scope.storeRoot, attach, store, attachStore); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 				if isGraphFormula {
