@@ -75,13 +75,17 @@ func (in snapshotInputs) quiescent(st storeState) bool {
 // It captures every field the seam writes; the field-coverage census
 // (TestMergeOracleFieldCoverage) proves this list stays exhaustive.
 type mergeEndState struct {
-	beads          map[string]Bead
-	deps           map[string][]Dep
-	depsComplete   bool
-	dirty          map[string]struct{}
-	beadSeq        map[string]uint64
-	localBeadAt    map[string]time.Time
-	deletedSeq     map[string]uint64
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	deletedSeq   map[string]uint64
+	// readyLost is the set of rows whose is_blocked verdict the merge dropped
+	// without preserving, so readiness declines for them unless their own edges
+	// can reproduce it (ga-cfhgr).
+	readyLost      map[string]struct{}
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -269,6 +273,11 @@ func ensureMaps(c *CachingStore) {
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
+	// The generated states never seed ready-projection marks, so every mark in
+	// a captured end state was produced by the merge under test — which is what
+	// lets buildExpectedNewEnd derive the expected set from the end beads map
+	// alone.
+	c.readyProjectionLost = make(map[string]struct{})
 }
 
 func captureEndState(c *CachingStore) mergeEndState {
@@ -284,6 +293,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
+		readyLost:            cloneDirty(c.readyProjectionLost),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,

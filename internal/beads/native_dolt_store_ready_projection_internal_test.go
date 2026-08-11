@@ -156,70 +156,142 @@ func nativeReadyDisagreementFixture(t *testing.T) (*CachingStore, *NativeDoltSto
 // pins: it does not propagate down parent-child, and it ignores an edge whose
 // target is not resident in the same scope. Either gap offers the control
 // dispatcher a step whose gate has not opened — regression #3218.
+// The subtests re-assert the invariant in the states a long-lived cache
+// actually spends its life in, not just the freshly primed one (ga-cfhgr).
+// beadFromNativeIssue cannot set IsBlocked — beadslib's types.Issue carries no
+// is_blocked field — so every routine refresh through backing.Get hands the
+// cache a row with no verdict. Before ga-cfhgr each of these overwrote the
+// column and left the weaker predicate answering, with no degrade latched,
+// which is why this defect was already live on the Dolt-backed cities rather
+// than introduced by the BdStore work.
 func TestCachedReadyOverNativeBackingNeverOffersWorkTheBackingHides(t *testing.T) {
-	cache, native, _, ids := nativeReadyDisagreementFixture(t)
+	hidden := func(ids map[string]string) map[string]string {
+		return map[string]string{
+			ids["child"]:  "blocked-ness propagates down parent-child and the cache's direct-dep predicate cannot see it",
+			ids["xstore"]: "its blocker gcg-offscope is not resident in this scope's cache, and cachedBeadReady treats a dep as blocking only when statusByID holds the target",
+		}
+	}
 
+	t.Run("after prime", func(t *testing.T) {
+		cache, native, _, ids := nativeReadyDisagreementFixture(t)
+		stage := newReadyInvariantStage(t, cache, nativeLiveReady(t, native, ids["blocker"], ids["unrelated"]))
+
+		stage.assertNeverExceedsBacking("after prime", hidden(ids))
+		stage.assertStillAnswers("after prime")
+	})
+
+	// A write-through refresh (CachingStore.Update -> backing.Get) reinstalls
+	// the row from a payload that cannot carry is_blocked.
+	t.Run("after update", func(t *testing.T) {
+		cache, native, _, ids := nativeReadyDisagreementFixture(t)
+		stage := newReadyInvariantStage(t, cache, nativeLiveReady(t, native, ids["blocker"], ids["unrelated"]))
+
+		for _, name := range []string{"child", "xstore"} {
+			assignee := "agent"
+			if err := cache.Update(ids[name], UpdateOpts{Assignee: &assignee}); err != nil {
+				t.Fatalf("Update(%s): %v", name, err)
+			}
+			stage.assertNeverExceedsBacking("after Update("+name+")", hidden(ids))
+		}
+		stage.assertStillAnswers("after Update")
+	})
+
+	// The dirty-row overlay refreshes through the same projection-less Get
+	// before serving a cached read.
+	t.Run("after dirty overlay ready", func(t *testing.T) {
+		cache, native, _, ids := nativeReadyDisagreementFixture(t)
+		stage := newReadyInvariantStage(t, cache, nativeLiveReady(t, native, ids["blocker"], ids["unrelated"]))
+
+		markDirtyForTest(cache, ids["child"])
+		if _, err := cache.Ready(); err != nil {
+			t.Fatalf("Ready over dirty overlay: %v", err)
+		}
+		stage.assertNeverExceedsBacking("after dirty-overlay Ready", hidden(ids))
+		stage.assertStillAnswers("after dirty-overlay Ready")
+	})
+
+	// A close invalidates its dependents' projection so the direct-dep
+	// predicate recomputes — correct for a direct blocks edge, blind to the
+	// parent-child propagation the column carries.
+	t.Run("after close", func(t *testing.T) {
+		cache, native, ids := nativeReadyCloseInvalidationFixture(t)
+
+		newReadyInvariantStage(t, cache, nativeLiveReady(t, native, ids["gate"], ids["x"])).
+			assertStillAnswers("before close")
+
+		if err := cache.Close(ids["x"]); err != nil {
+			t.Fatalf("Close(x): %v", err)
+		}
+		stage := newReadyInvariantStage(t, cache, nativeLiveReady(t, native, ids["gate"]))
+		stage.assertNeverExceedsBacking("after Close(x)", map[string]string{
+			ids["both"]: "its parent is still blocked by the open gate, and blocked-ness propagates down the parent-child edge",
+		})
+		// The cost, stated: the row carries a parent-child edge, so its verdict
+		// is one only the column can give and the cache declines rather than
+		// guesses. And it is a WINDOW, not a latch — the next reconcile refills
+		// the column and the cache serves readiness again.
+		stage.assertDeclines("after Close(x)", ids["both"])
+		cache.runReconciliation()
+		stage.assertStillAnswers("after Close(x) + reconcile")
+	})
+}
+
+// nativeLiveReady reads the backing's own verdict and pins the fixture to it.
+func nativeLiveReady(t *testing.T, native *NativeDoltStore, want ...string) []string {
+	t.Helper()
 	live, err := native.Ready()
 	if err != nil {
 		t.Fatalf("native Ready: %v", err)
 	}
-	want := sortedIDs(live)
-	if got := wantReadyIDs(ids["blocker"], ids["unrelated"]); !equalIDs(want, got) {
-		t.Fatalf("native Ready = %v, want %v: the fixture must model bd's is_blocked filter", want, got)
+	got := sortedIDs(live)
+	if !equalIDs(got, wantReadyIDs(want...)) {
+		t.Fatalf("native Ready = %v, want %v: the fixture must model bd's is_blocked filter", got, wantReadyIDs(want...))
 	}
+	return got
+}
 
-	readers := []struct {
-		name string
-		read func() ([]Bead, error)
-	}{
-		{"Ready", func() ([]Bead, error) { return cache.Ready() }},
-		{"ReadyContext", func() ([]Bead, error) { return cache.ReadyContext(context.Background()) }},
-		{"CachedReady", func() ([]Bead, error) {
-			rows, ok := cache.CachedReady()
-			if !ok {
-				return nil, ErrCacheUnavailable
-			}
-			return rows, nil
-		}},
-		{"Handles().Cached.Ready", func() ([]Bead, error) { return cache.Handles().Cached.Ready() }},
-	}
-	for _, reader := range readers {
-		rows, err := reader.read()
+// nativeReadyCloseInvalidationFixture is the close-path shape on the native
+// store:
+//
+//	gate (open) <-- blocks -- parent <-- parent-child -- both
+//	x (open)    <-- blocks -- both
+//
+// Closing x satisfies both's only DIRECT blocking edge, so the cache's
+// dependency-derived predicate calls it ready the moment
+// clearDependentReadyProjectionsLocked drops its is_blocked. The backing does
+// not: both's parent is still blocked by the open gate, and blocked-ness
+// propagates down parent-child. Every other row's verdict is unchanged by the
+// close, so the fixture's stored column stays honest across the mutation.
+func nativeReadyCloseInvalidationFixture(t *testing.T) (*CachingStore, *NativeDoltStore, map[string]string) {
+	t.Helper()
+	storage := &nativeBlockedColumnStorage{nativeDoltMemStorage: newNativeDoltMemStorage(), blocked: map[string]bool{}}
+	native := newNativeDoltStoreForTest(storage)
+
+	ids := map[string]string{}
+	for _, title := range []string{"gate", "x", "parent", "both"} {
+		b, err := native.Create(Bead{Type: "task", Status: "open", Title: title})
 		if err != nil {
-			// Declining is a correct answer: the caller then takes the live
-			// backing verdict. Answering with MORE than the backing is not.
-			if errors.Is(err, ErrCacheUnavailable) {
-				continue
-			}
-			t.Fatalf("%s: %v", reader.name, err)
+			t.Fatalf("Create %s: %v", title, err)
 		}
-		got := sortedIDs(rows)
-		if containsID(got, ids["child"]) {
-			t.Errorf("%s offered %s, a child of a blocked parent that the backing's own Ready hides: "+
-				"blocked-ness propagates down parent-child and the cache's direct-dep predicate cannot see it (backing = %v, cache = %v)",
-				reader.name, ids["child"], want, got)
-		}
-		if containsID(got, ids["xstore"]) {
-			t.Errorf("%s offered %s, whose blocker gcg-offscope is not resident in this scope's cache: "+
-				"cachedBeadReady treats a dep as blocking only when statusByID holds the target (backing = %v, cache = %v)",
-				reader.name, ids["xstore"], want, got)
-		}
-		if extra := idsBeyond(got, want); len(extra) > 0 {
-			t.Errorf("%s returned %v beyond the backing's own Ready (backing = %v)", reader.name, extra, want)
-		}
+		ids[title] = b.ID
 	}
+	if err := storage.store.DepAdd(ids["parent"], ids["gate"], "blocks"); err != nil {
+		t.Fatalf("DepAdd parent blocks gate: %v", err)
+	}
+	if err := storage.store.DepAdd(ids["both"], ids["x"], "blocks"); err != nil {
+		t.Fatalf("DepAdd both blocks x: %v", err)
+	}
+	if err := storage.store.DepAdd(ids["both"], ids["parent"], "parent-child"); err != nil {
+		t.Fatalf("DepAdd both parent-child parent: %v", err)
+	}
+	storage.blocked[ids["parent"]] = true
+	storage.blocked[ids["both"]] = true
 
-	// Declining is the fail-safe, not the fix. The point of filling the column
-	// is that the cache keeps ANSWERING readiness — and answers it exactly the
-	// way the backing does. A store that only ever declined would satisfy the
-	// subset checks above while costing every rig a live read per tick.
-	cached, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady declined: a native backing that can answer is_blocked must keep serving readiness from cache")
+	cache := NewCachingStoreForTest(native, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
 	}
-	if got := sortedIDs(cached); !equalIDs(got, want) {
-		t.Fatalf("CachedReady = %v, want %v (the backing's own verdict)", got, want)
-	}
+	return cache, native, ids
 }
 
 // TestNativeReadyProjectionIsOneBatchedReadPerCycle pins the cost of filling the

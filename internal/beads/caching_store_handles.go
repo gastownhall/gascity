@@ -268,6 +268,10 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
 		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("reading complete ready projection for %s from cache: %w", b.ID, ErrCacheUnavailable)
+		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
 	depsByID := make(map[string][]Dep, len(openBeads))
@@ -301,6 +305,9 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {
 			continue
+		}
+		if c.readyProjectionUnknownLocked(b.ID) {
+			return nil, fmt.Errorf("reading ready beads for %s from cache: %w", b.ID, ErrCacheUnavailable)
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}

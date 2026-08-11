@@ -552,9 +552,15 @@ func (c *CachingStore) mergeSnapshotLocked(
 			})
 		}
 		c.absorbFreshLocked(id, freshBead, now, absorbOpts{
-			depsMode:   depsExplicit,
-			deps:       freshDeps,
-			seqMode:    seqClearGuarded,
+			depsMode: depsExplicit,
+			deps:     freshDeps,
+			seqMode:  seqClearGuarded,
+			// preserveCachedReadyProjectionLocked above already decided, per
+			// row, which cached verdicts survive this cycle — on the blocking
+			// targets' fresh statuses, which no single-row absorb can see. Its
+			// refusals are the rows whose verdict really may have changed, so
+			// they must land as unanswerable rather than be re-preserved here.
+			readyMode:  readyFromFresh,
 			clearDirty: true,
 		})
 	}
