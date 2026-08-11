@@ -789,17 +789,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			if len(node.MetadataRefs) == 0 {
 				continue
 			}
-			mergedMeta, err := metadataMapFromNative(issues[i].Metadata)
-			if err != nil {
-				return fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
-			}
-			if mergedMeta == nil {
-				mergedMeta = make(map[string]string, len(node.MetadataRefs))
-			}
+			refs := make(map[string]string, len(node.MetadataRefs))
 			for metaKey, refKey := range node.MetadataRefs {
-				mergedMeta[metaKey] = keyToID[refKey]
+				refs[metaKey] = keyToID[refKey]
 			}
-			raw, err := metadataRawFromMap(mergedMeta)
+			raw, err := metadataRawWithOverrides(issues[i].Metadata, refs)
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
 			}
@@ -1003,19 +997,9 @@ func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
 	}
 	return nativeStoreError(id, tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
@@ -1412,19 +1396,9 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
 	}
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
@@ -1659,19 +1633,9 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
-		metadata, err := metadataMapFromNative(issue.Metadata)
+		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-		}
-		if metadata == nil {
-			metadata = make(map[string]string, len(opts.Metadata))
-		}
-		for k, v := range opts.Metadata {
-			metadata[k] = v
-		}
-		raw, err := metadataRawFromMap(metadata)
-		if err != nil {
-			return nil, err
 		}
 		updates["metadata"] = raw
 	}
@@ -2151,6 +2115,44 @@ func metadataRawFromMap(metadata map[string]string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshaling metadata: %w", err)
 	}
 	return raw, nil
+}
+
+// metadataRawWithOverrides merges overrides into a bead's stored metadata
+// document, leaving every value the caller did not name byte-identical.
+//
+// Metadata is a single JSON column, so setting one key means rewriting the
+// whole document. Decoding it into map[string]string first (as
+// metadataMapFromNative does, correctly, for callers that want Go strings)
+// renders each non-string value as JSON text, and writing that back persists
+// the rendering: a bead holding {"n": 42} became {"n": "42"} once any
+// unrelated key was set. Decoding into json.RawMessage keeps untouched values
+// exactly as stored. Named keys are written as JSON strings, matching the
+// map[string]string that the store's write API accepts.
+func metadataRawWithOverrides(raw json.RawMessage, overrides map[string]string) (json.RawMessage, error) {
+	values := make(map[string]json.RawMessage)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return nil, fmt.Errorf("unmarshaling metadata: %w", err)
+		}
+		if values == nil {
+			values = make(map[string]json.RawMessage, len(overrides))
+		}
+	}
+	for key, value := range overrides {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata value %q: %w", key, err)
+		}
+		values[key] = encoded
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling metadata: %w", err)
+	}
+	return encoded, nil
 }
 
 func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {

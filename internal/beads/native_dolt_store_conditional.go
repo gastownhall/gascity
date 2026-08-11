@@ -54,6 +54,10 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 		if issue == nil {
 			return fmt.Errorf("compare-and-set metadata on %q: %w", id, ErrNotFound)
 		}
+		// The compare reads through metadataMapFromNative so a stored
+		// non-string value keeps comparing against its JSON text, exactly as
+		// before. The write goes through metadataRawWithOverrides so keys
+		// other than the one being swapped keep their stored representation.
 		metadata, err := metadataMapFromNative(issue.Metadata)
 		if err != nil {
 			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
@@ -63,13 +67,9 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 			// and leaves swapped false, which the caller reads as (false, nil).
 			return nil
 		}
-		if metadata == nil {
-			metadata = make(map[string]string, 1)
-		}
-		metadata[key] = next
-		raw, err := metadataRawFromMap(metadata)
+		raw, err := metadataRawWithOverrides(issue.Metadata, map[string]string{key: next})
 		if err != nil {
-			return err
+			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 		}
 		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
 			return nativeStoreError(id, err)
