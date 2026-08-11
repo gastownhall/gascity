@@ -10,7 +10,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/git"
 )
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
@@ -347,8 +346,8 @@ func TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock(t *testing.T) {
 	// Sanity: prove the aliasing precondition. The stash created at
 	// rigRoot must be visible from workerDir too, or this test proves
 	// nothing about the bug.
-	if has, err := git.New(workerDir).HasStashesResult(); err != nil || !has {
-		t.Fatalf("test setup invalid: rig-root stash not visible from workerDir (has=%v err=%v) — aliasing precondition not met", has, err)
+	if out := runGit(t, workerDir, "stash", "list"); strings.TrimSpace(out) == "" {
+		t.Fatalf("test setup invalid: rig-root stash not visible from workerDir — aliasing precondition not met")
 	}
 
 	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
