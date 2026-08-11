@@ -57,7 +57,7 @@ func unreadScope(t *testing.T) string {
 // holding — statusListStoreWithTimeout races the read against a 1s per-store
 // deadline and reports "list timed out" if it loses. A probe subprocess inside
 // List is charged to that budget. Measured before this was removed, with the
-// deadline shortened to 250ms and bd answering the probe argv in 400ms:
+// deadline shortened to 250ms and bd answering the probe argv slower than it:
 //
 //	statusListStoreWithTimeout(ctx, state, store, ListQuery{AllowScan:true})
 //	  => rows=0 err="list timed out: context deadline exceeded"   (250ms)
@@ -77,15 +77,21 @@ func TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice(t *testing.T)
 	statusStoreReadTimeout = 250 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = old })
 
-	// bd answers every read empty and immediately; anything ELSE the store
-	// decides to ask takes longer than the caller's whole budget, which is what
-	// a real bd probe against a loaded Dolt server does.
+	// The caller's context outlives its own read budget: statusListStoreWithTimeout
+	// derives a 250ms child from it, so canceling the parent happens only after the
+	// read has already given up. bd answers every read empty and immediately, and
+	// anything ELSE the store decides to ask returns only when that parent ends —
+	// so an unrequested command cannot complete inside the caller's budget, by
+	// construction rather than by racing a wall-clock constant.
+	caller, endCaller := context.WithCancel(context.Background())
+	defer endCaller()
+
 	read := "bd list --json --include-infra --include-gates --limit 0"
 	var extra atomic.Int64
 	var runner beads.CommandRunner = func(_, name string, args ...string) ([]byte, error) {
 		if name+" "+strings.Join(args, " ") != read {
 			extra.Add(1)
-			time.Sleep(400 * time.Millisecond)
+			<-caller.Done()
 		}
 		return []byte(`[]`), nil
 	}
@@ -104,7 +110,7 @@ func TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice(t *testing.T)
 			state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) { return store, nil }
 
 			start := time.Now()
-			rows, err := statusListStoreWithTimeout(context.Background(), state, store, beads.ListQuery{AllowScan: true})
+			rows, err := statusListStoreWithTimeout(caller, state, store, beads.ListQuery{AllowScan: true})
 			elapsed := time.Since(start)
 
 			if err != nil {
