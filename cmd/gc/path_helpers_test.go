@@ -19,6 +19,24 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+// doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
+// bound how long runWith tolerates a candidate leak surviving past
+// runTests() returning. A dolt sql-server that a test has already signaled
+// to stop still needs a bounded, non-zero amount of wall-clock time to
+// actually leave the process table (flush, close listeners, OS reap); under
+// host contention that ordinary shutdown tail can still be in flight the
+// instant the first final scan fires, which misclassifies a process
+// finishing an already-in-progress clean shutdown as a permanent leak
+// (ga-szv0ge). The guard's real invariant is "no test leaves a dolt server
+// running forever," not "no test leaves a dolt server running for one more
+// scheduler tick after Run() returns" — mirrors the hang-budget framing in
+// ga-f5clwo. Sized well below normal package test timeouts so a genuine
+// leak (one that never clears, e.g. ga-vltdpl) still fails within seconds.
+const (
+	doltLeakGuardGraceInitialInterval = 250 * time.Millisecond
+	doltLeakGuardGraceMaxElapsedTime  = 5 * time.Second
+)
+
 func canonicalTestPath(path string) string {
 	return testutil.CanonicalPath(path)
 }
@@ -178,7 +196,7 @@ func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses, doltLeakGuardGraceInitialInterval, doltLeakGuardGraceMaxElapsedTime)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -188,6 +206,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
+	_, _ time.Duration,
 ) int {
 	_ = sweepStale("startup")
 	sweepOrphanDirs()

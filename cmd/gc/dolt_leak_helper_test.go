@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // testReporter is the subset of *testing.T methods that
@@ -589,6 +590,8 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		func() {},
 		func() { registeredReaped = true },
 		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		5*time.Millisecond,
 	)
 
 	if code != 1 {
@@ -623,6 +626,8 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 		func() { order = append(order, "sweepOrphanDirs") },
 		func() {},
 		func([]DoltProcInfo) {},
+		time.Millisecond,
+		5*time.Millisecond,
 	)
 
 	if code != 0 {
@@ -630,6 +635,57 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 	}
 	if len(order) < 3 || order[0] != "sweepStale" || order[1] != "sweepOrphanDirs" || order[2] != "runTests" {
 		t.Fatalf("call order = %v, want [sweepStale sweepOrphanDirs runTests ...]", order)
+	}
+}
+
+// A dolt sql-server that a test already told to stop can still be mid
+// graceful-shutdown the instant runTests() returns; ga-szv0ge found this
+// misclassified as a permanent leak under host contention. This simulates
+// the process clearing partway through the grace window: the final scan
+// reports it present on the first two polls and gone from the third poll
+// onward, well within the injected grace window, so the guard must not
+// fail the run or reap anything for it.
+func TestDoltLeakGuardedTestingMToleratesLeakClearingWithinGraceWindow(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct-current")
+	clearing := DoltProcInfo{
+		PID: 2001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(tempRoot, "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	var scan int
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil // initial scan: nothing running yet
+		}
+		if scan <= 3 {
+			return []DoltProcInfo{clearing}, nil // first two final-scan polls: still mid shutdown
+		}
+		return nil, nil // cleared by the next poll, well within the grace window
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var reapedLeaks []DoltProcInfo
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() {},
+		func() {},
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		200*time.Millisecond,
+	)
+
+	if code != 0 {
+		t.Fatalf("guard returned code %d, want 0: a leak that clears within the grace window must not fail the run", code)
+	}
+	if len(reapedLeaks) != 0 {
+		t.Fatalf("reaped leaks = %#v, want none: the process cleared on its own within the grace window", reapedLeaks)
 	}
 }
 
