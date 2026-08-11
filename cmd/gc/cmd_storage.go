@@ -119,6 +119,22 @@ func storageRecoveryInstruction() string {
 	return storageRecoveryCommand + " --" + storageFleetStoppedFlag
 }
 
+// storageStatusInstruction renders the read-only report the way an operator
+// types it. The read verb has no operator-command spelling of its own — it
+// takes no source flag — so its namespace is derived from the one the migrate
+// spelling names, for the reason the file header gives: a message pointing at a
+// command this binary does not carry is an instruction that fails at the shell.
+// An unparseable spelling is already reported by newUnbuildableStorageCmd, so
+// here it degrades to the default namespace rather than swallowing the message
+// that carries it.
+func storageStatusInstruction() string {
+	surface, err := parseOperatorCommandSpelling(storageMigrationCommand)
+	if err != nil {
+		return "gc storage " + storageStatusVerb
+	}
+	return "gc " + surface.Namespace + " " + storageStatusVerb
+}
+
 // newStorageCmd constructs the `gc storage` tree named by the operator
 // spellings.
 func newStorageCmd(stdout, stderr io.Writer) *cobra.Command {

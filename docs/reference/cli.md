@@ -1651,14 +1651,30 @@ per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
 
-On a city that serves a coordination class from its own [storage] binding,
---attach follows the ATTACH BEAD: the sub-DAG and the blocking dependency
-are written to the store that holds it, so the two ends of the edge stay in
-one store. A v2 (graph.v2) formula is the exception and is refused for an
-attach bead the binding owns: it normalizes its target into a synthetic
-input convoy, which is a work bead that can live neither in the binding nor
-in the work ledger, whose membership edge to the target would be
-cross-class. Attach a v1 formula to that bead instead.
+On a city that serves the graph class from its own [storage] binding, most
+of --attach is NOT SUPPORTED YET and refuses rather than serving. A graft is
+graph class whatever the formula's version — every bead it creates carries
+gc.root_bead_id — so the sub-DAG belongs in the binding while the blocking
+dependency belongs beside the attach bead, and a split city cannot have
+both:
+
+  * attach bead in the WORK ledger — refused. Writing the sub-DAG beside it
+    strands graph-class beads in the work store, which gc storage status
+    reports and exits non-zero on; writing it into the binding leaves the
+    work store holding a blocks row naming an id it cannot resolve, which
+    never clears. Representing that block across the store boundary needs a
+    cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+gc storage recover-stranded --from-work --fleet-stopped.
 
 ```
 gc formula cook <formula-name> [flags]

@@ -497,6 +497,12 @@ func closeEveryBeadExcept(t *testing.T, store beads.Store, keep string) {
 // leaves Ready permanently. Neither production backend rejects that write
 // (internal/beads/splittest/strict_store.go's backend table), so the only thing
 // that can catch it is this test.
+//
+// It is asserted on the one graft a split city still serves: a v1 formula onto
+// a bead the BINDING owns. The work-resident residence it used to use refuses
+// now, because the sub-DAG it would mint beside the attach bead is graph class
+// and therefore a stranded write (ga-99xhy,
+// TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity).
 func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
 	graph := splittest.NewClassStore(t, config.BeadClassGraph)
@@ -506,14 +512,14 @@ func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T
 	if err != nil {
 		t.Fatalf("open work store: %v", err)
 	}
-	source, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
+	source, err := graph.Create(beads.Bead{Title: "a running workflow step", Type: "task"})
 	if err != nil {
-		t.Fatalf("create attach bead: %v", err)
+		t.Fatalf("create the class-resident attach bead: %v", err)
 	}
 
-	res := cookFormula(t, "graph-work", "--attach", source.ID)
+	res := cookFormula(t, "legacy-work", "--attach", source.ID)
 
-	deps, err := work.DepList(source.ID, "down")
+	deps, err := graph.DepList(source.ID, "down")
 	if err != nil {
 		t.Fatalf("listing attach deps: %v", err)
 	}
@@ -521,17 +527,17 @@ func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T
 		t.Fatalf("attach bead %s has no blocking dep after cook; the graft was never wired", source.ID)
 	}
 	for _, dep := range deps {
-		if _, err := work.Get(dep.DependsOnID); err != nil {
-			t.Errorf("work store holds dep %s -> %s (%s) whose target it cannot resolve: %v — a dangling cross-store blocking edge no backend rejects and no finalize path removes", dep.IssueID, dep.DependsOnID, dep.Type, err)
+		if _, err := graph.Get(dep.DependsOnID); err != nil {
+			t.Errorf("the binding holds dep %s -> %s (%s) whose target it cannot resolve: %v — a dangling cross-store blocking edge no backend rejects and no finalize path removes", dep.IssueID, dep.DependsOnID, dep.Type, err)
 		}
 	}
 
 	closeEveryBeadExcept(t, graph, source.ID)
 	closeEveryBeadExcept(t, work, source.ID)
 
-	ready, err := work.Ready()
+	ready, err := graph.Ready()
 	if err != nil {
-		t.Fatalf("work Ready(): %v", err)
+		t.Fatalf("binding Ready(): %v", err)
 	}
 	if !slices.Contains(beadIDs(ready), source.ID) {
 		t.Fatalf("attach bead %s is not Ready after the whole workflow closed (ready=%v, root=%s); the --attach contract says the graft unblocks it, so it is wedged out of Ready forever", source.ID, beadIDs(ready), res.RootID)
@@ -609,36 +615,78 @@ func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	}
 }
 
-// TestFormulaCookAttachIsIdempotentOnSplitCity drives the `existing != nil`
-// early return, the one attach path that returns without instantiating. A
-// convoy target gives the invocation a stable input-convoy id and therefore a
-// stable graph root key, so a repeat cook must adopt the live workflow instead
-// of minting a second one — and must not add a second blocking edge. The lookup
-// that decides this reads the store, so it is a residence assertion: point it at
-// a ledger the root is not in and every re-cook duplicates the workflow.
-func TestFormulaCookAttachIsIdempotentOnSplitCity(t *testing.T) {
-	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
-	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+// TestFormulaCookAttachIsIdempotent drives the `existing != nil` early return,
+// the one attach path that returns without instantiating. A convoy target gives
+// the invocation a stable input-convoy id and therefore a stable graph root key,
+// so a repeat cook must adopt the live workflow instead of minting a second one
+// — and must not add a second blocking edge.
+//
+// Two rows, because a split city answers this differently now. The graph.v2
+// --attach arm is refused on BOTH residences there (the binding's, for the
+// convoy that has nowhere to live — #5163; the work ledger's, for the sub-DAG
+// that would be a stranded write — ga-99xhy), so the property a split city has
+// to hold is that a repeated refusal accumulates nothing. The idempotent adopt
+// itself is asserted where it still runs.
+func TestFormulaCookAttachIsIdempotent(t *testing.T) {
+	t.Run("single-store adopts the live workflow", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		seedCLIStorageRoutes(t, cityDir, nil)
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		source, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
 
-	work, err := openStoreAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("open work store: %v", err)
-	}
-	source, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
-	if err != nil {
-		t.Fatalf("create attach bead: %v", err)
-	}
+		first := cookFormula(t, "graph-work", "--attach", source.ID)
+		second := cookFormula(t, "graph-work", "--attach", source.ID)
 
-	first := cookFormula(t, "graph-work", "--attach", source.ID)
-	second := cookFormula(t, "graph-work", "--attach", source.ID)
+		if first.RootID != second.RootID {
+			t.Fatalf("re-cook minted a second workflow root (%s then %s); the idempotent lookup read a store that does not hold the root", first.RootID, second.RootID)
+		}
+		if got := blockingDepCount(t, work, source.ID); got != 1 {
+			t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1", source.ID, got)
+		}
+	})
 
-	if first.RootID != second.RootID {
-		t.Fatalf("re-cook minted a second workflow root (%s then %s); the idempotent lookup read a store that does not hold the root", first.RootID, second.RootID)
-	}
-	deps, err := work.DepList(source.ID, "down")
+	t.Run("split refuses repeatedly and accumulates nothing", func(t *testing.T) {
+		cityDir := oneShotCookCity(t)
+		graph := splittest.NewClassStore(t, config.BeadClassGraph)
+		seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+		work, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("open work store: %v", err)
+		}
+		source, err := work.Create(beads.Bead{Title: "attach target", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+
+		for attempt := 1; attempt <= 2; attempt++ {
+			if out, err := cookFormulaErr(t, "graph-work", "--attach", source.ID); err == nil {
+				t.Fatalf("attempt %d served a graft onto a work-resident bead on a split city: %s", attempt, out)
+			}
+		}
+		if got := beadIDs(allBeads(t, work)); len(got) != 1 || got[0] != source.ID {
+			t.Errorf("the work ledger holds %v after two refused grafts, want only %s", got, source.ID)
+		}
+		if got := allBeads(t, graph); len(got) != 0 {
+			t.Errorf("the binding holds %d bead(s) after two refused grafts: %+v", len(got), got)
+		}
+		if got := blockingDepCount(t, work, source.ID); got != 0 {
+			t.Errorf("attach bead %s carries %d blocking deps after two refused grafts, want 0", source.ID, got)
+		}
+	})
+}
+
+// blockingDepCount returns how many `blocks` edges hang off a bead.
+func blockingDepCount(t *testing.T, store beads.Store, beadID string) int {
+	t.Helper()
+	deps, err := store.DepList(beadID, "down")
 	if err != nil {
-		t.Fatalf("listing attach deps: %v", err)
+		t.Fatalf("listing deps of %s: %v", beadID, err)
 	}
 	blocking := 0
 	for _, dep := range deps {
@@ -646,9 +694,7 @@ func TestFormulaCookAttachIsIdempotentOnSplitCity(t *testing.T) {
 			blocking++
 		}
 	}
-	if blocking != 1 {
-		t.Errorf("attach bead %s carries %d blocking deps after two cooks, want 1: %+v", source.ID, blocking, deps)
-	}
+	return blocking
 }
 
 // TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity is the mirror of
@@ -718,20 +764,22 @@ func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 // move.
 //
 // So the command is asserted too, on the FACT rather than on the arguments:
-// TestFormulaCookAttachEmitsTheWorkAssociationOnASplitCity drives the real
-// cobra `gc formula cook --attach` on a split city and requires an
-// execution.work_associated naming the attach bead. It fails when the convoy
-// leg names a store that does not hold the convoy, which the residence
-// assertions around it cannot see — DepList on a convoy a store never held
-// answers EMPTY, not an error.
+// TestFormulaCookAttachEmitsTheWorkAssociation drives the real cobra
+// `gc formula cook --attach` and requires an execution.work_associated naming
+// the attach bead. It fails when the convoy leg names a store that does not
+// hold the convoy, which the residence assertions around it cannot see —
+// DepList on a convoy a store never held answers EMPTY, not an error.
 //
-// What keeps the two legs equal in production is a REFUSAL, not an accident:
-// the one shape that would split them, a graph.v2 graft onto a bead the class
-// binding owns, cannot mint its work-class input convoy in either ledger and is
-// refused by name (ga-2orlf,
-// TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused). If that refusal
-// is ever lifted, the two legs diverge again and BOTH tests are the ones that
-// have to answer for it.
+// What keeps the two legs equal in production is a pair of REFUSALS, not an
+// accident. The only cook that mints an input convoy is a graph.v2 --attach,
+// and on a split city both of its residences refuse: a binding-owned attach
+// bead, whose work-class convoy can live in neither ledger (ga-2orlf,
+// TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused), and a
+// work-resident one, whose graph-class sub-DAG would be a stranded write
+// (ga-99xhy, TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity). So
+// this unit test is the ONLY place the two legs can be handed different stores
+// today. If either refusal is lifted, the command-level test moves back onto
+// the split fixture and both are the ones that have to answer for it.
 func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T) {
 	cityPath := t.TempDir()
 	graph := splittest.NewClassStore(t, config.BeadClassGraph)
