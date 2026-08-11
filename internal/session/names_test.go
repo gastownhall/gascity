@@ -1319,3 +1319,73 @@ func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesConfiguredName(t *tes
 		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(retired pool slot holding configured name) = %v, want nil", err)
 	}
 }
+
+// TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes guards the
+// no-regression requirement of the retired-pool-slot release: it fires only
+// when the bead is CLOSED and carries BOTH markers (pool_managed=true AND
+// session_origin=ephemeral). Drop any one of the three and the name stays
+// permanently reserved.
+//
+// The third case is the load-bearing one: session_origin=="ephemeral" WITHOUT
+// pool_managed is the legacy manual multi-session shape recognized by
+// isLegacyManualSessionBeadForAgent (cmd/gc/session_origin.go), whose name must
+// stay permanent. Simplifying the release to a single pool_managed check would
+// silently release it — this test fails loudly instead.
+func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		close    bool
+	}{
+		{
+			name: "live pool slot",
+			metadata: map[string]string{
+				"session_name":   "loial",
+				"pool_managed":   "true",
+				"session_origin": "ephemeral",
+			},
+			close: false,
+		},
+		{
+			name: "closed pool-managed non-ephemeral",
+			metadata: map[string]string{
+				"session_name":   "loial",
+				"pool_managed":   "true",
+				"session_origin": "manual",
+			},
+			close: true,
+		},
+		{
+			name: "closed ephemeral not pool-managed",
+			metadata: map[string]string{
+				"session_name":   "loial",
+				"session_origin": "ephemeral",
+			},
+			close: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			bead, err := store.Create(beads.Bead{
+				Type:     BeadType,
+				Labels:   []string{LabelSession},
+				Metadata: tc.metadata,
+			})
+			if err != nil {
+				t.Fatalf("Create(%s): %v", tc.name, err)
+			}
+			if tc.close {
+				if err := store.Close(bead.ID); err != nil {
+					t.Fatalf("Close(%s): %v", tc.name, err)
+				}
+			}
+
+			if err := ensureSessionNameAvailable(store, "loial"); !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("ensureSessionNameAvailable(%s) = %v, want %v", tc.name, err, ErrSessionNameExists)
+			}
+		})
+	}
+}
