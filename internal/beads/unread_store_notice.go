@@ -338,13 +338,14 @@ func (s *BdStore) noticeIfStoreCannotSeeItsLedger(op string) {
 	if !ok {
 		return
 	}
-	_, _ = io.WriteString(s.unreadStoreNoticeSink(), UnreadStoreNotice(op, s.dir, unread, activeStore))
+	_, _ = io.WriteString(s.noticeWriter(), UnreadStoreNotice(op, s.dir, unread, activeStore))
 }
 
-// unreadStoreNoticeSink returns where this store's notice is written. os.Stderr
-// by default, so an operator running `gc ready` sees it and the controller's
-// log captures it, without touching the stdout a caller may be parsing.
-func (s *BdStore) unreadStoreNoticeSink() io.Writer {
+// noticeWriter returns where this store's operator notices are written.
+// os.Stderr by default, so an operator running `gc ready` sees them and the
+// controller's log captures them, without touching the stdout a caller may be
+// parsing.
+func (s *BdStore) noticeWriter() io.Writer {
 	if s.noticeSink != nil {
 		return s.noticeSink
 	}

@@ -318,13 +318,12 @@ func (c *CachingStore) runReconciliation() {
 		recordCacheScanLarge(context.Background(), c.idPrefix, len(fresh),
 			cacheReconcileScanWarnThreshold, time.Since(bdStart))
 	}
-	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
+	// The reconcile pass never marked the snapshot partial on an enrichment
+	// failure — the rows it just listed are whole either way — so it discards
+	// the completeness verdict applyReadyProjection returns and keeps only the
+	// problem-log entry it already recorded.
+	fresh, _ = c.applyReadyProjection("reconcile ready projection", fresh)
 	bdLatency := time.Since(bdStart)
-	if enrichErr != nil {
-		c.recordProblem("reconcile ready projection", enrichErr)
-	} else {
-		fresh = enriched
-	}
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {

@@ -727,11 +727,10 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	if enriched, err := c.enrichReadyProjectionForCache(all); err != nil {
-		partialErr = errors.Join(partialErr, err)
-		c.recordProblem("prime active ready projection", err)
-	} else {
-		all = enriched
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
 	}
 
 	beadMap := make(map[string]Bead, len(all))
@@ -843,11 +842,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	if enriched, enrichErr := c.enrichReadyProjectionForCache(all); enrichErr != nil {
-		c.recordProblem("prime ready projection", enrichErr)
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	all = enriched
+	if enrichErr != nil {
 		partialErr = errors.Join(partialErr, enrichErr)
-	} else {
-		all = enriched
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -1242,6 +1240,29 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 		return backing.enrichReadyProjectionForCache(items)
 	}
 	return items, nil
+}
+
+// applyReadyProjection enriches items with the backing store's ready projection
+// and returns the failure that leaves the snapshot INCOMPLETE, having already
+// recorded every failure on the problem log.
+//
+// A projection the backing store cannot serve at all is not an incomplete
+// snapshot: IsBlocked==nil is the documented fallback and cachedBeadReady
+// derives readiness from dependencies instead, so the rows are whole and the
+// cache degrades to a named state rather than a partial one. Folding it into
+// primePartialErr — which nothing but a clean prime clears — declined every
+// cache-only read for the life of the process and sent each one to a live 5-6s
+// bd subprocess, which is the shape maintainer-city was stuck in.
+func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, error) {
+	enriched, err := c.enrichReadyProjectionForCache(items)
+	if err == nil {
+		return enriched, nil
+	}
+	c.recordProblem(op, err)
+	if errors.Is(err, ErrReadyProjectionUnsupported) {
+		return items, nil
+	}
+	return items, err
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {

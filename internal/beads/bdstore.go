@@ -196,15 +196,74 @@ func classifyBDExecResult(parent, ctx context.Context, name string, timeout time
 		return "timeout", timeoutErr, timeoutErr
 	}
 	if runErr != nil {
-		detail := strings.TrimSpace(stderr)
-		if detail == "" && name == "bd" {
-			detail = bdStdoutErrorDetail(out)
-		}
-		if detail != "" {
+		if detail := bdFailureDetail(name, out, stderr); detail != "" {
 			return "error", runErr, fmt.Errorf("%w: %s", runErr, detail)
 		}
 	}
 	return "done", runErr, runErr
+}
+
+// bdFailureDetail composes the operator-facing detail for a failed invocation
+// out of the two streams bd splits its output across.
+//
+// bd writes unrelated startup notices to stderr BEFORE the command runs — the
+// BD_OTEL_* deprecation warning is the live example — so on a bd that both nags
+// and fails, stderr's FIRST line is the nag and the line saying what actually
+// broke sits below it. Every single-line render of the wrapped error (the cache
+// problem tile, `gc status`, a journal grep) then shows the nag. That is how a
+// permanently failing `bd sql ready projection` on maintainer-city read as a
+// telemetry warning for a night while the controller starved.
+//
+// So the detail leads with bd's own Error:/Hint: lines (cmd/bd/errors.go) and
+// keeps everything else verbatim, in order, after them. NOTHING is dropped, and
+// every other shape — a single line, stderr that already leads with the error,
+// stderr with no bd error line, empty stderr, a non-bd command — composes
+// byte-for-byte what it composed before.
+func bdFailureDetail(name string, out []byte, stderr string) string {
+	detail := strings.TrimSpace(stderr)
+	if name != "bd" {
+		return detail
+	}
+	if detail == "" {
+		// bd writes structured errors to stdout under --json while stderr is
+		// often empty.
+		return bdStdoutErrorDetail(out)
+	}
+	return hoistBdErrorLines(detail)
+}
+
+// bdErrorLinePrefixes are the prefixes bd stamps on the lines that say what
+// failed (cmd/bd/errors.go: HandleError, HandleErrorWithHint).
+var bdErrorLinePrefixes = []string{"Error:", "Fatal:", "Hint:"}
+
+func hoistBdErrorLines(detail string) string {
+	lines := strings.Split(detail, "\n")
+	if len(lines) < 2 || isBdErrorLine(lines[0]) {
+		return detail
+	}
+	leading := make([]string, 0, len(lines))
+	trailing := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isBdErrorLine(line) {
+			leading = append(leading, line)
+			continue
+		}
+		trailing = append(trailing, line)
+	}
+	if len(leading) == 0 {
+		return detail
+	}
+	return strings.Join(append(leading, trailing...), "\n")
+}
+
+func isBdErrorLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, prefix := range bdErrorLinePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // bdExecTimeoutError formats the deadline error after the per-command context
