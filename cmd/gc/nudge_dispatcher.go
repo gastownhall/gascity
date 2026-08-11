@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -192,6 +193,28 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			continue
 		}
 		if !obs.Running {
+			// A dormant session (process gone) with a due queued nudge must be
+			// woken so the managed reconciler restarts it and the drain/dispatch
+			// path can then deliver; otherwise the item strands forever
+			// (issue #1543). Mirror the direct `gc session nudge` path
+			// (queueManagedSessionNudgeWake -> requestManagedNudgeWake): stamp an
+			// explicit wake request and poke the controller. We deliberately do
+			// NOT send-keys to the dead pane and do NOT increment delivered — a
+			// wake is not a live delivery, and the queued item stays Pending until
+			// the woken session drains it exactly once (atomic claim guards
+			// against double-delivery). requestManagedNudgeWake already guards
+			// terminal lifecycle states via session.WakeSession, returning a
+			// *session.WakeConflictError we swallow so a genuinely closed/closing
+			// session cannot be resurrected and does not fail the whole tick.
+			if canRequestManagedNudgeWake(target, store) {
+				if wErr := requestManagedNudgeWake(target, store); wErr != nil {
+					if _, conflict := session.WakeConflictState(wErr); !conflict && firstErr == nil {
+						firstErr = wErr
+					}
+				} else if pErr := nudgePokeController(cityPath); pErr != nil && firstErr == nil {
+					firstErr = pErr
+				}
+			}
 			continue
 		}
 		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
