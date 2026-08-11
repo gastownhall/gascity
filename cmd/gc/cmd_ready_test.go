@@ -1065,3 +1065,85 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 		t.Errorf("the steer names --sort without its accepted values: %q", msg)
 	}
 }
+
+// readyTierRecordingStore records the storage tier every read it serves was
+// asked for, so a test can assert what the federation ASKED rather than only
+// what it got back.
+//
+// The distinction is the whole of ga-8lyxc. Every leg could serve every tier;
+// none of them failed, and none of them had a tier to refuse — the federation
+// never stated one. The work legs' bead-policy layer then rewrote the zero value
+// to TierBoth and the unwrapped class leg took it literally, so the merged answer
+// was two different questions and nothing on any path could say so.
+type readyTierRecordingStore struct {
+	beads.Store
+	readyTiers *[]beads.TierMode
+	listTiers  *[]beads.TierMode
+}
+
+func (s readyTierRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	var q beads.ReadyQuery
+	if len(query) > 0 {
+		q = query[0]
+	}
+	*s.readyTiers = append(*s.readyTiers, q.TierMode)
+	return s.Store.Ready(query...)
+}
+
+func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	*s.listTiers = append(*s.listTiers, query.TierMode)
+	return s.Store.List(query)
+}
+
+// TestReadyStatesTheSameTierOnEveryLeg is the structural guard behind ga-8lyxc,
+// and it is deliberately about the QUESTION rather than the rows.
+//
+// A row-level assertion only catches the tier hole on a fixture whose legs are
+// wrapped differently, and the wrapping is exactly what a refactor is free to
+// change. This asserts the invariant directly: every leg of the federation is
+// read at one explicit tier, and never at the zero value — which is not a
+// neutral default here but a narrower question the policy-wrapped legs silently
+// rewrite. Both arms are covered, because they build different query types.
+func TestReadyStatesTheSameTierOnEveryLeg(t *testing.T) {
+	var readyTiers, listTiers []beads.TierMode
+	legs := []readyLeg{
+		readyTestLeg("city", readyTierRecordingStore{
+			Store: splittest.NewWorkStore(t, "gc"), readyTiers: &readyTiers, listTiers: &listTiers,
+		}),
+		readyTestLeg("rig frontend", readyTierRecordingStore{
+			Store: splittest.NewWorkStore(t, "ra"), readyTiers: &readyTiers, listTiers: &listTiers,
+		}),
+		readyTestLeg("graph", readyTierRecordingStore{
+			Store: splittest.NewClassStore(t, config.BeadClassGraph), readyTiers: &readyTiers, listTiers: &listTiers,
+		}),
+	}
+
+	if _, err := readyBeadsForOpts(legs, readyOpts{}); err != nil {
+		t.Fatalf("gc ready: %v", err)
+	}
+	assertEveryLegAskedForTheFederatedTier(t, "gc ready", len(legs), readyTiers)
+
+	readyTiers, listTiers = nil, nil
+	if _, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress}); err != nil {
+		t.Fatalf("gc ready --status in_progress: %v", err)
+	}
+	assertEveryLegAskedForTheFederatedTier(t, "gc ready --status in_progress", len(legs), listTiers)
+}
+
+// assertEveryLegAskedForTheFederatedTier asserts one read per leg, each at
+// beads.FederatedReadTier, and none at the zero value.
+func assertEveryLegAskedForTheFederatedTier(t *testing.T, surface string, legs int, got []beads.TierMode) {
+	t.Helper()
+	if len(got) != legs {
+		t.Fatalf("%s issued %d leg reads over %d legs; the recorder is not seeing the federation", surface, len(got), legs)
+	}
+	for i, tier := range got {
+		if tier == beads.TierIssues {
+			t.Errorf("%s read leg %d at the ZERO-VALUE tier. That is not a neutral default across these legs: a policy-wrapped work store rewrites it to TierBoth and an unwrapped relocated class store does not, so the merged answer is two different questions and the class store's whole ephemeral tier drops out with no error (ga-8lyxc)", surface, i)
+			continue
+		}
+		if tier != beads.FederatedReadTier {
+			t.Errorf("%s read leg %d at tier %v, want beads.FederatedReadTier (%v); legs that answer at different tiers cannot be merged into one answer", surface, i, tier, beads.FederatedReadTier)
+		}
+	}
+}

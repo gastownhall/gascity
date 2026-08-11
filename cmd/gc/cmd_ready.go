@@ -129,16 +129,19 @@ func toReadyBeadDeps(deps []beads.Dep) []readyBeadDep {
 }
 
 // readyOpts carries the parsed `gc ready` flags.
+//
+// --include-ephemeral is deliberately absent: the reader spans both storage
+// tiers on every leg unconditionally (beads.FederatedReadTier), so the flag
+// selects nothing. See newReadyCmd.
 type readyOpts struct {
-	assignee         string
-	unassigned       bool
-	metadataFields   []string
-	excludeTypes     []string
-	excludeLabels    []string
-	sortOrder        string
-	limit            int
-	includeEphemeral bool
-	status           string
+	assignee       string
+	unassigned     bool
+	metadataFields []string
+	excludeTypes   []string
+	excludeLabels  []string
+	sortOrder      string
+	limit          int
+	status         string
 }
 
 // newReadyCmd builds `gc ready`: the in-process, city-wide claimable-work reader
@@ -154,6 +157,7 @@ type readyOpts struct {
 func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts readyOpts
 	var jsonOut bool
+	var includeEphemeral bool
 	cmd := &cobra.Command{
 		Use:   "ready",
 		Short: "List ready (claimable) work across every store in the city",
@@ -174,7 +178,11 @@ The flags mirror the "bd ready" contract the default work_query builds:
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
-store answered first.`,
+store answered first.
+
+Every leg is read across both storage tiers, so the wisp/ephemeral rows an
+orchestration step runs as are claimable work here whether or not
+--include-ephemeral is passed.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdReady(opts, stdout, stderr) != 0 {
@@ -190,7 +198,14 @@ store answered first.`,
 	cmd.Flags().StringArrayVar(&opts.excludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
 	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
 	cmd.Flags().IntVar(&opts.limit, "limit", 0, "max beads to return (0 = unlimited)")
-	cmd.Flags().BoolVar(&opts.includeEphemeral, "include-ephemeral", false, "include the wisp/ephemeral tier")
+	// --include-ephemeral is accepted for parity with `bd ready`, which the
+	// generated work_query carries verbatim on a bd-1.0.5 city. It selects
+	// nothing, and that is the honest spelling rather than a silent one: every
+	// leg is read at beads.FederatedReadTier, which already spans the wisp tier.
+	// Binding it to a discarded variable is deliberate — a readyOpts field
+	// nothing consults is how a flag ends up looking honored while one leg
+	// quietly narrows (ga-8lyxc).
+	cmd.Flags().BoolVar(&includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
@@ -262,7 +277,7 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if err != nil {
 		return nil, err
 	}
-	items, err := readReadyCandidates(legs, opts, status)
+	items, err := readReadyCandidates(legs, status)
 	if err != nil {
 		return nil, err
 	}
@@ -280,17 +295,20 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 // lists beads in exactly that status — the flag is a real selector, not a single
 // special case with an "everything else means ready" fallthrough, which answers
 // `--status closed` with open work.
-func readReadyCandidates(legs []readyLeg, opts readyOpts, status string) ([]beads.Bead, error) {
-	tier := beads.TierIssues
-	if opts.includeEphemeral {
-		tier = beads.TierBoth
-	}
+//
+// Both arms state beads.FederatedReadTier explicitly, and neither has a branch
+// that could state anything else. A tier left at the zero value is not a neutral
+// default across these legs: the work legs' bead-policy layer rewrites it to
+// TierBoth and the relocated class leg has no such layer, so the merged answer
+// would be one question asked of the work stores and a narrower one asked of the
+// store that holds the execution DAG. See beads.FederatedReadTier.
+func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, error) {
 	if status == "" {
-		return federateReadyBeads(legs, beads.ReadyQuery{TierMode: tier})
+		return federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	}
 	return federateListBeads(legs, beads.ListQuery{
 		Status:   status,
-		TierMode: tier,
+		TierMode: beads.FederatedReadTier,
 		// Only the crash-recovery tier pays for a live read: a claim that
 		// happened seconds ago must be visible, and a cached projection of it is
 		// exactly the stale answer that re-dispatches work already in flight.

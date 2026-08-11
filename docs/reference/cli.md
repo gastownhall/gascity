@@ -3274,6 +3274,10 @@ Rows are emitted in canonical ready order (priority, created_at, id) unless
 read is the true top-N of the merged set rather than the top-N of whichever
 store answered first.
 
+Every leg is read across both storage tiers, so the wisp/ephemeral rows an
+orchestration step runs as are claimable work here whether or not
+--include-ephemeral is passed.
+
 ```
 gc ready [flags]
 ```
@@ -3283,7 +3287,7 @@ gc ready [flags]
 | `--assignee` | string |  | only work assigned to this identity |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
-| `--include-ephemeral` | bool |  | include the wisp/ephemeral tier |
+| `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |

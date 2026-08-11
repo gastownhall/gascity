@@ -496,6 +496,57 @@ func (e splitEnv) mintWispWith(t *testing.T, opts wispOpts) beads.Bead {
 	return staged
 }
 
+// mintEphemeralGraphBead creates a graph-class bead that lands on the EPHEMERAL
+// tier of whichever store owns the class on this topology, and fails the test if
+// it did not.
+//
+// It exists because mintWisp lands a DURABLE row on the split leg: the relocated
+// class store carries no bead-policy layer, so the same create that maps onto
+// the ephemeral tier through a work front door lands a plain row there. Every
+// tier invariant built on mintWisp is therefore vacuous on the leg that matters,
+// which is how a whole ephemeral tier went missing from the federated readers
+// unnoticed (ga-8lyxc).
+//
+// The tier is reached the way production reaches it on each leg, not by patching
+// the bead afterwards:
+//
+//   - policy-wrapped front door (the single-store topology's work store): a
+//     gc.kind=wisp create, which defaultBeadStorage maps to "ephemeral" under
+//     bd-1.0.5 — plain mintWisp.
+//   - unwrapped relocated class store (the split topology): the store's own
+//     StorageCreateStore capability, which is the exact call
+//     createWithStoragePolicy makes once a storage class is decided. It is a
+//     real production shape on this leg: internal/mail/beadmail creates its
+//     message beads Ephemeral on whatever store owns the messaging class, and
+//     that class is relocated to this same binding.
+func mintEphemeralGraphBead(t *testing.T, e splitEnv, title string) beads.Bead {
+	t.Helper()
+	front := e.graphStore()
+	if e.policyWrapped(front) {
+		return e.mintWispWith(t, wispOpts{title: title})
+	}
+	store, ok := front.(beads.StorageCreateStore)
+	if !ok {
+		t.Fatalf("the relocated class store (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier the way createWithStoragePolicy does", front)
+	}
+	created, err := store.CreateWithStorage(beads.Bead{
+		ID:       splitWispID(),
+		Title:    title,
+		Type:     "task", // graph.v2 wisps materialize as issue_type "task"
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
+	}, beads.StorageEphemeral)
+	if err != nil {
+		t.Fatalf("minting ephemeral graph bead %q on the relocated class store: %v", title, err)
+	}
+	if !created.Ephemeral {
+		t.Fatalf("minted graph bead %s has Ephemeral=false; the fixture is not exercising the relocated store's wisp tier and every tier assertion on it is vacuous", created.ID)
+	}
+	if !coordclass.Classify(created).IsInfrastructure() {
+		t.Fatalf("minted ephemeral graph bead %s classifies as work, want infrastructure (type=%q metadata=%v)", created.ID, created.Type, created.Metadata)
+	}
+	return created
+}
+
 // mintDurableGraphBead creates a DURABLE graph-class bead through the graph
 // front door: the routed control/workflow shape (gc.kind=workflow), which the
 // storage policy keeps off the ephemeral tier on either leg. routedTo, if
