@@ -920,7 +920,15 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 		target = string(sessionpkg.StateAsleep)
 		clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
 	}
-	if rollbackAvailable && !alive && strings.TrimSpace(info.MetadataState) == "creating" {
+	// gcf-ru0: this gate originally checked MetadataState == "creating" only,
+	// from before #2583 split "start-pending" out as its own state ahead of
+	// "creating". projectRuntimeProjection's BaseStateStartPending branch has
+	// no staleness check of its own (unlike its BaseStateCreating sibling), so
+	// a bead stuck in start-pending with no rollback gate here just keeps
+	// re-projecting start-pending forever — pendingCreateLeaseExpiredForRollbackInfo
+	// already understands start-pending via pendingCreateRollbackState, so widen
+	// the gate to match instead of restricting it to "creating".
+	if rollbackAvailable && !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) {
 		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
