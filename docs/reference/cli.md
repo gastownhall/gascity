@@ -65,6 +65,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -79,6 +80,7 @@ gc [flags]
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
+| [gc storage](#gc-storage) | Inspect and migrate this city's storage-class layout |
 | [gc supervisor](#gc-supervisor) | Manage the machine-wide supervisor |
 | [gc suspend](#gc-suspend) | Suspend the city (all agents effectively suspended) |
 | [gc trace](#gc-trace) | Inspect and control session reconciler tracing |
@@ -269,6 +271,25 @@ Use --rig &lt;name&gt; to pin a specific rig store, or --city &lt;path&gt; to pi
 city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
+
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
@@ -1316,13 +1337,11 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
-gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
-| `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
@@ -1631,6 +1650,34 @@ With --attach on a v2 formula — one declaring
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
+
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+gc storage recover-stranded --from-work --fleet-stopped.
 
 ```
 gc formula cook <formula-name> [flags]
@@ -3225,6 +3272,48 @@ gc prompt synth [flags]
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
 
+## gc ready
+
+List ready, claimable work as a JSON array, federating the city store, the
+rig stores, and — on a split city — the relocated graph store where molecule
+roots, step beads and control beads live.
+
+It is the in-process, city-wide drop-in for the single-store "bd ready" work
+query, so workers and the control plane see graph-class work instead of an
+authoritative-looking short answer. On a city that relocates no coordination
+class it reads the one store, unchanged.
+
+The flags mirror the "bd ready" contract the default work_query builds:
+  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+           --exclude-type=epic --exclude-label "hold:mayor" \
+           --sort oldest --limit 20 --json
+
+Rows are emitted in canonical ready order (priority, created_at, id) unless
+--sort selects a created_at order, and --limit is applied last, so a bounded
+read is the true top-N of the merged set rather than the top-N of whichever
+store answered first.
+
+Every leg is read across both storage tiers, so the wisp/ephemeral rows an
+orchestration step runs as are claimable work here whether or not
+--include-ephemeral is passed.
+
+```
+gc ready [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | only work assigned to this identity |
+| `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
+| `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
+| `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--limit` | int |  | max beads to return (0 = unlimited) |
+| `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
+| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
+| `--unassigned` | bool |  | only unassigned work |
+
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -4358,6 +4447,94 @@ gc stop [path|name] [flags]
 | `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
 | `--json` | bool |  | emit JSONL summary |
 | `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
+
+## gc storage
+
+Move this city's storage-class layout, and report on it.
+
+These are operator commands. Nothing here runs on boot: a city whose
+[storage.classes] name a binding it has not converged on refuses to start and
+names the migrate command, because the source's writer set is something an
+operator arranges rather than something a program can observe.
+
+```
+gc storage
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
+
+## gc storage migrate
+
+Copy this city's infrastructure-class beads out of the work store and into
+the binding [storage.classes] assigns them to.
+
+Every bead is copied with its id and its within-class dependency topology
+preserved, proven field-equal against a closed and reopened destination, and
+then recorded in a proven-copy manifest and a convergence marker. The source is
+RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
+rollback before cutover is a config edit with no data recovery step.
+
+The move refuses while a writer can reach the source. This binary can prove the
+absence of a controller and cannot prove the absence of anything else, so that
+half is an explicit operator attestation.
+
+```
+gc storage migrate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage recover-stranded
+
+Copy the infrastructure beads a converged city's proven copy never carried
+out of the retained work store and into the binding that is already serving.
+
+This is the recovery the stranded-write refusal names. It is additive: it moves
+only ids the binding does not hold and the proven-copy manifest does not record,
+it deletes nothing from either store, and it extends the manifest only after
+every moved bead has been proven equal against a closed and reopened
+destination. A bead whose class it cannot state is named and left where it is.
+
+It refuses on a city that has NOT converged — the whole copy is still owed
+there, and `gc storage migrate --from-work` is what owes it. It is not that
+command run twice: the migration is one-shot on purpose, and forcing it to
+re-copy would re-import a serving binding from a source that no longer holds
+what the binding does.
+
+```
+gc storage recover-stranded [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
+| `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage status
+
+Report which binding serves each storage class, whether this city has
+converged onto it, and what the retained source and the binding each hold.
+
+This path is read-only against a LIVE city: it creates no directory, database,
+write-ahead log, shared-memory index, schema, marker or manifest. It does not
+open the binding's engine unless that database already exists, because opening
+it would create the very database the report is being asked about.
+
+It exits non-zero when the city is configured for a binding it has not
+converged on, so a deployment script can gate on it.
+
+```
+gc storage status
+```
 
 ## gc supervisor
 

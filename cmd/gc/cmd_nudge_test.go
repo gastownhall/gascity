@@ -3597,7 +3597,7 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
 	cmd := startPollerLikeProcess(t, cityPath, "session-id")

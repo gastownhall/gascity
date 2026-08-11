@@ -85,6 +85,25 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which rewrites to
 "update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
@@ -235,6 +254,42 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// `gc bd sql`, `gc bd query` and the selector verbs (`list`, `search`) are
+	// passthroughs to bd, and bd answers about the bd ledger only. On a split
+	// city a read that names a relocated class's beads comes back empty and exit
+	// 0 — a confident wrong answer, and the one that reported live molecule roots
+	// as missing. A frontier read (`gc bd ready`, or `gc bd list --ready`, which
+	// runs the same query) is refused on the same seam for a different reason:
+	// its whole result set is short by the relocated class whatever the argv.
+	// Refuse both here, where the class routing is known; bd cannot know a class
+	// was relocated.
+	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
+		if !bdRelocatedClassOverrideEnabled() {
+			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint(bdRelocatedClassInvocationComputesFrontier(bdArgs))) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// Overridden, but never silently: the operator asked for a read this
+		// ledger cannot answer by class, so the reason it would have been
+		// refused travels with the result they are about to trust.
+		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// A by-ID operation whose subject a relocated class owns is answered in
+	// process, from the binding that class is served from, and never handed to
+	// the subprocess — which opens the work workspace and cannot see the bead.
+	// It runs BEFORE the release-if-current arm below because that arm resolves
+	// only the work scope: on a split city it would release against the ledger
+	// the bead was moved off. See cmd_bd_by_id.go.
+	//
+	// rigName is the explicit --rig, and it travels because the WORK scope this
+	// function just resolved and the class binding are two different ledgers: a
+	// class-owned subject under an explicit --rig is refused rather than served
+	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
+	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
+	// travel — see refuseRigScopedClassOwnedTarget.
+	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
+		return code
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -321,9 +376,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
+	// Resolve the same binary every other bd path in the tree resolves for
+	// this scope: a scope bound to a complete storage binding pins the bd
+	// build that speaks that backend, and the passthrough must honor the pin
+	// or it hands the command to an ambient bd that rejects the bound
+	// backend. Keying on the target scope rather than the city keeps a rig
+	// that owns its binding on its pin, and keeps a rig that overrides the
+	// city backend on the ambient bd its runtime env already implies.
+	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

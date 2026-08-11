@@ -2679,13 +2679,8 @@ schema = 1
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
-	}
+	// production paths are NormalizePathForCompare form; compare firmlink-aware (#4934)
+	assertSameTestPath(t, got, dir)
 }
 
 func TestFindNearestImportRootSkipsRuntimeOnlyDirs(t *testing.T) {
@@ -2754,13 +2749,7 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(packDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want nearest pack %q", got, want)
-	}
+	assertSameTestPath(t, got, packDir)
 }
 
 func TestResolveImportRootRuntimeOnlyAncestorResolvesRegisteredRigCity(t *testing.T) {

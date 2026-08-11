@@ -91,6 +91,78 @@ func TestParseIdempotent(t *testing.T) {
 	}
 }
 
+// TestOrderNoWorkGateParsed covers vp-cixi.6: an order can opt out of the
+// dispatcher's open-work gates via no_work_gate. Pure cooldown probes that
+// track no beads (provider-health-probe) set this so a slow Dolt store can't
+// time the gate out and skip the probe every cycle (#2893 dispatch starvation).
+func TestOrderNoWorkGateParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\nno_work_gate = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.NoWorkGate {
+		t.Error("NoWorkGate = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.NoWorkGate {
+		t.Error("NoWorkGate = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "10m", NoWorkGate: true}); err != nil {
+		t.Errorf("Validate with NoWorkGate: %v", err)
+	}
+}
+
+// TestProviderHealthProbeOrderOptsOutOfWorkGate covers the deployed shape of
+// provider-health-probe (vp-cixi.6 GAP D): a cooldown-triggered exec probe on
+// a 10m interval with a real 120s timeout. The shipped pack will flip
+// no_work_gate = true (sling S-1) so the dispatcher skips its open-work gates
+// and a slow Dolt store can no longer time them out and skip the probe every
+// cycle (#2893 dispatch starvation). This test pins the parse shape so the
+// pack flip is mechanically known to be valid: WITH the flag the order opts
+// out and passes Validate; WITHOUT it the order parses as a plain cooldown
+// probe (NoWorkGate == false, the pre-S-1 default).
+func TestProviderHealthProbeOrderOptsOutOfWorkGate(t *testing.T) {
+	base := `[order]
+description = "Probe provider health"
+exec = "$ORDER_DIR/scripts/provider-health-probe.sh"
+trigger = "cooldown"
+interval = "10m"
+timeout = "120s"
+`
+	on, err := Parse([]byte(base + "no_work_gate = true\n"))
+	if err != nil {
+		t.Fatalf("Parse (with flag): %v", err)
+	}
+	if !on.NoWorkGate {
+		t.Error("NoWorkGate = false, want true for opted-out probe")
+	}
+	if on.Trigger != "cooldown" || on.Interval != "10m" || on.Timeout != "120s" {
+		t.Errorf("probe shape mismatch: trigger=%q interval=%q timeout=%q", on.Trigger, on.Interval, on.Timeout)
+	}
+	if err := Validate(Order{
+		Name:       "provider-health-probe",
+		Exec:       "$ORDER_DIR/scripts/provider-health-probe.sh",
+		Trigger:    "cooldown",
+		Interval:   "10m",
+		Timeout:    "120s",
+		NoWorkGate: true,
+	}); err != nil {
+		t.Errorf("Validate provider-health-probe with NoWorkGate: %v", err)
+	}
+
+	off, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatalf("Parse (without flag): %v", err)
+	}
+	if off.NoWorkGate {
+		t.Error("NoWorkGate = true, want false (default) for probe without the flag")
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {

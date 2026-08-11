@@ -318,7 +318,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryFor(cityQueryTopology(cityPath, cfg)), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}

@@ -345,3 +345,15 @@ func (s *Store) RepairTypeBestEffort(id string) {
 // code must prefer the typed methods; this exists so Phase 4/5 can land
 // incrementally without a flag-day rewrite.
 func (s *Store) Store() beads.SessionStore { return s.store }
+
+// SetLocalString stores a clone-local session value without exposing the
+// underlying Beads store through the sessions front door.
+func (s *Store) SetLocalString(id, key, value string) error {
+	return s.store.SetLocalString(id, key, value)
+}
+
+// GetLocalString returns a clone-local session value without exposing the
+// underlying Beads store through the sessions front door.
+func (s *Store) GetLocalString(id, key string) (string, error) {
+	return s.store.GetLocalString(id, key)
+}

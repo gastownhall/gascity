@@ -872,7 +872,7 @@ func TestDoRigSetEndpointInheritPostgresCityIgnoresStaleManagedRuntime(t *testin
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
-	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
@@ -895,7 +895,7 @@ func TestDoRigSetEndpointInheritPostgresCityIgnoresStaleManagedRuntime(t *testin
 		t.Fatalf("config.yaml changed after stale postgres managed runtime:\n%s", got)
 	}
 	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
-		t.Fatalf("stale managed port should not be copied to postgres-backed rig, stat err = %v", err)
+		t.Fatalf("stale managed port should not be copied to a rig gc does not serve, stat err = %v", err)
 	}
 	if !strings.Contains(stderr.String(), "managed city endpoint unavailable") {
 		t.Fatalf("stderr = %q, want managed city endpoint unavailable", stderr.String())

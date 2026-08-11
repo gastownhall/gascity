@@ -531,6 +531,10 @@ func loadScopeSnapshotWithBody(store beads.Store, rootID, scopeRef string, body 
 	return snapshot, nil
 }
 
+// listByWorkflowRootAndScope narrows beads.MembershipDirectRootID to one scope:
+// every bead carrying both gc.root_bead_id == rootID and gc.scope_ref ==
+// scopeRef, closed included. The root itself carries neither key, so unlike
+// beads.DirectMembers this returns members only.
 func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
@@ -661,7 +665,7 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID string) (int, error) {
 	all := s.all
 	if !s.allComplete {
-		loaded, err := listByWorkflowRoot(store, s.rootID)
+		loaded, err := beads.DirectMembers(store, s.rootID)
 		if err != nil {
 			return 0, err
 		}
@@ -841,8 +845,21 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
+	// Generated spec sidecars are topology records rather than executable
+	// members; preserve their established successful cleanup outcome before the
+	// remaining subtree is skipped.
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
+	}
+	// A terminal root makes every still-open generated member non-executable.
+	// Close the remainder as one ordered, idempotent batch before completing
+	// the finalizer. This also repairs partially materialized workflows whose
+	// unused steps were never reached by ordinary dependency progression.
+	if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	}); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
@@ -1322,7 +1339,7 @@ func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bea
 	} else if ok {
 		return bead, nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1427,33 +1444,6 @@ func sortedPendingIDs(pending map[string]beads.Bead) []string {
 	}
 	sort.Strings(ids)
 	return ids
-}
-
-func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]beads.Bead, 0, len(all)+1)
-	seen := make(map[string]bool, len(all)+1)
-	if root, err := store.Get(rootID); err == nil {
-		result = append(result, root)
-		seen[root.ID] = true
-	} else if !errors.Is(err, beads.ErrNotFound) {
-		return nil, err
-	}
-	for _, bead := range all {
-		if seen[bead.ID] {
-			continue
-		}
-		result = append(result, bead)
-		seen[bead.ID] = true
-	}
-	return result, nil
 }
 
 func isLogicalDescendant(logical, candidate beads.Bead) bool {
@@ -1589,7 +1579,7 @@ func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {
 }
 
 func workflowRootHasTerminalAbortScopeFailure(store beads.Store, rootID, finalizerID string) (bool, error) {
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return false, err
 	}

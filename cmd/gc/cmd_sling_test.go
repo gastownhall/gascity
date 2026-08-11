@@ -23,7 +23,6 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -3465,8 +3464,7 @@ dolt.auto-start: false
 	}
 }
 
-func TestSlingStoreEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestSlingStoreEnvWithError_RefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -3481,7 +3479,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "")
+	writeUnregisteredBackendMetadata(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -3492,12 +3490,7 @@ dolt.auto-start: false
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: rigDir}}}
 
 	_, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
-	if err == nil {
-		t.Fatal("slingStoreEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
 func TestTargetType(t *testing.T) {

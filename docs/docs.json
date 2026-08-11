@@ -213,7 +213,8 @@
             "group": "Operate",
             "pages": [
               "runbooks/managed-city-endpoints",
-              "runbooks/remote-hardened-city"
+              "runbooks/remote-hardened-city",
+              "runbooks/split-storage-classes"
             ]
           }
         ]

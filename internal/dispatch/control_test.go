@@ -3109,7 +3109,7 @@ func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType strin
 
 func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}

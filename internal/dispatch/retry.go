@@ -238,7 +238,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 
 func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string, attempt int) (beads.Bead, error) {
 	if rootID := strings.TrimSpace(eval.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && logicalID != "" && attempt > 0 {
-		all, err := listByWorkflowRoot(store, rootID)
+		all, err := beads.DirectMembers(store, rootID)
 		if err != nil {
 			return beads.Bead{}, err
 		}
@@ -621,7 +621,7 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 		return fmt.Errorf("%s: could not derive retry step refs", prevRun.ID)
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}

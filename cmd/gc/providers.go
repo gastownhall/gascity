@@ -892,9 +892,11 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	}
 	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
 	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity.
+	// failed load yields nil cfg, which the class resolvers treat as identity —
+	// where a relocated class is SERVED from does not depend on it, because the
+	// routes come from cliStorageRoutes, which reads the city's own [storage].
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }
