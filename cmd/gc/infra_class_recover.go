@@ -63,14 +63,59 @@ package main
 // CLOSED AND REOPENED destination and proven field-, class- and dep-equal to
 // the source, by the migration's own comparators.
 //
-// # Idempotence
+// # The topology is repaired over the whole resident set, not over the copy
 //
-// Re-running is a no-op: the gap is recomputed from live state, a bead already
-// in the binding is skipped, DepAdd replaces an edge in place rather than
-// duplicating it, and the manifest is rewritten as a superset. A partial
-// failure leaves the binding holding what it managed to copy and the manifest
-// unextended, which is the safe residue — those ids are still stranded, still
-// named by the next check, and the next run copies the rest.
+// An edge belongs to a PAIR of beads, and the two endpoints of a within-infra
+// edge need not arrive in the binding on the same run: the dispatcher's normal
+// wiring direction is a pre-existing bead blocking on a just-created one, so a
+// bead that crossed at cutover routinely gains an edge into one written after
+// it. So the edge pass runs over every source infrastructure bead the binding
+// holds once the copy finishes — inbound and outbound, this run's rows and the
+// cutover's alike — exactly as importInfraSnapshot runs its dep pass over every
+// row rather than over the ones it happened to create. Only edges the binding
+// lacks are written, so the pass is a diff rather than a rewrite and its count
+// is a statement: "0 restored" is what a converged city reports.
+//
+// An edge that cannot be written is NAMED, per edge, and never reported as
+// something else. There are three ways to not write one and they are three
+// different facts: the far endpoint is a work bead (the destination owns no row
+// for it, exactly as the migration leaves it); the far endpoint is a bead the
+// manifest records and the binding's own GC has since collected (re-adding it
+// would dangle a reference to a deliberate delete); or the far endpoint is an
+// infrastructure bead THIS RUN REFUSED TO MOVE, which is a within-infra edge
+// this repair is dropping, and is reported as a refusal rather than counted as
+// linkage.
+//
+// # Idempotence, and what a partial failure leaves
+//
+// Re-running is a no-op AND a repair: the gap is recomputed from live state, a
+// bead already in the binding is not re-copied, every missing within-infra edge
+// between resident beads is re-driven, and the manifest is rewritten as a
+// superset.
+//
+// A partial failure — ENOSPC, a read-only binding root, a kill — can leave rows
+// in the binding that the manifest does not record, because the rows are written
+// row by row and the manifest is published once at the end. Those ids are NOT
+// still stranded: the binding holds them, so no containment check names them,
+// and the earlier claim that the residue was self-healing was false for exactly
+// the ids that got copied. Left unrecorded, the day the binding's own GC
+// collects one it reads back as a strand and the city refuses to boot over a row
+// the repair had correctly delivered.
+//
+// So the residue is a bucket of its own: every source infrastructure bead the
+// binding holds that the manifest does not record is re-proven against the
+// reopened destination by the same comparators the moved rows face, and folded
+// into the manifest. One that cannot be proven — a row under that id that is not
+// the source's row — is named and left unrecorded, because the manifest's
+// meaning is "the copy was proven to deliver this id" and recording an unproven
+// one would be a proof nobody made.
+//
+// This is the asymmetry with the migration, stated so it is not re-introduced:
+// an interrupted runInfraClassMigration self-heals, because the manifest is
+// written before the marker and the next run's prepareInfraDestination drops the
+// stamped rows and re-imports. This repair writes into an already-converged
+// binding it must never clear, so its resume is recognition rather than
+// rollback.
 //
 // # The rig census is deliberately not repeated here
 //
@@ -91,6 +136,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -203,6 +249,33 @@ type strandedBeadDump struct {
 	DepError  string      `json:"dep_error,omitempty"`
 }
 
+// infraRelationCapabilityRefusal reports whether err is an adapter saying it
+// does not implement relation listing AT ALL, as opposed to a store saying this
+// particular read did not work just now.
+//
+// The distinction is the whole safety of the fallback below. `operation
+// "IssueRelations" not supported by the postgres backend` is a fact about the
+// adapter: it stays true for every bead and every retry, so one probe answers
+// for the store. `database is locked`, a dropped connection, a subprocess that
+// could not fork are facts about a moment, and a moment is no evidence about a
+// capability. Reading the second as the first swaps a trustworthy read for one
+// this codebase itself marks incomplete — BdStore.listIncludesCompleteDependencies
+// returns false, which is why CachingStore refuses to serve down-deps from the
+// inline projection — and it does so for the whole run, under a zero exit code.
+//
+// Text matching is what is available: the refusal crosses the adapter boundary
+// as a string and neither side carries a sentinel for it. It degrades in the
+// safe direction — an unrecognized capability refusal is read as a transient
+// error, which refuses the bead rather than moving it edge-free. The same idiom,
+// for the same reason, is infraGenesisOpenFailure's "already exists".
+func infraRelationCapabilityRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "not supported") || strings.Contains(text, "unsupported")
+}
+
 // sourceDepReader answers "what does this bead depend on" against a work store
 // that may not implement the relation read at all.
 //
@@ -211,7 +284,8 @@ type strandedBeadDump struct {
 // rather than about the city: the same rows are still carried INLINE on every
 // bead the store lists, in beads.Bead.Dependencies, because bd's own list JSON
 // emits a `dependencies` array beside `dependency_count`. So the reader prefers
-// the explicit relation read and falls back to the inline projection.
+// the explicit relation read and falls back to the inline projection — but only
+// on that capability refusal, never on an error that could be a moment.
 //
 // (importInfraSnapshot and verifyInfraCopy both call DepList unconditionally,
 // so the MIGRATION cannot run against such a source at all. That is a real gap
@@ -241,26 +315,34 @@ type sourceDepReader struct {
 	witnessID string
 }
 
-// newSourceDepReader probes the relation read once and, if it is unsupported,
-// witnesses the inline projection over the store's full contents.
+// newSourceDepReader probes the relation read once and, if the adapter refuses
+// the capability, witnesses the inline projection over the store's full
+// contents.
+//
+// Any other probe error leaves the reader on the relation read: a transient
+// failure is not evidence about the adapter, so each bead's own read decides
+// that bead's fate and a bead whose read fails becomes ambiguous rather than
+// edge-free.
 func newSourceDepReader(source beads.Store, probeID string) (*sourceDepReader, error) {
 	reader := &sourceDepReader{source: source, relationsOK: true}
 	if probeID == "" {
 		return reader, nil
 	}
-	if _, err := source.DepList(probeID, "down"); err != nil {
-		reader.relationsOK = false
-		reader.relationsErr = err
-		rows, listErr := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-		if listErr != nil {
-			return nil, fmt.Errorf("witnessing the source's inline dependency projection: %w", listErr)
-		}
-		for _, b := range rows {
-			if len(b.Dependencies) > 0 {
-				reader.inlineWitnessed = true
-				reader.witnessID = b.ID
-				break
-			}
+	_, err := source.DepList(probeID, "down")
+	if !infraRelationCapabilityRefusal(err) {
+		return reader, nil
+	}
+	reader.relationsOK = false
+	reader.relationsErr = err
+	rows, listErr := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if listErr != nil {
+		return nil, fmt.Errorf("witnessing the source's inline dependency projection: %w", listErr)
+	}
+	for _, b := range rows {
+		if len(b.Dependencies) > 0 {
+			reader.inlineWitnessed = true
+			reader.witnessID = b.ID
+			break
 		}
 	}
 	return reader, nil
@@ -304,19 +386,153 @@ func (r *sourceDepReader) describe() string {
 	return fmt.Sprintf("source dep edges: UNREADABLE — the store refuses relation listing (%v) and no inline projection was witnessed", r.relationsErr)
 }
 
+// storageRecoveryLogPrefix is the recovery spelling without its source flag —
+// the head every diagnostic in this file prints.
+//
+// It is DERIVED from storageRecoveryCommand rather than written out beside it,
+// because the whole reason this command exists is that a diagnostic naming a
+// command the binary does not carry is an operator instruction that fails at the
+// shell. A constant would have been a second spelling to keep in step by hand,
+// and TestStorageRecoveryCommandNamesTheVerbTheTreeCarries can only pin what it
+// can see. An undecomposable spelling falls back to the whole command, which is
+// wordy and still runnable — and newUnbuildableStorageCmd has already refused
+// the build by then.
+func storageRecoveryLogPrefix() string {
+	surface, err := parseOperatorCommandSpelling(storageRecoveryCommand)
+	if err != nil {
+		return storageRecoveryCommand
+	}
+	return "gc " + surface.Namespace + " " + surface.Verb
+}
+
+// infraDepEdgeHeld reports whether the binding already carries want, by exactly
+// infraDepDifference's rule: the far endpoint has to match, and an untyped edge
+// on either side matches any type, because a store that records no dep_type is
+// not recording a different one.
+func infraDepEdgeHeld(want beads.Dep, have []beads.Dep) bool {
+	for _, d := range have {
+		if d.DependsOnID != want.DependsOnID {
+			continue
+		}
+		if d.Type == "" || want.Type == "" || d.Type == want.Type {
+			return true
+		}
+	}
+	return false
+}
+
+// infraEdgePlan is the within-infra topology the binding owes once this run's
+// copy finishes: what to write, what is already there, and — named rather than
+// counted — what cannot be written at all.
+//
+// It is computed over every source infrastructure bead that will be resident,
+// not over the rows this run copies, because an edge belongs to a PAIR and the
+// two endpoints can arrive on different runs. That also makes it the repair: a
+// re-run recomputes the same plan against live state, finds the edges an
+// interrupted predecessor never wrote, and writes those.
+type infraEdgePlan struct {
+	// missing are the edges to write, in a deterministic order.
+	missing []beads.Dep
+	// held counts the edges the binding already carries, which is what makes a
+	// re-run's "0 restored" a statement rather than a hope.
+	held int
+	// crossBoundary counts edges into a work bead. The destination owns no row
+	// for the far endpoint, so the edge stays metadata linkage resolved by the
+	// owning-store read on each side — exactly as importInfraSnapshot leaves it.
+	crossBoundary int
+	// collected counts edges into an infrastructure bead the manifest records
+	// and the binding no longer holds. The binding's own GC took the row and the
+	// edge with it; re-adding it would dangle a reference to a deliberate delete.
+	collected int
+	// dropped names the edges whose far endpoint is an infrastructure bead this
+	// run REFUSED to move. These are within-infra edges this repair is dropping,
+	// and nothing retains them — infraMigrationRow nils both Dependencies and
+	// Needs — so they are named per edge rather than counted into anything.
+	dropped []string
+	// unstatable names resident beads whose source topology no read could state,
+	// so an operator knows the plan is incomplete rather than empty.
+	unstatable []string
+}
+
+// planInfraEdges builds the plan against the set of source beads the binding
+// will hold when the copy finishes.
+//
+// A bead not yet created reads back no edges from the destination, so every edge
+// it owes lands in missing — which is why the plan can be built before the copy
+// and still describe the state after it. That ordering is what lets --dry-run
+// report the topology it would restore without writing anything.
+func planInfraEdges(rows []beads.Bead, resident, infra, proven map[string]bool,
+	edgesFor func(beads.Bead) ([]beads.Dep, bool, error), destination beads.Store,
+) (infraEdgePlan, error) {
+	plan := infraEdgePlan{}
+	for _, b := range rows {
+		if !resident[b.ID] {
+			continue
+		}
+		want, ok, err := edgesFor(b)
+		if !ok {
+			plan.unstatable = append(plan.unstatable, fmt.Sprintf("%s (%v)", b.ID, err))
+			continue
+		}
+		if len(want) == 0 {
+			continue
+		}
+		have, err := destination.DepList(b.ID, "down")
+		if err != nil {
+			return infraEdgePlan{}, fmt.Errorf("listing the binding's dep edges of %s: %w", b.ID, err)
+		}
+		for _, d := range want {
+			switch {
+			case !infra[d.DependsOnID]:
+				plan.crossBoundary++
+			case !resident[d.DependsOnID]:
+				if proven[d.DependsOnID] {
+					plan.collected++
+					continue
+				}
+				plan.dropped = append(plan.dropped, fmt.Sprintf("%s -> %s (%s): the far endpoint is an infrastructure bead this repair declined to move", b.ID, d.DependsOnID, d.Type))
+			case infraDepEdgeHeld(d, have):
+				plan.held++
+			default:
+				// The near id is this bead's, not the entry's own IssueID: on the
+				// inline projection the entry is a bd list-JSON row and the bead
+				// it was read from is the authority for which bead it belongs to.
+				plan.missing = append(plan.missing, beads.Dep{IssueID: b.ID, DependsOnID: d.DependsOnID, Type: d.Type})
+			}
+		}
+	}
+	return plan, nil
+}
+
+// reportInfraEdgePlan prints what the plan could not write. Both callers reach
+// it — the run that writes and the run that finds nothing to write — because a
+// dropped edge is a fact about the city rather than about this invocation.
+func reportInfraEdgePlan(stdout io.Writer, plan infraEdgePlan) {
+	if len(plan.dropped) > 0 {
+		fmt.Fprintf(stdout, "DROPPED %d within-infra dep edge(s): the far endpoint is an infrastructure bead this repair declined to move, and nothing retains them:\n", len(plan.dropped)) //nolint:errcheck // best-effort stdout
+		for _, entry := range plan.dropped {
+			fmt.Fprintf(stdout, "  %s\n", entry) //nolint:errcheck // best-effort stdout
+		}
+	}
+	if len(plan.unstatable) > 0 {
+		fmt.Fprintf(stdout, "UNSTATABLE topology on %d bead(s) the binding already holds, so the edge plan is incomplete rather than empty:\n", len(plan.unstatable)) //nolint:errcheck // best-effort stdout
+		for _, entry := range plan.unstatable {
+			fmt.Fprintf(stdout, "  %s\n", entry) //nolint:errcheck // best-effort stdout
+		}
+	}
+}
+
 // doStorageRecoverStranded performs the repair, in the order the hazards demand.
 //
 // Structural validation first, because a plan boot would refuse must not be
 // repaired toward; then the served-binding note, because a repair into a
 // binding that is not the one serving is a copy into an orphan; then
 // convergence, because this is a repair of a copy that happened rather than a
-// substitute for one that did not; then the writers; then the guard.
+// substitute for one that did not; then the writers; then the guard — and only
+// under the guard, the manifest, because a read-modify-write that straddles the
+// lock can silently drop the ids a concurrent run published.
 func doStorageRecoverStranded(ctx context.Context, request storageOperatorRequest, opts strandedRecoveryOptions, stdout, stderr io.Writer) int {
-	// The spelling without its source flag, exactly as doStorageMigrate does it.
-	// TestStorageRecoveryCommandNamesTheVerbTheTreeCarries pins it against
-	// storageRecoveryCommand so a rename of the verb cannot leave diagnostics
-	// naming a command the binary no longer has.
-	const logPrefix = "gc storage recover-stranded"
+	logPrefix := storageRecoveryLogPrefix()
 
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
 	if err != nil {
@@ -324,8 +540,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	if !ok {
-		fmt.Fprintf(stderr, "%s: this city's [storage.classes] do not assign %s to one shared non-work binding this build can serve, so there is no binding to recover into and nothing here is stranded. %s\n", //nolint:errcheck // best-effort stderr
-			logPrefix, infraMigrationClassList(), storageSupportedTopologyStatement)
+		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
 		return 1
 	}
 	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
@@ -346,16 +561,6 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if state != infraConvergenceMarked {
 		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q (%s is absent or its database is gone), so nothing here is a stranded write — the whole copy is still owed. Run:  %s\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Binding, target.MarkerPath(), storageMigrationCommand)
-		return 1
-	}
-	proven, recorded, err := readInfraCopyManifest(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !recorded {
-		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing distinguishes a bead the copy never carried from one the binding's own GC has since collected. Recovering on that basis would import rows the binding deliberately deleted. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
-			logPrefix, target.Database, target.ManifestPath())
 		return 1
 	}
 
@@ -384,6 +589,26 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 	}()
 
+	// The manifest, under the lock that makes it a read-modify-WRITE rather than
+	// two unrelated operations. runInfraClassMigration reads and writes it
+	// entirely under the guard for the same reason: the guard is non-blocking, so
+	// a second run of this verb can take it, publish and release inside any pause
+	// above — and the controller dial above is a pause of up to three seconds on
+	// a city with a stale socket, which is the normal state during the incident
+	// this verb is for. A manifest read before that pause is a snapshot of bytes
+	// that can have moved on, and writing a replacement built from it drops
+	// whatever the other run recorded.
+	proven, recorded, err := readInfraCopyManifest(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !recorded {
+		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing distinguishes a bead the copy never carried from one the binding's own GC has since collected. Recovering on that basis would import rows the binding deliberately deleted. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
+			logPrefix, target.Database, target.ManifestPath())
+		return 1
+	}
+
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -395,6 +620,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// One order for every pass below, so two runs over the same city report the
+	// same thing in the same sequence.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	infraIDs := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		infraIDs[b.ID] = true
 	}
 
 	destination, err := openInfraDestination(target)
@@ -423,10 +655,20 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// the binding, and not in the manifest of what the copy was proven to
 	// deliver. A bead the manifest records is one the binding's own lifecycle
 	// removed, and importing it back would resurrect state the binding deleted.
+	//
+	// And the third bucket, which is neither: a bead the binding HOLDS that the
+	// manifest does not record. Nothing about it is stranded, so no check names
+	// it — and that is the trap. It is the residue an interrupted run leaves, and
+	// left unrecorded it becomes a boot-fatal false strand the day the binding's
+	// own GC collects it.
 	var stranded []beads.Bead
+	var unrecorded []beads.Bead
 	removedSinceCutover := 0
 	for _, b := range rows {
 		if resolvable[b.ID] {
+			if !proven[b.ID] {
+				unrecorded = append(unrecorded, b)
+			}
 			continue
 		}
 		if proven[b.ID] {
@@ -435,15 +677,16 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		stranded = append(stranded, b)
 	}
-	sort.Slice(stranded, func(i, j int) bool { return stranded[i].ID < stranded[j].ID })
 
-	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath()) //nolint:errcheck // best-effort stdout
-	fmt.Fprintf(stdout, "source infrastructure beads: %d\nbinding beads: %d\nproven copy: %d\nremoved since cutover: %d\nstranded: %d\n",                     //nolint:errcheck // best-effort stdout
-		len(rows), len(held), len(proven), removedSinceCutover, len(stranded))
+	fmt.Fprintf(stdout, "city:     %s\nbinding:  %s\ndatabase: %s\nmanifest: %s\n", request.CityPath, target.Binding, target.Database, target.ManifestPath())             //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "source infrastructure beads: %d\nbinding beads: %d\nproven copy: %d\nremoved since cutover: %d\nstranded: %d\nin the binding, unrecorded: %d\n", //nolint:errcheck // best-effort stdout
+		len(rows), len(held), len(proven), removedSinceCutover, len(stranded), len(unrecorded))
 
 	probeID := ""
 	if len(stranded) > 0 {
 		probeID = stranded[0].ID
+	} else if len(rows) > 0 {
+		probeID = rows[0].ID
 	}
 	depReader, err := newSourceDepReader(source, probeID)
 	if err != nil {
@@ -488,26 +731,52 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	}
 
 	if opts.DumpPath != "" {
-		if err := writeStrandedDump(opts.DumpPath, depReader, stranded); err != nil {
+		if err := writeStrandedDump(opts.DumpPath, target, depReader, stranded); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintf(stdout, "dump: %s (%d bead(s) with their source dep edges)\n", opts.DumpPath, len(stranded)) //nolint:errcheck // best-effort stdout
 	}
 
+	// The topology, planned over every source bead the binding WILL hold rather
+	// than over the rows this run copies. An edge from a bead that crossed at
+	// cutover into one this run recovers is the dispatcher's normal wiring
+	// direction, and reading only the copied rows' outbound edges drops every one
+	// of them silently.
+	resident := make(map[string]bool, len(resolvable)+len(movable))
+	for id := range resolvable {
+		resident[id] = true
+	}
+	for _, b := range movable {
+		resident[b.ID] = true
+	}
+	edgesFor := func(b beads.Bead) ([]beads.Dep, bool, error) {
+		if cached, ok := wantEdges[b.ID]; ok {
+			return cached, true, nil
+		}
+		return depReader.deps(b)
+	}
+	plan, err := planInfraEdges(rows, resident, infraIDs, proven, edgesFor, destination)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	if opts.DryRun {
-		fmt.Fprintf(stdout, "dry-run: nothing was written. %d bead(s) would be copied into %s\n", len(movable), target.Database) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "dry-run: nothing was written. %d bead(s) would be copied into %s, and %d dep edge(s) restored\n", len(movable), target.Database, len(plan.missing)) //nolint:errcheck // best-effort stdout
+		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 {
 			return 1
 		}
 		return 0
 	}
 
-	if len(movable) == 0 {
-		fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record.") //nolint:errcheck // best-effort stdout
+	if len(movable) == 0 && len(unrecorded) == 0 && len(plan.missing) == 0 {
+		fmt.Fprintln(stdout, "nothing to recover: the binding already holds every infrastructure bead the retained work store has that the manifest does not record, with every within-infra edge between them.") //nolint:errcheck // best-effort stdout
+		reportInfraEdgePlan(stdout, plan)
 		reportAmbiguous(stdout, ambiguous)
-		if len(ambiguous) > 0 {
+		if len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 {
 			return 1
 		}
 		return 0
@@ -521,41 +790,29 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	copied := 0
 	for _, b := range movable {
 		if _, err := destination.Get(b.ID); err == nil {
-			// Already there — an earlier run of this command, or a writer that
-			// beat us to it. Idempotence, not a conflict.
-			resolvable[b.ID] = true
+			// Already there — a writer that beat us to it between the list and
+			// now. Idempotence, not a conflict.
 			continue
 		}
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(b)); err != nil {
-			fmt.Fprintf(stderr, "%s: copying bead %s into %s: %v\n", logPrefix, b.ID, target.Database, err)                                                                                                                                           //nolint:errcheck // best-effort stderr
-			fmt.Fprintf(stderr, "%s: %d bead(s) were copied before this failed. Nothing was deleted and the manifest was not extended, so the remainder is still stranded, still named by the next check, and a re-run resumes\n", logPrefix, copied) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: copying bead %s into %s: %v\n", logPrefix, b.ID, target.Database, err)                                                                                                                                                                       //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: %d bead(s) were copied before this failed. Nothing was deleted and the manifest was not extended; the rows already copied are recorded by the NEXT run rather than by this one, which is what makes a re-run a resume\n", logPrefix, copied) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		resolvable[b.ID] = true
 		copied++
 	}
 
 	// Dep edges, after every row exists, so an edge's far endpoint can be
-	// resolved. Only edges whose far endpoint the destination actually owns are
-	// written: a dep row referencing an id this store cannot resolve is a
-	// dangling edge, which is the one thing the migration's own import refuses
-	// to create.
-	edges := 0
-	skippedEdges := 0
-	for _, b := range movable {
-		for _, d := range wantEdges[b.ID] {
-			if !resolvable[d.DependsOnID] {
-				skippedEdges++
-				continue
-			}
-			if err := destination.DepAdd(b.ID, d.DependsOnID, d.Type); err != nil {
-				fmt.Fprintf(stderr, "%s: copying dep %s -> %s: %v\n", logPrefix, b.ID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			edges++
+	// resolved. Only edges the binding lacks are written: the pass is a diff, so
+	// re-running it on a converged city writes nothing and says so.
+	for _, d := range plan.missing {
+		if err := destination.DepAdd(d.IssueID, d.DependsOnID, d.Type); err != nil {
+			fmt.Fprintf(stderr, "%s: restoring dep %s -> %s: %v\n", logPrefix, d.IssueID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "copied: %d bead(s), %d dep edge(s) (%d cross-boundary edge(s) left as metadata linkage)\n", copied, edges, skippedEdges) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "copied: %d bead(s)\nedges: %d restored, %d already in the binding, %d cross-boundary edge(s) into work left as metadata linkage, %d into a bead the binding's own GC collected\n", //nolint:errcheck // best-effort stdout
+		copied, len(plan.missing), plan.held, plan.crossBoundary, plan.collected)
 
 	// Proven against durable bytes, not against the handle that wrote them:
 	// closed and reopened, exactly as verifyInfraCopy insists.
@@ -580,31 +837,105 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	for _, b := range after {
 		witnessed[b.ID] = true
 	}
-	for _, want := range movable {
-		got, err := verifier.Get(want.ID)
+	moved := make(map[string]bool, len(movable))
+	for _, b := range movable {
+		moved[b.ID] = true
+	}
+
+	// The equality stage, over every resident bead rather than over the copy, and
+	// against a SECOND source read rather than against the one the plan was built
+	// from. The first cut compared the destination to the same in-memory edge
+	// list it had written from, so whatever that read lost, the proof lost too —
+	// a dep proof that cannot fail. verifyInfraCopy re-reads source.DepList
+	// independently and this stage now holds itself to the same standard.
+	//
+	// Fields are compared for the rows this run created and NOT for the rows that
+	// were already resident: a bead the binding has been serving legitimately
+	// diverges from the source copy it was made from, and demanding equality
+	// there would refuse every healthy city. Edges are compared one-directionally
+	// for those same rows, for the same reason — the binding may hold edges the
+	// source never had — while a row this run created is held to both directions,
+	// because anything extra on it would be fabricated.
+	for _, b := range rows {
+		if !resident[b.ID] {
+			continue
+		}
+		got, err := verifier.Get(b.ID)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: bead %s missing from the reopened binding: %v. The manifest was NOT extended, so this bead is still named as stranded\n", logPrefix, want.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: bead %s missing from the reopened binding: %v. The manifest was NOT extended, so this bead is still named as stranded\n", logPrefix, b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if diff := beadCopyDifference(want, got); diff != "" {
-			fmt.Fprintf(stderr, "%s: bead %s differs after the copy: %s. The manifest was NOT extended\n", logPrefix, want.ID, diff) //nolint:errcheck // best-effort stderr
-			return 1
+		if moved[b.ID] {
+			if diff := beadCopyDifference(b, got); diff != "" {
+				fmt.Fprintf(stderr, "%s: bead %s differs after the copy: %s. The manifest was NOT extended\n", logPrefix, b.ID, diff) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if diff := infraCopyClassDifference(b, got); diff != "" {
+				fmt.Fprintf(stderr, "%s: bead %s %s. The manifest was NOT extended\n", logPrefix, b.ID, diff) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
-		if diff := infraCopyClassDifference(want, got); diff != "" {
-			fmt.Fprintf(stderr, "%s: bead %s %s. The manifest was NOT extended\n", logPrefix, want.ID, diff) //nolint:errcheck // best-effort stderr
-			return 1
+		wantDeps, depsOK, _ := depReader.deps(b)
+		if !depsOK {
+			// The plan already named this bead as unstatable and the exit code
+			// below carries it. The rows this run copied still stand: an edge
+			// nobody can read is a topology this stage cannot prove, not a copy
+			// it can disprove.
+			continue
 		}
-		gotDeps, err := verifier.DepList(want.ID, "down")
+		gotDeps, err := verifier.DepList(b.ID, "down")
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: listing copied deps of %s: %v\n", logPrefix, want.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: listing copied deps of %s: %v\n", logPrefix, b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if diff := infraDepDifference(want.ID, wantEdges[want.ID], gotDeps, witnessed); diff != "" {
-			fmt.Fprintf(stderr, "%s: %s. The manifest was NOT extended\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
+		for _, d := range wantDeps {
+			if !resident[d.DependsOnID] || infraDepEdgeHeld(d, gotDeps) {
+				continue
+			}
+			fmt.Fprintf(stderr, "%s: dep %s -> %s is in the work store and missing from the binding after the restore. The manifest was NOT extended\n", logPrefix, b.ID, d.DependsOnID) //nolint:errcheck // best-effort stderr
 			return 1
+		}
+		if moved[b.ID] {
+			if diff := infraDepDifference(b.ID, wantDeps, gotDeps, witnessed); diff != "" {
+				fmt.Fprintf(stderr, "%s: %s. The manifest was NOT extended\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
-	fmt.Fprintf(stdout, "verified: %d bead(s) re-read field-, class- and dep-equal from the closed and reopened %s\n", len(movable), target.Database) //nolint:errcheck // best-effort stdout
+
+	// The residue an interrupted predecessor left, proven by the same
+	// comparators the moved rows face before it is recorded. The manifest's
+	// meaning is "the copy was proven to deliver this id", so a binding row that
+	// is not the source's row is named and left unrecorded rather than folded in
+	// under a proof nobody made.
+	var recovered []string
+	var unprovable []string
+	for _, b := range unrecorded {
+		got, err := verifier.Get(b.ID)
+		if err != nil {
+			unprovable = append(unprovable, fmt.Sprintf("%s (the reopened binding cannot read it: %v)", b.ID, err))
+			continue
+		}
+		if diff := beadCopyDifference(b, got); diff != "" {
+			unprovable = append(unprovable, fmt.Sprintf("%s (%s)", b.ID, diff))
+			continue
+		}
+		if diff := infraCopyClassDifference(b, got); diff != "" {
+			unprovable = append(unprovable, fmt.Sprintf("%s (%s)", b.ID, diff))
+			continue
+		}
+		recovered = append(recovered, b.ID)
+	}
+	for _, b := range movable {
+		recovered = append(recovered, b.ID)
+	}
+	fmt.Fprintf(stdout, "verified: %d bead(s) re-read field-, class- and dep-equal from the closed and reopened %s\n", len(recovered), target.Database) //nolint:errcheck // best-effort stdout
+	if len(unprovable) > 0 {
+		fmt.Fprintf(stdout, "NOT RECORDED: %d bead(s) the binding holds under a source id whose row this repair cannot prove is the source's; the manifest does not claim them:\n", len(unprovable)) //nolint:errcheck // best-effort stdout
+		for _, entry := range unprovable {
+			fmt.Fprintf(stdout, "  %s\n", entry) //nolint:errcheck // best-effort stdout
+		}
+	}
 
 	// Only now the manifest, and only as a SUPERSET: the previous proven set is
 	// history the next boot still needs to classify absence against. An id
@@ -616,16 +947,19 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	extended := make([]string, 0, len(proven)+len(movable))
+	extended := make([]string, 0, len(proven)+len(recovered))
 	for id := range proven {
 		extended = append(extended, id)
 	}
-	for _, b := range movable {
-		if !proven[b.ID] {
-			extended = append(extended, b.ID)
+	for _, id := range recovered {
+		if !proven[id] {
+			extended = append(extended, id)
 		}
 	}
 	sort.Strings(extended)
+	// The superset check is sound because proven was read UNDER the guard, a few
+	// hundred lines up: these are the bytes on disk, not a snapshot that could
+	// have moved on while this run was dialing a socket.
 	if dropped := manifestIDsDropped(proven, extended); len(dropped) > 0 {
 		fmt.Fprintf(stderr, "%s: the extended manifest would drop %d id(s) the previous one recorded (%s). It is written as a superset or not at all; nothing was written and the previous manifest at %s still stands\n", //nolint:errcheck // best-effort stderr
 			logPrefix, len(dropped), strings.Join(dropped, ", "), target.ManifestPath())
@@ -647,11 +981,53 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if len(residual.Stranded) > 0 {
 		fmt.Fprintf(stdout, "residual ids: %s\n", strings.Join(residual.Stranded, ", ")) //nolint:errcheck // best-effort stdout
 	}
+	reportInfraEdgePlan(stdout, plan)
 	reportAmbiguous(stdout, ambiguous)
-	if len(residual.Stranded) > 0 || len(ambiguous) > 0 {
+	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// reportUnresolvedInfraBinding explains a city whose infrastructure classes do
+// not resolve to a binding this build can repair into.
+//
+// Two very different cities reach it, and one refusal cannot be true of both. A
+// legacy single-store city really has nothing stranded: every class is served by
+// the work store and no bead is anywhere the readers cannot see. A BORN-SPLIT
+// city has the whole split, served by a provider this build carries no migration
+// discipline for — and the infrastructure beads sitting in its work store are
+// exactly what the boot guard refuses over and what `gc storage status` prints
+// as `born-split: BLOCKED`. Telling that operator "nothing here is stranded"
+// contradicted two other surfaces of the same binary about the same bead id,
+// during an incident, one step from the born-split advice's own second clause:
+// "then delete them from the work store".
+//
+// So the born-split arm defers to the authority that CAN answer, and reports the
+// same discipline doStorageStatus reports rather than asserting a fact about
+// data this verb never read.
+func reportUnresolvedInfraBinding(request storageOperatorRequest, logPrefix string, stdout, stderr io.Writer) {
+	storage := request.Cfg.EffectiveStorage()
+	if shape, binding := storageSplitShapeOf(storage); shape == storageSplitWhole {
+		provider := storage.Bindings[binding].Provider
+		fmt.Fprintf(stderr, "%s: binding %q is served by provider %q, which this build carries no repair for — the one it carries serves only a binding backed by its own bead engine. This city serves under the born-split discipline instead, and this command cannot state anything about it.\n", //nolint:errcheck // best-effort stderr
+			logPrefix, binding, provider)
+		report := checkBornSplitDiscipline(request.CityPath, logPrefix, stderr)
+		switch report.Outcome {
+		case infraMigrationConverged:
+			fmt.Fprintf(stdout, "born-split: clean — the work store holds no infrastructure bead, so nothing here is stranded and the binding may serve.\n") //nolint:errcheck // best-effort stdout
+		case infraMigrationBornSplitBlocked:
+			report.Target = infraBindingTarget{Binding: binding}
+			fmt.Fprintf(stdout, "born-split: BLOCKED — the work store holds %d infrastructure bead(s) the binding cannot read: %s\n", //nolint:errcheck // best-effort stdout
+				len(report.Stranded), strings.Join(report.Stranded, ", "))
+			fmt.Fprintln(stderr, infraMigrationOperatorAdvice(report, logPrefix)) //nolint:errcheck // best-effort stderr
+		default:
+			fmt.Fprintf(stdout, "born-split: could not be verified (%s); reason on stderr\n", report.Outcome) //nolint:errcheck // best-effort stdout
+		}
+		return
+	}
+	fmt.Fprintf(stderr, "%s: this city's [storage.classes] do not assign %s to one shared non-work binding this build can serve, so there is no binding to recover into and nothing here is stranded. %s\n", //nolint:errcheck // best-effort stderr
+		logPrefix, infraMigrationClassList(), storageSupportedTopologyStatement)
 }
 
 // manifestIDsDropped returns the sorted ids the previous proven set recorded
@@ -687,6 +1063,32 @@ func reportAmbiguous(stdout io.Writer, ambiguous []string) {
 	}
 }
 
+// infraPathInside reports whether path resolves inside root.
+//
+// Both sides are made absolute and lexically cleaned before they are compared,
+// so a relative spelling, a trailing slash or a `..` cannot walk past the check.
+// The path itself need not exist — that is the point, since the refusal has to
+// fire BEFORE anything is created there.
+func infraPathInside(root, path string) (bool, error) {
+	if root == "" {
+		return false, nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		// Different volumes on Windows; nothing under the root by construction.
+		return false, nil //nolint:nilerr // an unrelatable path is not inside the root
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
+}
+
 // setOf renders an id slice as the membership map the containment classifier
 // takes.
 func setOf(ids []string) map[string]bool {
@@ -700,7 +1102,28 @@ func setOf(ids []string) map[string]bool {
 // writeStrandedDump records every stranded bead and its source dep edges before
 // anything is written, so the input to the repair is reproducible from a file
 // rather than from a store that has since changed.
-func writeStrandedDump(path string, depReader *sourceDepReader, stranded []beads.Bead) error {
+//
+// It refuses two paths rather than truncating them, because this is the one
+// write in this file an operator TYPES, and it happens before the dry-run branch
+// and long before any backup exists:
+//
+//   - anything inside the binding root. The three completions available there
+//     are the manifest, the marker and the database directory, so every
+//     completion in the directory an operator is investigating is fatal: the
+//     manifest's loss turns stranded-write detection off for the life of the
+//     city, whose only documented remedy is a re-converge this file measures as
+//     a 51,127 -> 1,452 loss.
+//   - anything that already exists. A dump is a new artifact; an existing path
+//     is a typo rather than an instruction, and `--dry-run` — the first thing a
+//     cautious operator reaches for, and the one mode that requires no
+//     attestation — would otherwise print "nothing was written" over a file it
+//     had just emptied.
+func writeStrandedDump(path string, target infraBindingTarget, depReader *sourceDepReader, stranded []beads.Bead) error {
+	if inside, err := infraPathInside(target.Root, path); err != nil {
+		return fmt.Errorf("resolving the stranded-bead dump path %s: %w", path, err)
+	} else if inside {
+		return fmt.Errorf("refusing to write the stranded-bead dump to %s: it is inside the binding root %s, which holds the proven-copy manifest, the convergence marker and the database this repair reads. Write the dump somewhere else", path, target.Root)
+	}
 	entries := make([]strandedBeadDump, 0, len(stranded))
 	for _, b := range stranded {
 		entry := strandedBeadDump{Bead: b, Class: coordclass.Classify(b).String(), DepSource: "relations"}
@@ -715,8 +1138,11 @@ func writeStrandedDump(path string, depReader *sourceDepReader, stranded []beads
 		entry.Deps = deps
 		entries = append(entries, entry)
 	}
-	file, err := os.Create(path)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("refusing to write the stranded-bead dump to %s: it already exists, and a dump is written to a fresh path so a mistyped one cannot truncate the file it names", path)
+		}
 		return fmt.Errorf("writing the stranded-bead dump: %w", err)
 	}
 	writer := bufio.NewWriter(file)

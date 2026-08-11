@@ -769,9 +769,27 @@ func TestStorageRecoveryCommandNamesTheVerbTheTreeCarries(t *testing.T) {
 	if !strings.Contains(instruction, "--"+storageFleetStoppedFlag) {
 		t.Errorf("the operator instruction %q omits the attestation the repair requires, so it fails at the shell", instruction)
 	}
-	// The diagnostics prefix is the same spelling without its source flag.
-	if want := "gc " + surface.Namespace + " " + surface.Verb; !strings.HasPrefix(storageRecoveryCommand, want+" ") {
+	// The diagnostics prefix is the same spelling without its source flag, and
+	// it is the one the command really prints rather than a second spelling
+	// written out beside it. The comment on the old constant claimed this test
+	// pinned it; no test could see it, so a rename of the verb would have left
+	// every diagnostic in the file naming a command the binary no longer had —
+	// which is the exact defect this command exists to close.
+	want := "gc " + surface.Namespace + " " + surface.Verb
+	if !strings.HasPrefix(storageRecoveryCommand, want+" ") {
 		t.Errorf("the diagnostics prefix %q is not the head of %q", want, storageRecoveryCommand)
+	}
+	if got := storageRecoveryLogPrefix(); got != want {
+		t.Errorf("the prefix the command prints is %q, want %q", got, want)
+	}
+	// And it is really what reaches an operator: the refusal below is the
+	// cheapest one to provoke, so this is the derivation end to end.
+	var stdout, stderr bytes.Buffer
+	if code := doStorageRecoverStranded(context.Background(), storageOperatorRequest{CityPath: t.TempDir(), Cfg: &config.City{}, FleetStopped: true}, strandedRecoveryOptions{}, &stdout, &stderr); code == 0 {
+		t.Fatal("the repair claimed success on a city with no infrastructure binding")
+	}
+	if !strings.HasPrefix(stderr.String(), want+":") {
+		t.Errorf("the refusal does not lead with the spelling the tree is built from: %q", stderr.String())
 	}
 }
 
