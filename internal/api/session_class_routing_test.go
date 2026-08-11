@@ -4,8 +4,10 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -86,16 +88,22 @@ func TestBeadListAssigneeTermsReadsSessionsClass(t *testing.T) {
 // This one is a WRITE path as well as a read: its materialize arm creates a
 // session bead. Routed at the work store on a converged city that create is a
 // stranded infrastructure bead the sessions binding never sees.
+//
+// The assignee is the CONFIGURED NAMED SESSION, not a live bead ID: that is the
+// only input that reaches the create. A bead-ID assignee resolves on the first,
+// non-materializing pass, so the materialize arm — the sole arm that Creates —
+// never runs and the work-store assertion below cannot discriminate.
 func TestNormalizeRawBeadAssigneeReadsSessionsClass(t *testing.T) {
-	fs, info := splitSessionState(t)
+	fs, _ := splitSessionState(t)
 	srv := New(fs)
 
-	got, err := srv.normalizeRawBeadAssignee(context.Background(), info.ID)
+	const named = "myrig/worker"
+	got, err := srv.normalizeRawBeadAssignee(context.Background(), named)
 	if err != nil {
 		t.Fatalf("normalizeRawBeadAssignee: %v", err)
 	}
 	if got == "" {
-		t.Fatal("normalizeRawBeadAssignee returned empty; the session bead was not found")
+		t.Fatal("normalizeRawBeadAssignee returned empty; the named session was not resolved")
 	}
 
 	// Nothing may have been minted in the work store on the way.
@@ -104,7 +112,14 @@ func TestNormalizeRawBeadAssigneeReadsSessionsClass(t *testing.T) {
 		t.Fatalf("list work store: %v", err)
 	}
 	if len(work) != 0 {
-		t.Fatalf("work store holds %d bead(s) after an assignee normalize; session-class writes must not land there: %v", len(work), work)
+		t.Fatalf("STRANDED WRITE: work store holds %d bead(s) after an assignee normalize; session-class writes must not land there: %v", len(work), work)
+	}
+
+	// And the materialized bead is in the sessions binding. This also proves the
+	// create actually fired, so the assertion above is not passing for the
+	// trivial reason that nothing was written at all.
+	if _, err := session.ResolveSessionID(fs.sessionsBeadStore, named); err != nil {
+		t.Fatalf("named session was not materialized into the SESSIONS store: %v", err)
 	}
 }
 
@@ -114,6 +129,15 @@ func TestNormalizeRawBeadAssigneeReadsSessionsClass(t *testing.T) {
 func TestExtmsgSessionSelectorsReadSessionsClass(t *testing.T) {
 	fs, info := splitSessionState(t)
 	srv := New(fs)
+
+	// The handle source is stamped on the RELOCATED bead only, so the returned
+	// value names which store answered. Asserting non-empty cannot: on a miss
+	// extmsgSessionHandleForSelector falls back to extmsgHandleLabel(selector),
+	// which is non-empty for every non-empty selector.
+	const wantHandle = "relocated-alias"
+	if err := fs.sessionsBeadStore.SetMetadata(info.ID, "alias", wantHandle); err != nil {
+		t.Fatalf("stamp alias: %v", err)
+	}
 
 	resolve := srv.extmsgResolveSessionSelector()
 	if resolve == nil {
@@ -127,8 +151,62 @@ func TestExtmsgSessionSelectorsReadSessionsClass(t *testing.T) {
 		t.Fatalf("resolved selector = %q, want %q", id, info.ID)
 	}
 
-	if handle := srv.extmsgSessionHandleForSelector(info.ID); handle == "" {
-		t.Fatal("extmsgSessionHandleForSelector returned empty for a relocated session")
+	if handle := srv.extmsgSessionHandleForSelector(info.ID); handle != wantHandle {
+		t.Fatalf("extmsgSessionHandleForSelector = %q, want %q (the fallback label %q means the store that answered never held the bead)",
+			handle, wantHandle, extmsgHandleLabel(info.ID))
+	}
+}
+
+// TestExtmsgNotifyMembersMaterializesIntoSessionsClass covers the extmsg member
+// fan-out, the PR's #1 write site.
+//
+// A member that names a configured session with no live bead is materialized on
+// first receive: resolveSessionIDMaterializingNamedWithContext ->
+// materializeNamedSessionWithContext -> handle.Create. Through the work store on
+// a converged split city every cold-wake mints a `type=session` bead there — the
+// sessions binding never sees it and the boot containment re-check names it.
+//
+// The work store is not asserted empty here: the extmsg services are backed by
+// it in this fixture, so their own conversation beads live there legitimately.
+// The discriminating assertion is which store the SESSION bead landed in.
+func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.sessionsBeadStore = beads.NewMemStore()
+
+	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         caller,
+		Conversation:   ref,
+		SessionID:      "myrig/worker",
+		BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		Owner:          extmsg.MembershipOwnerManual,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(peer): %v", err)
+	}
+
+	// Nothing is excluded, so the fan-out must materialize the named member.
+	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hello peers", "", "")
+	srv.waitForBackground()
+
+	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+		t.Fatalf("STRANDED WRITE: session bead %q minted in the WORK store; session-class creates must land in the sessions binding", id)
+	}
+	if _, err := session.ResolveSessionID(fs.sessionsBeadStore, "myrig/worker"); err != nil {
+		t.Fatalf("named member was not materialized into the SESSIONS store: %v", err)
 	}
 }
 
