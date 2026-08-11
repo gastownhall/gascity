@@ -226,7 +226,10 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	if sink == nil || sink == usage.Discard {
 		return
 	}
-	store := cr.cityBeadStore()
+	// Every bead this lane touches is a session bead (Get by session id,
+	// SetMetadata of the usage markers), so it reads the sessions class, not the
+	// work store. Identity to the work store on a city that relocates nothing.
+	store := cr.sessionsBeadStore().Store
 	if store == nil {
 		return
 	}

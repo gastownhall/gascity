@@ -53,7 +53,11 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	store := s.state.CityBeadStore()
+	// The ?assignee filter is applied to WORK beads, but the identifier it takes
+	// is resolved against SESSION beads, and the identity expansion below reads
+	// one — so this store is the sessions class even though the caller is a work
+	// query. Identity to the work store on a city that relocates nothing.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return []string{assignee}
 	}
@@ -96,7 +100,12 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the materialize arm below CREATES a
+	// session bead when the named session has no canonical one, and the
+	// RepairTypeBestEffort heal writes to it. Through the work store on a
+	// relocated city that create is a stranded infrastructure bead — the class
+	// binding never sees it and the boot containment re-check names it.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return assignee, nil
 	}
