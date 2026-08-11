@@ -258,15 +258,24 @@ func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
 	initialInterval, maxElapsedTime time.Duration,
 ) ([]DoltProcInfo, error) {
 	var leaked []DoltProcInfo
+	var finalScanErr error
 
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = initialInterval
 	bo.MaxElapsedTime = maxElapsedTime
 
-	err := backoff.Retry(func() error {
-		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
-		if finalErr != nil {
-			return backoff.Permanent(finalErr)
+	// backoff.Retry (v4.3.0) already unwraps a *backoff.PermanentError it
+	// returns internally and hands back the inner error directly, so
+	// type-asserting on Retry's own return value can never see a
+	// *backoff.PermanentError. Capture the scan error directly via this
+	// closure variable instead, mirroring leaked above: set at the same
+	// point backoff.Permanent(finalErr) is returned, read after Retry
+	// returns.
+	_ = backoff.Retry(func() error {
+		final, err := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
+		if err != nil {
+			finalScanErr = err
+			return backoff.Permanent(err)
 		}
 		leaked = diffDoltProcessSnapshots(initial, final)
 		if len(leaked) == 0 {
@@ -274,16 +283,13 @@ func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
 		}
 		return fmt.Errorf("%d dolt sql-server process(es) still present", len(leaked))
 	}, bo)
-	if err != nil {
-		var permErr *backoff.PermanentError
-		if errors.As(err, &permErr) {
-			return nil, permErr.Err
-		}
-		// Retries exhausted with a non-empty diff on the last poll: leaked
-		// already holds that observation, and the sentinel error above
-		// carries no information beyond "still non-empty" — fall through
-		// and report leaked, exactly like the old single-scan path did.
+	if finalScanErr != nil {
+		return nil, finalScanErr
 	}
+	// Retries exhausted with a non-empty diff on the last poll falls
+	// through here too: leaked already holds that observation, and the
+	// sentinel error returned by Retry in that case carries no
+	// information beyond "still non-empty".
 	return leaked, nil
 }
 

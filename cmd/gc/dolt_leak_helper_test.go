@@ -689,6 +689,65 @@ func TestDoltLeakGuardedTestingMToleratesLeakClearingWithinGraceWindow(t *testin
 	}
 }
 
+// waitForFinalScanToClear must surface a persistent final-scan enumeration
+// failure as its own error rather than dropping it. backoff.Retry (v4.3.0)
+// already unwraps the *backoff.PermanentError it returns internally and
+// hands back the inner error directly, so a later
+// errors.As(err, &permErr) against Retry's return value can never match --
+// ga-7r2h5i found this let a real enumeration failure fall through and get
+// reported as a clean run.
+func TestDoltLeakGuardedTestingMWaitForFinalScanToClearReturnsEnumerationError(t *testing.T) {
+	g := newDoltLeakGuardedTestingM(nil, t.TempDir())
+	scanErr := errors.New("reading /proc: permission denied")
+	enumerate := func() ([]DoltProcInfo, error) { return nil, scanErr }
+
+	leaked, err := g.waitForFinalScanToClear(enumerate, map[int]DoltProcInfo{}, time.Millisecond, 5*time.Millisecond)
+
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("waitForFinalScanToClear err = %v, want it to be the enumeration failure %v", err, scanErr)
+	}
+	if leaked != nil {
+		t.Fatalf("leaked = %#v, want nil alongside a scan error", leaked)
+	}
+}
+
+// Same failure, exercised through runWith: a final-scan enumeration error
+// must fail the guard (code 1) and must not reap anything, since an
+// enumeration failure carries no process list to act on. Pre-fix, this
+// returned code 0 -- the swallowed error read as "no leak found".
+func TestDoltLeakGuardedTestingMRunWithFailsOnFinalScanError(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct-current")
+	scanErr := errors.New("reading /proc: permission denied")
+	var scan int
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil // initial scan succeeds
+		}
+		return nil, scanErr // every final-scan poll fails
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	var reapedLeaks []DoltProcInfo
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() {},
+		func() {},
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+		time.Millisecond,
+		5*time.Millisecond,
+	)
+
+	if code != 1 {
+		t.Fatalf("guard returned code %d, want 1: a final-scan enumeration failure must fail the run, not be swallowed as a clean result", code)
+	}
+	if len(reapedLeaks) != 0 {
+		t.Fatalf("reaped leaks = %#v, want none: an enumeration failure carries no process list to reap", reapedLeaks)
+	}
+}
+
 // A dolt sql-server rooted in the source checkout rather than under the run's
 // temp root is the leak shape the guard used to miss entirely: cmd/gc's own
 // package dir is structurally outside tempRoot, so PathWithin(tempRoot, cfg)
