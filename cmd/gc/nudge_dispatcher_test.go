@@ -425,6 +425,35 @@ func TestDispatchAllQueuedNudgesRecordsSkipReasons(t *testing.T) {
 	if got := state.DispatchSkips["not-running"]; got != 1 {
 		t.Fatalf("DispatchSkips[not-running] = %d, want 1 (full map: %#v)", got, state.DispatchSkips)
 	}
+
+	// The routine skip: a fresh city whose queue holds a pending item for one
+	// agent while the only open session belongs to another. The loop reaches
+	// the target but nothing in the queue names it, so it falls through the
+	// matched check. A separate city dir keeps the cumulative counters above
+	// from bleeding into this assertion.
+	otherDir := t.TempDir()
+	if err := enqueueQueuedNudge(otherDir, newQueuedNudge("other-worker", "msg", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	var unmatchedOut strings.Builder
+	delivered, err = dispatchAllQueuedNudges(otherDir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, &unmatchedOut)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges (not-matched): %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0", delivered)
+	}
+	if !strings.Contains(unmatchedOut.String(), "route=skip reason=not-matched") {
+		t.Fatalf("debug output missing not-matched skip line, got: %q", unmatchedOut.String())
+	}
+
+	otherState, err := nudgequeue.LoadState(otherDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := otherState.DispatchSkips["not-matched"]; got != 1 {
+		t.Fatalf("DispatchSkips[not-matched] = %d, want 1 (full map: %#v)", got, otherState.DispatchSkips)
+	}
 }
 
 func TestNudgeDispatcherIsSupervisor(t *testing.T) {

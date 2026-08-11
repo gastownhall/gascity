@@ -179,7 +179,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
-			logNudgeDispatchSkip(debugOut, "no-target", info.ID, info.AgentName, "")
+			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
