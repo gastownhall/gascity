@@ -24,6 +24,15 @@ import (
 // target, so that arm refuses. The two outcomes sit next to each other below on
 // purpose — the resolver is the same, the expressibility is not.
 //
+// The OTHER residence — an attach bead in the work ledger — is refused by both
+// arms, and its tests live in formula_cook_attach_class_test.go
+// (TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity and its v1
+// twin). That refusal replaced this file's
+// TestFormulaCookAttachOnAWorkResidentBeadIsUnchanged, which pinned the shape
+// as served: a graft is graph class whatever the formula's version, so serving
+// it beside a work-resident attach bead minted graph-class rows in the work
+// ledger, which is a stranded write (ga-99xhy).
+//
 // Its siblings live in oneshot_class_routes_test.go, which covers the BIRTH
 // half — where a newly minted bead lands. The distinction matters: a birth is
 // routed by the CLASS of what is being created, a by-id operation by where the
@@ -198,8 +207,8 @@ func TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused(t *testing.T) {
 	}
 }
 
-// TestFormulaCookAttachEmitsTheWorkAssociationOnASplitCity is the COMMAND-level
-// statement that the cook's execution-fact legs are not merely equal but right.
+// TestFormulaCookAttachEmitsTheWorkAssociation is the COMMAND-level statement
+// that the cook's execution-fact legs are not merely equal but right.
 //
 // executionevent.ProjectCurrent reads the root and its steps from the graph leg
 // and the input convoy's `tracks` edges from the work leg, and a work leg that
@@ -207,10 +216,27 @@ func TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused(t *testing.T) {
 // mis-assigned leg loses the run's link to the work it was grafted onto with no
 // error, no warning and exit 0. That failure is invisible to a residence
 // assertion, so it is asserted here on the fact the projection exists to
-// produce, through the real cobra command, on the split topology where the two
-// legs could diverge.
-func TestFormulaCookAttachEmitsTheWorkAssociationOnASplitCity(t *testing.T) {
-	work, _, cityPath := cookCityWithSplitGraphAt(t)
+// produce, through the real cobra command.
+//
+// It used to run on the SPLIT topology, where the two legs can actually
+// diverge. That row is gone because the shape is: the only cook that mints an
+// input convoy is a graph.v2 --attach, and on a split city BOTH of its
+// residences now refuse — a binding-owned attach bead because the convoy has
+// nowhere to live (#5163,
+// TestFormulaCookGraphV2AttachOnAClassResidentBeadIsRefused) and a work-resident
+// one because the sub-DAG would be a stranded write (ga-99xhy,
+// TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity). So the
+// divergence is unreachable through this command rather than unasserted, and
+// the leg ASSIGNMENT keeps its own guard at
+// TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg. When ga-2orlf
+// lifts either refusal, this test moves back onto the split fixture with it.
+func TestFormulaCookAttachEmitsTheWorkAssociation(t *testing.T) {
+	cityPath := oneShotCookCity(t)
+	seedCLIStorageRoutes(t, cityPath, nil)
+	work, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
 
 	source, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
 	if err != nil {
@@ -275,54 +301,18 @@ func TestFormulaCookLegacyAttachGraftsOntoAClassResidentBeadInOneStore(t *testin
 	}
 }
 
-// TestFormulaCookAttachOnAWorkResidentBeadIsUnchanged pins the DEFERRED half,
-// so it cannot close or widen without a test moving.
-//
-// When the attach bead lives in the work ledger, the graft stays there with it —
-// including the sub-DAG, whose beads are graph class. Relocating them would put
-// the two ends of the `blocks` edge in different stores, which no backend
-// rejects and every Ready implementation reads as a blocker that never clears
-// (#5150 reproduced it as "attach bead gc-1 is not Ready after the whole
-// workflow closed"). Closing this gap needs the block REPRESENTED across the
-// store boundary, which no mechanism provides today.
-//
-// If a cross-boundary representation ever lands, this test flips: the root moves
-// to the binding, the work store keeps only a resolvable edge, and the deferral
-// paragraph on attachStore in cmd_formula.go goes with it.
-func TestFormulaCookAttachOnAWorkResidentBeadIsUnchanged(t *testing.T) {
-	work, graph := cookCityWithSplitGraph(t)
-
-	source, err := work.Create(beads.Bead{Title: "attach target", Type: "task"})
-	if err != nil {
-		t.Fatalf("create attach bead: %v", err)
-	}
-
-	res := cookFormula(t, "graph-work", "--attach", source.ID)
-
-	if _, err := work.Get(res.RootID); err != nil {
-		t.Fatalf("sub-DAG root %s left the work ledger its attach bead lives in: %v — that is the split edge, not the fix", res.RootID, err)
-	}
-	if _, err := graph.Get(res.RootID); err == nil {
-		t.Errorf("sub-DAG root %s landed in the binding while its attach bead stayed in the work ledger; the `blocks` row then names an id the work store cannot resolve", res.RootID)
-	}
-	deps, err := work.DepList(source.ID, "down")
-	if err != nil {
-		t.Fatalf("listing attach deps: %v", err)
-	}
-	if len(deps) == 0 {
-		t.Fatalf("attach bead %s has no blocking dep after cook", source.ID)
-	}
-	for _, dep := range deps {
-		if _, err := work.Get(dep.DependsOnID); err != nil {
-			t.Errorf("work store holds dep %s -> %s (%s) whose target it cannot resolve: %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
-		}
-	}
-}
-
 // TestFormulaCookAttachStaysOnTheOneStoreOnASingleStoreCity is the single-store
 // compatibility row for the whole attach change: a city that relocates nothing
 // gets the exact store its scope resolved, so both arms behave as they always
-// did.
+// did — and, since ga-99xhy, are not refused by the split-city class gate.
+//
+// Green before and after by design. Its teeth were proven by mutation: dropping
+// attachGraftClassRefusal's unrelocated early return fails this test, and
+// TestFormulaCookAttachEmitsTheWorkAssociation and
+// TestFormulaCookAttachIsIdempotent/single-store with it, on
+//
+//	gc formula cook graph-work: --attach gc-1: gc-1 is work class and lives in
+//	a WORK store rather than in the graph binding ...
 func TestFormulaCookAttachStaysOnTheOneStoreOnASingleStoreCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
 	resetCLIStorageRoutes(t)

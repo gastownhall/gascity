@@ -629,14 +629,33 @@ per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
 
-On a city that serves a coordination class from its own [storage] binding,
---attach follows the ATTACH BEAD: the sub-DAG and the blocking dependency
-are written to the store that holds it, so the two ends of the edge stay in
-one store. A v2 (graph.v2) formula is the exception and is refused for an
-attach bead the binding owns: it normalizes its target into a synthetic
-input convoy, which is a work bead that can live neither in the binding nor
-in the work ledger, whose membership edge to the target would be
-cross-class. Attach a v1 formula to that bead instead.`,
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
@@ -669,7 +688,12 @@ cross-class. Attach a v1 formula to that bead instead.`,
 			//
 			// The --attach arms do not use this: a graft follows its PARENT,
 			// not its class, so they route by the attach bead's id instead —
-			// see attachStore below.
+			// see attachStore below. Following the parent is only sound when
+			// the parent's store may hold graph-class beads, which in a split
+			// city's CITY scope means the binding; attachGraftClassRefusal is
+			// the gate that keeps the two rules from contradicting each other,
+			// and it asks the scope question first because a rig store holds
+			// its own graph-class beads and the relocation never moves it.
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
@@ -695,20 +719,24 @@ cross-class. Attach a v1 formula to that bead instead.`,
 				// The arm that can serve it is the V1 one. The graph.v2 arm
 				// cannot, and refuses — see the block on isGraphFormula below.
 				//
-				// STILL DEFERRED, and it is the other half of the v1 arm: on a
-				// split city whose attach bead lives in the WORK ledger, the
-				// sub-DAG is graph class and stays in the work ledger with it.
-				// Relocating it needs the block REPRESENTED across the store
-				// boundary — a mechanism that does not exist, in beads or here,
-				// and whose absence is why the edge must stay co-resident
-				// rather than be split. See the ga-k8pzw notes.
-				//
 				// Every city that relocates nothing, and every split city whose
 				// attach bead is work resident, gets back the exact store value
 				// resolveFormulaScope opened, so attachStore != store is
 				// precisely "the class binding holds this bead".
 				attachStore, err := classRoutedStoreForID(cityPath, attach, store)
 				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				// The other half of co-residence, and it applies to BOTH arms:
+				// keeping the graft beside a WORK-resident attach bead keeps the
+				// edge resolvable and mints graph-class beads in the work
+				// ledger, which is a stranded write. Neither placement is
+				// expressible on a split city, so the graft is refused before
+				// either arm runs — see formula_cook_attach_class.go, ga-99xhy.
+				// The scope root travels with the store because relocation is a
+				// CITY-scope property: a rig store is never relocated, so a
+				// rig-scoped graft is co-resident and stays served.
+				if err := attachGraftClassRefusal(cityPath, scope.storeRoot, attach, store, attachStore); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 				if isGraphFormula {
@@ -755,10 +783,12 @@ cross-class. Attach a v1 formula to that bead instead.`,
 							"--attach %s: %s is owned by the relocated class binding, and a graph.v2 formula's synthetic input convoy is a work bead — it can live neither there (a work-class bead in the infra ledger) nor in the work ledger (its `tracks` edge to %s would be cross-class, which convoy.TrackItemIn refuses); grafting a graph.v2 formula onto a class-owned bead needs a cross-class membership edge: ga-2orlf. A v1 formula attaches to %s today",
 							attach, attach, attach, attach))
 					}
-					// Past the refusal attachStore IS store, so this arm runs
-					// on the one store it always did and its execution-fact
-					// legs are the same value: the root, its steps and the
-					// input convoy are all minted here.
+					// Past both refusals — this one, and the class gate above
+					// that rejects a work-resident attach bead on a split city —
+					// only a single-store city reaches here. attachStore IS
+					// store, this arm runs on the one store it always did, and
+					// its execution-fact legs are the same value: the root, its
+					// steps and the input convoy are all minted here.
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					var syntheticInputConvoyID string

@@ -210,7 +210,8 @@
               "events-reemit-execution",
               "storage-migrate",
               "storage-status",
-              "ready"
+              "ready",
+              "storage-recover-stranded"
             ]
           },
           "event_id": {

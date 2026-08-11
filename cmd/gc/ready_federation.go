@@ -59,6 +59,21 @@ package main
 // API. Promoting it to an error is a defensible product decision, but it is a
 // behavior change that has to land on BOTH surfaces at once.
 //
+// # Every leg answers the SAME question
+//
+// The legs are not wrapped alike. A work store sits behind cmd/gc's bead-policy
+// layer, which rewrites a TierIssues read to TierBoth before it reaches the
+// backend; a relocated class store has no such layer, because openStorageRoutes
+// keys the class map straight to the engine value the provider returned. So a
+// query that leaves TierMode at its zero value asks the work legs one question
+// and the class leg a narrower one, and the merge presents the two as one
+// answer. The class store's ephemeral tier — the wisps an orchestration step
+// runs as — drops out with no error and no short-array signal (ga-8lyxc).
+//
+// Every read below therefore states beads.FederatedReadTier explicitly on every
+// leg. That is the tier the policy-wrapped legs have always answered at, so it
+// changes nothing for a city that relocates no class.
+//
 // # Single-store cities take none of this
 //
 // relocatedGraphLegStore gates on STORE IDENTITY, the same rule the API's
@@ -189,7 +204,8 @@ func federateReadyBeads(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, erro
 // The read is a direct store.List rather than the live handle's, because that
 // handle overrides TierMode to TierBoth and would silently discard the caller's
 // tier selection. The API's list arm reads the store directly for the same
-// reason.
+// reason. The caller states the tier it wants (readReadyCandidates), so nothing
+// here has to guess it.
 func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error) {
 	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
 		return store.List(q)

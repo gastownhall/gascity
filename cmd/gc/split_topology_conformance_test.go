@@ -95,6 +95,7 @@ func TestSplitTopologyConformance(t *testing.T) {
 	t.Run("I13-cli-ready-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceCLIReadyFederation) })
 	t.Run("I14-projection-coherence", func(t *testing.T) { forEachTopology(t, conformanceProjectionCoherence) })
 	t.Run("I15-work-query-federation", func(t *testing.T) { forEachTopologyWithRig(t, conformanceWorkQueryFederation) })
+	t.Run("I16-federated-read-tier", func(t *testing.T) { forEachTopology(t, conformanceFederatedReadTier) })
 }
 
 // conformanceReadyFederation (I1) guards the "no work" fail-open: a worker
@@ -1227,9 +1228,13 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 
 	leaf, _, wrapped := unwrapBeadPolicyStore(front)
 	if !wrapped {
-		// Relocated class store: no policy layer, so no tier expansion and no
-		// ephemeral tier to be blind to. Everything the store holds is on the
-		// main tier and every read path sees it.
+		// Relocated class store: no policy layer, so no tier EXPANSION and no
+		// tier for these two beads to hide behind — mintWisp's create lands a
+		// plain row here. That is a statement about what this front door
+		// CREATES, not about what the store can hold: a create that names the
+		// tier itself still lands an ephemeral row in this store (see
+		// mintEphemeralGraphBead), and reading it back is exactly what the
+		// federated readers were failing to do. I16 owns that half.
 		//
 		// Which branch runs is decided by the fixture's model of the class
 		// store, so it cannot police that model. The pin that does is
@@ -1555,6 +1560,16 @@ func beadIDsOf(list []beads.Bead) []string {
 // The single-store row is not a formality: it is the byte-identity claim. There
 // the graph class is not relocated, both surfaces federate the same two work
 // legs, and the answer must be exactly the one a legacy city already got.
+//
+// # What an equality oracle cannot see, and what covers it
+//
+// CLI == API is blind by construction to a defect BOTH surfaces have. ga-8lyxc
+// was exactly that: the CLI defaulted its ready read to the zero-value tier and
+// the API passed no ready query at all, so both dropped the relocated store's
+// ephemeral rows and this row stayed green while both surfaces were short. I16
+// is the complement — its oracle is the LEG, not the other surface — and the two
+// rows have to be read together: this one pins that the surfaces agree, that one
+// pins that what they agree on is everything the stores hold.
 func conformanceCLIReadyFederation(t *testing.T, e splitEnv) {
 	cityWork, err := e.work.Create(beads.Bead{Title: "city work bead", Type: "task"})
 	if err != nil {
@@ -1718,6 +1733,18 @@ type apiReadyListBody struct {
 // rows.
 func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 	t.Helper()
+	return apiGetBeadListBody(t, e, "/beads/ready")
+}
+
+// apiGetBeadListBody serves one of the city-scoped bead read endpoints through
+// the REAL handler stack over the fixture's stores and decodes the list body.
+//
+// The state is a controllerState — the production api.State — so BeadStores(),
+// CityBeadStore() and GraphBeadStore() resolve through exactly the dispatch the
+// running controller uses. suffix is the city-scoped path with its query string,
+// e.g. "/beads/ready" or "/beads?status=in_progress".
+func apiGetBeadListBody(t *testing.T, e splitEnv, suffix string) apiReadyListBody {
+	t.Helper()
 	cityName := loadedCityName(e.cfg, e.cityPath)
 	state := &controllerState{
 		cfg:           e.cfg,
@@ -1728,17 +1755,159 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 		storageRoutes: e.routes,
 	}
 	mux := api.NewSupervisorMux(&singleCityStateResolver{state: state}, nil, false, "test", "", time.Now()).WithAnyHostAllowed()
-	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+cityName+"/beads/ready", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+cityName+suffix, nil)
 	rec := httptest.NewRecorder()
 	mux.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /beads/ready = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s = %d, want 200 (body=%q)", suffix, rec.Code, rec.Body.String())
 	}
 	var body apiReadyListBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode /beads/ready: %v (body=%q)", err, rec.Body.String())
+		t.Fatalf("decode %s: %v (body=%q)", suffix, err, rec.Body.String())
 	}
+	// The partial tier is deliberately NOT asserted here: the dead-rig row
+	// (conformanceCLIReadyDeadRigLeg) reads this endpoint expecting Partial
+	// exactly, and a helper that failed on it would make that row unwritable.
+	// Callers over healthy stores assert it themselves.
 	return body
+}
+
+// conformanceFederatedReadTier (I16) pins that a city-wide federated read asks
+// EVERY leg the same question about storage tiers.
+//
+// # The defect, measured on a live split city
+//
+// The legs are not wrapped alike. A work store sits behind cmd/gc's bead-policy
+// layer, whose expandPolicyReadTier / expandPolicyReadyQuery rewrite a
+// TierIssues read to TierBoth before it reaches the backend. A relocated class
+// store has no such layer — openStorageRoutes keys the class map straight to the
+// engine value the provider returned. So a query that left TierMode at its zero
+// value asked the work legs one question and the class leg a narrower one, and
+// merged the two answers as if they were the same question.
+//
+// win-mc-forge measured it, and the arithmetic is exact: against the relocated
+// graph database `bd ready --include-ephemeral --limit 0` returned 17 claimable
+// beads, three of them wisps; the federated reader over the same store returned
+// exactly the other 14, while still serving the work stores' own ephemeral rows.
+// No leg errored. No flag was rejected. The wisps were simply not there — and
+// ephemeral wisps are how orchestration steps run, so a molecule mid-execution
+// reads as having no runnable frontier and is diagnosed as stalled when it is
+// fine.
+//
+// # Why the CLI == API row (I13) could not catch it
+//
+// I13's oracle is the OTHER surface, and both surfaces had the same hole: the
+// CLI defaulted to TierIssues and the API passed no ready query at all. Two
+// surfaces agreeing about a short answer is what an equality oracle is blind to
+// by construction. So this row's oracle is the LEG ITSELF — everything the store
+// holds must reach the merged answer — which is the same arithmetic
+// win-mc-forge ran by hand and cannot be satisfied by two wrong surfaces
+// agreeing.
+//
+// # Both topologies, and the single-store row is the byte-identity claim
+//
+// The single-store row is not a formality. Its owning leg is the policy-wrapped
+// work store, which has ALWAYS answered at TierBoth, so this row passes before
+// and after the fix and fails the moment the fix narrows a legacy city's answer.
+func conformanceFederatedReadTier(t *testing.T, e splitEnv) {
+	durable := mintDurableGraphBead(t, e, "federated-tier durable graph bead", "")
+	wisp := mintEphemeralGraphBead(t, e, "federated-tier graph wisp")
+
+	owner, ownerName := e.owner()
+	legIDs := legReadyIDsAcrossTiers(t, owner)
+	if !containsString(legIDs, wisp.ID) || !containsString(legIDs, durable.ID) {
+		t.Fatalf("the %s store's own ready read = %v, missing durable=%s or wisp=%s; the fixture is not staging the two tiers this row is about", ownerName, legIDs, durable.ID, wisp.ID)
+	}
+
+	assertFederationServesWholeLeg(t, "gc ready", ownerName, legIDs, cliReadyIDs(t, e))
+	assertFederationServesWholeLeg(t, "GET /v0/beads/ready", ownerName, legIDs, apiReadyIDs(t, e))
+
+	conformanceFederatedInFlightTier(t, e, ownerName)
+}
+
+// conformanceFederatedInFlightTier is the in-flight arm of I16, and it is the
+// symptom the incident was reported as: an adopt-pr step running as an ephemeral
+// wisp is invisible in the mid-flight listing, so a molecule that is executing
+// normally reads as having nothing in progress.
+//
+// It covers the other two federated readers — `gc ready --status in_progress`
+// (federateListBeads) and GET /v0/beads?status=in_progress (the API's list
+// fan-out) — which take a ListQuery rather than a ReadyQuery and had the same
+// unstated tier.
+func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string) {
+	t.Helper()
+	const holder = "executor-1"
+	claimed := mintEphemeralGraphBead(t, e, "federated-tier in-flight graph wisp")
+	inProgress := "in_progress"
+	if err := e.graphStore().Update(claimed.ID, beads.UpdateOpts{Status: &inProgress, Assignee: stringPtr(holder)}); err != nil {
+		t.Fatalf("claiming the in-flight graph wisp %s: %v", claimed.ID, err)
+	}
+
+	legs := readyFederationLegs(loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
+	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
+	if err != nil {
+		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
+	}
+	cli := make([]string, 0, len(rows))
+	for _, row := range rows {
+		cli = append(cli, row.ID)
+	}
+	if !containsString(cli, claimed.ID) {
+		t.Errorf("`gc ready --status in_progress` = %v, missing the claimed ephemeral %s-store wisp %s. This is the reported symptom verbatim: a step running as a wisp is invisible mid-flight, so the molecule reads as having no runnable frontier and is diagnosed as stalled while it is executing", cli, ownerName, claimed.ID)
+	}
+
+	body := apiGetBeadListBody(t, e, "/beads?status=in_progress")
+	if body.Partial {
+		t.Fatalf("GET /v0/beads?status=in_progress reported a partial read over healthy stores: %v", body.PartialErrors)
+	}
+	apiIDs := make([]string, 0, len(body.Items))
+	for _, b := range body.Items {
+		apiIDs = append(apiIDs, b.ID)
+	}
+	if !containsString(apiIDs, claimed.ID) {
+		t.Errorf("GET /v0/beads?status=in_progress = %v, missing the claimed ephemeral %s-store wisp %s; the CLI and the API fan out over the same legs and must not disagree about which tiers those legs span", apiIDs, ownerName, claimed.ID)
+	}
+}
+
+// legReadyIDsAcrossTiers is the ORACLE for I16: everything one leg holds as
+// claimable work across both storage tiers, read from that store directly.
+//
+// The tier is spelled beads.TierBoth literally rather than through
+// beads.FederatedReadTier, which is the constant under test. Taking the oracle
+// from the same constant would make this row pass by construction the day
+// somebody narrows it.
+func legReadyIDsAcrossTiers(t *testing.T, store beads.Store) []string {
+	t.Helper()
+	rows, err := beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("reading the leg's own ready set across both tiers: %v", err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, b := range rows {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// assertFederationServesWholeLeg asserts that every id a leg holds reached the
+// merged answer, and reports the miss in the arithmetic shape the live report
+// used: leg total, merged∩leg total, and the difference by id.
+func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legIDs, merged []string) {
+	t.Helper()
+	var missing []string
+	served := 0
+	for _, id := range legIDs {
+		if containsString(merged, id) {
+			served++
+			continue
+		}
+		missing = append(missing, id)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	t.Errorf("%s dropped %d of the %s store's %d claimable beads: the leg holds %d, the merged answer carries %d of them, %d - %d = %d missing %v. Nothing failed and nothing was rejected — the rows are simply not there, which is indistinguishable from work that does not exist",
+		surface, len(missing), legName, len(legIDs), len(legIDs), served, len(legIDs), len(missing), served, missing)
 }
 
 // conformanceProjectionCoherence (I14) pins that the two `gc bd` PROJECTIONS

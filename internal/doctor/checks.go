@@ -760,6 +760,9 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	serverExists := splitStoreDirExists(serverDir)
 	embeddedExists := splitStoreDirExists(embeddedDir)
 	if !serverExists || !embeddedExists {
+		if unread := c.unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir); unread != nil {
+			return unread
+		}
 		r.Status = StatusOK
 		r.Message = "no legacy split store detected"
 		return r
@@ -811,6 +814,58 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
 	r.FixHint = splitStoreFixHint(activeStore)
 	return r
+}
+
+// unreadStoreBesideTheActiveOne reports a bead database sitting in the mode
+// directory the scope's metadata does NOT point at, when the mode it does point
+// at has no directory of its own yet.
+//
+// That shape is the one gc's own storage-mode change produces, and it is the
+// one the announcement steers here for: canonicalizing an embedded workspace to
+// server mode re-points the ledger before any .beads/dolt exists, so the
+// both-directories test above answers "no legacy split store detected" for
+// exactly the scope that has one. A diagnostic an operator is told to run and
+// which reports OK on the state they were warned about is worse than no
+// diagnostic — it converts a real warning into a false all-clear.
+//
+// The evidential standard is the one this check already applies: a `.dolt`
+// repository under the inactive mode's directory, without opening it. A
+// repository `bd init` created and never wrote to reports the same as a
+// populated one, which is why this is a WARNING that names both paths and never
+// an error — see splitStoreDetails for the recovery it prescribes.
+//
+// It answers nothing when the active store is unidentifiable, when the inactive
+// directory is absent, or when it holds no repository: each of those is a scope
+// with one ledger, which is the ordinary case.
+func (c *BDSplitStoreCheck) unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir string) *CheckResult {
+	activeSource, activeStore := c.activeBDStore(beadsDir)
+	inactiveStore, inactiveDir := "embeddeddolt", embeddedDir
+	switch activeStore {
+	case "dolt":
+	case "embeddeddolt":
+		inactiveStore, inactiveDir = "dolt", serverDir
+	default:
+		return nil
+	}
+	if !splitStoreDirExists(inactiveDir) {
+		return nil
+	}
+	inactiveRepos, err := doltReposUnder(inactiveDir)
+	if err != nil || len(inactiveRepos) == 0 {
+		return nil
+	}
+	serverRepos, embeddedRepos := inactiveRepos, []string(nil)
+	if inactiveStore == "embeddeddolt" {
+		serverRepos, embeddedRepos = nil, inactiveRepos
+	}
+	return &CheckResult{
+		Name:   c.Name(),
+		Status: StatusWarning,
+		Message: fmt.Sprintf("unread bead database beside the active store: active .beads/%s (%s), unread .beads/%s contains %d Dolt repo(s)",
+			activeStore, activeSource, inactiveStore, len(inactiveRepos)),
+		Details: splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos),
+		FixHint: splitStoreFixHint(activeStore),
+	}
 }
 
 // CanFix returns false; reconciliation requires explicit user review.
@@ -936,11 +991,27 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 	return details
 }
 
+// splitStoreFixHint prescribes the reconciliation, and names what the operator
+// will see while they are in the middle of it.
+//
+// "Keep both directories until reconciled" parks a scope in the exact shape
+// BdStore's read-time guard notices (internal/beads/unread_store_notice.go): an
+// active store with no rows beside a second bead database. That guard is a
+// notice and never a refusal precisely so this advice stays safe to follow —
+// but an operator who takes it and then sees an unexplained line on every empty
+// `gc ready` has been sent into a state the diagnostic did not warn them about.
+// Naming the override here is what keeps the two from contradicting each other.
+//
+// The bound stated here is the one the guard actually holds: once per scope per
+// process. A `gc` command is one process, so an operator sees it once per
+// command; a supervisor sees it once for the life of the daemon.
 func splitStoreFixHint(activeStore string) string {
+	silence := "; keep both directories until reconciled — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
+		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	if activeStore == "" || activeStore == "unknown" {
-		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store; keep both directories until reconciled"
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
 	}
-	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + silence
 }
 
 func describeRepoList(repos []string) string {

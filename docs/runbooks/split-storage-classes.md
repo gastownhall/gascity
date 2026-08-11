@@ -127,6 +127,39 @@ converged — the proven-copy size, the stranded count, and how many the
 binding's own garbage collection has removed since cutover. It exits non-zero
 while the city is unconverged, so a deployment script can gate on it.
 
+### `gc bd ready` stops answering, on purpose
+
+After the split, `gc bd ready` is refused with exit 1 on this city no matter
+what arguments it is given, and the refusal names the relocated class and the
+binding. `gc bd list --ready` is refused the same way, because bd documents that
+flag as "same semantics as bd ready" and runs the same query. It is not a bug
+and it is not scoped to the arguments: `bd ready` computes a frontier over the
+one ledger `bd` resolves from the working directory, and takes no selector that
+could reach the binding, so its answer is the work-class subset of the city's
+ready set and nothing distinguishes that from the whole of it.
+
+Use `gc ready` instead. It federates the city store, the rig stores and the
+binding, and exits non-zero naming the leg it could not read rather than
+returning a short array. Every worker's generated work query is already swapped
+onto it, so this affects operators and ad-hoc scripts, not the work loop.
+
+`gc ready` is flag-compatible with the `bd ready` invocation that generated work
+query builds — **not** with all of `bd ready`. It takes `--assignee`,
+`--unassigned`, `--metadata-field`, `--exclude-type`, `--exclude-label`,
+`--sort`, `--limit`, `--include-ephemeral`, `--status` and `--json`, and rejects
+the rest of bd's ready surface (`--label`, `--label-any`, `--parent`, `--type`,
+`--priority`, `--offset`, `--has-metadata-key`, `--mol`, `--include-deferred`,
+`--gated`, `--claim`, and every single-letter shorthand such as `-u` or `-n`).
+Its `--sort` takes `oldest|newest`, not bd's `priority|hybrid|oldest`. If your
+query needs a flag only bd has, narrow with `--metadata-field` or read the
+relocated class directly from the binding —
+`GC_BD_ALLOW_RELOCATED_CLASS_READ=1` runs the one-ledger read anyway when the
+work-class subset is genuinely the answer you want.
+
+Make sure the `gc` on every agent's `PATH` is the build that has `gc ready`:
+the generated work query shells out to it by name, and an older `gc` on `PATH`
+fails every hook with `running work query: exit status 1`.
+
 ## Rolling back
 
 **Before cutover, rollback is free** — nothing moved, so nothing is lost. How
