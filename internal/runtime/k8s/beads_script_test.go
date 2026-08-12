@@ -34,6 +34,29 @@ func TestBeadsScriptEnsureReadyDoesNotAutoInitSharedWorkspace(t *testing.T) {
 	assertCallNotContains(t, result.callLog, "config set issue_prefix")
 }
 
+// TestBeadsScriptEnsureReadyRunsAsBakedGcagentUID pins the beads-runner pod to
+// the uid the agent image actually bakes. contrib/k8s/Dockerfile.base:138 runs
+// `useradd -m -s /bin/bash gcagent` with no `-u` on `ubuntu:24.04`, which
+// already ships a default `ubuntu` user at 1000 — so `gcagent` lands at 1001.
+// A pod pinned to 1000 runs as that unrelated `ubuntu` user, and /workspace
+// (owned by gcagent) becomes unwritable.
+func TestBeadsScriptEnsureReadyRunsAsBakedGcagentUID(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op: "ensure-ready",
+		Env: map[string]string{
+			"GC_K8S_IMAGE": "gc-beads:latest",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s ensure-ready error = %v\noutput:\n%s", result.err, result.output)
+	}
+	const wantUID = 1001
+	got := result.podSecurityContext
+	if got.RunAsUser != wantUID || got.RunAsGroup != wantUID || got.FSGroup != wantUID {
+		t.Fatalf("pod securityContext = %+v, want runAsUser/runAsGroup/fsGroup all %d", got, wantUID)
+	}
+}
+
 func TestBeadsScriptInitUsesScopeRootAndCanonicalDoltTarget(t *testing.T) {
 	result := runBeadsScript(t, beadsScriptOptions{
 		Op:   "init",
@@ -277,11 +300,20 @@ type beadsScriptOptions struct {
 	Stdin       string
 }
 
+// podSecurityContext is the subset of a pod's `spec.securityContext` the
+// script tests assert on.
+type podSecurityContext struct {
+	RunAsUser  int `json:"runAsUser"`
+	RunAsGroup int `json:"runAsGroup"`
+	FSGroup    int `json:"fsGroup"`
+}
+
 type beadsScriptResult struct {
-	manifestEnv map[string]string
-	callLog     string
-	output      string
-	err         error
+	manifestEnv        map[string]string
+	podSecurityContext podSecurityContext
+	callLog            string
+	output             string
+	err                error
 }
 
 func runBeadsScript(t *testing.T, opts beadsScriptOptions) beadsScriptResult {
@@ -366,11 +398,13 @@ exit 1
 		t.Fatalf("read call log: %v", readCallErr)
 	}
 	manifestEnv := map[string]string{}
+	var podSecCtx podSecurityContext
 	manifestBytes, readManifestErr := os.ReadFile(manifestPath)
 	if readManifestErr == nil && len(manifestBytes) > 0 {
 		var manifest struct {
 			Spec struct {
-				Containers []struct {
+				SecurityContext podSecurityContext `json:"securityContext"`
+				Containers      []struct {
 					Env []struct {
 						Name  string `json:"name"`
 						Value string `json:"value"`
@@ -381,6 +415,7 @@ exit 1
 		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 			t.Fatalf("parse manifest json: %v\n%s", err, string(manifestBytes))
 		}
+		podSecCtx = manifest.Spec.SecurityContext
 		if len(manifest.Spec.Containers) > 0 {
 			for _, item := range manifest.Spec.Containers[0].Env {
 				manifestEnv[item.Name] = item.Value
@@ -391,10 +426,11 @@ exit 1
 	}
 
 	return beadsScriptResult{
-		manifestEnv: manifestEnv,
-		callLog:     string(callLogBytes),
-		output:      string(out),
-		err:         err,
+		manifestEnv:        manifestEnv,
+		podSecurityContext: podSecCtx,
+		callLog:            string(callLogBytes),
+		output:             string(out),
+		err:                err,
 	}
 }
 
