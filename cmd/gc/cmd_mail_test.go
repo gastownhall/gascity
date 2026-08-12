@@ -1708,6 +1708,60 @@ func TestMailInboxDefaultsToHuman(t *testing.T) {
 
 // --- gc mail read ---
 
+// TestMailReadByNonRecipientDoesNotMarkRead pins the sc-xrqhup fix: a sender
+// verifying its own delivery with `gc mail read` must NOT consume the
+// RECIPIENT's unread state — before this fix, two refinery directives
+// (including a Chris ruling) were silently ignored because the sender's
+// verify-read left the recipient's hook with nothing to announce, and any
+// mail-state supersession gate would see the mail as consumed.
+func TestMailReadByNonRecipientDoesNotMarkRead(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("mayor", "dip/oversight-rig.project-lead", "Directive", "hold the lane") //nolint:errcheck
+	t.Setenv("GC_ALIAS", "mayor")                                                    // the SENDER verifying its own send
+
+	var stdout, stderr bytes.Buffer
+	code := doMailRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailRead = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "hold the lane") {
+		t.Errorf("stdout = %q, want message body shown", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "without marking read") {
+		t.Errorf("stderr = %q, want a peek-downgrade notice", stderr.String())
+	}
+	inbox, err := mp.Inbox("dip/oversight-rig.project-lead")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(inbox) != 1 {
+		t.Fatalf("recipient unread = %d, want 1 (the sender's verify-read must not consume it)", len(inbox))
+	}
+}
+
+// TestMailReadByRecipientStillMarksRead pins that the actual recipient's read
+// keeps its side effect — inbox hygiene must not regress.
+func TestMailReadByRecipientStillMarksRead(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("mayor", "dip/oversight-rig.project-lead", "Directive", "hold the lane") //nolint:errcheck
+	t.Setenv("GC_ALIAS", "dip/oversight-rig.project-lead")
+
+	var stdout, stderr bytes.Buffer
+	code := doMailRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailRead = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	inbox, err := mp.Inbox("dip/oversight-rig.project-lead")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(inbox) != 0 {
+		t.Fatalf("recipient unread = %d, want 0 after own read", len(inbox))
+	}
+}
+
 func TestMailReadSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

@@ -2028,16 +2028,32 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 	}
 	id := args[0]
 
-	m, err := mp.Read(id)
+	// A read by anyone OTHER than the recipient must not consume the
+	// recipient's unread state (sc-xrqhup): a sender verifying its own
+	// delivery with `read` was silently defeating hook announcement and any
+	// mail-state gate downstream. Fetch side-effect-free first; only the
+	// recipient's own read marks. An unidentified caller (the human at a
+	// terminal, actor "human") keeps the marking behavior — the defect case
+	// is agents with known identities reading mail addressed to others.
+	actor := eventActor()
+	m, err := mp.Get(id)
 	telemetry.RecordMailOp(context.Background(), "read", err)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if actor != "human" && strings.TrimSpace(m.To) != "" && strings.TrimSpace(m.To) != actor {
+		fmt.Fprintf(stderr, "gc mail read: %s is addressed to %q, not %q — showing without marking read (recipient's unread state preserved; use `gc mail peek` for send verification)\n", id, m.To, actor) //nolint:errcheck
+	} else {
+		if m, err = mp.Read(id); err != nil {
+			fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	rec.Record(events.Event{
 		Type:    events.MailRead,
-		Actor:   eventActor(),
+		Actor:   actor,
 		Subject: id,
 		Payload: mailEventPayload(nil),
 	})
