@@ -373,6 +373,10 @@ type BdStore struct {
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
+	// readyProjectionDoorValue names which bd verb fills this scope's
+	// is_blocked column: `bd sql` where the backend implements it, `bd blocked`
+	// where it does not. See bdstore_ready_projection.go.
+	readyProjectionDoorValue readyProjectionDoor
 	// readyProjectionVersionErr memoizes the ErrReadyProjectionUnsupported this
 	// store owes every later caller when the bd on PATH predates the is_blocked
 	// projection. Store-local rather than scope-latched: the bd binary is a
