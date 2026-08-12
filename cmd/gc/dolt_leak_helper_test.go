@@ -849,3 +849,15 @@ func TestSnapshotDoltProcessesForConfigRootsIgnoresEmptyRoots(t *testing.T) {
 		t.Fatalf("empty roots matched %d process(es), want 0: %#v", len(got), got)
 	}
 }
+
+// The grace ceiling must stay a generous hang budget (ga-f5clwo), not drift
+// back toward round 2's 5s window, which still false-positived under host
+// contention (ga-d5nmtj gate evidence). The floor is picked independent of
+// config.DefaultDoltStopTimeout's exact value, so a future change to that
+// constant can't silently retighten this guard without a test noticing.
+func TestDoltLeakGuardGraceMaxElapsedTimeBudget(t *testing.T) {
+	const floor = 15 * time.Second
+	if doltLeakGuardGraceMaxElapsedTime < floor {
+		t.Fatalf("doltLeakGuardGraceMaxElapsedTime = %s, want >= %s", doltLeakGuardGraceMaxElapsedTime, floor)
+	}
+}

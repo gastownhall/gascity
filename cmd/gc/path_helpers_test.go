@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -31,11 +32,22 @@ import (
 // (ga-szv0ge). The guard's real invariant is "no test leaves a dolt server
 // running forever," not "no test leaves a dolt server running for one more
 // scheduler tick after Run() returns" — mirrors the hang-budget framing in
-// ga-f5clwo. Sized well below normal package test timeouts so a genuine
-// leak (one that never clears, e.g. ga-vltdpl) still fails within seconds.
+// ga-f5clwo: this is a hang detector, not a latency SLO, so per ga-f5clwo's
+// own carve-out it gets "one shared generous budget" rather than per-test
+// tuning. Round 2's 5s budget still false-positived under host contention
+// (ga-d5nmtj gate evidence: PID 2911558 outlived the grace window, a later
+// scan found it already gone). Round 3 sets the ceiling to
+// config.DefaultDoltStopTimeout rather than a new arbitrary literal: that
+// constant is this same codebase's existing answer to "how long may a
+// managed dolt server take to actually stop" (its SIGTERM→SIGKILL grace,
+// cmd/gc/dolt_stop_managed.go), so the guard now tolerates exactly the
+// shutdown tail the system itself is already configured to allow — no
+// process the system considers to be stopping normally can trip it. Sized
+// well below normal package test timeouts so a genuine leak (one that never
+// clears, e.g. ga-vltdpl) still fails within tens of seconds, not minutes.
 const (
 	doltLeakGuardGraceInitialInterval = 250 * time.Millisecond
-	doltLeakGuardGraceMaxElapsedTime  = 5 * time.Second
+	doltLeakGuardGraceMaxElapsedTime  = config.DefaultDoltStopTimeout
 )
 
 func canonicalTestPath(path string) string {
