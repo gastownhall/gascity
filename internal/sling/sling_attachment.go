@@ -226,9 +226,27 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 				continue
 			}
 		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, AttachmentLabel(attached), attached.ID)
+		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
 	}
 	return nil
+}
+
+// MoleculeAttachedError reports that a bead already has a live, non-workflow
+// molecule/wisp attachment blocking a new formula attach. It is distinct from
+// sourceworkflow.ConflictError (a live graph.v2 workflow attachment) so
+// callers can use errors.As to tell the two conflict kinds apart: an implicit
+// default-formula sling may choose to fall back to plain routing on this
+// error, but must keep hard-failing on a workflow conflict or any other
+// error, since neither is the "unrelated molecule already attached" case the
+// fallback exists for.
+type MoleculeAttachedError struct {
+	BeadID       string
+	Label        string // AttachmentLabel(attached), e.g. "molecule" or "wisp"
+	AttachmentID string
+}
+
+func (e *MoleculeAttachedError) Error() string {
+	return fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
 }
 
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
