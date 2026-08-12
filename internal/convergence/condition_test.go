@@ -114,6 +114,9 @@ func TestConditionEnvEnvironAbsolutizesRelativeGCHome(t *testing.T) {
 }
 
 func TestConditionEnvEnvironReportsRelativeGCHomeResolutionError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cannot remove the process working directory on Windows")
+	}
 	controllerDir := t.TempDir()
 	t.Chdir(controllerDir)
 	t.Setenv("GC_HOME", filepath.Join("relative", "gc-home"))
