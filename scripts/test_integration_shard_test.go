@@ -47,6 +47,38 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	}
 }
 
+func TestBdStoreIntegrationShardOwnsRunnerIsolationAndAllCallSites(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+
+	out, err := fixture.runShard(t, "bdstore")
+	if err != nil {
+		t.Fatalf("bdstore integration shard failed: %v\n%s", err, out)
+	}
+
+	captured, err := os.ReadFile(fixture.capturePath)
+	if err != nil {
+		t.Fatalf("read captured go invocation: %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(captured), "\x00\x00"), "\x00")
+	wantTests := []string{
+		"TestBdStoreConformance",
+		"TestBdStoreDeleteBatchOrphansExternalDependents",
+		"TestBdStoreMailWispInsert",
+		"TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig",
+		"TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON",
+	}
+	want := []string{
+		"test",
+		"-tags", "integration",
+		"-timeout", "17s",
+		"./test/integration",
+		"-run", "^(" + strings.Join(wantTests, "|") + ")$",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bdstore go test argv = %q, want exact durable shard command %q", got, want)
+	}
+}
+
 func TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseRuntimeTmuxManifest(t, filepath.Join(repo, runtimeTmuxManifestRelativePath))

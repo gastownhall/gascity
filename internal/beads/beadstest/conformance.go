@@ -161,7 +161,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			"pool_slot":    "3",
 			"agent_name":   "tower/polecat",
 		}
-		created, err := s.Create(beads.Bead{Title: "polecat", Type: "gc:session", Labels: []string{"gc:session"}, Metadata: meta})
+		created, err := s.Create(beads.Bead{Title: "polecat", Type: "session", Labels: []string{"gc:session"}, Metadata: meta})
 		if err != nil {
 			t.Fatal(err)
 		}

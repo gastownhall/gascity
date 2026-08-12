@@ -93,6 +93,14 @@ review_formulas_recovery_tests=(
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 )
 
+bdstore_tests=(
+  TestBdStoreConformance
+  TestBdStoreDeleteBatchOrphansExternalDependents
+  TestBdStoreMailWispInsert
+  TestNewIsolatedToolEnvPinsHomeAwayFromAmbientBeadsConfig
+  TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON
+)
+
 # Keep this list to top-level test names. Matching a parent test runs all of
 # its subtests, so additions here directly widen the every-PR smoke budget.
 rest_smoke_tests=(
@@ -306,7 +314,7 @@ run_rest_full_shard_modulo() {
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" "${bdstore_tests[@]}"; do
     excluded+="${excluded_name}"$'\n'
   done
 
@@ -385,7 +393,7 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
+    run_pkg_tests "$pkg" "${bdstore_tests[@]}"
     ;;
   rest-smoke)
     run_rest_smoke_shard
