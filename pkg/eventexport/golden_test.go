@@ -39,6 +39,31 @@ func TestGoldenWireBytes(t *testing.T) {
 			want: `{"seq":2,"type":"bead.created","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"mc-2","run_id":"wf-root-abc","session_id":"sess-9f2a","step_id":"mc-step-7"}`,
 		},
 		{
+			name: "native topology omitted remains unknown",
+			env:  Envelope{Seq: 4, Type: "bead.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", StepID: "step-b"},
+			want: `{"seq":4,"type":"bead.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","step_id":"step-b"}`,
+		},
+		{
+			name: "native topology explicit root remains empty array",
+			env:  Envelope{Seq: 5, Type: "bead.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", StepID: "step-root", DependsOnStepIDs: slicePtr([]string{})},
+			want: `{"seq":5,"type":"bead.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","step_id":"step-root","depends_on_step_ids":[]}`,
+		},
+		{
+			name: "native topology populated remains ordered array",
+			env:  Envelope{Seq: 6, Type: "bead.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", StepID: "step-b", DependsOnStepIDs: slicePtr([]string{"step-a"})},
+			want: `{"seq":6,"type":"bead.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","step_id":"step-b","depends_on_step_ids":["step-a"]}`,
+		},
+		{
+			name: "execution work association retains only physical ref and run",
+			env:  Envelope{Seq: 7, Type: "execution.work_associated", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "mc-work", RunID: "gcg-root"},
+			want: `{"seq":7,"type":"execution.work_associated","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"mc-work","run_id":"gcg-root"}`,
+		},
+		{
+			name: "execution step definition retains explicit root topology",
+			env:  Envelope{Seq: 8, Type: "execution.step_defined", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "gcg-step", RunID: "gcg-root", StepID: "root", DependsOnStepIDs: slicePtr([]string{})},
+			want: `{"seq":8,"type":"execution.step_defined","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-step","run_id":"gcg-root","step_id":"root","depends_on_step_ids":[]}`,
+		},
+		{
 			// The content opt-in path: free-form title/formula serialize verbatim
 			// after step_id. Pinning this anchors the off-by-default exemption — the
 			// empty-field cases above prove the DEFAULT wire is byte-identical to the
@@ -60,8 +85,10 @@ func TestGoldenWireBytes(t *testing.T) {
 	}
 }
 
+func slicePtr(values []string) *[]string { return &values }
+
 // TestBatchGoldenBytes pins the batch envelope shape: an opaque city_hash (never
-// a cleartext city name) and schema_version 2.
+// a cleartext city name) and schema_version 5.
 func TestBatchGoldenBytes(t *testing.T) {
 	b := Batch{CityHash: "7f3a9c1e5b2d4068", SchemaVersion: SchemaVersion, Events: []Envelope{
 		{Seq: 1, Type: "convoy.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "gcg-4216"},
@@ -70,7 +97,7 @@ func TestBatchGoldenBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"city_hash":"7f3a9c1e5b2d4068","schema_version":2,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
+	want := `{"city_hash":"7f3a9c1e5b2d4068","schema_version":5,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
 	if string(out) != want {
 		t.Fatalf("batch golden:\n got %s\nwant %s", out, want)
 	}
@@ -84,7 +111,8 @@ func TestBatchGoldenBytes(t *testing.T) {
 func TestAllowlistPolicyGolden(t *testing.T) {
 	wantAllowed := []string{
 		"bead.closed", "bead.created", "controller.started", "convoy.closed",
-		"events.rotated", "gc.store.maintenance.done", "mail.sent",
+		"events.rotated", "execution.step_completed", "execution.step_defined", "execution.step_started", "execution.work_associated",
+		"gc.store.maintenance.done", "mail.sent",
 		"order.completed", "order.failed", "order.fired",
 		"project.identity.stamped", "session.drain_acked_with_assigned_work",
 		"session.draining", "session.reset_stalled", "session.stopped",
@@ -93,7 +121,7 @@ func TestAllowlistPolicyGolden(t *testing.T) {
 	if got := AllowedTypeList(); !reflect.DeepEqual(got, wantAllowed) {
 		t.Fatalf("allowlist policy changed:\n got  %v\n want %v\n-> update this golden AND bump SchemaVersion", got, wantAllowed)
 	}
-	if got := sortedKeys(refTypes); !reflect.DeepEqual(got, []string{"bead.closed", "bead.created", "convoy.closed"}) {
+	if got := sortedKeys(refTypes); !reflect.DeepEqual(got, []string{"bead.closed", "bead.created", "convoy.closed", "execution.step_completed", "execution.step_defined", "execution.step_started", "execution.work_associated"}) {
 		t.Fatalf("refTypes policy changed: got %v -> bump SchemaVersion", got)
 	}
 	if got := sortedKeys(mailReduced); !reflect.DeepEqual(got, []string{"mail.sent"}) {

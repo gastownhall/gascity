@@ -713,6 +713,59 @@ func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
 	}
 }
 
+// TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry reproduces
+// gc-e2xqk end to end: a typed deliverable close must not mint attempt 2.
+func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review.attempt.1",
+			"gc.attempt":          "1",
+			"gc.outcome.producer": "formula-step",
+		},
+	})
+	// gc-outcome-close records work_id = the closed bead's own ID.
+	disposition := fmt.Sprintf(`{"contract_version":1,"disposition":"deliverable","work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, attempt1.ID)
+	if err := store.SetMetadata(attempt1.ID, "gc.coordinator_outcome.producer_disposition", disposition); err != nil {
+		t.Fatalf("set producer_disposition: %v", err)
+	}
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass (no spurious retry)", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+}
+
 func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -1643,6 +1696,7 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "dolt breaker open", err: errors.New("Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"), want: true},
 		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
+		{name: "workflow root close blocked", err: errors.New("gsp-p68ch6: completing workflow head: updating bead \"gsp-p68ch6\": exit status 1: cannot close blocked issue: gsp-p68ch6 is blocked by [gsp-yl7fpr]"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
@@ -2382,6 +2436,49 @@ func TestBuildAttemptRecipeSimpleRetry(t *testing.T) {
 	}
 }
 
+// TestBuildAttemptRecipePreservesStepDescription pins gastownhall/gascity#4861:
+// ralph-loop attempt beads created for later iterations lost the task
+// description, making fresh-session execution fail with "missing_task_input"
+// while a warm session could mask the defect through context carryover.
+// buildAttemptRecipe's root attempt step copied title/type/labels/assignee/
+// metadata from the frozen step spec but not step.Description. This drives
+// attempts 1 and 2 (the reported failure was specifically iteration 2+) and
+// asserts both iteration roots retain the authored description — the same
+// symmetry retry cloning already has for subject/child/check beads
+// (internal/dispatch/ralph.go, ~526-535/563-572/596-605).
+func TestBuildAttemptRecipePreservesStepDescription(t *testing.T) {
+	t.Parallel()
+
+	const authoredDescription = "Full task description with detailed requirements the agent needs to do the work without any ambient session context."
+
+	step := &formula.Step{
+		ID:          "converge",
+		Title:       "Converge",
+		Description: authoredDescription,
+		Type:        "task",
+		Ralph:       &formula.RalphSpec{MaxAttempts: 5},
+	}
+
+	control := beads.Bead{
+		ID: "gc-1",
+		Metadata: map[string]string{
+			"gc.step_id":  "converge",
+			"gc.step_ref": "mol-test.converge",
+		},
+	}
+
+	for _, attempt := range []int{1, 2} {
+		recipe := buildAttemptRecipe(step, control, attempt)
+		if len(recipe.Steps) != 1 {
+			t.Fatalf("attempt %d: steps = %d, want 1", attempt, len(recipe.Steps))
+		}
+		rootStep := recipe.Steps[0]
+		if rootStep.Description != authoredDescription {
+			t.Errorf("attempt %d: root step Description = %q, want %q (a fresh session claiming this attempt would fail with missing_task_input)", attempt, rootStep.Description, authoredDescription)
+		}
+	}
+}
+
 func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	t.Parallel()
 
@@ -3055,7 +3152,7 @@ func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType strin
 
 func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}

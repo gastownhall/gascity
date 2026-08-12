@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -215,21 +216,9 @@ func (r *FileRecorder) Record(e Event) {
 	// The bounded wait drops the recorder if a dead writer is holding the
 	// lock instead of blocking forever and piling up processes.
 	fd := int(r.file.Fd())
-	deadline := time.Now().Add(recordFlockTimeout)
-	for {
-		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
-			return
-		}
-		if time.Now().After(deadline) {
-			fmt.Fprintf(r.stderr, "events: lock: timed out after %dms waiting on flock at %s\n", recordFlockTimeout.Milliseconds(), r.path) //nolint:errcheck // best-effort stderr
-			return
-		}
-		time.Sleep(recordFlockRetryInterval)
+	if err := lockRecorderFile(fd, r.path); err != nil {
+		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
 	}
 	defer func() {
 		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
@@ -240,6 +229,112 @@ func (r *FileRecorder) Record(e Event) {
 	if err := r.writeRecordLocked(&e); err != nil {
 		fmt.Fprintf(r.stderr, "events: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// AppendBatch strictly appends a complete event batch under one mutex and one
+// cross-process file lock. It assigns contiguous sequence numbers, prepares the
+// complete JSONL payload before writing, performs exactly one write, and
+// returns every lock, marshal, write, or unlock failure to the caller.
+//
+// Unlike Record, AppendBatch is not best-effort and does not auto-rotate. It is
+// intended for bounded operator-authored snapshots whose caller must know
+// whether the complete append succeeded.
+func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return fmt.Errorf("recorder is closed")
+	}
+	if r.file == nil {
+		return fmt.Errorf("recorder file is unavailable")
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+
+	fd := int(r.file.Fd())
+	if err := lockRecorderFile(fd, r.path); err != nil {
+		return fmt.Errorf("lock: %w", err)
+	}
+	unlockPending := true
+	defer func() {
+		if !unlockPending {
+			return
+		}
+		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("unlock: %w", err))
+		}
+	}()
+
+	latest, err := readLatestActiveSeq(r.path)
+	if err != nil {
+		return fmt.Errorf("latest seq: %w", err)
+	}
+	if r.seq > latest {
+		latest = r.seq
+	}
+	if uint64(len(batch)) > ^uint64(0)-latest {
+		return fmt.Errorf("allocating %d event sequences after %d: sequence overflow", len(batch), latest)
+	}
+
+	data, lastSeq, err := marshalBatch(batch, latest, time.Now())
+	if err != nil {
+		return err
+	}
+	if err := writeBatch(r.file, data); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	r.seq = lastSeq
+	r.recordCount += uint64(len(batch))
+
+	unlockPending = false
+	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		return fmt.Errorf("unlock: %w", err)
+	}
+	return nil
+}
+
+func lockRecorderFile(fd int, path string) error {
+	deadline := time.Now().Add(recordFlockTimeout)
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %dms waiting on flock at %s", recordFlockTimeout.Milliseconds(), path)
+		}
+		time.Sleep(recordFlockRetryInterval)
+	}
+}
+
+func marshalBatch(batch []Event, startingSeq uint64, now time.Time) ([]byte, uint64, error) {
+	var data bytes.Buffer
+	for i, event := range batch {
+		event.Seq = startingSeq + uint64(i) + 1
+		if event.Ts.IsZero() {
+			event.Ts = now
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal event %d: %w", i, err)
+		}
+		data.Write(encoded)
+		data.WriteByte('\n')
+	}
+	return data.Bytes(), startingSeq + uint64(len(batch)), nil
+}
+
+func writeBatch(writer io.Writer, data []byte) error {
+	written, err := writer.Write(data)
+	if written != len(data) {
+		return errors.Join(err, io.ErrShortWrite)
+	}
+	return err
 }
 
 // writeRecordLocked appends e to the active log under the recorder

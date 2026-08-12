@@ -162,6 +162,28 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
 }
 
+// snapshotFromStore builds a workflow snapshot for one store. Both of its
+// branches implement beads.MembershipDirectRootID — the root plus every bead
+// carrying gc.root_bead_id — the SQL fast path as a WHERE clause
+// (workflowSQLQueryWorkflowBeads) and the fallback inline below. Neither is a
+// dependency walk, deliberately: a gc.kind=spec sidecar has no edges, so a dep
+// walk would drop it and hand the dashboard a shorter, plausible step list.
+//
+// The fallback is spelled out here instead of calling beads.DirectMembers
+// because it reads through info.store's own handle. beads.DirectMembers reads
+// through the LIVE handle, which on a caching store bypasses the cache — a
+// correctness win for the dispatcher writing the molecule, an unwanted cost on
+// this dashboard read path. The RULE is shared; the read handle is not.
+//
+// KNOWN DIVERGENCE (ga-212sl): the fallback lists at the zero-value
+// TierMode, so it is TierIssues and drops every ephemeral row, while the SQL
+// fast path above queries the wisps table as well. A wisp molecule's beads are
+// all ephemeral, so the two branches of this one function return different
+// sets for one — and which branch runs depends only on whether the Dolt server
+// was reachable, which is exactly the coupling workflowSQLQueryWorkflowBeads's
+// doc says must not exist. Fixing it moves this read onto beads.DirectMembers
+// (or onto TierBoth), which changes what this endpoint returns for wisp
+// molecules; that is its own slice.
 func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, storesScanned []string, listPartial bool, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Try direct SQL path — ~500x faster than N+1 bd subprocess calls.
 	var (
@@ -653,6 +675,23 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 			scopeKind: beadmeta.ScopeKindCity,
 			scopeRef:  cityName,
 			store:     graphStore,
+		}, true
+	case ordersClassStoreRefPrefix:
+		// Round-trip the orders-class ref minted by appendOrdersClassStoreInfo: the
+		// order history list hands it to a client as the store_ref for every
+		// binding-resident tracking bead, and the detail endpoint takes it back. On
+		// a default city (orders == city) there is no orders entry to name, so this
+		// resolves nothing and callers fall back to the store scan.
+		ordersStore := state.OrdersBeadStore().Store
+		cityName := workflowCityScopeRef(state.CityName())
+		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
+			return workflowStoreInfo{}, false
+		}
+		return workflowStoreInfo{
+			ref:       ordersClassStoreRefPrefix + ":" + cityName,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  cityName,
+			store:     ordersStore,
 		}, true
 	case beadmeta.ScopeKindRig:
 		store := state.BeadStore(scopeRef)

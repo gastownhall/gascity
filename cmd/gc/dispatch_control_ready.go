@@ -201,8 +201,12 @@ func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []bea
 	return out
 }
 
-// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --sort oldest --limit=N`.
-func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int) []beads.Bead {
+// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --sort oldest --limit=N`.
+// This is a route-scoped, unassigned tier (Tier 3 pool-demand/control-dispatcher
+// routing), so held beads must be excluded (ga-5736js): filterReadyByAssignee
+// (Tier 1/2, assignee-scoped) stays hold-transparent by design and must not
+// gain this filter.
+func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.Bead {
 	var matched []beads.Bead
 	for _, b := range ready {
 		if b.Assignee != "" || b.Type == controlReadyExcludeType {
@@ -211,11 +215,21 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string, limit int
 		if b.Metadata[metadataKey] != route {
 			continue
 		}
+		held := false
+		for _, label := range beadmeta.DispatchHoldLabels {
+			if beadLabelsContain(b.Labels, label) {
+				held = true
+				break
+			}
+		}
+		if held {
+			continue
+		}
 		matched = append(matched, b)
 	}
 	beads.SortBeads(matched, beads.SortCreatedAsc)
-	if limit > 0 && len(matched) > limit {
-		matched = matched[:limit]
+	if len(matched) > workflowServeScanLimit {
+		matched = matched[:workflowServeScanLimit]
 	}
 	return matched
 }
@@ -256,8 +270,8 @@ func evaluateControlReady(ready []beads.Bead, parsed parsedControlReadyQuery, en
 		groups = append(groups, filterReadyByAssignee(ready, cand, workflowServeScanLimit))
 	}
 	for _, route := range controlReadyRoutes(parsed) {
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route, workflowServeScanLimit))
-		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route, workflowServeScanLimit))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route))
+		groups = append(groups, filterReadyByRoute(ready, beadmeta.RoutedToMetadataKey, route))
 	}
 	return mergeControlReadyGroups(groups...)
 }
@@ -270,12 +284,20 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 	return out
 }
 
-// controlReadyFallbackReady issues exactly one batched `bd ready --json`
-// call covering the whole active ready set (no --assignee/--metadata-field
-// filter), for evaluateControlReady to filter in Go. Used when the in-process
-// cache can't answer: dirty, still priming, or the rig's bd compatibility
-// mode requires --include-ephemeral (a tier CachedReady can't serve).
-func controlReadyFallbackReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+// controlReadyFallbackReady answers the batched ready scan the in-process cache
+// could not: dirty, still priming, or a bd compatibility mode that requires
+// --include-ephemeral (a tier CachedReady can't serve).
+//
+// It reads whichever ledger the control dispatcher will actually dispatch
+// against. On a scope whose graph class has been relocated to a binding, that is
+// an in-process Ready() on the binding: `bd` in dir speaks to the work store,
+// and the control beads there are the copies the migration retained, which no
+// longer receive the workflow's mutations. Enumerating those would hand the
+// drain loop a queue of ids the dispatch then no-ops on forever.
+func controlReadyFallbackReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
+		return controlReadyBindingReady(dir, binding, includeEphemeral)
+	}
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
@@ -294,6 +316,39 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 	}
 	if len(result) == controlReadyFallbackLimit {
 		log.Printf("control-ready fallback: bd ready for %s returned exactly the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
+	}
+	beads.SortBeadsReadyOrder(result)
+	return result, nil
+}
+
+// controlReadyBindingReady is the relocated-graph arm of the fallback: the same
+// batched ready scan, taken in-process against the binding instead of by
+// shelling `bd` in a directory that no longer holds the class.
+//
+// It reproduces the shell arm's three filters rather than approximating them:
+// --include-ephemeral is the TierBoth/TierIssues split BdStore.Ready itself
+// applies, --exclude-type is applied in Go because ReadyQuery carries no type
+// selector, and the limit is taken after that exclusion so the batched cap means
+// the same thing on both arms.
+func controlReadyBindingReady(dir string, binding beads.Store, includeEphemeral bool) ([]beads.Bead, error) {
+	tier := beads.TierIssues
+	if includeEphemeral {
+		tier = beads.TierBoth
+	}
+	ready, err := binding.Ready(beads.ReadyQuery{TierMode: tier})
+	if err != nil {
+		return nil, fmt.Errorf("control-ready fallback: reading the graph binding for %s: %w", dir, err)
+	}
+	result := make([]beads.Bead, 0, len(ready))
+	for _, bead := range ready {
+		if bead.Type == controlReadyExcludeType {
+			continue
+		}
+		result = append(result, bead)
+		if len(result) == controlReadyFallbackLimit {
+			log.Printf("control-ready fallback: the graph binding for %s returned at least the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
+			break
+		}
 	}
 	beads.SortBeadsReadyOrder(result)
 	return result, nil
@@ -319,6 +374,16 @@ type controlReadyCacheEntry struct {
 // (runControlDispatcherInStore) would already be failing loudly if it were a
 // real production gap.
 //
+// The snapshot is taken over the SAME store runControlDispatcherWithStoreAndConfig
+// dispatches against: controlGraphStore resolves the scope's graph class, so the
+// queue and the mutation are one ledger. They must not diverge. A queue drawn
+// from the work store while the dispatch closes the binding's copy re-offers the
+// same id every tick -- ProcessControl no-ops on the already-closed copy, and
+// drainWorkflowServeWork counts a no-op as progress -- so the drain loop never
+// returns; and the beads the dispatch CREATES (fanout fragments, retry attempts,
+// drain units) would land in a ledger the scan never reads, stalling the
+// workflow at its first hop.
+//
 // Known limitation (low-impact, not fixed here): concurrent callers racing a
 // stale/missing entry for the same dir each independently open+prime their
 // own store rather than coalescing behind one in-flight prime -- last writer
@@ -336,11 +401,18 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City) *beads.Caching
 		return entry.cache
 	}
 
-	store, err := openControlStoreAtForCity(dir, cityPath, cfg)
-	if err != nil {
-		return nil
+	// The snapshot must be taken over the store the dispatch will mutate. When
+	// the scope's graph class is relocated that is the binding, and the scope
+	// store is not opened at all — it would be a bd process this scan never reads.
+	source, relocated := controlGraphBinding(cityPath, dir)
+	if !relocated {
+		opened, err := openControlStoreAtForCity(dir, cityPath, cfg)
+		if err != nil {
+			return nil
+		}
+		source = opened
 	}
-	cs := beads.NewCachingStore(store, nil)
+	cs := beads.NewCachingStore(source, nil)
 	if err := cs.PrimeActive(); err != nil {
 		log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
 		return nil
@@ -378,7 +450,7 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 		}
 	}
 
-	ready, err := controlReadyFallbackReady(dir, env, parsed.includeEphemeral)
+	ready, err := controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err
 	}

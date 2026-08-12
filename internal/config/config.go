@@ -252,6 +252,9 @@ type City struct {
 	Rigs []Rig `toml:"rigs,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
 	Patches Patches `toml:"patches,omitempty"`
+	// Storage assigns the six semantic storage classes to immutable named
+	// bindings. Nil preserves the existing all-Work storage topology.
+	Storage *StorageConfig `toml:"storage,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
 	// Session configures the session provider backend.
@@ -710,6 +713,9 @@ type AgentOverride struct {
 	// MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.
 	// Duration string (e.g., "15m"). Empty disables jitter.
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -1591,6 +1597,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that holds in-progress work but has stopped making
+	// progress. Because recycling a claim-holder interrupts work, set this above
+	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
+	// Duration string (e.g. "20m"). Unset/zero disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1694,6 +1706,13 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
@@ -1936,6 +1955,16 @@ type DoltConfig struct {
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
+	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
+	// variable, which is how long Dolt keeps an idle connection before reaping
+	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
+	// generally need this raised with it, or the controller's long-lived
+	// dispatch-pool connections are still reaped between ticks. Before this
+	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
+	// supervisor's process environment, which no city.toml could express and
+	// no shell-invoked restart inherited — so a restart from an operator shell
+	// silently rewrote the value. 0 (omitted) means use the managed default.
+	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
 	// `<data_dir>/.dolt/noms/LOCK` and per-database
@@ -2007,6 +2036,16 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	}
 	return DefaultDoltWriteTimeoutMillis
 }
+
+// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
+// window when neither city.toml nor the environment configures one.
+//
+// Deliberately not paired with an Effective* accessor like the other [dolt]
+// fields: wait_timeout resolves three ways, not two. An unset field must fall
+// through to GC_DOLT_WAIT_TIMEOUT, which can itself select "omit the system
+// variable entirely" with a negative value, so collapsing unset to this default
+// would silently discard the env layer.
+const DefaultDoltWaitTimeoutSeconds = 30
 
 // DefaultDoltLockReleaseTimeout is the wait window for dolt's on-disk
 // exclusive store lock to be released when no value is configured. 1m covers
@@ -2547,8 +2586,11 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
@@ -2559,9 +2601,13 @@ type DaemonConfig struct {
 	// what it protected, without removing anything. This is the safe
 	// staged-rollout surface: an operator enables dry-run first, confirms via
 	// `gc events` that no live worktree appears in the would-reap set, then
-	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
-	// effect when AutoReapClosedBeadWorktrees is already true (real removal
-	// supersedes it). Defaults to false.
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
 	// in minutes, before a closed-bead worktree becomes eligible for reap
@@ -2922,9 +2968,11 @@ func (c *City) FormulasDir() string {
 
 // AllPackDirs returns the union of city-level and all rig-level pack directories
 // (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
-// global scans that intentionally need the full pack-fragment universe. Prompt
-// rendering for a specific rig should use PackDirsForRig so one rig's fragments
-// cannot override another rig's same-named fragments.
+// global scans that intentionally need the full pack-fragment universe, and as
+// the fallback PackDirsForRig("") uses for rig-less (scope="city") agents, which
+// have no single rig to scope to. Prompt rendering for a specific rig should use
+// PackDirsForRig so one rig's fragments cannot override another rig's
+// same-named fragments.
 func (c *City) AllPackDirs() []string {
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
@@ -2943,12 +2991,27 @@ func (c *City) AllPackDirs() []string {
 // directories imported by rigName, deduplicated with city-level dirs kept first.
 // Use this when rendering prompts for one agent so rig-imported template
 // fragments are available without exposing fragments imported by other rigs.
+//
+// rigName == "" means a rig-less (scope="city") agent — e.g. deep-investigator,
+// supervisor, pack-author — which has no single rig to scope to. Those agents
+// fall back to AllPackDirs(): the union across every rig, sorted by rig name for
+// determinism. A fragment name defined identically in more than one rig's pack
+// resolves fine (that's the common case: a shared vocabulary like
+// handoff-routing, meant to render identically everywhere). A name defined with
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
+// See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
+	if rigName == "" {
+		return c.AllPackDirs()
+	}
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
-	if rigName != "" {
-		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
-	}
+	dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
 	return dirs
 }
 
@@ -3242,6 +3305,19 @@ type Agent struct {
 	// disables jitter (every session restarts at exactly MaxSessionAge).
 	// Ignored when MaxSessionAge is unset.
 	MaxSessionAgeJitter string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the
+	// idle-timeout ladder may defer on the same assigned-work bead
+	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
+	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
+	// Nil means use the built-in default. Without this backstop a session
+	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
+	// open due to an upstream status-mapping bug) would defer indefinitely,
+	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at
+	// the single-tick level. The counter resets whenever the anchor bead
+	// changes or the session is not idle-kill-eligible; see
+	// sessionHasAwakeAssignedWorkForReachableStore's caller in
+	// session_reconciler.go.
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
@@ -3435,6 +3511,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -4087,6 +4164,13 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		reservedSessionNames[sessionName] = identity
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
+			if agent.EffectiveWakeMode() == "fresh" {
+				warnings = append(warnings, fmt.Sprintf(
+					"named_session %q: mode %q with wake_mode %q on template %q %s; use only for a deliberate restart-per-cycle actor",
+					s.QualifiedName(), s.ModeOrDefault(), agent.EffectiveWakeMode(), agent.QualifiedName(),
+					alwaysFreshWakeModeMarker,
+				))
+			}
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
 				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
@@ -4103,6 +4187,20 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []s
 		}
 	}
 	return warnings, nil
+}
+
+// alwaysFreshWakeModeMarker is a stable substring on the warning emitted when a
+// mode="always" named session backs a wake_mode="fresh" template. CLI warning
+// classification keys off this marker, so keep it in sync with
+// IsAlwaysFreshWakeModeWarning.
+const alwaysFreshWakeModeMarker = "starts a fresh provider session after every drain"
+
+// IsAlwaysFreshWakeModeWarning reports whether a load warning is the non-fatal
+// always+fresh advisory. CLI warning filters use this to print the notice and
+// keep it non-fatal in strict mode. Keep in sync with
+// alwaysFreshWakeModeMarker.
+func IsAlwaysFreshWakeModeWarning(warning string) bool {
+	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a
@@ -4502,6 +4600,9 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	if err := validateStorageAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
@@ -4518,6 +4619,12 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	// Parse sees one layer. Cross-layer storage invariants (six-class
+	// completeness, binding resolution) are checked on the composed root in
+	// LoadWithIncludesOptions, because a fragment may supply either half.
+	if err := validateStorageLayer(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

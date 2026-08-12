@@ -140,7 +140,7 @@ func TestFilterReadyByRouteRequiresUnassignedAndSortsOldestFirst(t *testing.T) {
 		{ID: "ga-epic-routed", CreatedAt: older, Type: "epic", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-other-route", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "other"}},
 	}
-	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher", workflowServeScanLimit)
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-older", "ga-newer"}
 	if !stringSlicesEqual(beadIDs(got), want) {
 		t.Fatalf("filterReadyByRoute = %#v, want %#v", beadIDs(got), want)
@@ -466,7 +466,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 	defer restore()
 
 	dir := t.TempDir()
-	result, err := controlReadyFallbackReady(dir, nil, false)
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -498,7 +498,8 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	restore := captureLogOutput(&logBuf)
 	defer restore()
 
-	result, err := controlReadyFallbackReady(t.TempDir(), nil, false)
+	dir := t.TempDir()
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}

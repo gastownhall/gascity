@@ -179,6 +179,7 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	t.Setenv("GC_CITY_PATH", cityPath)
 
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
@@ -248,6 +249,7 @@ func TestNewRootCmdCompatibilityWrapperNeverConsultsAmbientArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	t.Setenv("GC_CITY_PATH", cityPath)
 
 	oldArgs := os.Args
 	os.Args = []string{oldArgs[0], "git-credential", "get"}

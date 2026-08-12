@@ -152,20 +152,124 @@ already verified on the prior attempt. Close this step and proceed.
 
 **3. If pre-flights fail on {{base_branch}}:**
 
-File a bead and proceed. Do NOT fix pre-existing failures — that's
-not your assignment.
+The failure is on the base branch, so it is not yours and every polecat
+starting a baseline right now sees the same thing. Report it ONCE: search
+the ledger first, and add your confirmation to the existing bead instead of
+filing another copy. Do NOT fix pre-existing failures — that's not your
+assignment.
 
-FORBIDDEN: Pushing to {{base_branch}}. FORBIDDEN: Fixing pre-existing failures.
+FORBIDDEN: Pushing to {{base_branch}}. FORBIDDEN: Fixing pre-existing
+failures. FORBIDDEN: Filing before searching.
+
+**3a. Derive a stable symptom key.** Two agents describe one defect in two
+different ways, so free-text prose cannot match; a symptom key can.
+
+Use the failing **test function** name, with any Go subtest suffix stripped
+at the first `/`. Two polecats often trip different subtests of the same
+function — `TestDisableAndPurge.../clean_config_with_residual_files` versus
+`.../peer_successor_cross-device_tree` — and searching the full subtest path
+means neither finds the other's bead. Key on the function; note the subtest
+in the description.
+
+```bash
+RAW_FAILURE="<failing test as reported, e.g. TestFoo/some_subtest>"
+SYMPTOM_KEY="${RAW_FAILURE%%/*}"
+```
+
+When the failure has no test name at all, use the failing package or target
+path (`internal/api/genclient`). Handle each distinct failure under its own
+key.
+
+**3b. Search before filing — and fail CLOSED on lookup error.** A lookup
+that errors is not an all-clear. Include claimed beads: the existing report
+is usually already `in_progress` with someone fixing it.
 
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
-gc bd create --title "Pre-existing failure: <description>" --type bug --priority 1
-gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
-  -m "Filed: <bead-id>. Proceeding with $WORK_BEAD_ID."
+EXISTING=""
+MATCHES=$(gc bd list --title-contains "$SYMPTOM_KEY" --status open,in_progress,blocked --json)
+LOOKUP_RC=$?
+if [ "$LOOKUP_RC" -ne 0 ]; then
+    echo "Ledger lookup failed (rc=$LOOKUP_RC). NOT filing — a failed lookup is not proof the bead is missing."
+    gc mail send <rig>/witness -s "NOTICE: {{base_branch}} pre-flight failed, dedupe lookup broken" \
+      -m "Symptom: $SYMPTOM_KEY. Lookup exited $LOOKUP_RC so nothing was filed. Proceeding with $WORK_BEAD_ID."
+else
+    EXISTING=$(printf '%s' "$MATCHES" | jq -r '.[0].id // empty')
+fi
 ```
 
-**Exit criteria:** Pre-flights pass (or pre-existing bug filed), ready to implement."""
+**3b2. If the exact key matched nothing, widen to the family.** Sibling
+tests in one package usually fail for one reason: three different
+`TestDisableAndPurge*` functions were filed separately when a single
+environment leak broke all of them, and that package accumulated eight beads
+in under two days. Search the shared prefix, or the package name:
+
+```bash
+if [ "$LOOKUP_RC" -eq 0 ] && [ -z "$EXISTING" ]; then
+    SYMPTOM_FAMILY="<shared test prefix or failing package, e.g. TestDisableAndPurge>"
+    FAMILY_MATCHES=$(gc bd list --title-contains "$SYMPTOM_FAMILY" --status open,in_progress,blocked --json)
+    FAMILY_RC=$?
+    if [ "$FAMILY_RC" -ne 0 ]; then
+        echo "Family lookup failed (rc=$FAMILY_RC). NOT filing — a failed lookup is not proof the bead is missing."
+    else
+        printf '%s' "$FAMILY_MATCHES" | jq -r '.[] | "\\(.id)\\t\\(.title)"'
+    fi
+fi
+```
+
+Read what comes back rather than matching on the string alone. A hit whose
+symptom is genuinely the same defect — same package, same failure mode —
+means comment on it as in 3c. Set it by hand — this one is a judgement
+call, so nothing assigns it for you:
+
+```bash
+EXISTING="<the bead id you judged to be the same defect>"
+```
+
+A hit that merely shares a prefix but fails for a different reason is not
+your bead; keep going to 3d.
+
+**3c. If `$EXISTING` is set — comment, do not file:**
+
+```bash
+gc bd comment "$EXISTING" "Also observed on {{base_branch}} while starting $WORK_BEAD_ID."
+```
+
+One bead, N confirmations. Then get on with your own work.
+
+**3d. If the lookup succeeded and matched nothing, check whether the fix
+already landed** and your baseline is simply stale. Re-filing a defect that
+is already fixed puts a ready bead in the pool, and the next sling sends a
+polecat to redo merged work:
+
+```bash
+CUTOFF=$(date -u -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-7d +%Y-%m-%d)
+CLOSED_MATCHES=$(gc bd list --title-contains "$SYMPTOM_KEY" --status closed --closed-after "$CUTOFF" --json)
+CLOSED_RC=$?
+```
+
+On a match — or on a non-zero `$CLOSED_RC`, since a failed lookup is not
+proof the fix has not landed — re-fetch `origin/{{base_branch}}`, reset your
+worktree to the current tip, and re-run the pre-flight before filing
+anything.
+
+**3e. Only now file it** — with the symptom key verbatim in the title, so
+the next polecat's 3b lookup finds your bead. Put the full failure,
+including the subtest you stripped in 3a and the package, in the body:
+
+```bash
+gc bd create --title "Pre-existing failure: $SYMPTOM_KEY — <short description>" \
+  --type bug --priority 1 \
+  --design "Observed on {{base_branch}}. Full failure: $RAW_FAILURE"
+gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
+  -m "Filed: <bead-id> for $SYMPTOM_KEY. Proceeding with $WORK_BEAD_ID."
+```
+
+**Exit criteria:** Pre-flights pass, or the failure is recorded exactly once
+— a new bead you filed, or your comment on the bead that already had it —
+or, when the ledger lookup itself was broken, witness has been notified
+instead."""
 
 [[steps]]
 id = "implement"
@@ -282,7 +386,12 @@ debug cruft, unintended file changes. Fix anything you find.
 ```
 
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
-If pre-existing, file a bead.
+
+If the failure is pre-existing, report it through the search-first protocol
+in the `preflight-tests` step (3a-3e): derive the symptom key, search the
+ledger, comment on the bead that already covers it, and only file when the
+lookup succeeded and found nothing. Reaching this step later than the other
+polecats makes a duplicate more likely here, not less.
 
 **3. Ensure everything is committed:**
 ```bash

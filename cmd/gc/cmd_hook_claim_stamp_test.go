@@ -57,7 +57,16 @@ func poolClaimOps(runner string, claimedMeta map[string]string, branch string, s
 		},
 		ResolveWorkBranch: func(string) string { return branch },
 		StampWorkMeta:     spy.fn,
-		PublishRunMap:     noopPublishRunMap,
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
+			meta := map[string]string{}
+			for k, v := range claimedMeta {
+				meta[k] = v
+			}
+			meta[beadmeta.SessionIDMetadataKey] = "mc-sess1"
+			meta[beadmeta.SessionNameMetadataKey] = "gc__role-mc-sess1"
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: meta}, nil
+		},
+		PublishRunMap: noopPublishRunMap,
 	}
 }
 
@@ -291,5 +300,70 @@ func TestDoHookClaimIdentityStampFailureDoesNotFailClaim(t *testing.T) {
 	}
 	if result.BeadID != "hw-err" || result.Reason != "claimed" {
 		t.Fatalf("claim result = %+v, want bead hw-err reason claimed", result)
+	}
+}
+
+func TestDoHookClaimEmitsStartedOnlyAfterDurableSessionReadback(t *testing.T) {
+	spy := &stampMetaSpy{}
+	meta := map[string]string{
+		"gc.routed_to": "worker", beadmeta.RootBeadIDMetadataKey: "gcg-run",
+		beadmeta.StepIDMetadataKey: "build", beadmeta.NativeStepDependenciesMetadataKey: `["prepare"]`,
+	}
+	ops := poolClaimOps(`[{"id":"gcg-attempt","status":"open","metadata":{"gc.routed_to":"worker"}}]`, meta, "", spy)
+	var emitted []beads.Bead
+	ops.EmitExecutionStepStarted = func(b beads.Bead, _ string, _ []string, _ string) { emitted = append(emitted, b) }
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d; stderr=%s", code, stderr.String())
+	}
+	if len(emitted) != 1 || emitted[0].ID != "gcg-attempt" || emitted[0].Metadata[beadmeta.SessionIDMetadataKey] != "mc-sess1" || emitted[0].Status != "in_progress" {
+		t.Fatalf("started emission = %#v, want one durable in-progress session-stamped step", emitted)
+	}
+
+	spy.err = errors.New("stamp failed")
+	emitted = nil
+	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("failed-stamp claim = %d; stderr=%s", code, stderr.String())
+	}
+	if len(emitted) != 0 {
+		t.Fatalf("failed stamp emitted started event: %#v", emitted)
+	}
+}
+
+// TestDoHookClaimAdoptionReconcilesDurableStartedFact covers the crash window
+// between a durable claim-time identity stamp and event recording. A later hook
+// tick adopts the same in-progress assignment, verifies its durable identity,
+// and must re-emit the idempotent started fact rather than leave a permanent
+// lifecycle gap.
+func TestDoHookClaimAdoptionReconcilesDurableStartedFact(t *testing.T) {
+	spy := &stampMetaSpy{}
+	meta := map[string]string{
+		"gc.routed_to": "worker", beadmeta.RootBeadIDMetadataKey: "gcg-run",
+		beadmeta.StepIDMetadataKey: "build", beadmeta.SessionIDMetadataKey: "mc-sess1",
+		beadmeta.SessionNameMetadataKey: "gc__role-mc-sess1",
+	}
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"gcg-attempt","status":"in_progress","assignee":"gc__role-mc-sess1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"gcg-run","gc.step_id":"build","gc.session_id":"mc-sess1","gc.session_name":"gc__role-mc-sess1"}}]`, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+		StampWorkMeta:     spy.fn,
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: meta}, nil
+		},
+		PublishRunMap: noopPublishRunMap,
+	}
+	var emitted []beads.Bead
+	ops.EmitExecutionStepStarted = func(b beads.Bead, _ string, _ []string, _ string) { emitted = append(emitted, b) }
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", poolClaimOpts(), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d; stderr=%s", code, stderr.String())
+	}
+	if spy.calls != 0 {
+		t.Fatalf("StampWorkMeta calls = %d, want 0 for an already durable identity", spy.calls)
+	}
+	if len(emitted) != 1 || emitted[0].ID != "gcg-attempt" || emitted[0].Metadata[beadmeta.SessionIDMetadataKey] != "mc-sess1" {
+		t.Fatalf("started emission = %#v, want durable adopted step", emitted)
 	}
 }

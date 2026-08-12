@@ -309,9 +309,7 @@ func resolveImportRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if canonical, err2 := filepath.EvalSymlinks(cwd); err2 == nil {
-		cwd = canonical
-	}
+	cwd = normalizePathForCompare(cwd)
 	// Explicit rig/dir signals carry user intent and outrank cwd inference:
 	// route them through the registered-city machinery first, exactly as
 	// --city does above. Only pure cwd inference may use the nearest-marker

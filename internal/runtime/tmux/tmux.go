@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -47,6 +48,55 @@ const pollInterval = 100 * time.Millisecond
 // name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
 // alongside the family name.
 var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
+
+// defaultNudgeSubmitKeySequence is the ordered tmux key names sent, in
+// order, to submit a pasted nudge for a provider family with no explicit
+// entry in nudgeSubmitKeySequences. A single "Enter" is the historical,
+// still-correct behavior for every family this fork has verified.
+var defaultNudgeSubmitKeySequence = []string{"Enter"}
+
+// nudgeSubmitKeySequences declares, per provider family, the ordered tmux
+// key names sent (via sendNudgeSubmitSequence) to submit a pasted nudge —
+// the "declarative per-provider nudge submit-key sequence" design from
+// upstream gastownhall/gascity#4706. A family with no entry here gets
+// defaultNudgeSubmitKeySequence.
+//
+// #4706 was filed against a k8s codex agent whose first turn never started:
+// codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
+// is swallowed as a composer newline rather than treated as submit — codex's
+// actual submit sequence is Escape then Enter. This fork's tmux carrier does
+// not yet carry that fix; adding it here is left to a follow-up once the
+// change is exercised against a live codex TUI in this repo's own test
+// harness (it is out of scope for this claude-focused patch, but the table
+// exists precisely so that follow-up is a one-line addition, not another
+// pass through the delivery mechanics).
+//
+// This table does NOT yet contain an entry for the claude-specific stall
+// this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
+// "LIVE RESIDUAL": a claude TUI composer left with pasted-but-unsubmitted
+// text even after the unconfirmed-submit and clear-before-paste fixes
+// landed). Investigation (see ra-oudpha comments) could not identify a wrong
+// key as the cause — #4706 itself specifies claude's default submit
+// sequence as plain Enter, which is what this fork already sends, and the
+// live specimens showed text sitting visibly unsubmitted (not a
+// silently-succeeded-but-unconfirmed false negative), ruling out a busy-
+// indicator detection gap as the explanation too. Pinning the actual cause
+// needs a live trace this fork-patch pass does not have access to (the city
+// this bead is scoped against is live and read-only for this pass). Once
+// traced, the fix — whatever key sequence or timing claude's TUI turns out
+// to need — is a single entry in this table plus a test, not a rewrite of
+// NudgeSession.
+var nudgeSubmitKeySequences = map[string][]string{}
+
+// nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
+// for a provider family, or defaultNudgeSubmitKeySequence when the family
+// has no explicit entry.
+func nudgeSubmitKeySequenceForFamily(family string) []string {
+	if seq, ok := nudgeSubmitKeySequences[family]; ok {
+		return seq
+	}
+	return defaultNudgeSubmitKeySequence
+}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -144,6 +194,16 @@ var (
 	ErrSessionNotFound    = errors.New("session not found")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
+	// ErrNudgeSubmitUnconfirmed indicates the submit Enter was handed to tmux
+	// but the agent's busy indicator was never observed within budget: the
+	// message may be sitting drafted-but-unsubmitted in the pane. Callers
+	// that can retry (the nudge queue dispatcher, the idle-claim backstop)
+	// must treat this the same as an undelivered nudge: the queue must not
+	// ack the item, so it requeues after the normal retry delay and consumes
+	// one of its bounded attempts, exactly like any other delivery failure.
+	// ga-bwm proved that treating an unconfirmed submit as a clean success is
+	// exactly what lets a stalled nudge go undetected for many minutes.
+	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -153,6 +213,12 @@ var (
 	// proceeding — see issue ga-h9z.
 	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
+
+// ErrNoCurrentTarget is tmux's reply when the server IS alive but holds no
+// sessions (exit-empty off — gc's configured default). It wraps ErrNoServer so
+// existing idempotent-teardown callers are unchanged; only the new-session
+// preflight distinguishes it.
+var ErrNoCurrentTarget = fmt.Errorf("%w: no current target", ErrNoServer)
 
 const (
 	hiddenAttachReadyTimeout = 2 * time.Second
@@ -243,6 +309,12 @@ type Tmux struct {
 	// agentSlice wraps pane commands in a transient systemd user scope when
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
+
+	// serverSocketObserver observes a named socket only after tmux reports
+	// ErrNoServer during the new-session preflight. Nil selects the production
+	// observer; tests inject a deterministic observation without opening a
+	// socket.
+	serverSocketObserver func(context.Context, string) error
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -319,9 +391,13 @@ func wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// Detect specific error types
+	if strings.Contains(stderr, "no current target") {
+		// The server answered — it is simply holding zero sessions. Wraps
+		// ErrNoServer so idempotent-teardown callers are unaffected.
+		return ErrNoCurrentTarget
+	}
 	if strings.Contains(stderr, "no server running") ||
 		strings.Contains(stderr, "error connecting to") ||
-		strings.Contains(stderr, "no current target") ||
 		strings.Contains(stderr, "server exited unexpectedly") {
 		return ErrNoServer
 	}
@@ -351,8 +427,10 @@ func wrapError(err error, stderr string, args []string) error {
 //   - nil when SocketName is empty (default-server case is out of scope) or
 //     when the server replies (alive — including the expected "session not
 //     found" for the bogus probe target).
-//   - nil with ErrNoServer semantics absorbed (no server bound is safe; tmux
-//     will create a fresh server cleanly).
+//   - nil when tmux reports "no current target" (ErrNoCurrentTarget): the
+//     server answered and is alive with zero sessions, so new-session attaches
+//     rather than unlinking and rebinding.
+//   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -372,10 +450,24 @@ func (t *Tmux) probeServerAlive() error {
 		// Healthy server, just doesn't have the probe session. Safe.
 		return nil
 	}
-	if errors.Is(err, ErrNoServer) {
-		// No server bound (stale socket or never existed). Safe — tmux will
-		// unlink any stale socket and bind a fresh server.
+	if errors.Is(err, ErrNoCurrentTarget) {
+		// The server answered: it is alive with zero sessions, so new-session
+		// attaches rather than unlinking and rebinding. Never a stale socket.
 		return nil
+	}
+	if errors.Is(err, ErrNoServer) {
+		observer := t.serverSocketObserver
+		if observer == nil {
+			observer = observeNamedSocket
+		}
+		path := namedSocketPath(t.cfg.SocketName)
+		observationErr := observer(ctx, path)
+		if observationErr == nil {
+			return nil
+		}
+		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
+		// must not retry a guarded no-server result as an ordinary absence.
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
@@ -435,6 +527,92 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	return nil
 }
 
+// sessionEnvUnsetKeys returns the sorted keys of env whose value is empty.
+//
+// An empty value is this repo's spelling of "withhold this var from the child",
+// not "set it to the empty string" — see processenv.ControllerOnlyEnvKeys and
+// convergence.ScrubTokenEnv. A session env map is an OVERLAY on an environment
+// the child already inherits (the tmux server's global env), so a key the caller
+// merely omitted arrives carrying the server's value; only an explicit
+// withholding removes it.
+func sessionEnvUnsetKeys(env map[string]string) []string {
+	var keys []string
+	for k, v := range env {
+		if v == "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// withEnvUnsetPrefix prefixes command with `env -u KEY ...` so the process tmux
+// execs starts without those vars. This covers the INITIAL exec only — it is a
+// property of one command string, not of the session — which is why
+// markSessionEnvRemoved has to carry the same withholding forward.
+func withEnvUnsetPrefix(command string, unsetKeys []string) string {
+	if len(unsetKeys) == 0 || command == "" {
+		return command
+	}
+	var prefix string
+	for _, k := range unsetKeys {
+		prefix += " -u " + k
+	}
+	return "env" + prefix + " " + command
+}
+
+// durableWithholdKeys returns the empty-valued keys whose withholding must
+// SURVIVE into later processes, rather than only applying to the command tmux
+// execs first.
+//
+// That is the controller-scope credentials and nothing else. The other keys a
+// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_ pair —
+// are nesting-detection flags, not secrets: the `env -u` prefix already gives
+// them the behavior they need on the launched command, and marking them in the
+// session environment would buy nothing while putting an extra tmux round-trip
+// on every session creation in the repo.
+func durableWithholdKeys(env map[string]string) []string {
+	var keys []string
+	for _, k := range sessionEnvUnsetKeys(env) {
+		if processenv.IsControllerOnlyEnv(k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// markSessionEnvRemoved marks keys for REMOVAL in the session environment
+// (`set-environment -r`), so every process tmux starts in this session from now
+// on — respawn-pane, new-window, split-window — is started without them.
+//
+// This is the durable half of the withholding contract, and it is what makes the
+// relaunch path safe: respawn-pane takes no env argument, so a warm box that
+// carried the withholding only as an `env -u` command prefix would hand the
+// server's real value to the respawned agent. `-r` is not `-u`: -u unsets the
+// SESSION entry and lets the server's global value show through again, which is
+// the bug rather than the fix.
+//
+// A session that no longer exists is the one tolerated failure, and it is not a
+// swallow: a short-lived pane command can exit and take its session down while
+// this call is in flight, and a session that is gone has no pane to leak into
+// and no warm box to respawn, so the control is vacuous rather than unapplied.
+// That condition is confirmed by ASKING tmux, not by matching stderr — tmux 3.4
+// answers set-environment with "no such session" and has-session with "can't
+// find session", so only one of the two is classified, and wording is not a
+// contract. Every other failure is a real failure to apply a security control
+// and is returned.
+func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
+	for _, k := range keys {
+		if _, err := t.run("set-environment", "-t", session, "-r", k); err != nil {
+			if alive, probeErr := t.HasSession(session); probeErr == nil && !alive {
+				return nil
+			}
+			return fmt.Errorf("marking %s for removal from session %q env: %w", k, session, err)
+		}
+	}
+	return nil
+}
+
 // NewSessionWithCommandAndEnv creates a new detached tmux session with environment
 // variables set via -e flags. This ensures the initial shell process inherits the
 // correct environment from the session, rather than inheriting from the tmux server
@@ -445,6 +623,14 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // The command should still use 'exec env' for WaitForCommand detection compatibility,
 // but -e provides defense-in-depth for the initial shell environment.
 // Requires tmux >= 3.2.
+//
+// Empty-valued keys are WITHHELD by the `env -u` command prefix, which covers
+// the command new-session execs. Controller-scope credentials additionally get
+// the durable session-environment marker, which covers every process started in
+// the session afterwards — above all respawn-pane. Both are required for those
+// keys and each was falsified against a real tmux 3.4: new-session starts the
+// command before any follow-up can land, so the marker alone leaves the CREATED
+// pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
@@ -463,30 +649,29 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	var unsetKeys []string
+	unsetKeys := sessionEnvUnsetKeys(env)
 	for _, k := range keys {
-		if env[k] == "" {
-			// Empty values mean "unset this var". Collect for env -u prefix.
-			unsetKeys = append(unsetKeys, k)
-		} else {
+		if env[k] != "" {
 			args = append(args, "-e", fmt.Sprintf("%s=%s", k, env[k]))
 		}
 	}
-	// For vars that need unsetting, prefix the command with env -u flags.
-	// tmux -e sets session-level env but the shell process still inherits
-	// from the tmux server's global environment. env -u ensures the var
-	// is actually absent from the child process.
-	if len(unsetKeys) > 0 && command != "" {
-		var prefix string
-		for _, k := range unsetKeys {
-			prefix += " -u " + k
-		}
-		command = "env" + prefix + " " + command
-	}
+	// For vars that need unsetting, prefix the command with env -u flags. The
+	// pane's shell would otherwise inherit them from the tmux server's global
+	// environment, which holds whatever the controller exported when the server
+	// started. This prefix is a property of THIS command only.
+	command = withEnvUnsetPrefix(command, unsetKeys)
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	_, err := t.run(args...)
 	if err != nil {
+		return err
+	}
+	// Carry the CREDENTIAL withholding into the session environment, so it
+	// survives into every later process — above all respawn-pane, which the
+	// warm-box relaunch path uses and which takes no env argument at all. Fail
+	// closed: a session that silently kept a withheld credential is the defect
+	// this prevents.
+	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
@@ -1569,15 +1754,36 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	if client == nil {
 		return false, nil
 	}
-	for _, key := range keys {
+	if len(keys) == 0 {
+		return true, nil
+	}
+	// Resolve every key to its byte sequence before writing anything: an unknown
+	// key must fall through to the SendKeysRaw path (used=false) without a partial
+	// hidden-client write or a recorded poke.
+	seqs := make([][]byte, len(keys))
+	for i, key := range keys {
 		seq, ok := hiddenAttachedKeyBytes(key)
 		if !ok {
 			return false, nil
 		}
+		seqs[i] = seq
+	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too — mirroring sendHiddenAttachedText. Without it, the
+	// detached-Gemini rewind picker keys ResetInterruptedTurn drives through
+	// SendKeys (and the detached Interrupt's Ctrl-C) would let gc's own final
+	// keystroke echo count as the agent responding once the sequence outlasts
+	// pokeEcho (see discountPokeActivity). beginPoke captures the genuine prior
+	// before the first write — carrying a still-unanswered earlier poke's baseline
+	// forward so chained gc echoes don't become the new prior — and stamps it only
+	// after the last key lands. A failed write records nothing.
+	commitPoke := t.beginPoke(target)
+	for _, seq := range seqs {
 		if err := client.write(seq); err != nil {
 			return true, err
 		}
 	}
+	commitPoke()
 	return true, nil
 }
 
@@ -1589,6 +1795,13 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if text == "" {
 		return true, nil
 	}
+	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
+	// so record a poke here too (the residual NudgeNow gap): capture the
+	// pre-nudge activity before the first write and stamp it only after the
+	// trailing Enter is delivered, so a later GetSessionActivity discounts gc's
+	// echo instead of counting this nudge as the agent responding (see
+	// discountPokeActivity). A failed write records nothing.
+	commitPoke := t.beginPoke(target)
 	if err := client.write([]byte(text)); err != nil {
 		return true, err
 	}
@@ -1598,6 +1811,7 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	if err := client.write([]byte{'\r'}); err != nil {
 		return true, err
 	}
+	commitPoke()
 	return true, nil
 }
 
@@ -1732,21 +1946,24 @@ const (
 	submitReEnterBackoff      = 200 * time.Millisecond
 )
 
-// submitEnterAndConfirm sends Enter and confirms the message submitted by
-// observing the agent transition to its busy/processing state. It re-sends
-// Enter only while the pane remains idle (submission not yet observed), so a
-// turn that already started can never receive a second Enter.
+// submitEnterAndConfirm sends the provider's submit key sequence (see
+// nudgeSubmitKeySequences — a single Enter for every family this fork has
+// verified so far) and confirms the message submitted by observing the
+// agent transition to its busy/processing state. It re-sends the sequence
+// only while the pane remains idle (submission not yet observed), so a turn
+// that already started can never receive a second submit.
 //
 // Returns:
 //   - (true, nil)  — the agent went busy: the message submitted.
-//   - (false, nil) — Enter was delivered to tmux but busy was never observed
-//     within the budget (best-effort; preserves the historical "nil == handed
-//     to tmux" contract so callers do not re-paste).
-//   - (false, err) — every Enter send failed at the tmux layer.
+//   - (false, nil) — the submit sequence was delivered to tmux but busy was
+//     never observed within the budget (best-effort; preserves the
+//     historical "nil == handed to tmux" contract so callers do not
+//     re-paste).
+//   - (false, err) — every submit attempt failed at the tmux layer.
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
@@ -1757,7 +1974,7 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 			}
 			sleep(submitReEnterBackoff)
 		}
-		if err := sendEnter(); err != nil {
+		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1792,6 +2009,48 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 		return sessionlog.ProviderFamily(provider) == "claude"
 	}
 	return t.targetLooksLikeProvider(target, "claude")
+}
+
+// nudgeSubmitKeySequence resolves target's declared submit key sequence (see
+// nudgeSubmitKeySequences), identifying the provider family the same way
+// submitVerifyEligible and shouldSendEscapeBeforeEnter do: prefer the
+// GC_PROVIDER pane environment variable, falling back to a process-name
+// sniff for panes without it (ad hoc sessions, some test harnesses).
+func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
+	if provider := t.providerEnv(target); provider != "" {
+		return nudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+	}
+	for family := range nudgeSubmitKeySequences {
+		if t.targetLooksLikeProvider(target, family) {
+			return nudgeSubmitKeySequenceForFamily(family)
+		}
+	}
+	return defaultNudgeSubmitKeySequence
+}
+
+// nudgeSubmitKeySettle is the pause between successive keys within a
+// multi-key submit sequence (e.g. a hypothetical Escape-then-Enter entry) —
+// long enough for the TUI to process the first key's effect before the next
+// arrives, short enough not to meaningfully lengthen the existing submit
+// budget. Not used when the sequence has a single key (today's default for
+// every family), so it changes no existing timing.
+const nudgeSubmitKeySettle = 100 * time.Millisecond
+
+// sendNudgeSubmitSequence sends target's declared provider-family submit key
+// sequence as an ordered series of tmux send-keys calls, pausing
+// nudgeSubmitKeySettle between keys. Returns the first error encountered;
+// remaining keys are not sent after an error, matching sendEnter's previous
+// single-key contract (the caller decides how to react to a failed submit).
+func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
+	for i, key := range keys {
+		if i > 0 {
+			time.Sleep(nudgeSubmitKeySettle)
+		}
+		if _, err := t.run("send-keys", "-t", target, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NudgeSession sends a message to a Claude Code session reliably.
@@ -1831,11 +2090,11 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// entry would let the final Enter's echo land outside the discount window.
 	// pokePrior also carries a still-unanswered earlier poke's baseline forward
 	// so chained nudges inside pokeGrace don't record gc's own echo as prior.
-	prior := t.pokePrior(session)
+	commitPoke := t.beginPoke(session)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(session, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -1870,19 +2129,33 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
 
-	// 5. Send Enter and, for providers with a reliable busy indicator, confirm
-	// the draft actually submitted — re-sending Enter only while the pane stays
-	// idle. A lost submit Enter (raced against the paste or a detached-pane
-	// wake) is the ga-bwm "drafted but not submitted" stall; confirming here
-	// removes the town's dependence on an external observer re-kicking the
-	// session. Providers without a reliable indicator keep best-effort delivery.
-	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
+	// 5. Send the provider's declared submit key sequence (see
+	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
+	// a reliable busy indicator, confirm the draft actually submitted —
+	// re-sending the sequence only while the pane stays idle. A lost submit
+	// (raced against the paste or a detached-pane wake) is the ga-bwm
+	// "drafted but not submitted" stall; confirming here removes the town's
+	// dependence on an external observer re-kicking the session. Providers
+	// without a reliable indicator keep best-effort delivery.
+	submitKeys := t.nudgeSubmitKeySequence(target)
+	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
-			return fmt.Errorf("failed to send Enter: %w", err)
+		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if err != nil {
+			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
 		delivered = true
+		if !confirmed {
+			// Do NOT collapse this to nil: a caller that treats nil as "clean
+			// delivery" would ack a queued nudge for a message that may still
+			// be sitting drafted-but-unsubmitted in the pane. Surfacing this
+			// as an error leaves the item unacked, so it requeues after the
+			// normal retry delay and spends one of its bounded attempts —
+			// the same handling as any other delivery failure — instead of
+			// silently losing the nudge.
+			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
+		}
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
@@ -1891,7 +2164,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		if attempt > 0 {
 			time.Sleep(submitReEnterBackoff)
 		}
-		if err := sendEnter(); err != nil {
+		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1900,7 +2173,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		delivered = true
 		return nil
 	}
-	return fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
+	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
 }
 
 // NudgePane sends a message to a specific pane reliably.
@@ -1918,11 +2191,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// See NudgeSession for why prior is captured before the first keystroke
 	// (via pokePrior, which also carries a still-unanswered earlier poke's
 	// baseline forward) and the poke stamped only on confirmed delivery.
-	prior := t.pokePrior(pane)
+	commitPoke := t.beginPoke(pane)
 	delivered := false
 	defer func() {
 		if delivered {
-			t.recordPokeAt(pane, prior, time.Now())
+			commitPoke()
 		}
 	}()
 
@@ -1944,13 +2217,15 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// happens before and after submit.
 	t.WakePaneIfDetached(pane)
 
-	// 5. Send Enter with retry (critical for message submission)
+	// 5. Send the provider's declared submit key sequence with retry
+	// (critical for message submission). See NudgeSession/nudgeSubmitKeySequences.
+	submitKeys := t.nudgeSubmitKeySequence(pane)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		if _, err := t.run("send-keys", "-t", pane, "Enter"); err != nil {
+		if err := t.sendNudgeSubmitSequence(pane, submitKeys); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1959,7 +2234,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		delivered = true
 		return nil
 	}
-	return fmt.Errorf("failed to send Enter after 3 attempts: %w", lastErr)
+	return fmt.Errorf("failed to send submit sequence after 3 attempts: %w", lastErr)
 }
 
 func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
@@ -2373,6 +2648,20 @@ func (t *Tmux) recordPokeAt(session string, prior, at time.Time) {
 	}
 	t.pokes[session] = pokeInfo{at: at, prior: prior}
 	t.pokeMu.Unlock()
+}
+
+// beginPoke snapshots the genuine pre-nudge activity for session (via pokePrior,
+// which also carries a still-unanswered earlier poke's baseline forward) and
+// returns a commit closure. Callers invoke commit only after the nudge's final
+// keystroke is confirmed delivered; it stamps the poke so a later
+// GetSessionActivity discounts gc's own keystroke echo (see discountPokeActivity)
+// instead of counting the nudge as the agent responding. A nudge that never
+// confirms delivery must not call commit, leaving last_active untouched. This is
+// the shared prior-before-write / stamp-after-delivery contract used by
+// NudgeSession, NudgePane, and the hidden-attached send path.
+func (t *Tmux) beginPoke(session string) (commit func()) {
+	prior := t.pokePrior(session)
+	return func() { t.recordPokeAt(session, prior, time.Now()) }
 }
 
 // pokePrior snapshots the genuine session activity to record as a new poke's

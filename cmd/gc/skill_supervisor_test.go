@@ -201,8 +201,9 @@ func TestRunStage1SkipsUnsupportedProvider(t *testing.T) {
 
 // TestRunStage1MixedProvidersCreateSiblingSinks verifies the spec's
 // mixed-provider scenario: a claude agent and a codex agent at the
-// same scope root produce sibling .claude/skills/ and .codex/skills/
-// sinks with the same city-pack skill.
+// same scope root produce sibling .claude/skills/ and .agents/skills/
+// sinks (the codex CLI reads .agents/skills, not .codex/skills) with the
+// same city-pack skill.
 func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
@@ -223,7 +224,7 @@ func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, vendor := range []string{".claude", ".codex"} {
+	for _, vendor := range []string{".claude", ".agents"} {
 		sink := filepath.Join(cityPath, vendor, "skills", "plan")
 		info, err := os.Lstat(sink)
 		if err != nil {
@@ -553,8 +554,8 @@ func TestRunStage1AgentLocalOnlyInItsOwnSink(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "mayor-only")); err != nil {
 		t.Errorf("mayor-only missing from claude sink: %v", err)
 	}
-	// deputy's codex sink does NOT get mayor's private skill.
-	if _, err := os.Lstat(filepath.Join(cityPath, ".codex", "skills", "mayor-only")); !os.IsNotExist(err) {
+	// deputy's codex sink (.agents/skills) does NOT get mayor's private skill.
+	if _, err := os.Lstat(filepath.Join(cityPath, ".agents", "skills", "mayor-only")); !os.IsNotExist(err) {
 		t.Errorf("mayor-only leaked into codex sink; err=%v", err)
 	}
 }

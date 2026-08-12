@@ -102,6 +102,36 @@ func TestMessageCreatedInWispTier(t *testing.T) {
 	}
 }
 
+func TestProviderWithSessionDirectoryKeepsMessageRowsInMessaging(t *testing.T) {
+	messaging := beads.NewMemStore()
+	sessions := beads.NewMemStore()
+	sessionBead, err := sessions.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "split-sender",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewWithSessionDirectory(messaging, session.NewStore(beads.SessionStore{Store: sessions}))
+	message, err := p.Send("split-sender", sessionBead.ID, "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := messaging.Get(message.ID); err != nil {
+		t.Fatalf("message not in Messaging store: %v", err)
+	}
+	rows, err := sessions.List(beads.ListQuery{Type: messageBeadType, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list messages in Sessions store: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("message rows leaked to Sessions store: %#v", rows)
+	}
+}
+
 func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
 	p := New(store)
@@ -1002,8 +1032,15 @@ func TestArchive(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Archive: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "dismiss me" {
+		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
 	}
 }
 
@@ -1089,12 +1126,23 @@ func TestLegacyClosedMessageBeadTreatedAsRemoved(t *testing.T) {
 		}
 	}
 
-	// Archive must still delete a closed legacy message when called explicitly.
+	// Archiving an already-closed legacy message is idempotent (ErrAlreadyArchived)
+	// and must NOT destroy the store row: #4422 forbids store.Delete on any archive
+	// path, including legacy cleanup. The bead stays retained and recoverable via
+	// bd show / store.Get, while remaining removed from every mail view (asserted
+	// above). View-removal (#4350) and store-retention (#4422) are orthogonal.
 	if err := p.Archive(legacy.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive(legacy closed) error = %v, want ErrAlreadyArchived", err)
 	}
-	if _, err := store.Get(legacy.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Errorf("store.Get(legacy) after Archive err = %v, want ErrNotFound", err)
+	retained, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("store.Get(legacy) after Archive: %v (want bead retained, not deleted)", err)
+	}
+	if retained.Status != "closed" {
+		t.Errorf("legacy bead status after Archive = %q, want \"closed\"", retained.Status)
+	}
+	if retained.Description != "closed by an old release" {
+		t.Errorf("legacy bead body after Archive = %q, want retained", retained.Description)
 	}
 }
 
@@ -1164,13 +1212,18 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	}
 	store.Close(sent.ID) //nolint:errcheck
 
-	// Archiving already-closed message returns ErrAlreadyArchived.
+	// Archiving an already-closed message returns ErrAlreadyArchived without
+	// deleting the bead (idempotent, body retained).
 	err = p.Archive(sent.ID)
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive already closed: got %v, want ErrAlreadyArchived", err)
 	}
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, getErr := store.Get(sent.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s) after Archive of closed bead: %v (want bead retained)", sent.ID, getErr)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 
@@ -1202,7 +1255,7 @@ func TestArchiveNotFound(t *testing.T) {
 	}
 }
 
-func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
+func TestArchiveRetainsBodyReadableAfterClose(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -1214,12 +1267,28 @@ func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
+	// #4422 guarantees the row is RETAINED at the store, not destroyed — the fix
+	// is that Archive closes instead of store.Delete. Recovery is via bd show /
+	// store.Get, NOT the mail API: p.Get correctly hides an archived message per
+	// #4350's view contract (isRemovedMessageBead). Assert the durability claim at
+	// the layer that actually carries it.
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Archive: %v (want body retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("archived bead status = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "dismiss me" {
+		t.Errorf("archived bead body = %q, want \"dismiss me\"", b.Description)
+	}
+	// And it stays hidden from the mail API, like every archived message.
 	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
-		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+		t.Errorf("p.Get after Archive err = %v, want ErrNotFound (hidden from mail views)", err)
 	}
 }
 
-func TestArchiveManyDeletesImmediately(t *testing.T) {
+func TestArchiveManyClosesAndRetains(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -1242,8 +1311,12 @@ func TestArchiveManyDeletesImmediately(t *testing.T) {
 		}
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
 		}
 	}
 }
@@ -1282,12 +1355,48 @@ func TestArchiveManyReportsPerIDResults(t *testing.T) {
 		t.Errorf("results[2].Err = %v, want nil", results[2].Err)
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
 		}
 	}
 	if _, err := store.Get(task.ID); err != nil {
 		t.Fatalf("task bead should remain after ArchiveMany partial error: %v", err)
+	}
+}
+
+// TestArchiveDoubleArchiveRetainsBody guards the edge case where the same
+// message is archived twice: the second call must NOT delete the bead (which
+// is now "closed" after the first call hits the closed-branch and returns
+// ErrAlreadyArchived without mutating it).
+func TestArchiveDoubleArchiveRetainsBody(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "archive twice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+	if err := p.Archive(sent.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Fatalf("second Archive: err = %v, want ErrAlreadyArchived", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after double Archive: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status after double Archive = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "archive twice" {
+		t.Errorf("bead body after double Archive = %q, want \"archive twice\"", b.Description)
 	}
 }
 
@@ -1350,9 +1459,18 @@ func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
 			t.Fatalf("results[%d].Err = %v", i, r.Err)
 		}
 	}
+	// Retention contract: matched messages are closed, not destroyed, so the
+	// bead stays retrievable and its body stays readable (see #4422).
 	for _, id := range []string{matchingA.ID, matchingB.ID} {
-		if _, err := base.Get(id); !errors.Is(err, beads.ErrNotFound) {
-			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after archive: %v, want the bead retained", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("archived message %s status = %q, want closed", id, got.Status)
+		}
+		if got.Description == "" {
+			t.Fatalf("archived message %s lost its body, want it retained", id)
 		}
 	}
 	got, err := base.Get(other.ID)
@@ -1390,8 +1508,12 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Delete: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 
@@ -2303,6 +2425,56 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
+		t.Fatalf("Send ordinary: %v", err)
+	}
+	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "not deliverable",
+		ThreadID:    "thread-missing-marker",
+		ExtraLabels: []string{mail.AutoHandoffLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff missing archive marker: %v", err)
+	}
+	auto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff auto: %v", err)
+	}
+	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "already delivered",
+		ThreadID:    "thread-read-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff read auto: %v", err)
+	}
+	if err := p.MarkRead(readAuto.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+
+	messages, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(messages) != 1 || messages[0].ID != auto.ID {
+		t.Fatalf("CheckAutoHandoffs = %#v, want only %q (not %q)", messages, auto.ID, missingArchiveMarker.ID)
+	}
+}
+
 // --- Provider session-list cache (ga-q6ct) ---
 
 // countingSessionListStore counts broad gc:session List calls and forwards
@@ -2606,3 +2778,150 @@ func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ mail.Provider = (*Provider)(nil)
+
+// --- Address contention fixtures ---
+//
+// Six fixtures in which two sessions contend for one address. They are the
+// cases where "resolve the recipient" and "resolve the sender" must NOT agree:
+// a recipient that two live sessions both claim is undeliverable and falls back
+// to the literal address, while the same identifier as a SENDER is a targeting
+// question with a settled answer (canonical session_name owns the identifier,
+// and a dual alias/session_name bead yields to a session_name-only one). Each
+// fixture states the routes or the stamped session id it must produce.
+
+// Fixture 1: one address, two live claimants (one by session_name, one by
+// alias). Undeliverable as a recipient: literal address only.
+func TestRecipientRoutesAreLiteralWhenTwoLiveSessionsClaimTheAddress(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
+
+	if got := p.recipientRoutes("contended"); !slices.Equal(got, []string{"contended"}) {
+		t.Fatalf("recipientRoutes = %v, want the literal address only", got)
+	}
+}
+
+// Fixture 2: the same contention as a SENDER. Sender resolution is targeting,
+// and canonical session_name owns the identifier.
+func TestSenderResolvesToTheSessionNameOwnerWhenAnAliasContendsForIt(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	named := mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
+
+	msg, err := p.Send("contended", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != named.ID {
+		t.Fatalf("%s = %q, want the session_name owner %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], named.ID)
+	}
+}
+
+// Fixture 3: a sender identified by the bead id of a CLOSED session. The
+// session is gone; its identity is not, so the message still carries it.
+func TestSenderResolvesTheBeadIDOfAClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	sender := mustCreateSessionBead(t, store, map[string]string{"alias": "retired-sender", "session_name": "retired-gc-1"})
+	if err := store.Close(sender.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+
+	msg, err := p.Send(sender.ID, "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("%s = %q, want the closed sender %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "retired-sender" {
+		t.Fatalf("%s = %q, want the closed sender's alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+}
+
+// Fixture 4: a recipient named by one session's bead id that another session
+// carries as its alias. Two claimants again, so literal only — a bead id is not
+// privileged over the alias that shadows it.
+func TestRecipientRoutesAreLiteralWhenAnAliasShadowsAnotherSessionsBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	target := mustCreateSessionBead(t, store, map[string]string{"session_name": "target-name"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": target.ID})
+
+	if got := p.recipientRoutes(target.ID); !slices.Equal(got, []string{target.ID}) {
+		t.Fatalf("recipientRoutes = %v, want the literal bead id only", got)
+	}
+}
+
+// Fixture 5: one session carries the address as BOTH alias and session_name
+// while another carries it as session_name only. As a sender the dual bead
+// yields: the session_name-only session owns the identifier.
+func TestSenderPrefersASessionNameOnlyClaimOverADualAliasClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
+	nameOnly := mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
+
+	msg, err := p.Send("shared-name", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != nameOnly.ID {
+		t.Fatalf("%s = %q, want the session_name-only owner %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], nameOnly.ID)
+	}
+}
+
+// Fixture 6: the same dual/session_name-only pair as a RECIPIENT. Two sessions
+// answer to the address, so mail refuses to choose between their mailboxes.
+func TestRecipientRoutesAreLiteralForADualClaimAndASessionNameOnlyClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
+	mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
+
+	if got := p.recipientRoutes("shared-name"); !slices.Equal(got, []string{"shared-name"}) {
+		t.Fatalf("recipientRoutes = %v, want the literal address only", got)
+	}
+}
+
+// TestRecipientRoutesCarryEveryAddressOfAnUncontendedSession is the positive
+// pole of the fixtures above: with a single claimant the routes widen to every
+// address that session answers to.
+func TestRecipientRoutesCarryEveryAddressOfAnUncontendedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	only := mustCreateSessionBead(t, store, map[string]string{
+		"alias":         "current-alias",
+		"session_name":  "canonical-name",
+		"alias_history": "former-alias",
+	})
+
+	got := p.recipientRoutes("current-alias")
+	want := []string{"current-alias", only.ID, "canonical-name", "former-alias"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recipientRoutes = %v, want %v", got, want)
+	}
+}
+
+func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	return b
+}

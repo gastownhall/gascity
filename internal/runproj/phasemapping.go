@@ -64,9 +64,19 @@ func mapRunPhase(rootID string, issues []runIssue) phaseMapping {
 		}
 	}
 
-	// Status-based blocked branch — authoritative for open runs.
+	// Status-based blocked branch — keyed on the authoritative bd status only.
+	// A substring scan of step text cannot distinguish a run that IS blocked from
+	// one that merely says the word: a step whose title or description contains
+	// "blocked" (a verdict enum, a prompt, an instruction) false-flagged the whole
+	// run. mol-review-quorum is the standing example — its review step lists
+	// "pass, pass_with_findings, fail, or blocked" as the verdict enum, so every
+	// mid-review quorum run landed in the blocked lane with a claim-a-worker
+	// remedy that can do nothing about it. This matches the invariant already
+	// stated in detail_displaystate_fixes_test.go: "blocked" is reserved for nodes
+	// the store itself marks blocked. textForIssue is still used for the "review"
+	// keyword path below.
 	for _, i := range issues {
-		if i.status == "blocked" || strings.Contains(textForIssue(i), "blocked") {
+		if i.status == "blocked" {
 			return phaseMapping{phase: "blocked", label: "blocked"}
 		}
 	}

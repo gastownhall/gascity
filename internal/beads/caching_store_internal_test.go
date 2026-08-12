@@ -2005,8 +2005,19 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	if stats.ProblemCount != int64(maxCacheSyncFailures) {
 		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
 	}
-	if len(logs) != 1 {
-		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	// Expect 2 logs: the deduplicated reconcile-cache problem (run 1) and the
+	// one-shot circuit-breaker trip (emitted when syncFailures reaches maxCacheSyncFailures).
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines, want 2 (1 reconcile problem + 1 circuit-breaker trip): %#v", len(logs), logs)
+	}
+	hasTrip := false
+	for _, l := range logs {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			hasTrip = true
+		}
+	}
+	if !hasTrip {
+		t.Fatalf("circuit-breaker trip not found in logs: %#v", logs)
 	}
 	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
 		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
@@ -2019,11 +2030,12 @@ func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.
 	cache.mu.Unlock()
 
 	cache.runReconciliation()
-	if len(logs) != 2 {
-		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	// After window expiry: 1 new reconcile-cache problem log (with suppressed count) → total 3.
+	if len(logs) != 3 {
+		t.Fatalf("logged %d problem lines after window expiry, want 3: %#v", len(logs), logs)
 	}
-	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
-		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
+	if !strings.Contains(logs[2], "suppressed 4 duplicate logs") {
+		t.Fatalf("third problem log = %q, want suppressed duplicate count", logs[2])
 	}
 }
 
@@ -2970,7 +2982,16 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.T) {
+// TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON pins that
+// PrimeActive takes each bead's "down" edges from the dependencies bd carried
+// inline on the list row, spending no `bd dep` fan-out to get them.
+//
+// It asserts the dep map rather than a readiness read. Under a bd with no
+// is_blocked column readiness is not the cache's to answer at all — the
+// dependency-derived predicate is weaker than bd's, so every readiness handle
+// declines and takes the live backing (ErrReadyProjectionUnsupported, #3218) —
+// and pinning this through CachedReady would pin that hole instead of the deps.
+func TestCachingStoreBdPrimeActiveUsesListDependenciesFromTheListJSON(t *testing.T) {
 	t.Parallel()
 
 	var depListCalls int
@@ -3007,19 +3028,23 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
+	cache.mu.RLock()
+	blockerDeps := cloneDeps(cache.deps["bd-blocker"])
+	blockedDeps := cloneDeps(cache.deps["bd-blocked"])
+	cache.mu.RUnlock()
+
+	if len(blockerDeps) != 0 {
+		t.Fatalf("cached deps for bd-blocker = %+v, want none", blockerDeps)
 	}
-	ids := map[string]bool{}
-	for _, b := range ready {
-		ids[b.ID] = true
-	}
-	if !ids["bd-blocker"] || ids["bd-blocked"] {
-		t.Fatalf("CachedReady ids = %v, want blocker ready and blocked excluded", ids)
+	want := Dep{IssueID: "bd-blocked", DependsOnID: "bd-blocker", Type: "blocks"}
+	if len(blockedDeps) != 1 || blockedDeps[0] != want {
+		t.Fatalf("cached deps for bd-blocked = %+v, want the inline edge %+v", blockedDeps, want)
 	}
 	if depListCalls != 0 {
 		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+	if _, ok := cache.CachedReady(); ok {
+		t.Fatal("CachedReady answered from a cache with no is_blocked column; the control dispatcher reads this handle")
 	}
 }
 
@@ -3893,7 +3918,16 @@ func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	}
 }
 
-func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testing.T) {
+// cachedDownDeps reads one bead's cached "down" edges without going through a
+// public reader, so a test can pin the dep map itself rather than a readiness
+// answer that depends on bd's is_blocked column as well.
+func cachedDownDeps(c *CachingStore, id string) []Dep {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneDeps(c.deps[id])
+}
+
+func TestCachingStoreBdReconcileRefreshesListDependencies(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
@@ -3902,30 +3936,29 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 		t.Fatalf("Prime: %v", err)
 	}
 
-	assertCachedReadyContains := func(wantReady bool) {
+	edge := Dep{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}
+	assertCachedDeps := func(want []Dep) {
 		t.Helper()
-		ready, ok := cache.CachedReady()
-		if !ok {
-			t.Fatal("CachedReady reported cache unavailable")
+		got := cachedDownDeps(cache, "bd-1")
+		if len(got) != len(want) {
+			t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
 		}
-		readyByID := make(map[string]bool, len(ready))
-		for _, bead := range ready {
-			readyByID[bead.ID] = true
-		}
-		if readyByID["bd-1"] != wantReady {
-			t.Fatalf("CachedReady includes bd-1 = %v, want %v; ready=%v", readyByID["bd-1"], wantReady, readyByID)
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("cached deps for bd-1 = %+v, want %+v", got, want)
+			}
 		}
 	}
 
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
-	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
+	runner.deps["bd-1"] = []Dep{edge}
 	cache.runReconciliation()
-	assertCachedReadyContains(false)
+	assertCachedDeps([]Dep{edge})
 
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
-	assertCachedReadyContains(true)
+	assertCachedDeps(nil)
 
 	if runner.depScanCalls != 0 {
 		t.Fatalf("dep scan calls = %d, want 0", runner.depScanCalls)
@@ -3945,16 +3978,8 @@ func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *tes
 	runner.deps["bd-1"] = nil
 	cache.runReconciliation()
 
-	ready, ok := cache.CachedReady()
-	if !ok {
-		t.Fatal("CachedReady reported cache unavailable")
-	}
-	readyByID := make(map[string]bool, len(ready))
-	for _, bead := range ready {
-		readyByID[bead.ID] = true
-	}
-	if !readyByID["bd-1"] {
-		t.Fatalf("CachedReady excludes bd-1 after omitted deps, ready=%v", readyByID)
+	if got := cachedDownDeps(cache, "bd-1"); len(got) != 0 {
+		t.Fatalf("cached deps for bd-1 = %+v after the list omitted them, want none", got)
 	}
 }
 

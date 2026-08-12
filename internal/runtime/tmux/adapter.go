@@ -91,6 +91,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.cache.Invalidate()
 		return nil
 	}
+	if errors.Is(err, ErrServerDegraded) {
+		return err
+	}
 	p.cleanupFailedStart(name, cfg)
 	return err
 }
@@ -795,7 +798,7 @@ func (p *Provider) TeardownServer() error {
 // This enables unit testing without a real tmux server.
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
-	respawnAgent(name, workDir, command string) error
+	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) bool
 	killSession(name string) error
@@ -848,7 +851,20 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // respawnAgent relaunches the agent command in the session's existing pane
 // (respawn-pane -k), reusing the warm box and its session environment. The
 // launch-half of the un-weld relaunch path.
-func (o *tmuxStartOps) respawnAgent(name, workDir, command string) error {
+//
+// respawn-pane takes no env argument: the new process inherits the tmux server's
+// global environment as filtered by the SESSION environment, so a withheld
+// credential has to already be marked removed there. NewSessionWithCommandAndEnv
+// does that at provision time, and this re-asserts it because a warm box is
+// explicitly long-lived — one provisioned by an older gc, whose create path only
+// built the one-shot `env -u` prefix, would otherwise hand the respawned agent
+// the controller's real value for the rest of the box's life. Re-marking a key
+// already marked is a no-op, and only controller-scope keys are marked, so a
+// relaunch that withholds no credential costs no extra tmux call at all.
+func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+		return err
+	}
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
@@ -1227,7 +1243,7 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err != nil {
 		return err
 	}
-	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand); err != nil {
+	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
 	}
 	if err := ctx.Err(); err != nil {
@@ -1314,7 +1330,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 	if cfg.Nudge != "" {
 		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			return fmt.Errorf("sending startup nudge: %w", err)
+			// The startup nudge has no retry-capable caller: the keystrokes
+			// reached tmux and the session is verified alive above, so an
+			// unconfirmed submit is a warning, not a start failure. Any other
+			// error still fails the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+				return fmt.Errorf("sending startup nudge: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
 		}
 	}
 

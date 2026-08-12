@@ -58,7 +58,12 @@ func writeRef(t *testing.T, cfg refConfig) string {
 for tprog in gc git; do printf '#!/bin/sh\necho "%s version (ref)\n"' "$tprog" > "$D/bin/$tprog"; chmod +x "$D/bin/$tprog"; done
 printf '#!/bin/sh\nif [ "$1" = ready ]; then [ -n "$GC_BEADS_API" ] || exit 1; command -v curl >/dev/null 2>&1 && exec curl -fsS -o /dev/null "$GC_BEADS_API/v0/beads/ready"; exec wget -q -O /dev/null "$GC_BEADS_API/v0/beads/ready"; fi\necho "bd version (ref)"\n' > "$D/bin/bd"; chmod +x "$D/bin/bd"`
 	if !cfg.installTooling {
-		install = `mkdir -p "$D/bin"` // no gc/bd/git installed
+		// "Not provided" must stay false even when the host has the tools
+		// system-wide (a real /usr/bin/bd install, or graphviz's /usr/bin/gc,
+		// whose `gc version` exits 0): shadow the probe's tools with failing
+		// stubs so the sandbox PATH's base-util dirs cannot leak them in.
+		install = `mkdir -p "$D/bin"
+for tprog in gc bd git; do printf '#!/bin/sh\nexit 127\n' > "$D/bin/$tprog"; chmod +x "$D/bin/$tprog"; done`
 	}
 	inject := `printf 'export GC_SESSION=%s\n' "$sess" > "$D/env"`
 	if !cfg.injectIdentity {

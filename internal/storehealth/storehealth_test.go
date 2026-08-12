@@ -38,7 +38,7 @@ func TestStorePath_DoltliteMetadata(t *testing.T) {
 func TestComputeWarningHighRatio(t *testing.T) {
 	// 11.2 GB (decimal) / 221 rows = ~50.68 MB/row, warning.
 	const size = 11_200_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true for size=%d rows=221", size)
 	}
@@ -56,7 +56,7 @@ func TestComputeWarningHighRatio(t *testing.T) {
 func TestComputeNoWarningLowRatio(t *testing.T) {
 	// 50 MB / 221 rows = ~0.23 MB/row, no warning.
 	const size = 50_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for size=%d rows=221", size)
 	}
@@ -68,16 +68,53 @@ func TestComputeNoWarningLowRatio(t *testing.T) {
 func TestComputeZeroRetainedRowsDoesNotWarnForBookkeepingBytes(t *testing.T) {
 	// The denominator is retained rows (open and closed). A genuinely empty
 	// store can still contain bookkeeping files, which alone are not unhealthy.
-	h := Compute("/c", 1, 0, time.Time{}, "")
+	h := Compute("/c", 1, 0, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for bookkeeping bytes with zero retained rows")
 	}
 }
 
 func TestComputeZeroEverything(t *testing.T) {
-	h := Compute("/c", 0, 0, time.Time{}, "")
+	h := Compute("/c", 0, 0, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for all-zero inputs")
+	}
+}
+
+// TestComputeUnmeasuredRowsNeverWarns: a row count that failed or
+// timed out must never be treated as a real zero. Even with a large
+// sizeBytes that would trip the ratio warning if 0 retained rows were real,
+// rowsMeasured=false must suppress the warning entirely — there is nothing
+// to compute a ratio against.
+func TestComputeUnmeasuredRowsNeverWarns(t *testing.T) {
+	const size = 11_200_000_000 // would warn at 221 real rows (see TestComputeWarningHighRatio)
+	h := Compute("/c", size, 0, false, time.Time{}, "")
+	if h.Warning {
+		t.Fatalf("Warning = true, want false when rows are unmeasured (RowsMeasured=false)")
+	}
+	if h.RatioMB != 0 {
+		t.Fatalf("RatioMB = %v, want 0 when rows are unmeasured", h.RatioMB)
+	}
+	if h.RowsMeasured {
+		t.Fatalf("RowsMeasured = true, want false")
+	}
+}
+
+// TestComputeUnmeasuredIsDistinguishableFromRealZero pins the actual
+// deliverable: two Health values with identical LiveRows=0 but different
+// RowsMeasured must be distinguishable by callers, so a failed measurement
+// can never render byte-identically to a genuinely empty, healthy store.
+func TestComputeUnmeasuredIsDistinguishableFromRealZero(t *testing.T) {
+	measured := Compute("/c", 1, 0, true, time.Time{}, "")
+	unmeasured := Compute("/c", 1, 0, false, time.Time{}, "")
+	if measured.RowsMeasured == unmeasured.RowsMeasured {
+		t.Fatalf("RowsMeasured did not distinguish a real zero-row count from an unmeasured one")
+	}
+	if !measured.RowsMeasured {
+		t.Fatalf("measured.RowsMeasured = false, want true")
+	}
+	if unmeasured.RowsMeasured {
+		t.Fatalf("unmeasured.RowsMeasured = true, want false")
 	}
 }
 
@@ -88,11 +125,11 @@ func TestComputeBoundary(t *testing.T) {
 	// MinWarnSizeBytes, so this exercises the ratio boundary alone,
 	// not the absolute-size floor (see TestComputeSmallStoreFloor).
 	const rows = 2000
-	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, time.Time{}, "")
+	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true at exact threshold, want false")
 	}
-	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, time.Time{}, "")
+	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false one byte over threshold, want true")
 	}
@@ -109,7 +146,7 @@ func TestComputeBoundary(t *testing.T) {
 // the total size is still well under the absolute floor.
 func TestComputeSmallStoreFloorSuppressesFalsePositive(t *testing.T) {
 	const size = 343_000_000
-	h := Compute("/c", size, 7, time.Time{}, "")
+	h := Compute("/c", size, 7, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false (343MB/7 rows is below the absolute floor despite a high ratio)")
 	}
@@ -125,7 +162,7 @@ func TestComputeSmallStoreFloorSuppressesFalsePositive(t *testing.T) {
 // are exceeded.
 func TestComputeLargeStoreStillWarnsAboveFloor(t *testing.T) {
 	const size = 11_200_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true (11.2GB/221 rows is well above both the ratio threshold and the absolute floor)")
 	}
@@ -133,7 +170,7 @@ func TestComputeLargeStoreStillWarnsAboveFloor(t *testing.T) {
 
 func TestComputeCarriesLastGC(t *testing.T) {
 	ts := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	h := Compute("/c", 1, 1, ts, "success")
+	h := Compute("/c", 1, 1, true, ts, "success")
 	if !h.LastGCAt.Equal(ts) {
 		t.Fatalf("LastGCAt = %v, want %v", h.LastGCAt, ts)
 	}

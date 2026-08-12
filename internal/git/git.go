@@ -169,6 +169,38 @@ func (g *Git) HasUnpushedCommitsResult() (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// HasUnreachableCommits reports whether HEAD has commits that no ref reaches.
+// If the probe fails, it returns true to fail closed.
+func (g *Git) HasUnreachableCommits() bool {
+	has, err := g.HasUnreachableCommitsResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasUnreachableCommitsResult reports whether HEAD has commits reachable from
+// no branch, tag, or remote-tracking ref — that is, commits that removing this
+// worktree would orphan. It is the question a caller deleting a worktree needs
+// answered, and it is deliberately narrower than HasUnpushedCommitsResult:
+// `git worktree remove` deletes the checkout, not refs/heads, so commits a
+// local branch still reaches survive the removal.
+//
+// The distinction is load-bearing for merge workflows that delete the branch
+// from the remote after merging. Once the remote branch is gone — and once a
+// squash-merge has given the merged change a different SHA on the target branch
+// — no remote-tracking ref reaches the worktree's HEAD ever again, so
+// HasUnpushedCommitsResult reports true permanently even though nothing is at
+// risk. Callers gating destructive cleanup on that answer never clean anything
+// up. Probe errors are returned as-is so callers can fail closed with a reason.
+func (g *Git) HasUnreachableCommitsResult() (bool, error) {
+	out, err := g.run("log", "HEAD", "--oneline", "--not", "--branches", "--remotes", "--tags")
+	if err != nil {
+		return false, fmt.Errorf("checking unreachable commits: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // HasStashes reports whether the repository has stashed work.
 // If the probe fails, it returns true to fail closed.
 func (g *Git) HasStashes() bool {

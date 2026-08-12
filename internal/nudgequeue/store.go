@@ -75,6 +75,10 @@ type NudgeShadow struct {
 	// DeliverAfter / ExpiresAt are the parsed scheduling timestamps if present.
 	DeliverAfter time.Time
 	ExpiresAt    time.Time
+	// CreatedAt is the bead-authoritative shadow creation clock.
+	CreatedAt time.Time
+	// TerminalAt is the controller terminalization clock, when present.
+	TerminalAt time.Time
 }
 
 // Store is the nudge-class domain wrapper. It holds the strongly-typed
@@ -101,6 +105,7 @@ func NewStore(store beads.NudgesStore) *Store {
 func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	s := NudgeShadow{
 		BeadID:         b.ID,
+		CreatedAt:      b.CreatedAt,
 		Open:           b.Status == "open",
 		ID:             b.Metadata["nudge_id"],
 		State:          b.Metadata["state"],
@@ -126,6 +131,11 @@ func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	if raw := b.Metadata["expires_at"]; raw != "" {
 		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
 			s.ExpiresAt = ts
+		}
+	}
+	if raw := b.Metadata["terminal_at"]; raw != "" {
+		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+			s.TerminalAt = ts
 		}
 	}
 	return s
@@ -350,6 +360,33 @@ func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs m
 	return shadows, nil
 }
 
+// ShadowHistorySince lists every open or terminal nudge shadow whose creation
+// or terminal clock is at or after since, oldest first. It preserves terminal
+// history needed by wait finalization across a storage cutover.
+func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
+	if s == nil || s.store.Store == nil {
+		return nil, nil
+	}
+	candidates, err := s.store.List(beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	shadows := make([]NudgeShadow, 0, len(candidates))
+	for _, b := range candidates {
+		shadow := decodeNudgeItem(b)
+		if b.CreatedAt.Before(since) && (shadow.TerminalAt.IsZero() || shadow.TerminalAt.Before(since)) {
+			continue
+		}
+		shadows = append(shadows, shadow)
+	}
+	return shadows, nil
+}
+
 // Find returns the OPEN (or terminal-but-decodable) nudge shadow for nudgeID as
 // a typed NudgeShadow, plus whether one was found. It is the existence gate used
 // by wait readiness; callers receive the decoded view rather than a raw bead.
@@ -421,6 +458,19 @@ func (s *Store) find(nudgeID string, includeClosed bool) (beads.Bead, bool, erro
 // is the package-canonical predicate; callers route their state checks through
 // it (or through the decoded NudgeShadow) rather than re-listing the codes.
 func IsTerminalState(state string) bool { return isTerminalNudgeState(state) }
+
+// IsShadowBead reports whether b is a nudge shadow bead.
+func IsShadowBead(b beads.Bead) bool {
+	if b.Type != nudgeBeadType {
+		return false
+	}
+	for _, label := range b.Labels {
+		if label == nudgeBeadLabel {
+			return true
+		}
+	}
+	return false
+}
 
 // CanonicalCloseReason is the exported face of the close_reason floor codec, for
 // the cmd/gc adapter test that guards the >=20 char validator floor.

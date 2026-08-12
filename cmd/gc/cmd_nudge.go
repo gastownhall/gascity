@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -136,6 +137,12 @@ type nudgeStatusJSON struct {
 	Pending       []queuedNudge     `json:"pending"`
 	InFlight      []queuedNudge     `json:"in_flight"`
 	Dead          []queuedNudge     `json:"dead"`
+
+	// DispatchSkips is the dispatch tick's running, city-wide (not
+	// agent-scoped) count of silent skips by reason, since the queue state
+	// file was created. Omitted when empty (legacy-mode cities never
+	// populate it; a fresh queue has no ticks recorded yet).
+	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
 }
 
 type nudgeStatusCounts struct {
@@ -340,6 +347,16 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
+	// City-wide (not agent-scoped) skip-reason totals from the supervisor
+	// dispatch tick, read directly off the persisted queue state — a raw
+	// read so this doesn't re-run the maintenance sweep listQueuedNudgesForTarget
+	// above already ran. Best-effort: a load failure here must not fail the
+	// whole status command over a diagnostics-only field.
+	var dispatchSkips map[string]int64
+	if qs, qsErr := nudgequeue.LoadState(target.cityPath); qsErr == nil {
+		dispatchSkips = qs.DispatchSkips
+	}
+
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, nudgeStatusJSON{
 			SchemaVersion: "1",
@@ -353,9 +370,10 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 				InFlight: len(inFlight),
 				Dead:     len(dead),
 			},
-			Pending:  nonNilQueuedNudges(pending),
-			InFlight: nonNilQueuedNudges(inFlight),
-			Dead:     nonNilQueuedNudges(dead),
+			Pending:       nonNilQueuedNudges(pending),
+			InFlight:      nonNilQueuedNudges(inFlight),
+			Dead:          nonNilQueuedNudges(dead),
+			DispatchSkips: dispatchSkips,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc nudge status: writing JSON: %v\n", err) //nolint:errcheck
 			return 1
@@ -390,7 +408,25 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 				item.ID, deadReason(item), item.Source, item.Message)
 		}
 	}
+	if len(dispatchSkips) > 0 {
+		fmt.Fprintln(stdout, "")                                                         //nolint:errcheck
+		fmt.Fprintln(stdout, "dispatch-tick skips (city-wide, all agents, cumulative):") //nolint:errcheck
+		for _, reason := range sortedNudgeDispatchSkipReasons(dispatchSkips) {
+			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
+		}
+	}
 	return 0
+}
+
+// sortedNudgeDispatchSkipReasons returns counts's keys in deterministic
+// (alphabetical) order for stable CLI output.
+func sortedNudgeDispatchSkipReasons(counts map[string]int64) []string {
+	reasons := make([]string, 0, len(counts))
+	for reason := range counts {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	return reasons
 }
 
 func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
@@ -2339,6 +2375,26 @@ func terminalStateForDeadQueuedNudge(item queuedNudge) string {
 // want the full backlog drained every time, matching pre-budget behavior.
 func noMaintenanceDeadline() time.Time {
 	return time.Now().Add(24 * time.Hour)
+}
+
+// recordNudgeDispatchSkips merges a dispatch tick's per-reason skip counts
+// into the queue state's running totals. Called at most once per tick, after
+// the per-session loop finishes, so it never nests inside the loop's own
+// withNudgeQueueState-backed calls (claimDueQueuedNudgesForTarget et al) —
+// the queue lock is a per-process flock and is not reentrant.
+func recordNudgeDispatchSkips(cityPath string, counts map[string]int64) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		if state.DispatchSkips == nil {
+			state.DispatchSkips = make(map[string]int64, len(counts))
+		}
+		for reason, n := range counts {
+			state.DispatchSkips[reason] += n
+		}
+		return nil
+	})
 }
 
 func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {

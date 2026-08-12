@@ -299,6 +299,7 @@ type startExecutionOptions struct {
 	asyncTracker                   *asyncStartTracker
 	asyncStopTracker               *asyncStartTracker
 	maxSessionAgeTr                maxSessionAgeTracker
+	assignedWorkDeferTr            assignedWorkDeferTracker
 	workDirResolver                taskWorkDirResolver
 	stabilityWaiter                startStabilityWaiter
 	sessionStaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
@@ -353,6 +354,16 @@ func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOpti
 func withMaxSessionAgeTracker(tr maxSessionAgeTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.maxSessionAgeTr = tr
+	}
+}
+
+// withAssignedWorkDeferTracker installs the consecutive same-bead
+// assigned-work defer backstop for this reconcile pass. Nil leaves the
+// backstop disabled (DecideIdleTimeout's AssignedWorkHas defer applies with
+// no consecutive-defer limit).
+func withAssignedWorkDeferTracker(tr assignedWorkDeferTracker) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.assignedWorkDeferTr = tr
 	}
 }
 
@@ -1135,13 +1146,10 @@ func buildPreparedStartWithWorkDirResolver(
 		// recoverRunningPendingCreate / direct-call paths where it was empty.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"instance_token": instanceToken})
 	}
-	beadAlias := strings.TrimSpace(candidate.info.Alias)
+	runtimeInfo := candidate.info
+	runtimeInfo.SessionName = candidate.name()
 	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
-		candidate.info.ID,
-		candidate.name(),
-		beadAlias,
-		strings.TrimSpace(candidate.info.Template),
-		strings.TrimSpace(candidate.info.SessionOrigin),
+		runtimeInfo,
 		generation,
 		continuationEpoch,
 		instanceToken,

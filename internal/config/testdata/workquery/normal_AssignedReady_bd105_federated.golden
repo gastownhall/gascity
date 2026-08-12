@@ -1,0 +1,1 @@
+sh -c 'for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do [ -z "$id" ] && continue; r=$(gc ready --include-ephemeral --assignee="$id" --json --limit=1) || exit $?; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; done; printf "[]"'

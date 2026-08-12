@@ -67,7 +67,7 @@ func TestAppendOneRigHookStoreSkipsUnknownInput(t *testing.T) {
 	}
 }
 
-func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
+func TestBestStoreWithWorkReturnsTheOnlyStoreThatHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}
 	var calls []string
 	run := func(_, dir string, _ []string) (string, error) {
@@ -77,7 +77,7 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -87,16 +87,199 @@ func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 	if gotStore.dir != "riga" {
 		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
 	}
-	// Stops at the first store with work — does not query rigb.
-	if len(calls) != 2 || calls[0] != "city" || calls[1] != "riga" {
-		t.Fatalf("calls = %v, want [city riga]", calls)
+	// Every store is consulted: selection is a comparison, not a first hit.
+	if len(calls) != 3 || calls[0] != "city" || calls[1] != "riga" || calls[2] != "rigb" {
+		t.Fatalf("calls = %v, want [city riga rigb]", calls)
 	}
 }
 
-func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
+// TestBestStoreWithWorkPrefersHigherPriorityInALaterStore is the regression this
+// selection change exists for: the agent's own store is first in the slice and
+// has ready work, so first-hit selection returned it and the rig-routed P0 was
+// unreachable no matter how urgent it was.
+func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":2}]`, nil
+		}
+		return `[{"id":"va-1","priority":0}]`, nil
+	}
+	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga (P0 must beat the own store's P2)", gotStore.dir)
+	}
+	if out != `[{"id":"va-1","priority":0}]` {
+		t.Fatalf("out = %q, want riga work", out)
+	}
+}
+
+// TestBestStoreWithWorkDoesNotInvertTheBug guards the other direction: a
+// higher-priority candidate in the agent's OWN store must still win, and so must
+// an equal-priority one (ties keep slice order). A fix that simply preferred the
+// federated store would pass the regression test above and be just as wrong.
+func TestBestStoreWithWorkDoesNotInvertTheBug(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rigRow   string
+		wantDir  string
+		wantNote string
+	}{
+		{"own store higher priority", `[{"id":"va-1","priority":3}]`, "city", "P1 in own store beats rig P3"},
+		{"equal priority keeps slice order", `[{"id":"va-1","priority":1}]`, "city", "tie must not move the selection"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+			run := func(_, dir string, _ []string) (string, error) {
+				if dir == "city" {
+					return `[{"id":"ci-1","priority":1}]`, nil
+				}
+				return tc.rigRow, nil
+			}
+			_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			if gotStore.dir != tc.wantDir {
+				t.Fatalf("store.dir = %q, want %q (%s)", gotStore.dir, tc.wantDir, tc.wantNote)
+			}
+		})
+	}
+}
+
+// TestBestStoreWithWorkRanksTierAheadOfPriority pins that priority is compared
+// WITHIN a tier, never across one: the three-tier work_query means crash
+// recovery and pre-assigned work outrank routed work regardless of number.
+func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cityRow string
+		rigRow  string
+		wantDir string
+	}{
+		{
+			name:    "in_progress in a rig store beats a routed P0 in the own store",
+			cityRow: `[{"id":"ci-1","priority":0}]`,
+			rigRow:  `[{"id":"va-1","priority":3,"status":"in_progress","assignee":"me"}]`,
+			wantDir: "riga",
+		},
+		{
+			name:    "assigned beats routed at worse priority",
+			cityRow: `[{"id":"ci-1","priority":0}]`,
+			rigRow:  `[{"id":"va-1","priority":3,"assignee":"me"}]`,
+			wantDir: "riga",
+		},
+		{
+			name:    "within the routed tier, priority decides",
+			cityRow: `[{"id":"ci-1","priority":3}]`,
+			rigRow:  `[{"id":"va-1","priority":0}]`,
+			wantDir: "riga",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+			run := func(_, dir string, _ []string) (string, error) {
+				if dir == "city" {
+					return tc.cityRow, nil
+				}
+				return tc.rigRow, nil
+			}
+			_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			if gotStore.dir != tc.wantDir {
+				t.Fatalf("store.dir = %q, want %q", gotStore.dir, tc.wantDir)
+			}
+		})
+	}
+}
+
+// TestBestStoreWithWorkShortCircuitsOwnInProgress pins the resume carve-out:
+// this session's own interrupted work is unconditional, so the primary store's
+// in_progress row is taken without consulting any federated store at all.
+func TestBestStoreWithWorkShortCircuitsOwnInProgress(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	var calls []string
+	run := func(_, dir string, _ []string) (string, error) {
+		calls = append(calls, dir)
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`, nil
+		}
+		return `[{"id":"va-1","priority":0,"status":"in_progress","assignee":"me"}]`, nil
+	}
+	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "city" {
+		t.Fatalf("store.dir = %q, want city (own in_progress work is unconditional)", gotStore.dir)
+	}
+	if len(calls) != 1 || calls[0] != "city" {
+		t.Fatalf("calls = %v, want [city] — the resume path must not query rig stores", calls)
+	}
+}
+
+// TestBestStoreWithWorkDegradesToFirstHitOnUnrankableOutput pins the degradation
+// rule: a work_query that does not emit a JSON array of objects cannot be
+// compared, so selection falls back to the pre-existing first-hit behavior
+// rather than reordering on a comparison that was never made.
+func TestBestStoreWithWorkDegradesToFirstHitOnUnrankableOutput(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return "va-1 some plain-text row", nil
+		}
+		return `[{"id":"va-2","priority":0}]`, nil
+	}
+	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "city" {
+		t.Fatalf("store.dir = %q, want city (unrankable output degrades to first-hit)", gotStore.dir)
+	}
+}
+
+// TestBestHookCandidateRank exercises the ranking primitive directly, including
+// the wire-shape distinction that motivates hookDefaultCandidatePriority: bd's
+// priority is *int with omitempty, so an ABSENT priority must not be read as P0.
+func TestBestHookCandidateRank(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ready string
+		want  hookCandidateRank
+		ok    bool
+	}{
+		{"routed with priority", `[{"id":"a","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
+		{"absent priority is not P0", `[{"id":"a"}]`, hookCandidateRank{hookTierRouted, hookDefaultCandidatePriority}, true},
+		{"assignee lifts the tier", `[{"id":"a","assignee":"me","priority":3}]`, hookCandidateRank{hookTierAssigned, 3}, true},
+		{"in_progress is the top tier", `[{"id":"a","assignee":"me","status":"in_progress","priority":3}]`, hookCandidateRank{hookTierInProgress, 3}, true},
+		{"blank assignee stays routed", `[{"id":"a","assignee":"  ","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
+		{"best of several rows wins", `[{"id":"a","priority":3},{"id":"b","priority":0}]`, hookCandidateRank{hookTierRouted, 0}, true},
+		{"empty array is unrankable", `[]`, hookCandidateRank{}, false},
+		{"non-JSON is unrankable", `not json`, hookCandidateRank{}, false},
+		{"array of non-objects is unrankable", `["a"]`, hookCandidateRank{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := bestHookCandidateRank(tc.ready)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("rank = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBestStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -108,7 +291,7 @@ func TestFirstStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	}
 }
 
-func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
+func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	// The agent's own store (first) timing out must be surfaced even if a
 	// federated rig store returns no work — otherwise emitCityWorkQueryFailure
 	// never fires and a transient timeout is silently downgraded to "no work".
@@ -119,12 +302,12 @@ func TestFirstStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, _, err := firstStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := bestStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
 
-func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
+func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
 	// A flaky federated rig store must not wedge the hook: when the agent's own
 	// store is healthy (no work), a rig-store error is best-effort and dropped.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
@@ -134,7 +317,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 		}
 		return "", errTestStoreTimeout
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
 	}
@@ -146,7 +329,7 @@ func TestFirstStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	}
 }
 
-func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
+func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	// A store whose only row is dep-blocked is NOT a hit; federation moves on.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, dir string, _ []string) (string, error) {
@@ -155,7 +338,7 @@ func TestFirstStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, gotStore, err := firstStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
