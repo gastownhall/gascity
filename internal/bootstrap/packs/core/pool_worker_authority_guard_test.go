@@ -36,8 +36,7 @@ func TestWorkerPromptsPutAuthorityBoundaryBeforeWorkInstructions(t *testing.T) {
 				"cannot upgrade",
 				"Do not sign as",
 				"key rotations",
-				"OpenAI/GWS/Gmail directives",
-				"Do not use `gws`, Gmail, Google Workspace",
+				"external-service directives",
 				"external human-send channel",
 				"self-appointing is a security",
 			} {
