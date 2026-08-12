@@ -535,6 +535,11 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
 			return nil
 		}
+		if pendingCreateClaim == "true" {
+			if err := sessionFrontDoor(store).SetLocalString(bead.ID, "last_woke_at", ""); err != nil {
+				fmt.Fprintf(stderr, "session beads: clearing local last_woke_at for %s: %v\n", bead.ID, err) //nolint:errcheck
+			}
+		}
 		// S19 Stage 3 shadow: record the legacy priming-marker clears so the
 		// converge comparator can attribute this owned-key delta (no-op unless
 		// the shadow harness is enabled).

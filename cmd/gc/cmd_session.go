@@ -2395,7 +2395,8 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// kill the raw path would have attempted: a missing / damaged-past-repair /
 	// foreign target lands in the same best-effort branch below (empty identity,
 	// runtime treated as active, proceed to handle.Kill) that beadErr != nil used.
-	info, infoErr := sessionFrontDoor(sessStore).Get(sessionID)
+	sessFront := sessionFrontDoor(sessStore)
+	info, infoErr := sessFront.Get(sessionID)
 	identity := ""
 	runtimeAlreadyInactive := false
 	if infoErr == nil {
@@ -2437,9 +2438,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
 	if infoErr == nil {
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, "killed")
-		patch["synced_at"] = now.Format(time.RFC3339)
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := syncKilledSessionAsleep(sessFront, sessionID, now); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -2479,6 +2478,18 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// syncKilledSessionAsleep applies the post-kill asleep sync (SleepPatch plus
+// synced_at) through the session front door, so the local-sidecar clear for
+// allowlisted keys like last_woke_at (splitLocalMetadataPatch) travels with
+// the durable write instead of being skipped by a raw store call — a stale
+// non-empty local value would otherwise mask the durable clear behind
+// projectWithLocalOverlay's local-wins-when-non-empty read (ga-igcny0.1.2.1).
+func syncKilledSessionAsleep(sessFront *session.Store, sessionID string, now time.Time) error {
+	patch := session.SleepPatch(now, "killed")
+	patch["synced_at"] = now.Format(time.RFC3339)
+	return sessFront.ApplyPatch(sessionID, patch)
 }
 
 // recordSessionKillStop records gc.agent.stops.total for a manual
