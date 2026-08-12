@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -41,6 +42,23 @@ const (
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
+
+	// queuedNudgeUnconfirmedSubmitCeiling bounds how many submit Enters may
+	// reach the runtime for ONE reminder before the queue presumes the
+	// injection landed (sc-lx6q5t).
+	//
+	// A tmux submit that cannot be confirmed (the agent's busy indicator was
+	// never observed within budget) is ambiguous: either the message is
+	// sitting drafted-but-unsubmitted in the pane, or — the measured common
+	// case on a busy session — it landed and the busy window was simply
+	// missed. Treating that ambiguity as a plain failure spends the full
+	// defaultQueuedNudgeMaxAttempts budget, so one reminder re-injects 3-5
+	// times into a session that already has it. One retry covers the genuinely
+	// drafted case; after a SECOND Enter has reached the runtime the balance
+	// of evidence is that the agent has the reminder, and another echo is
+	// strictly worse than none. Confirmable failures (nothing reached the
+	// runtime) are unaffected and keep the full attempt budget.
+	queuedNudgeUnconfirmedSubmitCeiling = 2
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -124,6 +142,11 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// subjectBeadID is the bead this nudge is ABOUT (gc session nudge
+	// --about), not the bead identifying the target. It is what lets a
+	// deferred reminder retire when its subject closes; empty for the
+	// ordinary "just wake this agent" nudge.
+	subjectBeadID string
 }
 
 type nudgeStatusJSON struct {
@@ -540,6 +563,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
 		}
 	}
+	// Mail-state supersession gate (dip-lvsq3c): at this prompt boundary the
+	// hook's own mail-check injection already reflects CURRENT unread state, so
+	// a "You have mail" reminder for an emptied inbox is a stale echo — retire
+	// it instead of injecting it.
+	items, satisfied := splitSatisfiedMailReminders(target, deliveryStore.Store, items)
+	if len(satisfied) > 0 {
+		if err := terminalizeSatisfiedMailReminders(target.cityPath, satisfied); err != nil {
+			fmt.Fprintf(stderr, "gc nudge drain: retiring read-mail reminders: %v\n", err) //nolint:errcheck
+		}
+	}
 	if len(items) == 0 {
 		if inject {
 			return 0
@@ -588,10 +621,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 }
 
 func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
-	return queuedNudgeOptions{
+	opts := queuedNudgeOptions{
 		SessionID:         target.sessionID,
 		ContinuationEpoch: target.continuationEpoch,
 	}
+	// Carry the subject bead onto the queued item so the delivery pass can
+	// retire the reminder once that bead closes.
+	if id := strings.TrimSpace(target.subjectBeadID); id != "" {
+		opts.Reference = &nudgeReference{Kind: "bead", ID: id}
+	}
+	return opts
 }
 
 // configureNudgePollRuntime bounds the long-lived nudge-poll sidecar's memory
@@ -1457,6 +1496,22 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr))
 		}
 	}
+	// Mail-state supersession gate (dip-lvsq3c): a "You have mail" reminder
+	// whose recipient has no unread mail must retire, not re-inject.
+	items, satisfied := splitSatisfiedMailReminders(target, deliveryStore, items)
+	if len(satisfied) > 0 {
+		if termErr := terminalizeSatisfiedMailReminders(target.cityPath, satisfied); termErr != nil {
+			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("retiring read-mail reminders: %w", termErr))
+		}
+	}
+	// Subject-state supersession gate (sc-lx6q5t): a cascade/route reminder
+	// about a bead that has since closed must retire, not re-inject.
+	items, extinct := splitPurposeExtinctSessionReminders(deliveryStore, items)
+	if len(extinct) > 0 {
+		if termErr := terminalizePurposeExtinctSessionReminders(target.cityPath, extinct); termErr != nil {
+			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("retiring reminders about closed beads: %w", termErr))
+		}
+	}
 	if len(items) == 0 {
 		return false, bookkeepErr
 	}
@@ -1485,8 +1540,20 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			}
 			return false, bookkeepErr
 		}
-		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
-			return false, errors.Join(bookkeepErr, recErr)
+		// An unconfirmed submit already handed the keystrokes to the runtime.
+		// Retry the first one; once a second Enter has reached the session,
+		// retire the item as accepted-for-injection instead of echoing it into
+		// a session that most likely already has it.
+		retry, presumed := splitUnconfirmedSubmitNudges(err, items)
+		if len(presumed) > 0 {
+			if ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(presumed), "accepted_for_injection", "two submits reached the runtime; boundary injection presumed", "unconfirmed-submit-ceiling"); ackErr != nil {
+				bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("retiring unconfirmed-submit nudges: %w", ackErr))
+			}
+		}
+		if len(retry) > 0 {
+			if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(retry), err, time.Now()); recErr != nil {
+				return false, errors.Join(bookkeepErr, recErr)
+			}
 		}
 		return false, bookkeepErr
 	}
@@ -1692,6 +1759,155 @@ func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (strin
 	default:
 		return "wait-not-ready", true, nil
 	}
+}
+
+// mailReminderUnreadCount reports the recipient's current unread mail count
+// for the mail-state supersession gate below. It is a package var so tests can
+// pin the mailbox state without a live mail store. The production reader mirrors
+// `gc mail check <agent>`: the same message-store class resolution and the same
+// recipient identity the notify path enqueued the reminder under.
+var mailReminderUnreadCount = func(target nudgeTarget, store beads.Store) (int, error) {
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), store, target.cfg, target.cityPath, nil)
+	mp := newMailProviderWithSessionStore(msgStore, cliSessionStore(store, target.cfg, target.cityPath))
+	msgs, err := mp.Inbox(target.agentKey())
+	if err != nil {
+		return 0, err
+	}
+	return len(msgs), nil
+}
+
+// splitSatisfiedMailReminders separates source:mail reminders whose purpose is
+// extinct — the recipient has NO unread mail, so "You have mail" is a stale
+// echo — from still-live items (dip-lvsq3c). The mail store is the truth for a
+// mail reminder; delivery confirmation is a transport proxy that fails exactly
+// on busy sessions, which is what let the same reminder re-inject at every
+// safe boundary. A read error or any unread mail keeps EVERY item deliverable
+// (fail-closed toward delivery: a live reminder must never be dropped on a
+// store hiccup).
+func splitSatisfiedMailReminders(target nudgeTarget, store beads.Store, items []queuedNudge) (deliverable, satisfied []queuedNudge) {
+	hasMail := false
+	for _, item := range items {
+		if item.Source == "mail" {
+			hasMail = true
+			break
+		}
+	}
+	if !hasMail {
+		return items, nil
+	}
+	unread, err := mailReminderUnreadCount(target, store)
+	if err != nil || unread > 0 {
+		return items, nil
+	}
+	for _, item := range items {
+		if item.Source == "mail" {
+			satisfied = append(satisfied, item)
+			continue
+		}
+		deliverable = append(deliverable, item)
+	}
+	return deliverable, satisfied
+}
+
+// terminalizeSatisfiedMailReminders retires purpose-extinct mail reminders as
+// superseded: consumed by the recipient reading their mail, not failed.
+func terminalizeSatisfiedMailReminders(cityPath string, items []queuedNudge) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return ackQueuedNudgesWithOutcome(cityPath, queuedNudgeIDs(items), "superseded", "mail already read (recipient inbox empty)", "mail-state-satisfied")
+}
+
+// splitPurposeExtinctSessionReminders separates source:session reminders whose
+// subject bead has CLOSED from still-live items (sc-lx6q5t). The cascade and
+// route orders enqueue a reminder ABOUT a bead ("blocker X closed — your
+// dependent Y may be unblocked", "check for assigned work"); once that bead is
+// closed the reminder has nothing left to say, and injecting it at the next
+// boundary costs the agent a turn to discover there is no work. The bead store
+// is the truth for those reminders, exactly as the mail store is for "You have
+// mail".
+//
+// Only items carrying a bead Reference are classified; everything else — no
+// reference, a non-bead reference, another source — is returned untouched. An
+// unreadable reference (missing bead, store hiccup, a bead owned by a store
+// this poller cannot see) keeps the item deliverable: fail-closed toward
+// delivery, since a live reminder must never be dropped on a read failure.
+func splitPurposeExtinctSessionReminders(store beads.Store, items []queuedNudge) (deliverable, extinct []queuedNudge) {
+	if store == nil {
+		return items, nil
+	}
+	referenced := false
+	for _, item := range items {
+		if queuedNudgeSubjectBeadID(item) != "" {
+			referenced = true
+			break
+		}
+	}
+	if !referenced {
+		return items, nil
+	}
+	for _, item := range items {
+		if queuedNudgeSubjectBeadClosed(store, item) {
+			extinct = append(extinct, item)
+			continue
+		}
+		deliverable = append(deliverable, item)
+	}
+	return deliverable, extinct
+}
+
+// queuedNudgeSubjectBeadID returns the bead a session-sourced reminder is
+// about, or "" when the item carries no usable bead reference.
+func queuedNudgeSubjectBeadID(item queuedNudge) string {
+	if item.Source != "session" || item.Reference == nil || item.Reference.Kind != "bead" {
+		return ""
+	}
+	return strings.TrimSpace(item.Reference.ID)
+}
+
+// queuedNudgeSubjectBeadClosed reports whether a session reminder's subject
+// bead is closed. Any read failure reports false so the item stays deliverable.
+func queuedNudgeSubjectBeadClosed(store beads.Store, item queuedNudge) bool {
+	id := queuedNudgeSubjectBeadID(item)
+	if id == "" {
+		return false
+	}
+	subject, err := store.Get(id)
+	if err != nil {
+		return false
+	}
+	return subject.Status == "closed"
+}
+
+// terminalizePurposeExtinctSessionReminders retires reminders about closed
+// beads as superseded: consumed by the subject reaching its terminal state,
+// not failed.
+func terminalizePurposeExtinctSessionReminders(cityPath string, items []queuedNudge) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return ackQueuedNudgesWithOutcome(cityPath, queuedNudgeIDs(items), "superseded", "referenced bead closed — reminder purpose extinct", "subject-bead-closed")
+}
+
+// splitUnconfirmedSubmitNudges partitions the items of a FAILED delivery into
+// the ones that still deserve a retry and the ones whose submit has now reached
+// the runtime twice (queuedNudgeUnconfirmedSubmitCeiling) and must be presumed
+// injected. A confirmable failure — anything that is not the unconfirmed-submit
+// sentinel — returns every item for retry, preserving today's behavior exactly.
+func splitUnconfirmedSubmitNudges(cause error, items []queuedNudge) (retry, presumed []queuedNudge) {
+	if !errors.Is(cause, sessiontmux.ErrNudgeSubmitUnconfirmed) {
+		return items, nil
+	}
+	for _, item := range items {
+		// Attempts counts submits already recorded, so Attempts+1 is the
+		// submit that just reached the runtime.
+		if item.Attempts+1 >= queuedNudgeUnconfirmedSubmitCeiling {
+			presumed = append(presumed, item)
+			continue
+		}
+		retry = append(retry, item)
+	}
+	return retry, presumed
 }
 
 func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queuedNudge) error {
@@ -2214,14 +2430,22 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		now := time.Now()
 		front := maint.frontForState(state)
 		deadline := noMaintenanceDeadline()
+		// Maintenance and shadow-bead bookkeeping are BEST-EFFORT here: the
+		// flock'd state.json is the storage authority and the bead is a shadow
+		// (see internal/nudgequeue/store.go). Before this change, a failure in
+		// the shadow store (bead-store contention on a loaded rig) aborted the
+		// whole transaction, so an already-INJECTED reminder was never removed
+		// from Pending — its claim lease lapsed and the hook re-injected the
+		// same items at every prompt boundary until the store freed up. The
+		// observability shadow must never block the delivery authority.
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "gc nudge ack: warning: recover pass (best-effort): %v\n", err) //nolint:errcheck
 		}
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "gc nudge ack: warning: expired prune (best-effort): %v\n", err) //nolint:errcheck
 		}
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "gc nudge ack: warning: dead prune (best-effort): %v\n", err) //nolint:errcheck
 		}
 		var terminal []queuedNudge
 		filtered := state.Pending[:0]
@@ -2245,9 +2469,12 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		for _, item := range terminal {
 			// terminal items come from a non-empty Pending/InFlight, so the
 			// store is already open; ensureOpen is idempotent and just returns
-			// the cached handle here.
+			// the cached handle here. Shadow-bead terminalization is
+			// best-effort: the item is already removed from the authority
+			// above, and resurrecting it (by aborting this transaction) turns
+			// one delayed shadow write into an endless duplicate delivery.
 			if err := markQueuedNudgeTerminal(maint.ensureOpen(), item, outcome, reason, commitBoundary, now); err != nil {
-				return err
+				fmt.Fprintf(os.Stderr, "gc nudge ack: warning: shadow terminalize %s (best-effort): %v\n", item.ID, err) //nolint:errcheck
 			}
 		}
 		return nil
