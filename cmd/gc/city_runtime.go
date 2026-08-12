@@ -3855,6 +3855,14 @@ func (cr *CityRuntime) shutdown() {
 				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 			}
 		}
+		// With every session stopped, tear down the provider's shared server,
+		// exactly like the standalone stop path (cmdStopBody ->
+		// teardownServerForStop). Without this, a supervisor-managed stop
+		// leaks the city's tmux server (mayor session included) until someone
+		// kills it by hand (#5175). The preserve-sessions shutdown returned
+		// above, before the session stops — preserved sessions live inside
+		// this server, so keeping it up there is by design, not an omission.
+		teardownServerForStop(cr.sp, cr.stderr)
 	})
 }
 
