@@ -848,6 +848,21 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		return 1
 	}
 	if queueManagedWake {
+		// Send-time loud-fail guard (sc-875uie): shouldQueueManagedNudgeWake chose to
+		// queue purely on !obs.Running, which cannot tell a resumable (asleep) session
+		// from one that has DRAINED. A drained session is not a wake conflict, so
+		// WakeSession accepts the wake and returns success — but the reconciler spawns
+		// a fresh worker instead of resuming it, so nothing ever consumes the queued
+		// nudge; it lingers until its retired fence stops matching and gc nudge status
+		// reads 0/0/0, having handed the sender a false "queued" success. Detect that
+		// silent-strand case here and fail undeliverable BEFORE enqueuing. (Terminal
+		// and gone targets are NOT diverted here — WakeSession already rejects them and
+		// the enqueue→rollback path dead-letters them loudly.) A probe error
+		// (transient/store) is non-fatal: fall through to the existing enqueue+wake
+		// path rather than block a legitimate nudge.
+		if reason, wouldStrand, probeErr := nudgeManagedWakeStrands(target, store); probeErr == nil && wouldStrand {
+			return writeUndeliverableSessionNudgeResult(target, mode, reason, jsonOutput, stdout, stderr)
+		}
 		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
 	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
@@ -968,6 +983,20 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
+}
+
+// nudgeManagedWakeStrands reports whether queuing a managed nudge-wake for the
+// target would silently strand it (a drained/stopped session WakeSession accepts
+// but never resumes), via the session front door's read-only ManagedWakeWouldStrand
+// probe. When the front door is unbacked or the target carries no session id it
+// cannot classify, so it reports wouldStrand=false to preserve the pre-existing
+// enqueue behavior.
+func nudgeManagedWakeStrands(target nudgeTarget, store beads.Store) (string, bool, error) {
+	front := cliSessionFrontDoor(store, target.cfg, target.cityPath)
+	if !front.Backed() || target.sessionID == "" {
+		return "", false, nil
+	}
+	return front.ManagedWakeWouldStrand(target.sessionID, time.Now().UTC())
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
@@ -1214,6 +1243,34 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 	}
 }
 
+// writeUndeliverableSessionNudgeResult reports a nudge that was NOT queued
+// because the target session would silently strand a managed wake (drained/
+// stopped — see nudgeManagedWakeStrands). It is the loud-fail counterpart to
+// writeQueuedSessionNudgeResult: the command exits non-zero and, in JSON mode,
+// emits queued=false / outcome="undeliverable" with the reason, so a caller
+// (human or script) gets a real failure signal instead of a false "queued"
+// success that later evaporates (sc-875uie).
+func writeUndeliverableSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, reason string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		if code := writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
+			SchemaVersion: "1",
+			OK:            false,
+			Target:        target.agentKey(),
+			SessionID:     target.sessionID,
+			SessionName:   target.sessionName,
+			Delivery:      string(mode),
+			Queued:        false,
+			Outcome:       "undeliverable",
+			Reason:        reason,
+		}); code != 0 {
+			return code
+		}
+		return 1
+	}
+	fmt.Fprintf(stderr, "gc session nudge: undeliverable — target session %s is %s and will not be resumed; nudge not queued\n", target.agentKey(), reason) //nolint:errcheck
+	return 1
+}
+
 func sendMailNotify(target nudgeTarget, sender string) error {
 	store, err := openNudgeBeadStoreErr(target.cityPath)
 	if err != nil {
@@ -1261,6 +1318,14 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 					sessFront = sessionFrontDoor(sessStore)
 				}
 				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
+				return nil
+			}
+			if nudgeErr == nil && result.Undelivered == worker.NudgeUndeliveredNoIdleBoundary {
+				// Live but busy past the idle window: the mail-check hook
+				// announces unread mail at the session's next prompt boundary,
+				// so enqueueing here would deliver the same mail through two
+				// channels (dip-lq1utb). The downgrade reason is upstream's
+				// vocabulary for exactly this state.
 				return nil
 			}
 		}
@@ -2086,6 +2151,11 @@ type nudgeMaintenanceStore struct {
 	opened   bool
 	store    beads.NudgesStore
 	front    *nudgequeue.Store
+
+	// sessProbe is the session-lifecycle probe the stranded-nudge sweep uses,
+	// built once (sessProbeBuilt) over the same store handle frontForState opened.
+	sessProbe      managedWakeUnreachableProbe
+	sessProbeBuilt bool
 }
 
 // frontForState returns the front-door handle to use for the maintenance passes
@@ -2113,6 +2183,41 @@ func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 		}
 	}
 	return m.store
+}
+
+// managedWakeUnreachableProbe reports whether the target session of a queued nudge
+// has reached a terminal/stranding lifecycle state and can therefore no longer
+// consume it. It is session.Store.ManagedWakeUnreachable as a method value; a nil
+// probe (no backed session front door) disables the stranded-nudge sweep.
+type managedWakeUnreachableProbe func(sessionID string, now time.Time) (string, bool, error)
+
+// strandProbe returns the session-lifecycle probe pruneStrandedQueuedNudges uses,
+// built lazily over the same underlying store handle frontForState opened (so the
+// idle/empty-queue tick never opens a store or loads config just to build it). It
+// returns nil — disabling the sweep for this pass — when the store was never
+// opened or the session front door is not backed. The one-shot session store is
+// routed through cliSessionFrontDoor so a [beads.classes.sessions] relocation is
+// honored the same way the running controller honors it.
+func (m *nudgeMaintenanceStore) strandProbe() managedWakeUnreachableProbe {
+	if m.sessProbeBuilt {
+		return m.sessProbe
+	}
+	m.sessProbeBuilt = true
+	if !m.opened || m.store.Store == nil {
+		return nil
+	}
+	// cfg drives only [beads.classes.sessions] relocation routing and is nil-safe at
+	// the single-store backend (resolveClassStore ignores it). Load it so a relocated
+	// session store is honored the same way the controller honors it, but fall back
+	// to nil rather than disable the sweep when config is unreadable (e.g. a bare
+	// test city) — the sweep is far too valuable to silently skip over a config read.
+	cfg, _ := loadCityConfig(m.cityPath, io.Discard)
+	front := cliSessionFrontDoor(m.store.Store, cfg, m.cityPath)
+	if front == nil || !front.Backed() {
+		return nil
+	}
+	m.sessProbe = front.ManagedWakeUnreachable
+	return m.sessProbe
 }
 
 // close releases the store this frame opened (if any). It never touches a
@@ -2151,6 +2256,9 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 			return err
 		}
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		if err := pruneStrandedQueuedNudges(state, front, maint.strandProbe(), now, deadline); err != nil {
 			return err
 		}
 		pending := state.Pending[:0]
@@ -2193,6 +2301,9 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
+		if err := pruneStrandedQueuedNudges(state, front, maint.strandProbe(), now, deadline); err != nil {
+			return err
+		}
 		for _, item := range state.Pending {
 			if item.Agent == agentName {
 				pending = append(pending, item)
@@ -2229,6 +2340,9 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 			return err
 		}
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+			return err
+		}
+		if err := pruneStrandedQueuedNudges(state, front, maint.strandProbe(), now, deadline); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -2730,6 +2844,68 @@ func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue
 		filtered = append(filtered, item)
 	}
 	state.Pending = filtered
+	sortQueuedNudges(state)
+	return nil
+}
+
+// pruneStrandedQueuedNudges dead-letters queued nudges whose TARGET SESSION has
+// terminated (closed / closing / archived-without-continuity) or stranded
+// (drained / stopped) and will therefore never consume them — the drain-time-race
+// half of the sc-875uie loud-fail guard. The send-time guard (half a,
+// nudgeManagedWakeStrands) blocks a NEW managed wake to an already-drained target;
+// this sweep covers the RACE the send-time guard cannot: a nudge queued to a live
+// or asleep session that THEN terminates before consuming it. Left unswept the
+// orphan lingers in Pending/InFlight until its retired session fence stops matching,
+// at which point `gc nudge status` reads 0/0/0 with zero trace and the sender never
+// learns delivery failed (the measured bug). Moving it to Dead surfaces it in
+// status and leaves a durable terminal bead.
+//
+// It is deliberately session-keyed: an item with no target SessionID (an
+// agent-broadcast nudge bound to no specific session) is left untouched — this fix
+// targets the measured session-directed evaporation only. A probe error (a
+// transient session-store read) KEEPS the item (fail-closed) rather than
+// dead-letter a possibly-live target. A nil probe or front (idle/empty queue never
+// opened the store) makes the whole pass a no-op.
+func pruneStrandedQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, probe managedWakeUnreachableProbe, now, deadline time.Time) error {
+	if probe == nil || front == nil {
+		return nil
+	}
+	var stranded []queuedNudge
+	sweep := func(items []queuedNudge) []queuedNudge {
+		kept := items[:0]
+		for i, item := range items {
+			if time.Now().After(deadline) {
+				kept = append(kept, items[i:]...)
+				break
+			}
+			if strings.TrimSpace(item.SessionID) == "" {
+				kept = append(kept, item)
+				continue
+			}
+			reason, unreachable, err := probe(item.SessionID, now)
+			if err != nil || !unreachable {
+				kept = append(kept, item)
+				continue
+			}
+			item.DeadAt = now.UTC()
+			item.ClaimedAt = time.Time{}
+			item.LeaseUntil = time.Time{}
+			if strings.TrimSpace(item.LastError) == "" {
+				item.LastError = "session " + reason
+			}
+			stranded = append(stranded, item)
+		}
+		return kept
+	}
+	state.Pending = sweep(state.Pending)
+	state.InFlight = sweep(state.InFlight)
+	for _, item := range stranded {
+		// Best-effort: mark the backing bead terminal even if the write fails, so a
+		// store hiccup cannot trap the item back in Pending/InFlight (mirrors the
+		// expired-prune contract). pruneDeadQueuedNudges repairs any missed terminal.
+		_ = front.Terminalize(item, "failed", item.LastError, "", now)
+	}
+	state.Dead = append(state.Dead, stranded...)
 	sortQueuedNudges(state)
 	return nil
 }
