@@ -12,24 +12,10 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
-
-// heartbeatMetadataKey is the bead-metadata key freshened by the gc-only
-// `gc bd heartbeat <issue-id>` subcommand. The gas-city-dashboard will read
-// this exact key — with the `_at` suffix — to tell a live worker from a dead
-// one (gastownhall/gascity#1855; reader tracked in dashboard #324). Unrelated
-// benchmark/test code writes the suffixless `gc.last_heartbeat` for a
-// different purpose; do not unify them.
-const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
-
-// bdHeartbeatNow supplies the timestamp stamped by `gc bd heartbeat`. It is a
-// package var so tests can pin it to a fixed instant; the rewrite normalizes
-// the result to UTC, so an injected non-UTC clock still produces a UTC stamp.
-var bdHeartbeatNow = time.Now
 
 // bdSilentFallbackExitCode is the exit code gc bd emits when it detects
 // that bd silently fell back to on-disk auto-import mode (managed Dolt
@@ -112,12 +98,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat <issue-id>" subcommand, which rewrites to
-"update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard, and
-"release-if-current <issue-id> <assignee>", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+<issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
+lease and fails loudly when the caller no longer owns it. gc adds one
+subcommand of its own: "release-if-current <issue-id> <assignee>", which
+conditionally resets an in-progress assignment only when the bead still has
+that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -127,7 +113,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd heartbeat my-project-abc     # refresh the claim lease you hold
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -197,17 +183,16 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
-// rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
-// subcommand into the bd command that performs the write:
-//
-//	update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>
-//
-// Long-running workers call `gc bd heartbeat {{issue}}` periodically so the
-// dashboard can distinguish a live worker from a dead one
-// (gastownhall/gascity#1855). It reuses bd's existing metadata-write path
-// rather than adding a new store method, and leaves the issue id in place so
-// the generic scope resolver still routes the write to the correct rig store.
-// Args that do not begin with "heartbeat" pass through unchanged.
+// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id>` subcommand and
+// forwards it to bd's NATIVE heartbeat, which pushes the claim's
+// lease_expires_at forward and fails loudly when the caller no longer owns
+// the claim (reclaimed lease, closed issue). gc used to rewrite this into
+// `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` — a write
+// nothing reads — which reported success while leaving the lease untouched,
+// so a worker's claim could go stale mid-task under a green heartbeat
+// (dip-wdt5aq). The id is validated here so a malformed id never reaches
+// bd's prefix-based rig auto-detection. Args that do not begin with
+// "heartbeat" pass through unchanged.
 func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
 		return bdArgs, nil
@@ -220,8 +205,7 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
 		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
-	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
-	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+	return []string{"heartbeat", rest[0]}, nil
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
