@@ -283,6 +283,37 @@ const (
 	LegacyWorkDirMetadataKey = "work_dir"
 )
 
+// Session-attribute keys: the non-"gc."-prefixed family written onto SESSION
+// beads (the sibling of the directory keys above; session beads spell their
+// attributes bare — "state", "session_name", "currently_processing_bead_id" —
+// and those live with their owner in internal/session). Only the keys a second
+// package must agree on are declared here, so the vocabulary has one home. Like
+// the directory keys they are intentionally NOT in KnownMetadataKeys, whose
+// drift guard only covers the gc. namespace.
+const (
+	// CurrentClaimBeadIDMetadataKey records, on the CLAIMING SESSION's bead, the
+	// id of the work bead that session most recently claimed through
+	// `gc hook --claim`. It is the durable back-channel that makes the claimed
+	// step id readable from the step's own shell: a pool session's shell has no
+	// GC_BEAD_ID / GC_TRIGGER_BEAD_ID (those exist only in the dispatch
+	// condition-script environment, internal/convergence/condition.go), so
+	// without this stamp a formula step cannot name the bead it is running and
+	// silently skips its own close. `gc hook current` reads it back.
+	//
+	// It is deliberately distinct from internal/session.CurrentBeadIDKey
+	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
+	// it wakes a session with an already-assigned work bead. That key describes
+	// a controller-side assignment; this one describes a claim the session made
+	// for itself, and the two lanes must not clobber each other's value.
+	//
+	// A stale stamp is dangerous for the same reason a stale session-affinity
+	// key is (see SessionAffinityMetadataKeys): a session that has released its
+	// work would otherwise keep naming a bead it no longer owns, and the next
+	// step to ask `gc hook current` would close somebody else's bead. Every path
+	// that takes work off a session clears it.
+	CurrentClaimBeadIDMetadataKey = "current_claim_bead_id"
+)
+
 // Dispatch metadata keys: a non-"gc."-prefixed family that sling writes onto
 // work and source beads to wire molecules together and record the merge
 // strategy. They predate the gc. namespace convention and their on-store

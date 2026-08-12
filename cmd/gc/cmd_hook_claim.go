@@ -159,6 +159,11 @@ type hookClaimOps struct {
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
 	StampWorkMeta hookStampWorkMetaFunc
+	// StampSessionClaim records the claimed bead id on the CLAIMING SESSION's own
+	// bead — the reverse direction from StampWorkMeta, and the only route by
+	// which the step's shell can later learn which bead it is running.
+	// Best-effort.
+	StampSessionClaim hookStampSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
@@ -201,6 +206,7 @@ type (
 	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc  func(sessionID, beadID string) error
 	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 )
@@ -350,6 +356,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
+	}
+	if ops.StampSessionClaim == nil {
+		ops.StampSessionClaim = hookStampSessionCurrentClaim
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
@@ -759,6 +768,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
+	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -1140,12 +1150,48 @@ func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, ass
 	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
 }
 
+// stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
+// SESSION's own bead (beadmeta.CurrentClaimBeadIDMetadataKey), the reverse
+// direction from stampHookClaimIdentity's work-bead back-reference.
+//
+// It exists because a claimed step id is otherwise UNREACHABLE from the step's
+// own shell: GC_BEAD_ID / GC_TRIGGER_BEAD_ID are set only in the dispatch
+// condition-script environment (internal/convergence/condition.go), never in a
+// pool session, so a formula step that must close the bead it is running had no
+// way to name it and silently skipped its own close — work that did nothing
+// reported green. `gc hook current` reads this stamp back and closes that gap.
+//
+// Unlike the work-bead session back-reference this is stamped for CONTROL beads
+// too: that exclusion exists because a control step must stay session-free by
+// graphroute's design, which is a statement about the WORK bead's metadata. A
+// control-dispatcher session running a control step needs to name its own bead
+// exactly as much as any other worker does.
+//
+// Best-effort: the write is guarded and compare-and-skipped inside
+// session.Store.SetCurrentClaim, and a failure is reported on stderr but never
+// fails the claim. The loud refusal for a step that cannot name its bead belongs
+// at the point of use, not here.
+func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	beadID := strings.TrimSpace(bead.ID)
+	if sessionID == "" || beadID == "" {
+		return
+	}
+	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	}
+}
+
 // publishHookClaimRunMap publishes the claimed bead's resolved run ID for the
 // external proxy correlation path. It deliberately does not decorate the
 // session bead: bd's fuzzy ID resolver can redirect a post-claim update to a
 // prefix-colliding session if the intended session disappears concurrently.
 // The run map is independent, best-effort telemetry and preserves useful
-// correlation without issuing that unsafe second store mutation.
+// correlation without issuing that unsafe second store mutation. (The one
+// session-bead write the claim does make, stampHookSessionCurrentClaim, goes
+// through the session front door's exact-id/session-bead-validated
+// SetCurrentClaim, which refuses the fuzzy redirect this comment describes
+// rather than risking it.)
 func publishHookClaimRunMap(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	sessionBeadID := hookClaimSessionID(opts.Env)
 	if sessionBeadID == "" {

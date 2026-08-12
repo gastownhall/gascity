@@ -394,6 +394,12 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_wait.go",
 	"cmd_nudge.go",
 	"cmd_mail.go",
+	// The claim back-channel's shared root: `gc hook --claim` stamps the claimed
+	// bead id onto the calling session's bead through it and `gc hook current`
+	// reads it back, so an unrouted front door here would write the stamp to the
+	// work store while the session bead lives in the relocated sessions store —
+	// and every `gc hook current` would then report "nothing claimed".
+	"hook_session_claim.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

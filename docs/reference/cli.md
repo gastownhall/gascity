@@ -1960,7 +1960,32 @@ gc hook [agent] [flags]
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook current
+
+Prints the work bead this session most recently claimed with gc hook --claim.
+
+The claim protocol stamps the claimed bead id onto the calling session's own
+bead, because a pool session's shell never receives $GC_BEAD_ID or
+$GC_TRIGGER_BEAD_ID — those exist only in the controller's dispatch condition
+environment. A formula step that must close the bead it is running reads it back
+here:
+
+    BEAD_ID="$&#123;GC_BEAD_ID:-$&#123;GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)&#125;&#125;"
+
+The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
+session identity and when the session has claimed nothing, so a caller that
+cannot name its bead fails loudly instead of skipping its own work.
+
+```
+gc hook current [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--id-only` | bool |  | print only the bead id, with no surrounding context |
 
 ## gc hook run
 
