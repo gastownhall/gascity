@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	beadslib "github.com/steveyegge/beads"
@@ -32,9 +33,10 @@ var _ MetadataCASWriter = (*NativeDoltStore)(nil)
 // conditional-UPDATE ... WHERE primitive and no raw-SQL escape hatch, making
 // the transaction the only composition point available.
 //
-// Sibling keys are preserved: the metadata column is a single blob, so the
-// write re-serializes the map read inside this transaction rather than
-// patching one field.
+// Sibling keys are preserved with their JSON types: the public Store view is
+// map[string]string, but bd metadata may also contain booleans, numbers, null,
+// objects, and arrays. The transaction compares through that public string
+// view, then replaces only the selected raw JSON member with a JSON string.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -47,6 +49,13 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 	swapped := false
 	commitMsg := fmt.Sprintf("gc: compare-and-set metadata %s on bead %s", key, id)
 	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		// Upstream Dolt storage may retry this entire callback after a
+		// retryable commit/connection failure. The result belongs to the
+		// current attempt, not any earlier callback invocation: otherwise a
+		// first attempt that reached UpdateIssue could leave swapped=true,
+		// while a retry observes a competing value and returns a false
+		// positive CAS success.
+		swapped = false
 		issue, err := tx.GetIssue(ctx, id)
 		if err != nil {
 			return nativeStoreError(id, err)
@@ -63,14 +72,23 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 			// and leaves swapped false, which the caller reads as (false, nil).
 			return nil
 		}
-		if metadata == nil {
-			metadata = make(map[string]string, 1)
-		}
-		metadata[key] = next
-		raw, err := metadataRawFromMap(metadata)
+		rawMetadata, err := metadataRawValuesFromNative(issue.Metadata)
 		if err != nil {
-			return err
+			return fmt.Errorf("parsing raw metadata for bead %q: %w", id, err)
 		}
+		if rawMetadata == nil {
+			rawMetadata = make(map[string]json.RawMessage, 1)
+		}
+		nextRaw, err := json.Marshal(next)
+		if err != nil {
+			return fmt.Errorf("marshaling metadata value %q: %w", key, err)
+		}
+		rawMetadata[key] = nextRaw
+		rawBytes, err := json.Marshal(rawMetadata)
+		if err != nil {
+			return fmt.Errorf("marshaling metadata: %w", err)
+		}
+		raw := json.RawMessage(rawBytes)
 		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
 			return nativeStoreError(id, err)
 		}
@@ -81,4 +99,15 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 		return false, err
 	}
 	return swapped, nil
+}
+
+func metadataRawValuesFromNative(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
+	}
+	return values, nil
 }

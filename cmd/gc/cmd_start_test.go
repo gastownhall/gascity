@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/bootstrap"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -2061,5 +2062,76 @@ func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
 	}
 	if strings.Contains(string(out), token) {
 		t.Errorf("child process received the controller token: %s", out)
+	}
+}
+
+// TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig pins the
+// wiring at cmd_start.go's provider-construction site: the provider must be
+// built from the config and path gc start already resolved, not from a second,
+// independent city rediscovery.
+//
+// The regression it guards is silent. The rediscovery path
+// (newSessionProvider → loadSessionProviderContext) swallows both
+// resolveCity() and loadCityConfig() errors and returns a cfg-less context, so
+// tmuxConfigFromSession falls back through sc.Socket → cityName → "" and lands
+// on the default tmux socket. Every socket-scoped operation then targets the
+// wrong server while start still reports success.
+//
+// cwd is pointed at an empty directory so rediscovery cannot accidentally
+// resolve this city: with the fix the captured socket is the configured label,
+// and without it the capture is empty.
+func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T) {
+	const (
+		socketLabel = "bright-lights"
+		cityName    = "socket-wiring-city"
+	)
+
+	cityPath := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
+		t.Fatalf("scaffold runtime root: %v", err)
+	}
+	cityTOML := "[workspace]\nname = \"" + cityName + "\"\n\n" +
+		"[beads]\nprovider = \"file\"\n\n" +
+		"[session]\nsocket = \"" + socketLabel + "\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var (
+		calls       int
+		gotSocket   string
+		gotCityName string
+		gotCityPath string
+	)
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(_ *config.City, _ string, sc config.SessionConfig, resolvedName, resolvedPath string) (runtime.Provider, error) {
+		calls++
+		gotSocket, gotCityName, gotCityPath = sc.Socket, resolvedName, resolvedPath
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartStandalone exit = %d, want 0\nstdout:\n%s\nstderr:\n%s",
+			code, stdout.String(), stderr.String())
+	}
+
+	if calls == 0 {
+		t.Fatal("buildSessionProviderByName never called; the seam no longer covers gc start's provider construction")
+	}
+	if gotSocket != socketLabel {
+		t.Errorf("session socket = %q, want %q; gc start built its provider from a rediscovered city instead of the resolved config",
+			gotSocket, socketLabel)
+	}
+	if gotCityName != cityName {
+		t.Errorf("city name = %q, want %q", gotCityName, cityName)
+	}
+	if gotCityPath != cityPath {
+		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
 	}
 }

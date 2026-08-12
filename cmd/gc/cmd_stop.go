@@ -370,7 +370,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// not in the current config).
 	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
 
-	teardownServerForStop(sp, stderr)
+	teardownServerForStop(sp, stderr, "gc stop")
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
@@ -381,13 +381,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	return code
 }
 
-func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
+// teardownServerForStop terminates a provider's shared server after every
+// session has been stopped. logPrefix identifies the caller in the error
+// line: the standalone path passes "gc stop", the supervisor-managed path
+// passes its own "<logPrefix>: city '<name>'" so a teardown warning reads
+// like every other managed-shutdown error.
+func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix string) {
 	lifecycle, ok := sp.(runtime.ServerLifecycleProvider)
 	if !ok {
 		return
 	}
 	if err := lifecycle.TeardownServer(); err != nil {
-		fmt.Fprintf(stderr, "gc stop: teardown server: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: teardown server: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 }
 

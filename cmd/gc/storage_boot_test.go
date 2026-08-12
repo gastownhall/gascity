@@ -1073,8 +1073,16 @@ func TestStorageCommandTreeIsBuiltFromTheBlessedSpelling(t *testing.T) {
 			t.Errorf("the spelling %q decomposed; it should not", bad)
 		}
 	}
-	if cmd := newStorageCmdFromSpelling("not a command", io.Discard, io.Discard); cmd.RunE == nil {
-		t.Error("an undecomposable spelling built a command that reports nothing")
+	if cmd := newStorageCmdFromSpellings("not a command", storageRecoveryCommand, io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("an undecomposable migration spelling built a command that reports nothing")
+	}
+	if cmd := newStorageCmdFromSpellings(storageMigrationCommand, "not a command", io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("an undecomposable recovery spelling built a command that reports nothing")
+	}
+	// Two operator commands under different parents would build one tree and
+	// leave the other spelling naming a command that does not resolve.
+	if cmd := newStorageCmdFromSpellings(storageMigrationCommand, "gc elsewhere recover-stranded --from-work", io.Discard, io.Discard); cmd.RunE == nil {
+		t.Error("spellings under different namespaces built a tree instead of reporting the conflict")
 	}
 }
 

@@ -129,6 +129,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// map-iteration order, so a bounded read truncated an
 				// arbitrary, per-call-different subset (#3208).
 				Sort: beads.SortCreatedDesc,
+				// Explicit tier, for the same reason as the sort and with the
+				// same failure shape: the zero value is not neutral across these
+				// legs. The work legs' bead-policy layer rewrites it to TierBoth
+				// and the unwrapped graph leg does not, so the relocated store's
+				// ephemeral rows dropped out of an authoritative-looking 200
+				// (ga-8lyxc). See beads.FederatedReadTier.
+				TierMode: beads.FederatedReadTier,
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -447,7 +454,9 @@ func beadListLegCount(ctx context.Context, store beads.Store, assignee string, i
 
 // beadListCountQuery builds the count query for the all=true list path. It
 // carries the same filters as the list query so the count matches exactly;
-// Sort and Limit are omitted because they do not affect a count.
+// Sort and Limit are omitted because they do not affect a count. The tier is
+// NOT omitted for the same reason: a count taken over a narrower tier than the
+// list it bounds advertises a Total the walk can never reach.
 func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	q := beads.ListQuery{
 		Status:        input.Status,
@@ -456,11 +465,21 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		Assignee:      assignee,
 		IncludeClosed: input.All,
 		Live:          input.Status == "in_progress",
+		TierMode:      beads.FederatedReadTier,
 	}
 	if !q.HasFilter() {
 		q.AllowScan = true
 	}
 	return q
+}
+
+// readyFederationQuery is the ready query every leg of the ready federation is
+// read with. It exists so the work legs and the graph leg cannot be given
+// different ones: they are read from two places in the handler below, and the
+// defect this closes was exactly the two places disagreeing about the tier
+// without either of them naming it. See beads.FederatedReadTier.
+func readyFederationQuery() beads.ReadyQuery {
+	return beads.ReadyQuery{TierMode: beads.FederatedReadTier}
 }
 
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
@@ -493,6 +512,11 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
+//   - Tier: every leg is read at beads.FederatedReadTier, stated explicitly.
+//     A no-argument Ready() left TierMode at its zero value, which the work
+//     legs' bead-policy layer rewrote to TierBoth while the unwrapped graph leg
+//     took literally — so the relocated store's whole ephemeral tier fell out of
+//     a 200 that named no failure (ga-8lyxc).
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -509,7 +533,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		ready, err := beads.HandlesFor(store).Live.Ready(readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -554,7 +578,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// does NOT go through federate(): the graph leg has no partial tier.
 	if graph := relocatedGraphStore(s.state); graph != nil {
 		pa.attempt()
-		ready, err := beads.HandlesFor(graph).Live.Ready()
+		ready, err := beads.HandlesFor(graph).Live.Ready(readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}

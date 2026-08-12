@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -906,10 +907,10 @@ func workQueryHasReadyWork(output string) bool {
 
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: future defer_until, any open blocking dep in the row's
-// blocked_by array, or the row's own is_blocked / status=="blocked" marker.
-// The work_query is expected to gate these, but defensive filtering here
-// prevents a single broken query from cascading into agent action on a bead
-// it cannot progress.
+// blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
+// canonical dispatch hold label. The work_query is expected to gate these, but
+// defensive filtering here prevents a single broken query from cascading into
+// agent action on a bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -940,6 +941,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isSelfBlockedHookCandidate(obj) {
+			continue
+		}
+		if isHeldHookCandidate(obj) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -1001,6 +1005,51 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 	}
 	if status, ok := item["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "blocked") {
 		return true
+	}
+	return false
+}
+
+// isHeldHookCandidate reports whether item carries a canonical dispatch hold
+// label (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
+// required next actor or condition is, by construction, not this session.
+//
+// Serving one as work is never right for ANY hook path: the assignee cannot
+// advance it, and because the assignment is never released the same bead comes
+// back on every subsequent tick, so a worker that correctly parked its bead was
+// permanently starved of ready work (gas-kg6). The status+assignee tests in
+// hookClaimExistingAssignment / claimFirstReadyHookAssignment cannot catch this
+// on their own — a held bead is validly in_progress and validly ours — so the
+// hold dimension is filtered here, in the one seam every hook path already runs
+// through (the claim, the cross-store federation, and plain `gc hook`).
+//
+// Only the two canonical values match, compared exactly against the shared
+// beadmeta constants: unrelated labels that merely look hold-ish (`mpr-human-hold`,
+// the routing label `needs-mayor`) are ordinary work and must not be stranded.
+//
+// An absent or null labels field means "no labels", never "unknown" — bd emits
+// labels:null for an unlabeled bead — so this fails open exactly like the
+// is_blocked projection above it.
+//
+// Scope (ga-5736js): this filters what the hook SERVES as work. It does not
+// touch the assignee-scoped demand/liveness tiers, which stay hold-transparent
+// by design so a held assignment still keeps its owner visible to the pool and
+// to crash recovery.
+func isHeldHookCandidate(item map[string]any) bool {
+	raw, ok := item["labels"].([]any)
+	if !ok {
+		return false
+	}
+	for _, entry := range raw {
+		label, ok := entry.(string)
+		if !ok {
+			continue
+		}
+		label = strings.TrimSpace(label)
+		for _, hold := range beadmeta.DispatchHoldLabels {
+			if strings.EqualFold(label, hold) {
+				return true
+			}
+		}
 	}
 	return false
 }

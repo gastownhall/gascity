@@ -210,7 +210,9 @@
               "events-reemit-execution",
               "storage-migrate",
               "storage-status",
-              "ready"
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

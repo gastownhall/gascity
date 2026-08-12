@@ -444,7 +444,11 @@ func normalizeNonExpandingPoolSessionInfo(
 // recordDeferredNonExpandingPoolAliasConflictInfo is the session.Info sibling of
 // recordDeferredNonExpandingPoolAliasConflict. It records the deferred-alias
 // bookkeeping via the SAME bp.beadStore.Update and folds the batch onto the
-// returned Info (ApplyPatch), the authoritative post-write value.
+// returned Info (ApplyPatch), the authoritative post-write value. Writes are
+// throttled by the shared deferredSingletonAliasRetryDue backoff gate (see
+// session_beads.go) keyed off the same pool_alias_conflict_at field the
+// sync-time path reads, so this call site cannot reset that path's clock
+// without also being subject to it.
 func recordDeferredNonExpandingPoolAliasConflictInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -454,6 +458,16 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	count := 0
 	if existing, err := strconv.Atoi(strings.TrimSpace(info.PoolAliasConflictCount)); err == nil && existing > 0 {
 		count = existing
+	}
+	// Canonical singleton pool identity retries share the same unresolvable-
+	// conflict shape as the sync-time path in session_beads.go (a
+	// max_active_sessions=1 agent with two live sessions never releases the
+	// alias), so it must go through the SAME deferredSingletonAliasRetryDue
+	// gate rather than writing on every buildDesiredState call. Do not
+	// duplicate the backoff predicate here -- that duplication is exactly how
+	// this call site went unguarded the first time.
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical

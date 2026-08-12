@@ -41,8 +41,12 @@ func (t QueryTopology) includeEphemeralReady() bool {
 // Ready reader commands. bdReadyCommand reads exactly one store — whichever one
 // `bd` resolves from the working directory — and is what every city runs today.
 // gcReadyCommand is the in-process federation over every store a city spreads
-// work across (cmd/gc's `gc ready`); it is flag-compatible with `bd ready` on
-// purpose, so the swap is the command word and nothing else.
+// work across (cmd/gc's `gc ready`); it accepts every flag the queries in this
+// file generate, so the swap is the command word and nothing else. That is a
+// claim about THESE queries, not about all of `bd ready`: `gc ready` registers
+// the generated subset and rejects the rest of bd's ready surface, which is why
+// the operator-facing refusals that steer at it say so
+// (internal/beads/bdsql_relocation.go RelocatedClassFrontierRefusal).
 const (
 	bdReadyCommand = "bd ready"
 	gcReadyCommand = "gc ready"
@@ -133,17 +137,36 @@ func excludeHoldLabelsShellArgs() string {
 	return args
 }
 
+// holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
+// the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
+// values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
+// jq-based hold filter so the label set is spelled exactly once.
+func holdLabelMatchCondsJQ() string {
+	conds := make([]string, len(beadmeta.DispatchHoldLabels))
+	for i, label := range beadmeta.DispatchHoldLabels {
+		conds[i] = `. == "` + label + `"`
+	}
+	return strings.Join(conds, " or ")
+}
+
 // excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
 // that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
 // filters that have no bd-side --exclude-label flag to lean on. Mirrors the
 // bracketed-count style of the dependency-blocking select above it so both
 // clauses read the same way (ga-x9kptu / ga-5736js).
 func excludeHoldLabelsJQClause() string {
-	conds := make([]string, len(beadmeta.DispatchHoldLabels))
-	for i, label := range beadmeta.DispatchHoldLabels {
-		conds[i] = `. == "` + label + `"`
-	}
-	return ` | select(([ (.labels // [])[] | select(` + strings.Join(conds, " or ") + `) ] | length) == 0)`
+	return ` | select(([ (.labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length) == 0)`
+}
+
+// heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
+// row of a work-query result carries. The in_progress serve gate reads it off
+// the candidate row it already holds, so the hold check costs no extra bd call.
+// `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
+// field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
+// the fail-open behavior TestInProgressTierServesUnparseableHeldCandidateFailOpen
+// pins.
+func heldLabelCountJQ() string {
+	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
 
 // jqMeta renders the jq expression that reads a bead-metadata key with an
@@ -338,10 +361,26 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // block readiness. Status interpretation is left to the shared Go filter:
 // any non-closed blocker counts.
 //
+// The same serve gate also skips a candidate parked on a canonical dispatch
+// hold (beadmeta.DispatchHoldLabels), read off the candidate row this tier
+// already holds — no extra bd call (gas-kg6). A held bead has no blocking
+// dependency, so the blocked_by gate alone let it through and the tier
+// re-served it on every tick; because the tier short-circuits with `exit 0`,
+// that also starved the ready tiers below it, and a worker that correctly
+// parked its bead could never reach its own ready queue. The hold dimension is
+// the same defect class as the dependency dimension above, so it shares the
+// same fall-through.
+//
+// Scope (ga-5736js): this is the WORK-SERVING decision only. The assignee-scoped
+// probes that answer "does a session still need to exist" —
+// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
+// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
+// assignment still keeps its owner visible to demand and recovery accounting.
+//
 // Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
 // degrades to the stock behavior of serving the candidate unchanged, never to
 // dropping it, so a malformed or log-prefixed bd stdout can never disable
-// crash recovery.
+// crash recovery. The hold count fails open the same way.
 func inProgressBlockedByEnrichmentScript(shellVar string) string {
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
@@ -363,7 +402,9 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 		`[ -z "$bb" ] && bb="[]"; ` +
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
 		`[ -z "$nblocked" ] && nblocked=0; ` +
-		`if [ "$nblocked" = "0" ]; then ` +
+		`nheld=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
+		`[ -z "$nheld" ] && nheld=0; ` +
+		`if [ "$nblocked" = "0" ] && [ "$nheld" = "0" ]; then ` +
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
 		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
@@ -423,10 +464,27 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 		`done; `
 }
 
+// ephemeralAssignedInProgressProbeScript is the ephemeral-store sibling of the
+// `bd list --status in_progress` crash-recovery query, in the same tier-1 slot.
+// It excludes candidates parked on a canonical dispatch hold
+// (beadmeta.DispatchHoldLabels) inside its own jq selection, the equivalent
+// fall-through to the bd-list tier's nheld serve gate (gas-kg6, #5114 review):
+// without it a held ephemeral bead exited the script as the sole candidate, the
+// Go-side filter then stripped it, and the hook reported no_work while ready
+// work sat unqueried below — the same starvation, wearing a drain label.
+// Filtering before the `.[:1]` truncation also lets a second, unheld
+// in_progress candidate be served instead of being shadowed by a held first.
+//
+// Failure mode differs from the bd-list tier's fail-open serve, deliberately:
+// this probe's jq consumes `bd query` stdout directly, so unparseable output
+// yields an empty candidate and the probe falls through — it never serves raw
+// stdout, with or without the hold filter. The hold-transparent existence
+// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
