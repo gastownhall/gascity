@@ -340,7 +340,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
 				}
-				store = convergeCityScopeStore(store, rctx.CityPath, "")
+				store = scopeGraphStore(rctx.CityPath, rctx.CityPath, nil, store)
 				if err := appendEntries("", store); err != nil {
 					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
 					return errExit
@@ -845,19 +845,28 @@ func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedC
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
 		return nil, resolvedContext{}, "", 1
 	}
-	return convergeCityScopeStore(store, rctx.CityPath, rctx.RigName), rctx, storePath, 0
+	return convergeScopeStore(rctx.CityPath, rctx.RigName, storePath, store), rctx, storePath, 0
 }
 
-// convergeCityScopeStore routes a converge scope's store to the graph class when
-// — and only when — the scope is the CITY. It mirrors the controller's split in
-// buildConvergenceScopes, and it is the same city-only rule
-// controlScopeTakesGraphClass applies to control beads: there is one graph
-// binding per city, so a rig scope keeps its own work ledger.
-func convergeCityScopeStore(store beads.Store, cityPath, rigName string) beads.Store {
+// convergeScopeStore returns the store a converge scope reads and writes.
+//
+// Convergence roots are ClassGraph, so a city scope goes through the city's
+// graph binding while a rig scope keeps its own work ledger. The routing itself
+// is scopeGraphStore's, shared with control dispatch, so the two coordination
+// surfaces cannot drift apart.
+//
+// The rig short-circuit is not redundant with scopeGraphStore's own city test.
+// That test is by PATH, and nothing forbids registering a rig at the city root,
+// where its path IS the city path. The controller's convergence scope map keys
+// on rig NAME (buildConvergenceScopes), so such a rig's roots are written to its
+// own store; routing this leg by path would send the CLI to a binding the
+// controller never writes for that rig — the read/write asymmetry this whole
+// change exists to remove.
+func convergeScopeStore(cityPath, rigName, storePath string, store beads.Store) beads.Store {
 	if rigName != "" {
 		return store
 	}
-	return resolveGraphStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)
+	return scopeGraphStore(cityPath, storePath, nil, store)
 }
 
 func convergeStorePathForContext(rctx resolvedContext) (string, error) {

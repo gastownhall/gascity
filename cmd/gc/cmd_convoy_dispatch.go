@@ -640,7 +640,7 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 // the dispatcher would exit non-zero and crash-loop. A rig scope therefore stays
 // entirely on its own store, exactly as it does today.
 func controlScopeTakesGraphClass(cityPath, storePath string) bool {
-	return samePath(resolveStoreScopeRoot(cityPath, storePath), cityPath)
+	return scopeIsCity(cityPath, storePath)
 }
 
 // controlGraphBinding returns the store this scope's control beads live in when
@@ -690,10 +690,7 @@ func controlStoreDescription(cityPath, storePath string) string {
 // runner, same scope issue prefix, same instance for the optional-capability
 // assertions (DepListBatch, UpdateAll) the scope-skip paths make against it.
 func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
-	if !controlScopeTakesGraphClass(cityPath, storePath) {
-		return scopeStore
-	}
-	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
+	return scopeGraphStore(cityPath, storePath, cfg, scopeStore)
 }
 
 // openControlStoreAtForCity resolves the control store for a city or rig SCOPE.
