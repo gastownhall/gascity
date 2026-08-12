@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1609,7 +1608,7 @@ port = 3307
 	}
 }
 
-func TestCheckDoltAuthorIdentitySkipsPostgresCityWithManagedDoltConfig(t *testing.T) {
+func TestCheckDoltAuthorIdentitySkipsABoundCityWithManagedDoltConfig(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	stubInitDependencyChecks(t)
 
@@ -1632,26 +1631,17 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
-		Database:         "beads",
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads_pg",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeOpaqueBindingScopeFixture(t, cityDir)
 
 	old := initRunDoltConfigGet
 	initRunDoltConfigGet = func(string) (string, error) {
-		t.Fatal("postgres-backed city should not require local Dolt identity")
+		t.Fatal("a city gc does not serve must not require a local Dolt identity")
 		return "", nil
 	}
 	t.Cleanup(func() { initRunDoltConfigGet = old })
 
 	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
-		t.Fatalf("checkDoltAuthorIdentity blocked for postgres city: %#v", status)
+		t.Fatalf("checkDoltAuthorIdentity blocked for a city gc does not serve: %#v", status)
 	}
 }
 

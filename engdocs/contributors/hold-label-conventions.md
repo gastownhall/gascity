@@ -98,10 +98,25 @@ different:**
 
 Nothing in this page requires or implies special-casing any role name in Go.
 `hold:mayor` and `hold:external` are plain label values in this project's own
-bd data, chosen and enforced by convention — this document, PR review, and
-`bd set-state`'s dimension semantics — not by SDK code. Gas City's "ZERO
-hardcoded roles" invariant is unaffected: nothing under `internal/` or
-`cmd/gc/` branches on the literal label value `hold:mayor` or `hold:external`.
+bd data, and *which* value to reach for is enforced by convention — this
+document, PR review, and `bd set-state`'s dimension semantics — not by SDK
+code.
+
+Gas City's "ZERO hardcoded roles" invariant is unaffected. The dispatcher does
+read these two values, from the single shared definition in
+`internal/beadmeta/hold_labels.go` (`DispatchHoldLabels`), so that a bead
+parked on a hold is not handed to a worker as actionable work. That is a check
+for the *presence of a label value*, not a branch on a role: no Go code knows
+or cares who "mayor" is, and renaming the seat would not change a line of it.
+Do not re-spell either literal at a call site — import the constants, so the
+label set stays defined exactly once.
+
+Two questions consume that list and they answer oppositely; `DispatchHoldLabels`
+documents the split in full. In short: filter on holds when deciding what an
+agent should **do** (route-scoped dispatch, and any path serving a bead as
+work — `ga-5736js`, `gas-kg6`), never when deciding which sessions still need
+to **exist** (pool demand and crash-recovery accounting stay hold-transparent,
+or a parked bead's owner goes invisible).
 
 ## See also
 

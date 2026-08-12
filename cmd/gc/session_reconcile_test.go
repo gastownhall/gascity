@@ -1136,11 +1136,10 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 // a city scope that resolves to an authoritative postgres backend with
 // no resolvable password makes controllerQueryRuntimeEnv return an error.
 func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified

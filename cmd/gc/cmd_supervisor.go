@@ -33,6 +33,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -1448,6 +1449,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
 	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
 
+	// External event forwarders consume the typed supervisor stream without
+	// configuring [events.export]. Allow that long-lived supervisor unit to arm
+	// the same transcript correlation sidecars independently.
+	armSupervisorTranscriptMetaFromEnv(stderr)
+
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
 	if supCfg.Events.Export.Enabled() {
@@ -2095,7 +2101,8 @@ func reconcileCities(
 
 		var cityRuntime *CityRuntime
 		if err := runPostPrepareStep("building_city_runtime", func() error {
-			cityRuntime = newCityRuntime(CityRuntimeParams{
+			var runtimeErr error
+			cityRuntime, runtimeErr = newCityRuntime(CityRuntimeParams{
 				CityPath:                path,
 				CityName:                cityName,
 				TomlPath:                tomlPath,
@@ -2116,6 +2123,7 @@ func reconcileCities(
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
 				ControlDispatcherCh:     controlDispatcherCh,
+				TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 				OnStarted: func() {
 					cr.UpdateCallback(path, func(m *managedCity) {
 						m.started = true
@@ -2131,7 +2139,7 @@ func reconcileCities(
 				Stdout:    stdout,
 				Stderr:    stderr,
 			})
-			return nil
+			return runtimeErr
 		}); err != nil {
 			emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
@@ -2142,9 +2150,18 @@ func reconcileCities(
 		// Wire API state.
 		var cs *controllerState
 		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cityCtx, cfg, sp, eventProv, cityName, path)
+			cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
 			return nil
 		}); err != nil {
+			// The runtime is already built, and it holds this city's storage
+			// binding, its trace file and its workspace services. Abandoning it
+			// here would leave the engine open for the life of the supervisor —
+			// including across the next attempt to start this same city.
+			cityCancel()
+			cityRuntime.shutdown()
+			if fr != nil {
+				fr.Close() //nolint:errcheck
+			}
 			emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
 			continue
@@ -2184,6 +2201,14 @@ func reconcileCities(
 			runPoolOnBoot(cfg, path, shellRunHook, stderr)
 			return nil
 		}); err != nil {
+			// Same as the controller-state branch above: the runtime is built,
+			// so it is shut down rather than abandoned with its storage binding
+			// still open.
+			cityCancel()
+			cityRuntime.shutdown()
+			if fr != nil {
+				fr.Close() //nolint:errcheck
+			}
 			emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
 			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
 			continue

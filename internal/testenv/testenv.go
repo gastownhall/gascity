@@ -105,6 +105,15 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 // expensive paths. Rollout-gate env overrides (internal/rollout registry
 // EnvOverride names) DO belong here: a developer's shell value must not leak in
 // and non-deterministically flip a gate's resolved mode during a test.
+//
+// Process-level opt-out vars belong here for the same reason. DO_NOT_TRACK and
+// GC_DISABLE_USAGE_METRICS gate internal/productmetrics, and agent fleets that
+// export GC_DISABLE_USAGE_METRICS=1 into every session leak it into bare
+// `go test` while `make test` (env -i) does not — so the state projection
+// reported environment-disabled instead of the state under test. Whether a
+// productmetrics test passed depended on which shell ran it, which both
+// invented merge-gate rejections of clean branches and could mask a genuine
+// misclassification regression.
 var LeakVectorVars = []string{
 	"BEADS_DIR",
 	"BEADS_DOLT_PASSWORD",
@@ -114,6 +123,7 @@ var LeakVectorVars = []string{
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_HOLDER_TOKEN",
 	"DOLT_ROOT_PATH",
+	"DO_NOT_TRACK",
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
@@ -127,6 +137,7 @@ var LeakVectorVars = []string{
 	"GC_CITY_RUNTIME_DIR",
 	"GC_CONTROL_DISPATCHER_TRACE_DEFAULT",
 	"GC_DIR",
+	"GC_DISABLE_USAGE_METRICS",
 	"GC_DOLT",
 	"GC_DOLT_HOST",
 	"GC_DOLT_PASSWORD",

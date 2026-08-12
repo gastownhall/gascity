@@ -270,6 +270,51 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	return closed, lastErr
 }
 
+// CloseRunsSwept closes tracking runs with the stale-sweep audit metadata.
+func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	ids = uniqueNonEmptyIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.store.Store == nil {
+		return 0, fmt.Errorf("order-tracking close: nil store")
+	}
+	metadata := map[string]string{"close_reason": reason, "order_tracking_sweep": reason}
+	if sweptBy != "" {
+		metadata["order_tracking_sweep_by"] = sweptBy
+	}
+	closed := 0
+	var lastErr error
+	for attempt := 1; attempt <= closeVerifyAttempts; attempt++ {
+		n, err := s.store.CloseAll(ids, metadata)
+		closed += n
+		if closed > len(ids) {
+			closed = len(ids)
+		}
+		if err == nil {
+			openIDs, openErr := s.openIDs(ids)
+			if openErr == nil && len(openIDs) == 0 {
+				return closed, nil
+			}
+			if openErr != nil {
+				err = openErr
+			} else {
+				err = fmt.Errorf("still open: %s", strings.Join(openIDs, ", "))
+			}
+		}
+		lastErr = fmt.Errorf("closing swept order-tracking beads %s: %w", strings.Join(ids, ", "), err)
+		if attempt < closeVerifyAttempts {
+			if waitErr := s.waitCloseRetry(ctx); waitErr != nil {
+				return closed, errors.Join(lastErr, waitErr)
+			}
+		}
+	}
+	return closed, lastErr
+}
+
 func (s *Store) waitCloseRetry(ctx context.Context) error {
 	timer := time.NewTimer(closeVerifyRetryDelay)
 	defer timer.Stop()

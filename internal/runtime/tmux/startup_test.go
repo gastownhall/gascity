@@ -92,12 +92,13 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 	return nil
 }
 
-func (f *fakeStartOps) respawnAgent(name, workDir, command string) error {
+func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	f.calls = append(f.calls, startCall{
 		method:  "respawnAgent",
 		name:    name,
 		workDir: workDir,
 		command: command,
+		env:     env,
 	})
 	return f.respawnErr
 }

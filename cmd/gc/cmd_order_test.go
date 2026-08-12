@@ -2951,11 +2951,10 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 }
 
 func TestOrderRunExecTrackedLabelsEnvBuildFailure(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -3041,12 +3040,14 @@ prefix = "fe"
 }
 
 func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_ORDER_SECRET", "db.example.test")
+	// The refusal quotes the offending backend name, so naming it as the
+	// process secret is what puts a secret-shaped value on the exact path
+	// under test: an env-build failure rendered to stderr.
+	t.Setenv("GC_ORDER_SECRET", "postgres")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -3064,7 +3065,7 @@ dolt.auto-start: false
 	if result.failureLabel != "exec-env-failed" {
 		t.Fatalf("failureLabel = %q, want exec-env-failed", result.failureLabel)
 	}
-	if strings.Contains(stderr.String(), "db.example.test") {
+	if strings.Contains(stderr.String(), "postgres") {
 		t.Fatalf("stderr leaked process secret: %s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "[redacted]") {
@@ -3079,7 +3080,6 @@ dolt.auto-start: false
 // child (see projectGitHubTokenExecEnv), so the manual failure path must scrub
 // them just like the controller dispatch path does.
 func TestOrderRunExecFailureRedactsProjectedGitHubToken(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	const secret = "ghp_projectedControllerToken0123456789"
 	t.Setenv("GITHUB_TOKEN", secret)
@@ -3128,7 +3128,6 @@ prefix = "ct"
 // failure path does — a passing order that prints the token would otherwise
 // leak it verbatim.
 func TestOrderRunExecSuccessRedactsProjectedGitHubToken(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	const secret = "ghp_projectedControllerToken0123456789"
 	t.Setenv("GITHUB_TOKEN", secret)

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -295,5 +297,33 @@ func TestStartEventExport_SuccessfulStartupArmsSidecar(t *testing.T) {
 
 	if !transcriptmeta.Enabled() {
 		t.Fatal("sidecar gate must be armed once the exporter clears its fail-closed startup")
+	}
+}
+
+func TestArmSupervisorTranscriptMetaFromEnv(t *testing.T) {
+	transcriptmeta.SetEnabled(false)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+	t.Setenv(supervisorTranscriptMetaEnv, "true")
+
+	armSupervisorTranscriptMetaFromEnv(io.Discard)
+
+	if !transcriptmeta.Enabled() {
+		t.Fatal("external-forwarder supervisor gate must arm transcript metadata")
+	}
+}
+
+func TestArmSupervisorTranscriptMetaFromEnvRejectsInvalidValue(t *testing.T) {
+	transcriptmeta.SetEnabled(false)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+	t.Setenv(supervisorTranscriptMetaEnv, "enabled-ish")
+	var stderr bytes.Buffer
+
+	armSupervisorTranscriptMetaFromEnv(&stderr)
+
+	if transcriptmeta.Enabled() {
+		t.Fatal("invalid external-forwarder supervisor gate must remain disabled")
+	}
+	if !strings.Contains(stderr.String(), supervisorTranscriptMetaEnv) {
+		t.Fatalf("warning = %q, want the invalid gate name", stderr.String())
 	}
 }

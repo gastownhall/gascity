@@ -1170,6 +1170,74 @@ func TestBDSplitStoreCheck_EmbeddedActiveWarnsWhenServerStoreHasRepos(t *testing
 	}
 }
 
+// TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists covers the shape gc's
+// own storage-mode change produces, and the one the change's announcement
+// steers an operator here for.
+//
+// Canonicalizing an embedded workspace to server mode re-points the ledger
+// before any .beads/dolt exists, so the both-directories test answers "no
+// legacy split store detected" for exactly the scope that has one. A diagnostic
+// an operator is told to run and which reports OK on the state they were just
+// warned about converts a real warning into a false all-clear.
+func TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"jc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "jc"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"unread bead database", ".beads/embeddeddolt", "1 Dolt repo"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+	if !strings.Contains(r.FixHint, "keep both directories until reconciled") {
+		t.Fatalf("fix hint = %q, want the recovery the storage-mode announcement mirrors", r.FixHint)
+	}
+}
+
+// TestBDSplitStoreCheck_OneStoreScopesStayOK is the false-positive budget for
+// the check above. Every scope here has exactly one ledger, which is what a gc
+// -created city looks like, and a warning on any of them would train operators
+// to ignore the one that matters.
+func TestBDSplitStoreCheck_OneStoreScopesStayOK(t *testing.T) {
+	for name, build := range map[string]func(t *testing.T, beadsDir string){
+		"server metadata, server database only": func(t *testing.T, beadsDir string) {
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "jc"))
+		},
+		"the unread directory holds no repository": func(t *testing.T, beadsDir string) {
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "jc"))
+			if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "jc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"nothing on disk at all": func(_ *testing.T, _ string) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"jc"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			build(t, beadsDir)
+			if r := NewBDSplitStoreCheck(dir).Run(&CheckContext{}); r.Status != StatusOK {
+				t.Fatalf("status = %d (%q), want OK on a scope with one ledger", r.Status, r.Message)
+			}
+		})
+	}
+}
+
 func TestBDSplitStoreCheck_BothDirsButInactiveEmptyIsOK(t *testing.T) {
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -3378,6 +3446,40 @@ max_connections = 1024
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK for city-configured listener overrides; msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout is the regression for the
+// false drift this check used to report. It resolved the expected wait_timeout
+// from the doctor process's own GC_DOLT_WAIT_TIMEOUT, so a city that configures
+// the value looked drifted whenever doctor ran from a shell that does not export
+// it — and the remediation hint then advised the stop/restart that would have
+// really introduced drift. The env is deliberately left UNSET here: that is the
+// operator-shell case.
+func TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+wait_timeout_seconds = 120
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("Load city.toml: %v", err)
+	}
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "120",
+	})
+	c := NewDoltConfigCheckForConfig(dir, false, cfg, nil)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for city-configured wait_timeout; msg = %s", r.Status, r.Message)
 	}
 }
 

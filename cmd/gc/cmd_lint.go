@@ -417,6 +417,9 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		qualifiedName = "lint-agent"
 	}
 	providerKey := agentCfg.Provider
+	// The zero query topology is right and not a shortcut: `gc lint` renders a
+	// PACK, which is not deployed to any city, so there is no storage
+	// arrangement to read. It lints the command's SHAPE.
 	return PromptContext{
 		CityRoot:                packDir,
 		AgentName:               qualifiedName,
@@ -429,10 +432,10 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",
-		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryForBeads(config.BeadsConfig{}),
-		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryForBeads(config.BeadsConfig{}),
-		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryForBeads(config.BeadsConfig{}),
-		WorkQuery:               agentCfg.EffectiveWorkQueryForBeads(config.BeadsConfig{}),
+		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryFor(config.QueryTopology{}),
+		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryFor(config.QueryTopology{}),
+		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryFor(config.QueryTopology{}),
+		WorkQuery:               agentCfg.EffectiveWorkQueryFor(config.QueryTopology{}),
 		SlingQuery:              agentCfg.EffectiveSlingQuery(),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayNameFor(providerKey, providers),

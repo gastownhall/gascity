@@ -301,8 +301,13 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
-	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
-	if strings.Contains(input, "/") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
+	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
+	// matches the corresponding pool template. Mirrors the shared resolver
+	// helper (internal/agentutil/resolve.go), which gates on
+	// ContainsAny(input, "/.") so dot-qualified instances resolve too
+	// (#4843).
+	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
 			return a, true
 		}
@@ -497,7 +502,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg)
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -522,7 +527,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -538,7 +543,7 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
+			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,
