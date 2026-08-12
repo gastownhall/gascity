@@ -247,3 +247,81 @@ func TestScanUnknownFlagsBareBdWithoutGcPrefix(t *testing.T) {
 		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
 	}
 }
+
+func TestScanUnknownFlagsAcceptsGCScopeFlagsOnGCBD(t *testing.T) {
+	// --city and --rig are gc-owned: cmd/gc/cmd_bd.go extractBdScopeFlags
+	// strips them before forwarding the remaining args to bd, and gc's own
+	// help documents "gc bd list --rig my-project -s open".
+	cases := []string{
+		"gc bd list --rig my-project --status open --json",
+		"gc bd list --rig={{ .Rig }} --status=open --json",
+		"gc bd --rig my-project create \"New task\"",
+		"gc bd create --city /path/to/city --type task \"t\"",
+		"gc bd --city=/path/to/city list --json",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsRejectsGCScopeFlagsOnBareBD(t *testing.T) {
+	// Bare bd has no --rig: "bd list --rig gascity" exits with
+	// "Error: unknown flag: --rig". Only the "gc bd" form accepts it.
+	findings := ScanUnknownFlags([]byte("bd list --rig my-project --json"))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--rig" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--rig")
+	}
+}
+
+func TestScanUnknownFlagsStopsAtShellSeparators(t *testing.T) {
+	// Flags after a pipe belong to the downstream command, not to bd.
+	cases := []string{
+		"gc bd show <id> --json | jq -r '.metadata.reason'",
+		"gc bd list --json | head -5",
+		"gc bd ready --json && echo -n done",
+		"gc bd show <id> --json ; grep -c foo",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsAngleBracketPlaceholdersDoNotSplit(t *testing.T) {
+	// "<id>" is a placeholder in prompt templates, not a redirection, so it
+	// must not end the invocation and hide a typo that follows it.
+	findings := ScanUnknownFlags([]byte("gc bd update <id> --asignee bob"))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--asignee" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--asignee")
+	}
+}
+
+func TestScanUnknownFlagsQuotedSeparatorDoesNotSplit(t *testing.T) {
+	// A pipe inside a quoted argument is data, not a shell separator, so the
+	// bd invocation continues and a real typo after it is still reported.
+	findings := ScanUnknownFlags([]byte(`gc bd list --json --title "a | b" --asignee bob`))
+	if len(findings) != 1 {
+		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
+	}
+	if findings[0].Flag != "--asignee" {
+		t.Errorf("Flag = %q, want %q", findings[0].Flag, "--asignee")
+	}
+}
+
+func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
+	// Prompt templates document commands in markdown tables; the cell pipes
+	// must not carry a neighboring cell's flags into the bd invocation.
+	line := "| Show bead | `gc bd show <id> --json` | pipe to `jq -r .id` |"
+	if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+	}
+}
