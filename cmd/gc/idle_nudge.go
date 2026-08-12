@@ -45,6 +45,8 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
+const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -510,7 +512,11 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 	if agent == nil {
 		return ""
 	}
-	return strings.TrimSpace(agent.Nudge)
+	nudge := strings.TrimSpace(agent.Nudge)
+	if nudge != "" {
+		return nudge
+	}
+	return defaultPoolClaimNudge
 }
 
 // writeIdleClaimMarker persists the backstop state machine onto the session
