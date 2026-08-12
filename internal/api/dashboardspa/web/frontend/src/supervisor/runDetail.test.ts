@@ -1,310 +1,216 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  resetSupervisorApiForTests,
-  setSupervisorApiForTests,
-  SupervisorApiError,
-  type SupervisorApi,
-} from './client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../api/client';
 import { loadSupervisorFormulaRunDetail } from './runDetail';
 
-vi.mock('../api/cityBase', () => ({
-  getActiveCity: () => 'test-city',
-  activeCityOrThrow: () => 'test-city',
-}));
+// The detail pipeline (snapshot synthesis, grouping, phase/stage, edges, lanes,
+// formula identity, completeness) moved to Go (internal/runproj.BuildRunDetail)
+// and is golden-gated byte-for-byte. The TS loader is now one GET to the BFF
+// run-projection endpoint that treats a warming 503 as a poll signal: fast
+// initial delays, then a capped cadence, with a total budget sized to the
+// server's 180s unknown-run grace window (a just-slung run's bead events land
+// 30-120s after sling). This file covers that thin read: the warm path, the
+// warming poll (cadence, budget, cancellation, the onWarming signal), and the
+// error surface the hook maps.
 
-const baseApi: SupervisorApi = {
-  baseUrl: '/gc-supervisor',
-  health: vi.fn(),
-  cityHealth: vi.fn(),
-  cityStatus: vi.fn(),
-  listCities: vi.fn(),
-  listAgents: vi.fn(),
-  listRigs: vi.fn(),
-  listBeads: vi.fn(),
-  listEvents: vi.fn(),
-  getBead: vi.fn(),
-  createBead: vi.fn(),
-  updateBead: vi.fn(),
-  closeBead: vi.fn(),
-  nudgeAgent: vi.fn(),
-  agentPrime: vi.fn(),
-  sling: vi.fn(),
-  formulaFeed: vi.fn(),
-  listMail: vi.fn(),
-  markMailRead: vi.fn(),
-  markMailUnread: vi.fn(),
-  archiveMail: vi.fn(),
-  replyMail: vi.fn(),
-  sendMail: vi.fn(),
-  mailThread: vi.fn(),
-  cityEventStreamUrl: vi.fn(),
-  sessionStreamUrl: vi.fn(),
-  listSessions: vi.fn(),
-  sessionPending: vi.fn(),
-  respondSession: vi.fn(),
-  sessionTranscript: vi.fn(),
-  workflowRun: vi.fn(),
-  formulaDetail: vi.fn(),
-  mutationHeaders: () => ({ 'X-GC-Request': 'dashboard' }),
+const detailBody = {
+  runId: 'mol-adopt-1',
+  rootBeadId: 'b-1',
+  rootStoreRef: 'rig:demo',
+  resolvedRootStore: 'rig:demo',
+  scopeKind: 'rig',
+  scopeRef: 'demo',
+  title: 'Adopt PR',
+  formula: { kind: 'unavailable', reason: 'missing_formula_metadata' },
+  formulaDetail: { kind: 'unavailable', reason: 'missing_formula_metadata' },
+  executionPath: { kind: 'unavailable', reason: 'missing_cwd_and_rig_root' },
+  snapshotVersion: 1,
+  snapshotEventSeq: { kind: 'known', seq: 100 },
+  completeness: { kind: 'complete' },
+  progress: { statusCounts: {} },
+  phase: 'intake',
+  stages: [],
+  nodes: [],
+  edges: [],
+  lanes: [],
 };
 
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 describe('loadSupervisorFormulaRunDetail', () => {
-  const workflowRun = vi.fn();
-  const formulaDetail = vi.fn();
-  const listSessions = vi.fn();
-
-  beforeEach(() => {
-    workflowRun.mockResolvedValue(workflowSnapshot());
-    formulaDetail.mockResolvedValue(formulaDetailResponse());
-    listSessions.mockResolvedValue({ items: [], total: 0 });
-    setSupervisorApiForTests({
-      ...baseApi,
-      workflowRun,
-      formulaDetail,
-      listSessions,
-    });
-  });
-
   afterEach(() => {
-    resetSupervisorApiForTests();
-    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
-  it('fetches formula detail when the root exposes formula metadata and a run target', async () => {
-    const detail = await loadSupervisorFormulaRunDetail('wf-1', 'city', 'test-city');
+  it('reads the run detail from the city-scoped BFF projection endpoint', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(detailBody, 200));
+    vi.stubGlobal('fetch', fetchMock);
 
-    expect(detail.formula).toEqual({
-      kind: 'known',
-      name: 'mol-test',
-      source: 'metadata',
+    await expect(loadSupervisorFormulaRunDetail('mol-adopt-1')).resolves.toMatchObject({
+      runId: 'mol-adopt-1',
     });
-    expect(detail.formulaDetail).toEqual({
-      kind: 'available',
-      name: 'mol-test',
-      target: 'test-city/codex',
-    });
-    expect(detail.completeness).toEqual({ kind: 'complete' });
-    expect(formulaDetail).toHaveBeenCalledWith('test-city', 'mol-test', {
-      target: 'test-city/codex',
-      scope_kind: 'city',
-      scope_ref: 'test-city',
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/city/test-city/runs/mol-adopt-1/detail',
+      expect.objectContaining({ method: 'GET' }),
+    );
   });
 
-  it('resolves formula detail when the supervisor omits the version field (3eo8, mol-focus-review)', async () => {
-    formulaDetail.mockResolvedValue(versionlessFormulaDetailResponse());
+  it('retries while the projection is warming (503) and resolves once it is ready', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: 'run view is warming' }, 503))
+      .mockResolvedValueOnce(jsonResponse(detailBody, 200));
+    vi.stubGlobal('fetch', fetchMock);
 
-    const detail = await loadSupervisorFormulaRunDetail('wf-1', 'city', 'test-city');
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    await vi.advanceTimersByTimeAsync(600);
 
-    expect(detail.formulaDetail).toEqual({
-      kind: 'available',
-      name: 'mol-test',
-      target: 'test-city/codex',
-    });
-    expect(detail.completeness).toEqual({ kind: 'complete' });
+    await expect(pending).resolves.toMatchObject({ runId: 'mol-adopt-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('reports missing formula metadata without calling the formula endpoint', async () => {
-    workflowRun.mockResolvedValue(
-      workflowSnapshot({
-        status: 'closed',
-        metadata: {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.run_target': 'test-city/codex',
-        },
-      }),
+  it('keeps polling a warming 503 at the capped cadence until the run appears (deep-link grace)', async () => {
+    // A dashboard deep link printed right after `gc sling` lands before the
+    // run's bead events exist (30-120s later). The loader must NOT surface
+    // failure after the fast delays (~4s) — it polls at the capped cadence
+    // (the server's pinned Retry-After: 5) until the run appears.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: 'run view is warming', reason: 'unknown_run' }, 503),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    // The fast delays plus eleven capped 5s polls (~60s in, the earliest the
+    // controller's cache-reconcile usually surfaces a just-slung run)...
+    await vi.advanceTimersByTimeAsync(600 + 1_200 + 2_400 + 11 * 5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(15);
+
+    // ...then the run appears and the SAME load resolves.
+    fetchMock.mockResolvedValueOnce(jsonResponse(detailBody, 200));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).resolves.toMatchObject({ runId: 'mol-adopt-1' });
+  });
+
+  it('gives up only after the ~180s warming budget is spent and surfaces the 503', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'run view is warming' }, 503));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    const assertion = expect(pending).rejects.toMatchObject({ status: 503 });
+    await vi.advanceTimersByTimeAsync(180_000);
+    await assertion;
+
+    // The initial attempt, the three fast retries (600+1200+2400 = 4.2s), then
+    // 5s-capped polls until the next delay would overrun the 180s budget:
+    // 1 + 3 + 35.
+    expect(fetchMock).toHaveBeenCalledTimes(39);
+  });
+
+  it('reports each warming 503 (with the graced unknown_run reason) to onWarming', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      // A cold-replay warming 503 carries no reason; the graced unknown-run
+      // 503 carries reason 'unknown_run' (the pinned wire contract).
+      .mockResolvedValueOnce(jsonResponse({ error: 'run view is warming' }, 503))
+      .mockResolvedValueOnce(
+        jsonResponse({ error: 'run view is warming', reason: 'unknown_run' }, 503),
+      )
+      .mockResolvedValueOnce(jsonResponse(detailBody, 200));
+    vi.stubGlobal('fetch', fetchMock);
+    const onWarming = vi.fn();
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1', { onWarming });
+    await vi.advanceTimersByTimeAsync(600 + 1_200);
+
+    await expect(pending).resolves.toMatchObject({ runId: 'mol-adopt-1' });
+    expect(onWarming.mock.calls.map(([warming]) => warming)).toEqual([
+      { reason: undefined },
+      { reason: 'unknown_run' },
+    ]);
+  });
+
+  it('stops polling when keepPolling turns false and surfaces the pending 503', async () => {
+    // The caller (the hook) supersedes a poll on unmount/navigation/refresh; a
+    // superseded poll must stop issuing GETs instead of running out its 180s
+    // budget in the background.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'run view is warming' }, 503));
+    vi.stubGlobal('fetch', fetchMock);
+    let polling = true;
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1', {
+      keepPolling: () => polling,
+    });
+    const assertion = expect(pending).rejects.toMatchObject({ status: 503 });
+    await vi.advanceTimersByTimeAsync(600);
+    polling = false;
+    await vi.advanceTimersByTimeAsync(1_200);
+    await assertion;
+
+    // The initial attempt and the one retry that was already scheduled — the
+    // post-delay keepPolling check stops the third GET from ever firing.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the short retry budget for a non-warming 5xx', async () => {
+    // Only the warming 503 gets the long poll; a persistent upstream 5xx is
+    // not a "run still being recorded" signal and surfaces after the fast
+    // delays as before.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'bad gateway' }, 502));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    const assertion = expect(pending).rejects.toMatchObject({ status: 502 });
+    await vi.advanceTimersByTimeAsync(600 + 1_200 + 2_400);
+    await assertion;
+
+    // The initial attempt plus three bounded retries.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('propagates a 422 unsupported run with its reason for the hook to map', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({ error: 'run is not a graph.v2 run', reason: 'not_run_view' }, 422),
+      ),
     );
 
-    const detail = await loadSupervisorFormulaRunDetail('wf-1');
-
-    expect(detail.formula).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_formula_metadata',
-    });
-    expect(detail.formulaDetail).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_formula_metadata',
-    });
-    expect(detail.completeness).toEqual({
-      kind: 'partial',
-      reasons: ['formula_detail_missing_formula_metadata'],
-    });
-    expect(formulaDetail).not.toHaveBeenCalled();
+    const err = await loadSupervisorFormulaRunDetail('v1-run').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiClientError);
+    expect(err).toMatchObject({ status: 422, reason: 'not_run_view' });
   });
 
-  it('does not title-fallback into formula detail for completed supervisor runs', async () => {
-    workflowRun.mockResolvedValue(
-      workflowSnapshot({
-        status: 'completed',
-        metadata: {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.run_target': 'test-city/codex',
-        },
-      }),
-    );
+  it('retries a transient 5xx (not just 503) and resolves', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: 'bad gateway' }, 502))
+      .mockResolvedValueOnce(jsonResponse(detailBody, 200));
+    vi.stubGlobal('fetch', fetchMock);
 
-    const detail = await loadSupervisorFormulaRunDetail('wf-1');
+    const pending = loadSupervisorFormulaRunDetail('mol-adopt-1');
+    await vi.advanceTimersByTimeAsync(600);
 
-    expect(detail.formula).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_formula_metadata',
-    });
-    expect(detail.formulaDetail).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_formula_metadata',
-    });
-    expect(detail.completeness).toEqual({
-      kind: 'partial',
-      reasons: ['formula_detail_missing_formula_metadata'],
-    });
-    expect(formulaDetail).not.toHaveBeenCalled();
+    await expect(pending).resolves.toMatchObject({ runId: 'mol-adopt-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('reports missing run target without calling the formula endpoint', async () => {
-    workflowRun.mockResolvedValue(
-      workflowSnapshot({
-        metadata: {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.formula': 'mol-test',
-        },
-      }),
-    );
+  it('does not retry a 404', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'unknown run' }, 404));
+    vi.stubGlobal('fetch', fetchMock);
 
-    const detail = await loadSupervisorFormulaRunDetail('wf-1');
-
-    expect(detail.formula).toEqual({
-      kind: 'known',
-      name: 'mol-test',
-      source: 'metadata',
-    });
-    expect(detail.formulaDetail).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_run_target',
-      name: 'mol-test',
-    });
-    expect(detail.completeness).toEqual({
-      kind: 'partial',
-      reasons: ['formula_detail_missing_run_target'],
-    });
-    expect(formulaDetail).not.toHaveBeenCalled();
-  });
-
-  it('preserves supervisor formula endpoint failures as partial formula detail', async () => {
-    formulaDetail.mockRejectedValue(new SupervisorApiError(404, 'not found', undefined));
-
-    const detail = await loadSupervisorFormulaRunDetail('wf-1');
-
-    expect(detail.formulaDetail).toEqual({
-      kind: 'unavailable',
-      reason: 'fetch_failed',
-      name: 'mol-test',
-      target: 'test-city/codex',
-      failure: 'not_found',
-    });
-    expect(detail.completeness).toEqual({
-      kind: 'partial',
-      reasons: ['formula_detail_fetch_failed'],
-    });
-  });
-
-  // Fix A: the workflow snapshot is the run-detail core read; a transient
-  // timeout/5xx is retried once before it blanks the view, mirroring the runs
-  // list core read. A 4xx is the caller's fault and is never retried.
-  it('retries the workflow core read once on a transient timeout', async () => {
-    let attempts = 0;
-    workflowRun.mockImplementation(async () => {
-      attempts += 1;
-      if (attempts === 1) {
-        throw new SupervisorApiError(
-          undefined,
-          'gc supervisor request timed out after 60000ms',
-          undefined,
-        );
-      }
-      return workflowSnapshot();
-    });
-
-    const detail = await loadSupervisorFormulaRunDetail('wf-1', 'rig', 'app');
-
-    expect(attempts).toBe(2);
-    expect(detail.completeness).toEqual({ kind: 'complete' });
-  });
-
-  it('does not retry the workflow core read on a non-transient (4xx) failure', async () => {
-    let attempts = 0;
-    workflowRun.mockImplementation(async () => {
-      attempts += 1;
-      throw new SupervisorApiError(400, 'bad request', undefined);
-    });
-
-    await expect(loadSupervisorFormulaRunDetail('wf-1', 'rig', 'app')).rejects.toThrow(
-      'bad request',
-    );
-    expect(attempts).toBe(1);
+    await expect(loadSupervisorFormulaRunDetail('ghost')).rejects.toMatchObject({ status: 404 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
-
-function workflowSnapshot(
-  overrides: {
-    status?: string;
-    metadata?: Record<string, string>;
-  } = {},
-) {
-  return {
-    workflow_id: 'wf-1',
-    root_bead_id: 'wf-1',
-    root_store_ref: 'city:test-city',
-    resolved_root_store: 'city:test-city',
-    scope_kind: 'city',
-    scope_ref: 'test-city',
-    snapshot_version: 1,
-    snapshot_event_seq: 1,
-    partial: false,
-    stores_scanned: ['city:test-city'],
-    beads: [
-      {
-        id: 'wf-1',
-        title: 'Direct supervisor run',
-        status: overrides.status ?? 'in_progress',
-        kind: 'workflow',
-        metadata: overrides.metadata ?? {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.formula': 'mol-test',
-          'gc.run_target': 'test-city/codex',
-        },
-      },
-    ],
-    deps: [],
-    logical_nodes: [],
-    logical_edges: [],
-    scope_groups: [],
-  };
-}
-
-function formulaDetailResponse() {
-  return {
-    name: 'mol-test',
-    description: 'formula detail',
-    version: 'v1',
-    preview: {
-      nodes: [{ id: 'wf-1', title: 'Direct supervisor run', kind: 'workflow' }],
-      edges: [],
-    },
-    steps: [],
-    deps: [],
-    var_defs: [],
-  };
-}
-
-// Inferred/title-based formulas (e.g. mol-focus-review) come back from the
-// supervisor with no `version` key — `{ name, description, var_defs, steps,
-// deps, preview }`. The dashboard must resolve these to `available`, not
-// degrade the Formula Detail panel (3eo8).
-function versionlessFormulaDetailResponse() {
-  const { version: _version, ...rest } = formulaDetailResponse();
-  return rest;
-}

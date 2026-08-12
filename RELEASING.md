@@ -9,7 +9,7 @@
 | **Homebrew tap** (`gastownhall/gascity`) | `release.yml` writes an asset-based formula after archives upload | Yes |
 | **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed | Yes (~3h delay) |
 
-The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gastownhall/gascity/gascity`.
+The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gascity`.
 
 ## How to Release
 
@@ -97,7 +97,7 @@ The release workflow automatically overwrites `Formula/gascity.rb` in the `gasto
 The tap formula installs prebuilt release assets, so users do not need Go or a source build:
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 ```
 
 The intended long-term user-facing Homebrew path is homebrew-core:

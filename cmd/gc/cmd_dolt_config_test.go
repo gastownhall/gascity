@@ -334,6 +334,62 @@ prefix = "fe"
 	}
 }
 
+func TestRemoveScopeLocalDoltServerArtifactsPreservesPortMirror(t *testing.T) {
+	scopeDir := t.TempDir()
+	beadsDir := filepath.Join(scopeDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+	for _, name := range []string{"dolt-server.pid", "dolt-server.lock", "dolt-server.log", "dolt-server.port"} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("3307\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", name, err)
+		}
+	}
+
+	if err := removeScopeLocalDoltServerArtifacts(scopeDir); err != nil {
+		t.Fatalf("removeScopeLocalDoltServerArtifacts: %v", err)
+	}
+	for _, name := range []string{"dolt-server.pid", "dolt-server.lock", "dolt-server.log"} {
+		if _, err := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists, stat err = %v", name, err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("ReadFile(dolt-server.port): %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "3307" {
+		t.Fatalf("dolt-server.port = %q, want %q", got, "3307")
+	}
+}
+
+// TestDoltliteReindexCheckMatchesBuildCapability pins the ga-7hei capability
+// probe the maintenance shell gate depends on: `gc dolt-config
+// doltlite-reindex --check` must exit 0 exactly when this build can reindex in
+// process, and non-zero otherwise. The shell's doltlite_reindex_supported uses
+// that exit code to skip the stale-index-producing flatten/gc on a build that
+// cannot heal the result, so a mis-wired flag would either reintroduce the
+// unhealable-corruption bug or block maintenance on a capable build. The test
+// runs in both build tags and asserts consistency with doltliteReindexSupported.
+func TestDoltliteReindexCheckMatchesBuildCapability(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-config", "doltlite-reindex", "--dir", dir, "--check"}, &stdout, &stderr)
+	if doltliteReindexSupported() {
+		if code != 0 {
+			t.Fatalf("--check on a reindex-capable build = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		return
+	}
+	if code == 0 {
+		t.Fatalf("--check on a non-capable build exited 0; the shell gate relies on a non-zero exit to skip " +
+			"the stale-index-producing flatten/gc (ga-7hei)")
+	}
+	if !strings.Contains(stderr.String(), "gascity_native_beads") {
+		t.Fatalf("--check failure should name the native build requirement so operators know the fix, got stderr=%s", stderr.String())
+	}
+}
+
 func TestDoltStateWriteProviderCmd(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-provider-state.json")
 	var stdout, stderr bytes.Buffer
@@ -380,5 +436,61 @@ func TestDoltStateReadProviderCmd(t *testing.T) {
 	}
 	if got := stdout.String(); got != "/tmp/city/.beads/dolt\n" {
 		t.Fatalf("stdout = %q", got)
+	}
+}
+
+// TestWriteManagedDoltConfigFile_HonorsCityWaitTimeout pins the second half of
+// the shell-restart drift fix. wait_timeout used to be resolvable ONLY from
+// GC_DOLT_WAIT_TIMEOUT in the starting process's environment, which no city.toml
+// could express: a city whose supervisor unit exported 120 got 120, while the
+// same `gc dolt restart` from an operator shell silently wrote 30.
+func TestWriteManagedDoltConfigFile_HonorsCityWaitTimeout(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{
+		WaitTimeoutSeconds: 120,
+	}); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := `wait_timeout: "120"`; !strings.Contains(string(data), want) {
+		t.Fatalf("managed config missing %q:\n%s", want, data)
+	}
+}
+
+// TestManagedDoltWaitTimeoutForConfig pins the resolution order, including the
+// env escape hatch city.toml cannot express: a negative GC_DOLT_WAIT_TIMEOUT
+// suppresses the system variable entirely, and an omitted or zero config field
+// must fall through to the env rather than forcing the default.
+//
+// The lookup is injected rather than set on the process: the cmd/gc environment
+// debt ratchet forbids growing t.Setenv usage (see TESTING.md).
+func TestManagedDoltWaitTimeoutForConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config config.DoltConfig
+		env    string
+		want   int
+	}{
+		{name: "city value wins over env", config: config.DoltConfig{WaitTimeoutSeconds: 120}, env: "30", want: 120},
+		{name: "unset city falls through to env", config: config.DoltConfig{}, env: "45", want: 45},
+		{name: "unset city and env uses default", config: config.DoltConfig{}, env: "", want: 30},
+		{name: "negative env disables", config: config.DoltConfig{}, env: "-1", want: 0},
+		{name: "city value beats a disabling env", config: config.DoltConfig{WaitTimeoutSeconds: 90}, env: "-1", want: 90},
+		{name: "unparseable env uses default", config: config.DoltConfig{}, env: "later", want: 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key != "GC_DOLT_WAIT_TIMEOUT" {
+					t.Fatalf("unexpected env lookup %q", key)
+				}
+				return tc.env
+			}
+			if got := managedDoltWaitTimeoutForConfig(tc.config, getenv); got != tc.want {
+				t.Fatalf("managedDoltWaitTimeoutForConfig(%+v, env=%q) = %d, want %d", tc.config, tc.env, got, tc.want)
+			}
+		})
 	}
 }

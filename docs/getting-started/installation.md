@@ -44,7 +44,7 @@ The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/ga
 ## Homebrew (recommended)
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 ```
 
 This taps the `gastownhall/gascity` formula, downloads the matching `gc`
@@ -111,7 +111,7 @@ Release tarballs are published for every tagged version. Supported platforms:
 
 ```bash
 # Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=1.3.0
+VERSION=1.4.0
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')

@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -31,48 +30,7 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 		CityPath:              cityPath,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
-		ControlDispatcherRuntimeMissing: func(qualifiedName string) bool {
-			return controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName)
-		},
 	}
-}
-
-// controlDispatcherSessionRuntimeMissing reports whether the control-dispatcher
-// agent's session is asleep with reason runtime-missing. Session beads are
-// city-scoped, so it reads the city store directly (the rig-scoped routing
-// store cannot see them). It powers the rig→city control-dispatcher fallback
-// (#3454); any lookup failure returns false so routing falls back to the normal
-// rig-local binding rather than mis-routing on a transient store error.
-func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool {
-	if cityPath == "" || strings.TrimSpace(qualifiedName) == "" {
-		return false
-	}
-	// Only consult the city store for a real, initialized city. Mirrors the
-	// pool-nudge guard in doSling: a bare working dir (no city.toml) has no
-	// session beads to read, and opening a store there would needlessly
-	// spin up a managed Dolt backend on the routing hot path.
-	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
-		return false
-	}
-	store, err := openCityStoreAt(cityPath)
-	if err != nil || store == nil {
-		return false
-	}
-	// Session beads are session-class; thread the city store into the consumer
-	// as a typed beads.SessionStore so the class stays statically visible. The
-	// lazy open above is retained deliberately: it is the load-bearing guard that
-	// avoids spinning up a managed Dolt backend on a bare working dir, and there
-	// is no controllerState here to source a pre-opened session store from.
-	return sessionRuntimeMissingInStore(beads.SessionStore{Store: store}, qualifiedName)
-}
-
-// sessionRuntimeMissingInStore reports whether any open session bead for the
-// agent (selected by its agent:<qualified> label) projects the runtime-missing
-// lifecycle reason in the given session store. The projection lives in
-// internal/session so the API sling path can share it without importing package
-// main; it takes the unwrapped beads.Store.
-func sessionRuntimeMissingInStore(store beads.SessionStore, qualifiedName string) bool {
-	return sessionpkg.RuntimeMissingInStore(store.Store, qualifiedName)
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
@@ -360,7 +318,7 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryFor(cityQueryTopology(cityPath, cfg)), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
@@ -768,6 +726,20 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
 }
 
+// controlReadyExcludeHoldLabelsShellArgs renders a repeated --exclude-label
+// flag for every beadmeta.DispatchHoldLabels value, mirroring internal/config's
+// excludeHoldLabelsShellArgs for routed_ready()'s route-scoped, unassigned
+// bd-ready calls (ga-x9kptu / ga-5736js) -- a bead intentionally parked on a
+// dispatch hold must never surface here. assignee_ready() (Tier 1/2) must
+// stay hold-transparent by design and must never call this.
+func controlReadyExcludeHoldLabelsShellArgs() string {
+	var args string
+	for _, label := range beadmeta.DispatchHoldLabels {
+		args += ` --exclude-label "` + label + `"`
+	}
+	return args
+}
+
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
@@ -785,7 +757,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
 	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
-	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
+	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientDoltConnectionQueryPrefix()
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -807,8 +779,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
@@ -823,6 +795,58 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`routed_ready "${GC_CONTROL_BARE_TARGET:-}"; ` +
 		`if [ -s "$tmp" ]; then jq -s "` + jqFilter + `" "$tmp"; else printf "[]"; fi` + `'`
 	return query
+}
+
+// ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
+// (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
+// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
+// names bd recognizes.
+//
+// Without this, the ready-query subprocess env is built by stripping the
+// parent's inherited Dolt vars and re-projecting them from a freshly resolved
+// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
+// runs its own managed-runtime-availability probe and can transiently come
+// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
+// from the subprocess env and causing `bd --sandbox` to resolve port 0
+// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
+// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
+// own environment already carries the connection coordinates it was spawned
+// with, so pass them through explicitly as a shell-prefix assignment (which
+// takes effect for the inner `sh -c` and its `bd` children regardless of what
+// the outer subprocess's cmd.Env resolved to) rather than depending on that
+// re-resolution succeeding on every poll.
+func ambientDoltConnectionQueryPrefix() string {
+	host, port := ambientDoltHostPort()
+	var pairs []string
+	if host != "" {
+		quotedHost := shellquote.Quote(host)
+		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
+	}
+	if port != "" {
+		quotedPort := shellquote.Quote(port)
+		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
+	}
+	if len(pairs) == 0 {
+		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
+		return ""
+	}
+	return " " + strings.Join(pairs, " ")
+}
+
+// ambientDoltHostPort resolves the ambient Dolt host and port as a matched
+// pair from a single env-var namespace instead of choosing each field
+// independently. GC_DOLT_* is authoritative when present (even partially);
+// BEADS_DOLT_SERVER_* is only consulted as a whole-pair fallback when
+// GC_DOLT_* carries neither value. Resolving fields independently risked
+// pairing a host from one namespace with a port from the other -- a
+// combination that may never have described the same server.
+func ambientDoltHostPort() (host, port string) {
+	host = strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	port = strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+	if host != "" || port != "" {
+		return host, port
+	}
+	return strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_HOST")), strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT"))
 }
 
 func workflowServeLegacyControlRoute(target string) string {
@@ -866,6 +890,9 @@ func controlDispatcherBareRoute(target string) string {
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
 	if workQuery == "" {
 		return nil, nil
+	}
+	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+		return queue, err
 	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {

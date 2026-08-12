@@ -221,7 +221,7 @@ function parseTranscriptSnapshot(value: Record<string, unknown>): SessionTranscr
       id: sessionId,
       template: typeof value.template === 'string' ? value.template : '',
       provider: typeof value.provider === 'string' ? value.provider : '',
-      format: typeof value.format === 'string' ? value.format : 'conversation',
+      format: value.format === 'text' ? 'text' : 'conversation',
       turns,
     },
     typeof value.captured_at === 'string' ? value.captured_at : new Date().toISOString(),

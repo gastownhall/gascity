@@ -15,6 +15,14 @@ func (m mapResolver) CityPath(name string) (string, bool) {
 	return p, ok
 }
 
+func (m mapResolver) Cities() []CityRef {
+	refs := make([]CityRef, 0, len(m))
+	for name, path := range m {
+		refs = append(refs, CityRef{Name: name, Path: path})
+	}
+	return refs
+}
+
 func TestRuntimeConfigDefaultsAreNeutral(t *testing.T) {
 	p := New(Deps{ReadOnly: true})
 	cfg := p.runtimeConfigFor("alpha", "/srv/alpha")

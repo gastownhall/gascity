@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,83 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 	if err := os.WriteFile(statePath, []byte(state), 0o644); err != nil {
 		t.Fatalf("write helper state: %v", err)
 	}
+	// Opt-in: record the reported start identity so a caller test can assert the
+	// scope-watchdog path populates it (the PR #4004 PID-reuse guard input).
+	// Two lines: start-time ticks, then the ps-lstart identity (possibly empty).
+	if identityPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_IDENTITY")); identityPath != "" {
+		identity := fmt.Sprintf("%d\n%s\n", started.StartTimeTicks, started.StartIdentity)
+		if err := os.WriteFile(identityPath, []byte(identity), 0o644); err != nil {
+			t.Fatalf("write helper identity: %v", err)
+		}
+	}
+}
+
+// readManagedDoltScopeIdentityState parses the two-line identity file the scope
+// watchdog helper writes when GC_TEST_MANAGED_DOLT_HELPER_IDENTITY is set:
+// start-time ticks on line 1, the ps-lstart identity (possibly empty) on line 2.
+func readManagedDoltScopeIdentityState(t *testing.T, path string) (uint64, string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read helper identity: %v", err)
+	}
+	lines := strings.SplitN(strings.TrimRight(string(data), "\n"), "\n", 2)
+	ticks, err := strconv.ParseUint(strings.TrimSpace(lines[0]), 10, 64)
+	if err != nil {
+		t.Fatalf("parse helper identity ticks %q: %v", lines[0], err)
+	}
+	identity := ""
+	if len(lines) >= 2 {
+		identity = lines[1]
+	}
+	return ticks, identity
+}
+
+// TestManagedDoltScopeWatchdogReportsStartIdentity is the PR #4004 F1 regression
+// for the production scope-watchdog path: the returned managedDoltStartedProcess
+// must carry the dolt child's OS start identity, snapshotted by the watchdog
+// before it can reap the child. Without it the startup-failure cleanup guard
+// (terminateManagedDoltStartedProcess) falls through to unconditional bare-PID
+// signaling and can kill an unrelated process that reused the numeric PID.
+func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process semantics required")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	statePath := filepath.Join(dir, "state")
+	identityPath := filepath.Join(dir, "identity")
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
+	cmd.Env = sanitizedBaseEnv(
+		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
+		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
+		"GC_TEST_MANAGED_DOLT_HELPER_IDENTITY="+identityPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
+		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, doltPID)
+		cleanupManagedDoltTestPID(t, watchdogPID)
+	})
+
+	ticks, identity := readManagedDoltScopeIdentityState(t, identityPath)
+	if ticks == 0 && identity == "" {
+		logData, _ := os.ReadFile(logPath)
+		t.Fatalf("scope watchdog reported no start identity (ticks=%d identity=%q); PID-reuse guard disabled; log:\n%s", ticks, identity, logData)
+	}
 }
 
 // TestManagedDoltScopeWatchdogServerSurvivesScopePresent asserts the
@@ -280,5 +358,67 @@ func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	}
 	if code := runManagedDoltScopeWatchdog([]string{" ", "log", "city"}, devnull, devnull); code != 2 {
 		t.Errorf("blank config exit = %d, want 2", code)
+	}
+}
+
+// TestTerminateManagedDoltScopeWatchdogChildSkipsReusedPID is the PR #4004
+// completeness regression for the watchdog's own reap path: the scope-gone and
+// signal-forward branches terminate the dolt child through
+// terminateManagedDoltScopeWatchdogChild, which must skip the signal when the
+// child's numeric PID was reaped and reused (identity mismatch) while still
+// terminating a child whose start identity still matches. Without the guard the
+// production scope reap could SIGKILL an unrelated process that reused the PID.
+func TestTerminateManagedDoltScopeWatchdogChildSkipsReusedPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+
+	// The live re-read is mocked to a fixed identity (3333); the guard compares
+	// each snapshot against it, exactly as the watchdog runloop does.
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 3333 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	// Matching snapshot (3333 == mocked re-read): the child is signaled and a
+	// sleep dies on SIGTERM (a zombie reads as not-alive).
+	matching := exec.Command("sleep", "60")
+	if err := matching.Start(); err != nil {
+		t.Fatalf("start matching child: %v", err)
+	}
+	matchingPID := matching.Process.Pid
+	t.Cleanup(func() {
+		_ = matching.Process.Kill()
+		_ = matching.Wait()
+	})
+	if err := terminateManagedDoltScopeWatchdogChild("", matchingPID, 3333, ""); err != nil {
+		t.Fatalf("guarded terminate of matching child: %v", err)
+	}
+	if pidAlive(matchingPID) {
+		t.Fatalf("watchdog reap did not signal matching dolt child pid %d", matchingPID)
+	}
+
+	// Reused snapshot (1111 != mocked re-read 3333): the PID was reaped and the
+	// number reused, so the guard must leave the live process untouched.
+	reused := exec.Command("sleep", "60")
+	if err := reused.Start(); err != nil {
+		t.Fatalf("start reused child: %v", err)
+	}
+	reusedPID := reused.Process.Pid
+	t.Cleanup(func() {
+		_ = reused.Process.Kill()
+		_ = reused.Wait()
+	})
+	if err := terminateManagedDoltScopeWatchdogChild("", reusedPID, 1111, ""); err != nil {
+		t.Fatalf("guarded terminate of reused child: %v", err)
+	}
+	// Give any erroneous SIGTERM time to land before asserting survival.
+	time.Sleep(200 * time.Millisecond)
+	if !pidAlive(reusedPID) {
+		t.Fatalf("watchdog reap signaled reused dolt child pid %d; identity guard not enforced", reusedPID)
 	}
 }

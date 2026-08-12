@@ -1,0 +1,248 @@
+[
+  {
+    "id": "dt-adopt1",
+    "title": "mol-adopt-pr-v2",
+    "status": "open",
+    "issue_type": "molecule",
+    "priority": 2,
+    "created_at": "2026-06-01T10:00:00Z",
+    "updated_at": "2026-06-01T12:30:00Z",
+    "assignee": "polecat-1",
+    "ref": "mol-adopt-pr-v2",
+    "metadata": {
+      "gc.formula_contract": "graph.v2",
+      "gc.kind": "run",
+      "gc.formula": "mol-adopt-pr-v2",
+      "gc.run_target": "rig:gascity-packs",
+      "gc.root_store_ref": "rig:gascity-packs",
+      "gc.scope_kind": "rig",
+      "gc.scope_ref": "gascity-packs",
+      "pr_review.pr_number": "42",
+      "pr_review.pr_url": "https://github.com/gastownhall/gascity/pull/42",
+      "pr_review.github_title": "Add run-view Go projection"
+    }
+  },
+  {
+    "id": "dt-adopt1.1",
+    "title": "Preflight checks",
+    "status": "closed",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T10:01:00Z",
+    "updated_at": "2026-06-01T10:05:00Z",
+    "parent": "dt-adopt1",
+    "ref": "mol-adopt-pr-v2.preflight",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-adopt1",
+      "gc.step_id": "preflight",
+      "gc.step_ref": "mol-adopt-pr-v2.preflight",
+      "gc.scope_ref": "gascity-packs"
+    }
+  },
+  {
+    "id": "dt-adopt1.2",
+    "title": "Worktree rebase check",
+    "status": "closed",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T10:06:00Z",
+    "updated_at": "2026-06-01T10:20:00Z",
+    "parent": "dt-adopt1",
+    "ref": "mol-adopt-pr-v2.rebase-check",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-adopt1",
+      "gc.step_id": "rebase-check",
+      "gc.step_ref": "mol-adopt-pr-v2.rebase-check",
+      "gc.scope_ref": "gascity-packs"
+    }
+  },
+  {
+    "id": "dt-adopt1.3",
+    "title": "Review loop",
+    "status": "in_progress",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T10:21:00Z",
+    "updated_at": "2026-06-01T12:30:00Z",
+    "assignee": "polecat-1",
+    "parent": "dt-adopt1",
+    "ref": "mol-adopt-pr-v2.review-loop",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-adopt1",
+      "gc.step_id": "review-loop",
+      "gc.step_ref": "mol-adopt-pr-v2.review-loop",
+      "gc.scope_ref": "gascity-packs",
+      "review.iteration.2": "in_progress"
+    }
+  },
+  {
+    "id": "dt-adopt1.3a",
+    "title": "Claude review",
+    "status": "closed",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T10:22:00Z",
+    "updated_at": "2026-06-01T11:00:00Z",
+    "parent": "dt-adopt1",
+    "ref": "mol-adopt-pr-v2.review-pipeline.review-claude",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-adopt1",
+      "gc.step_id": "review-pipeline.review-claude",
+      "gc.step_ref": "mol-adopt-pr-v2.review-pipeline.review-claude",
+      "gc.logical_bead_id": "dt-adopt1.3a",
+      "gc.scope_ref": "gascity-packs"
+    }
+  },
+  {
+    "id": "dt-adopt1.fin",
+    "title": "Merge and finalize",
+    "status": "open",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T10:00:30Z",
+    "updated_at": "2026-06-01T10:00:30Z",
+    "parent": "dt-adopt1",
+    "ref": "mol-adopt-pr-v2.finalize",
+    "metadata": {
+      "gc.kind": "run-finalize",
+      "gc.root_bead_id": "dt-adopt1",
+      "gc.step_id": "finalize",
+      "gc.step_ref": "mol-adopt-pr-v2.finalize",
+      "gc.scope_ref": "gascity-packs"
+    }
+  },
+  {
+    "id": "dt-bugdone",
+    "title": "mol-bug-report-implementation-v2",
+    "status": "closed",
+    "issue_type": "molecule",
+    "priority": 2,
+    "created_at": "2026-05-20T09:00:00Z",
+    "updated_at": "2026-05-20T15:45:00Z",
+    "ref": "mol-bug-report-implementation-v2",
+    "metadata": {
+      "gc.formula_contract": "graph.v2",
+      "gc.kind": "run",
+      "gc.formula": "mol-bug-report-implementation-v2",
+      "gc.run_target": "rig:demo-app",
+      "gc.root_store_ref": "rig:demo-app",
+      "gc.scope_kind": "rig",
+      "gc.scope_ref": "demo-app",
+      "bugflow.github_issue_url": "https://github.com/gastownhall/gascity/issues/17",
+      "bugflow.github_issue_number": "17"
+    }
+  },
+  {
+    "id": "dt-bugdone.1",
+    "title": "Implement change",
+    "status": "closed",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-05-20T09:05:00Z",
+    "updated_at": "2026-05-20T11:00:00Z",
+    "parent": "dt-bugdone",
+    "ref": "mol-bug-report-implementation-v2.implement-change",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-bugdone",
+      "gc.step_id": "implement-change",
+      "gc.step_ref": "mol-bug-report-implementation-v2.implement-change",
+      "gc.scope_ref": "demo-app"
+    }
+  },
+  {
+    "id": "dt-bugdone.2",
+    "title": "Merge and finalize",
+    "status": "closed",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-05-20T15:30:00Z",
+    "updated_at": "2026-05-20T15:45:00Z",
+    "parent": "dt-bugdone",
+    "ref": "mol-bug-report-implementation-v2.merge-and-finalize",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.root_bead_id": "dt-bugdone",
+      "gc.step_id": "merge-and-finalize",
+      "gc.step_ref": "mol-bug-report-implementation-v2.merge-and-finalize",
+      "gc.scope_ref": "demo-app"
+    }
+  },
+  {
+    "id": "dt-latch1",
+    "title": "mol-focus-review",
+    "status": "blocked",
+    "issue_type": "molecule",
+    "priority": 1,
+    "created_at": "2026-04-01T00:00:00Z",
+    "updated_at": "2026-04-01T00:00:00Z",
+    "description": "Focus + in-session review formula. Approval gate, review.",
+    "ref": "mol-focus-review",
+    "metadata": {
+      "gc.formula_contract": "graph.v2",
+      "gc.kind": "workflow",
+      "gc.formula": "mol-focus-review",
+      "gc.root_store_ref": "rig:gascity-dashboard",
+      "gc.scope_kind": "rig",
+      "gc.scope_ref": "gascity-dashboard"
+    }
+  },
+  {
+    "id": "dt-wisp1",
+    "title": "mol-do-work",
+    "status": "open",
+    "issue_type": "molecule",
+    "priority": 2,
+    "created_at": "2026-06-02T00:00:00Z",
+    "updated_at": "2026-06-02T00:00:00Z",
+    "ref": "mol-do-work",
+    "ephemeral": true,
+    "metadata": {
+      "gc.var.target": "demo-app",
+      "gc.var.prompt": "review the blocked PR and merge it after approval, then finalize"
+    }
+  },
+  {
+    "id": "dt-wisp1.1",
+    "title": "Implementation work",
+    "status": "in_progress",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-02T00:05:00Z",
+    "updated_at": "2026-06-02T00:05:00Z",
+    "assignee": "ralph-3",
+    "ephemeral": true,
+    "metadata": {
+      "molecule_id": "dt-wisp1",
+      "gc.step_id": "do-work"
+    }
+  },
+  {
+    "id": "dt-1920.step-1",
+    "title": "Orphan implementation patch",
+    "status": "in_progress",
+    "issue_type": "task",
+    "priority": 2,
+    "created_at": "2026-06-01T00:05:00Z",
+    "updated_at": "2026-06-01T00:05:00Z",
+    "metadata": {
+      "gc.kind": "step",
+      "gc.formula_contract": "graph.v2",
+      "gc.root_bead_id": "dt-1920",
+      "gc.step_id": "implementation.patch"
+    }
+  },
+  {
+    "id": "dt-lone",
+    "title": "Fix a typo in the README",
+    "status": "open",
+    "issue_type": "task",
+    "priority": 3,
+    "created_at": "2026-06-03T00:00:00Z",
+    "updated_at": "2026-06-03T00:00:00Z"
+  }
+]

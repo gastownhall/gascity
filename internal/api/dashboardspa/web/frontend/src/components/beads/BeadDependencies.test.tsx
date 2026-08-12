@@ -23,7 +23,10 @@ function bead(id: string, status: BeadStatus, extra: Partial<DashboardBead> = {}
 }
 
 function nodeFor(id: string, beads: DashboardBead[]) {
-  const graph = buildBeadGraph(beads);
+  // buildBeadGraph consumes SupervisorBead (priority: number), while these
+  // fixtures model DashboardBead (priority: number | null). Normalize the
+  // non-priority rows to 0 so the graph input matches the supervisor shape.
+  const graph = buildBeadGraph(beads.map((b) => ({ ...b, priority: b.priority ?? 0 })));
   const node = graph.nodes.get(id);
   if (!node) throw new Error(`no node for ${id}`);
   return node;

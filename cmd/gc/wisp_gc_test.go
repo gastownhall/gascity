@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -109,6 +110,57 @@ func TestWispGC_NothingExpired(t *testing.T) {
 	}
 }
 
+func TestWispGCClosesGeneratedMembersOnlyForTerminalRoots(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("completed-root", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.outcome":          "pass",
+		}),
+		makeGCBeadWithMetadata("completed-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "completed-root",
+		}),
+		makeGCBeadWithMetadata("superseded-root", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.outcome":          "canceled",
+		}),
+		makeGCBeadWithMetadata("partial-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "superseded-root",
+		}),
+		makeGCBeadWithMetadata("live-root", now.Add(-30*time.Minute), "in_progress", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("live-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "live-root",
+		}),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+
+	for _, id := range []string{"completed-step", "partial-step"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" || got.Metadata["gc.outcome"] != "skipped" {
+			t.Fatalf("%s = status %q outcome %q, want closed/skipped", id, got.Status, got.Metadata["gc.outcome"])
+		}
+	}
+	live, err := store.Get("live-step")
+	if err != nil {
+		t.Fatalf("Get(live-step): %v", err)
+	}
+	if live.Status != "open" {
+		t.Fatalf("live-step status = %q, want open", live.Status)
+	}
+}
+
 func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -174,23 +226,23 @@ func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
 func TestWispGC_PurgesExpiredReadMessageRetention(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
-		makeGCMessageWisp("unread-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "false"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
+		makeGCMessageWisp("unread-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "false"}),
 		makeGCMessageWisp("unset-old", now.Add(-2*time.Hour), nil),
-		makeGCMessageWisp("read-recent", now.Add(-30*time.Minute), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-recent", now.Add(-30*time.Minute), map[string]string{mail.ReadMetadataKey: "true"}),
 		{
 			ID:        "read-main-tier",
 			Status:    "open",
 			Type:      "message",
 			CreatedAt: now.Add(-2 * time.Hour),
-			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+			Metadata:  map[string]string{mail.ReadMetadataKey: "true"},
 		},
 		{
 			ID:        "read-task-wisp",
 			Status:    "open",
 			Type:      "task",
 			CreatedAt: now.Add(-2 * time.Hour),
-			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+			Metadata:  map[string]string{mail.ReadMetadataKey: "true"},
 			Ephemeral: true,
 		},
 	})
@@ -217,7 +269,7 @@ func TestWispGC_PurgesExpiredReadMessageRetention(t *testing.T) {
 func TestWispGC_ReadMessageRetentionZeroDisablesAndSuppressesLog(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
 	})
 
 	logOutput := captureWispGCLog(t, func() {
@@ -241,7 +293,7 @@ func TestWispGC_ReadMessageRetentionZeroDisablesAndSuppressesLog(t *testing.T) {
 func TestWispGC_ReadMessageRetentionLogsCountAndTTL(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
-		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mail.ReadMetadataKey: "true"}),
 	})
 
 	logOutput := captureWispGCLog(t, func() {

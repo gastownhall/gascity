@@ -2,7 +2,8 @@
 # gc dolt health — Lightweight Dolt data-plane health report.
 #
 # Checks server status and latency, per-database commit counts and open
-# beads, backup freshness, orphan databases, and zombie Dolt processes.
+# beads, backup freshness, orphan databases, active compaction quarantine
+# markers, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
@@ -92,18 +93,43 @@ now_ms() {
   esac
 }
 
-is_local_probe_host() {
-  case "$1" in
-    ""|0.0.0.0|127.*|localhost|::1|"[::1]") return 0 ;;
-    *) return 1 ;;
+# marker_epoch — convert an RFC3339 UTC timestamp (e.g. 2026-06-14T23:22:55Z)
+# to epoch seconds, portably across GNU and BSD date(1). Empty output on a
+# missing or unparseable timestamp so the caller can fall back to file mtime.
+marker_epoch() {
+  _ts="$1"
+  case "$_ts" in
+    ''|*[!0-9TZ:.+-]*) return 0 ;;
   esac
+  # GNU date parses the RFC3339 string directly; BSD/macOS date needs an
+  # explicit input format and the -j (do-not-set-clock) flag.
+  # Use `if` rather than `&&` so a failed date(1) doesn't set a non-zero
+  # exit status that would trigger `set -e` in the caller's subshell.
+  if _e=$(date -u -d "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  if _e=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  return 0
+}
+
+# human_duration — format a whole-second count as a compact age string
+# (e.g. 12d3h, 5h2m, 7m1s, 9s). Used for compaction quarantine marker age.
+human_duration() {
+  _s="$1"
+  case "$_s" in ''|*[!0-9]*) printf '0s'; return ;; esac
+  _d=$((_s / 86400)); _h=$(((_s % 86400) / 3600))
+  _m=$(((_s % 3600) / 60)); _sec=$((_s % 60))
+  if [ "$_d" -gt 0 ]; then printf '%dd%dh' "$_d" "$_h"
+  elif [ "$_h" -gt 0 ]; then printf '%dh%dm' "$_h" "$_m"
+  elif [ "$_m" -gt 0 ]; then printf '%dm%ds' "$_m" "$_sec"
+  else printf '%ds' "$_sec"; fi
 }
 
 # Find dolt PID by port for local managed servers. External Dolt endpoints do
 # not listen on 127.0.0.1, so do not let the local TCP precheck suppress the
-# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT.
+# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT. is_local_dolt_host is provided by
+# runtime.sh and shared with the status/logs commands.
 should_probe_sql=false
-if is_local_probe_host "$host"; then
+is_external=false
+if is_local_dolt_host "$host"; then
   pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
   if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
     server_running=true
@@ -111,6 +137,13 @@ if is_local_probe_host "$host"; then
     should_probe_sql=true
   fi
 else
+  # Configured external Dolt endpoint (non-local GC_DOLT_HOST). GC does not own
+  # a local managed process here, so server.running / server.pid keep their
+  # local-process defaults (false / 0). Reachability is decided by the SQL ping
+  # below and reported honestly via server.reachable + server.external — a
+  # reachable remote endpoint must not read as a downed local server
+  # (gastownhall/gascity su-deol8).
+  is_external=true
   should_probe_sql=true
 fi
 
@@ -155,55 +188,93 @@ trap 'rm -f "$_meta_cache" "$_zombie_scan_out"' EXIT
 # processes and wedging the health CLI. Query the running server via
 # SQL instead — it's the authoritative source, never deadlocks with
 # itself, and is cheap (dolt_log is indexed by commit hash).
-db_info=""
-if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
-  for d in "$data_dir"/*/; do
-    [ ! -d "$d/.dolt" ] && continue
-    name="$(basename "$d")"
-    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
-    # Reject names with anything outside [A-Za-z0-9_-] before interpolating
-    # into the SQL identifier. The first byte must still be alnum/underscore
-    # to avoid option-shaped names. Dolt permits directory names that shell
-    # basename happily returns (e.g. backticks, semicolons) but which
-    # would break out of the identifier and execute attacker-chosen SQL
-    # as the patrol user. Not an external-attack surface today — data
-    # directories are server-controlled — but fragile enough under
-    # config drift that it's worth skipping rather than probing.
-    case "$name" in
-      [A-Za-z0-9_]*)
-        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
-        ;;
-      *) continue ;;
+
+# db_name_is_safe NAME — accept NAME only when its first byte is alnum/underscore
+# and every byte is in [A-Za-z0-9_-], before it is interpolated into a
+# backtick-quoted SQL identifier. Dolt derives names from directory names
+# (local) or returns them from SHOW DATABASES (external); either source could in
+# principle carry characters (backticks, semicolons, leading dashes) that break
+# out of the identifier and execute attacker-chosen SQL as the patrol user. Not
+# an external-attack surface today — the catalog is server-controlled — but
+# fragile enough under config drift that it is worth skipping rather than probing.
+db_name_is_safe() {
+  case "$1" in
+    [A-Za-z0-9_]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# db_commit_and_open_counts NAME — emit `NAME|commits|open_beads` by querying the
+# running server for NAME's commit count (dolt_log) and open-bead count (issues
+# WHERE status='open'). Both counts come from SQL against the live server: it is
+# authoritative, never deadlocks with an on-disk dolt client, and is cheap.
+# 0 on timeout, error, or a database without the table (a non-beads DB) — the
+# same fail-soft contract for every database so one bad DB never hangs the
+# report. Under managed Dolt the beads live in the server's `issues` table, not
+# an on-disk beads.jsonl (absent or stale), which the old file grep reported as
+# open_beads=0 for every live database (#3200). Extract the first fully-numeric
+# line rather than a fixed row so a future `USE`/warning banner cannot silently
+# collapse the count to 0.
+db_commit_and_open_counts() {
+  _name="$1"
+  _commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "USE \`$_name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
+  _commits=$(printf '%s\n' "$_commits_csv" | grep -E '^[0-9]+$' | head -1)
+  case "$_commits" in ''|*[!0-9]*) _commits=0 ;; esac
+  _open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "USE \`$_name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
+  _open_beads=$(printf '%s\n' "$_open_csv" | grep -E '^[0-9]+$' | head -1)
+  case "$_open_beads" in ''|*[!0-9]*) _open_beads=0 ;; esac
+  printf '%s|%s|%s\n' "$_name" "$_commits" "$_open_beads"
+}
+
+# external_database_names — list user databases on a configured external Dolt
+# endpoint via SQL. The databases live on the remote server, so the on-disk
+# data-dir scan used for managed Dolt reports none (databases=[]); SHOW DATABASES
+# is the authoritative catalog for a remote endpoint (su-deol8). The CSV header
+# and system databases are filtered; unsafe identifiers are skipped.
+external_database_names() {
+  _show_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "SHOW DATABASES;" 2>/dev/null || true)
+  printf '%s\n' "$_show_csv" | while IFS= read -r _raw; do
+    _name=$(printf '%s' "$_raw" | tr -d '\r' | sed 's/^"//; s/"$//')
+    [ -n "$_name" ] || continue
+    [ "$_name" = "Database" ] && continue
+    case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in
+      information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
     esac
-    # Count commits via SQL (bounded). 0 on timeout or error — keep
-    # going rather than hang the whole report. Extract the first
-    # fully-numeric line rather than `sed -n '2p'`: future dolt builds
-    # may emit a status row for `USE` or a warning banner, in which
-    # case positional parsing silently collapses the count to 0 and the
-    # "empty repo" fallback masks the parse miss. Numeric-line grep
-    # gives a deterministic result or clearly-failed parse.
-    commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-      -q "USE \`$name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
-    commits=$(printf '%s\n' "$commits_csv" | grep -E '^[0-9]+$' | head -1)
-    # JSON consumers require a number; use 0 on failure.
-    case "$commits" in
-      ''|*[!0-9]*) commits=0 ;;
-    esac
-    # Count open beads from the running server (authoritative). Under managed
-    # Dolt the beads live in the server's `issues` table, not an on-disk
-    # beads.jsonl — that file is absent or stale, so the old file grep reported
-    # open_beads=0 for every live database (#3200). 0 on timeout, error, or a
-    # database without an `issues` table (a non-beads DB) — same fail-soft
-    # contract as the commit count above.
-    open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-      -q "USE \`$name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
-    open_beads=$(printf '%s\n' "$open_csv" | grep -E '^[0-9]+$' | head -1)
-    case "$open_beads" in
-      ''|*[!0-9]*) open_beads=0 ;;
-    esac
-    db_info="$db_info$name|$commits|$open_beads
-"
+    db_name_is_safe "$_name" || continue
+    printf '%s\n' "$_name"
   done
+}
+
+db_info=""
+if [ "$server_reachable" = true ]; then
+  if [ "$is_external" = true ]; then
+    # External endpoint: enumerate databases from the reachable remote server
+    # via SQL, then count each. The on-disk scan below cannot see remote
+    # databases, so it would report databases=[] despite healthy SQL (su-deol8).
+    db_info=$(external_database_names | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      db_commit_and_open_counts "$name"
+    done)
+  elif [ -d "$data_dir" ]; then
+    # Local managed Dolt: the on-disk data dir is authoritative for which
+    # databases exist. Scan it, then count each via SQL against the server.
+    for d in "$data_dir"/*/; do
+      [ ! -d "$d/.dolt" ] && continue
+      name="$(basename "$d")"
+      case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+      db_name_is_safe "$name" || continue
+      line=$(db_commit_and_open_counts "$name")
+      db_info="$db_info$line
+"
+    done
+  fi
 fi
 
 # Check backup freshness.
@@ -288,6 +359,54 @@ if [ -d "$data_dir" ]; then
     orphan_list="$orphan_list$name|$size
 "
     orphan_count=$((orphan_count + 1))
+  done
+fi
+
+# Detect active compaction quarantine markers.
+#
+# `gc dolt compact` writes a per-database marker under
+# $PACK_STATE_DIR/compact-quarantine/<db> when a post-flatten integrity probe
+# trips (value-hash drift, row-count change, etc. — see commands/compact/run.sh).
+# While a marker stands, auto-GC and scheduled compaction for that database are
+# blocked indefinitely until an operator clears it, so the working set can grow
+# unbounded and degrade the managed sql-server. Nothing else in this report
+# surfaces the marker, so a quarantine can sit unnoticed for many days
+# (gascity#3729). Scan filesystem-only — independent of server reachability,
+# since a wedged server may itself be a downstream symptom of the un-GC'd
+# bloat — and report each marker's db, reason, and age. The directory and
+# one-file-per-db key=value body layout mirror compact/run.sh exactly.
+quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
+quarantine_list=""
+quarantine_count=0
+if [ -d "$quarantine_dir" ]; then
+  for marker in "$quarantine_dir"/*; do
+    [ -f "$marker" ] || continue
+    q_db=$(basename "$marker")
+    # compact/run.sh writes transient files into this same directory:
+    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
+    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
+    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
+    # and a spurious exit 2.
+    case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
+    # Anchor each key to column 1 with index()==1 — the same reader idiom
+    # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
+    # key (8 and 12 = key length + 1).
+    q_reason=$(awk 'index($0, "reason=") == 1 { print substr($0, 8); exit }' "$marker" 2>/dev/null || true)
+    q_created=$(awk 'index($0, "created_at=") == 1 { print substr($0, 12); exit }' "$marker" 2>/dev/null || true)
+    [ -n "$q_reason" ] || q_reason="unknown"
+    q_epoch=$(marker_epoch "$q_created")
+    if [ -z "$q_epoch" ]; then
+      q_epoch=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null || echo "")
+    fi
+    q_age_sec=0
+    if [ -n "$q_epoch" ]; then
+      q_now=$(date +%s)
+      q_age_sec=$((q_now - q_epoch))
+      [ "$q_age_sec" -lt 0 ] && q_age_sec=0
+    fi
+    quarantine_list="$quarantine_list$q_db|$q_reason|$q_age_sec
+"
+    quarantine_count=$((quarantine_count + 1))
   done
 fi
 
@@ -426,12 +545,19 @@ if [ "$json_output" = true ]; then
   # SELECT 1). Consumers should key health off
   # `server.reachable`, not `server.running`, because a process can
   # hold the port while its goroutines are wedged.
+  #
+  # `server.external` distinguishes a configured remote endpoint from a local
+  # managed server. For an external endpoint GC owns no local process, so
+  # `server.running` / `server.pid` are local-process defaults (false / 0) and
+  # MUST NOT be read as a downed server — a reachable remote endpoint is
+  # healthy at `server.reachable=true, server.external=true` (su-deol8).
   cat <<JSONEOF
 {
   "timestamp": "$timestamp",
   "server": {
     "running": $server_running,
     "reachable": $server_reachable,
+    "external": $is_external,
     "pid": $server_pid,
     "port": $GC_DOLT_PORT,
     "latency_ms": $server_latency
@@ -463,6 +589,20 @@ JSONEOF
   cat <<JSONEOF
 
   ],
+  "quarantine": [
+JSONEOF
+  first=true
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    # db and reason both come from the filesystem; escape backslash then quote.
+    q_db_esc=$(printf '%s' "$q_db" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    q_reason_esc=$(printf '%s' "$q_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db_esc" "$q_reason_esc" "$q_age_sec"
+  done
+  cat <<JSONEOF
+
+  ],
   "processes": {
     "zombie_count": $zombie_count,
     "zombie_pids": [$(echo "$zombie_pids" | tr -s ' ' ',' | sed 's/^,//;s/,$//')]
@@ -479,9 +619,16 @@ JSONEOF
   exit 0
 fi
 
-# Human-readable output.
+# Human-readable output. For a configured external endpoint GC owns no local
+# process, so report reachability of the remote server rather than the
+# local-process "not running" signal that would misread as a downed server
+# (su-deol8).
 if [ "$server_running" = true ]; then
   echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)"
+elif [ "$is_external" = true ] && [ "$server_reachable" = true ]; then
+  echo "Server: external endpoint reachable ($host:$GC_DOLT_PORT, latency ${server_latency}ms)"
+elif [ "$is_external" = true ]; then
+  echo "Server: external endpoint unreachable ($host:$GC_DOLT_PORT)"
 else
   echo "Server: not running"
 fi
@@ -505,6 +652,15 @@ else
   echo "Backups: none found"
 fi
 
+if [ "$quarantine_count" -gt 0 ]; then
+  echo ""
+  echo "Compaction quarantine: $quarantine_count (auto-GC blocked)"
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    echo "  $q_db: $q_reason (held $(human_duration "$q_age_sec"))"
+  done
+fi
+
 if [ "$orphan_count" -gt 0 ]; then
   echo ""
   echo "Orphans: $orphan_count"
@@ -525,9 +681,19 @@ fi
 # process that isn't speaking MySQL. Stale backups, orphans, and
 # zombies are informational and do not fail the exit code.
 #
+# A standing compaction quarantine is the exception: auto-GC for that
+# database is blocked until an operator clears the marker, so it is a
+# real (if non-fatal) data-plane degradation. Signal it with a distinct
+# non-zero code (2) so CLI and CI callers can catch a blocked compaction
+# without conflating it with an unreachable server (1).
+#
 # JSON mode is unconditionally exit 0 (see above) — programmatic
-# consumers read `server.reachable` from the payload instead.
+# consumers read `server.reachable` and the `quarantine` array from the
+# payload instead.
 if [ "$server_reachable" = true ]; then
+  if [ "$quarantine_count" -gt 0 ]; then
+    exit 2
+  fi
   exit 0
 fi
 exit 1

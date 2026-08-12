@@ -1678,7 +1678,7 @@ func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string
 	case "opencode":
 		return "flag", "--prompt", 8000, nil
 	case "mimocode":
-		return "flag", "--prompt", 8000, []string{"--never-ask-questions"}
+		return "flag", "--prompt", 8000, []string{"--never-ask"}
 	case "antigravity":
 		return "flag", "--prompt-interactive", 5000, []string{"--dangerously-skip-permissions"}
 	default:

@@ -10,6 +10,9 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https; requires --city-name) |
+| `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
 
@@ -32,6 +35,7 @@ gc [flags]
 | [gc cities](#gc-cities) | List registered cities |
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
+| [gc context](#gc-context) | Manage named remote cities (~/.gc/contexts.toml) |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
@@ -50,14 +54,18 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
+| [gc login](#gc-login) | Log in to a hosted Gas City service |
+| [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
+| [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc ready](#gc-ready) | List ready (claimable) work across every store in the city |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -72,12 +80,14 @@ gc [flags]
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
+| [gc storage](#gc-storage) | Inspect and migrate this city's storage-class layout |
 | [gc supervisor](#gc-supervisor) | Manage the machine-wide supervisor |
 | [gc suspend](#gc-suspend) | Suspend the city (all agents effectively suspended) |
 | [gc trace](#gc-trace) | Inspect and control session reconciler tracing |
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
 
 ## gc agent
 
@@ -262,6 +272,25 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
@@ -293,9 +322,9 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.
+Subcommands for topology operations, health checking, diagnostics, exact-store
+metadata compare-and-set, and read-only list/show routed through the supervisor
+API with transparent fallback to direct bd reads.
 
 ```
 gc beads
@@ -306,6 +335,7 @@ gc beads
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
@@ -385,12 +415,13 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format flags. --json is an
-alias for --format=json. API-path JSON output includes _cache_age_s;
-fallback-path JSON omits it.
+Supports --label, --status, --all, and --format. --format=json emits
+JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
+it). The bare --json flag is reserved by the CLI's JSON-contract layer
+and is not wired for this command; use --format=json.
 
 ```
-gc beads list
+gc beads list [flags]
 ```
 
 **Example:**
@@ -398,9 +429,57 @@ gc beads list
 ```
 gc beads list
 gc beads list --label ready-to-build
-gc beads list --status open --json
-gc beads list --format=toon
+gc beads list --status open --format=json
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | include closed beads (default: open only) |
+| `--format` | string | `text` | output format: text or json |
+| `--label` | string |  | filter to beads carrying this label |
+| `--status` | string |  | filter to beads in this status |
+
+## gc beads metadata-cas
+
+Atomically compare and set one metadata key in one exact local bead store.
+
+The store must be selected explicitly with --store-ref=city:&lt;name&gt; or
+--store-ref=rig:&lt;name&gt;. This command never scans other stores, follows a
+cross-store fallback, or operates on a remote city. A conflict is an ordinary
+zero-exit outcome; capability, transport, readback, and validation failures are
+non-zero.
+
+Legacy file-provider cities created before scope-local file stores may map city
+and rig references to the same shared city file. That provider-layout alias is
+preserved for compatibility; it is not a search or cross-store fallback.
+
+Use --json for the canonical machine-output contract. --format=json remains
+accepted for compatibility. Combining --json with an explicit --format=text is
+a usage error.
+
+```
+gc beads metadata-cas <bead-id> [flags]
+```
+
+**Example:**
+
+```
+gc beads metadata-cas tr-123 \
+  --store-ref=rig:tributary \
+  --key=semantic_review_sha \
+  --expected=old-sha \
+  --next=new-sha \
+  --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--expected` | string |  | expected current value (explicit empty is allowed) |
+| `--format` | string | `text` | output format: text or json |
+| `--json` | bool |  | emit the canonical JSON result |
+| `--key` | string |  | metadata key to compare and set |
+| `--next` | string |  | replacement value (explicit empty is allowed) |
+| `--store-ref` | string |  | exact local store: city:&lt;name&gt; or rig:&lt;name&gt; |
 
 ## gc beads show
 
@@ -408,19 +487,25 @@ Show one bead by ID, routed through the supervisor API when the
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format and --json. API-path JSON output includes
-_cache_age_s; fallback-path JSON omits it.
+Supports --format. --format=json emits JSON (API-path JSON includes
+_cache_age_s; fallback-path JSON omits it). The bare --json flag is
+reserved by the CLI's JSON-contract layer and is not wired for this
+command; use --format=json.
 
 ```
-gc beads show <bead-id>
+gc beads show <bead-id> [flags]
 ```
 
 **Example:**
 
 ```
 gc beads show ga-abc
-gc beads show ga-abc --json
+gc beads show ga-abc --format=json
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `text` | output format: text or json |
 
 ## gc build-image
 
@@ -696,6 +781,108 @@ gc config show -f overlay.toml
 | `--json` | bool |  | emit JSON |
 | `--provenance` | bool |  | show where each config element originated |
 | `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
+
+## gc context
+
+Manage the client-side registry of named remote cities.
+
+A context names a remote city the gc CLI can operate over the HTTP+SSE control
+plane: its URL, the remote city name, and an optional credential command. Select
+a context per-invocation with --context &lt;name&gt;, or set a sticky default with
+'gc context use &lt;name&gt;' (a discoverable local city always wins over the default).
+
+```
+gc context
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc context add](#gc-context-add) | Add a named remote city |
+| [gc context current](#gc-context-current) | Show which city the current flags/env/cwd would target |
+| [gc context list](#gc-context-list) | List named remote cities |
+| [gc context remove](#gc-context-remove) | Remove a named remote city |
+| [gc context show](#gc-context-show) | Show a named remote city |
+| [gc context use](#gc-context-use) | Set the sticky default context |
+
+## gc context add
+
+Add a named remote city to ~/.gc/contexts.toml.
+
+--url is required and must be https for a non-loopback host. --city sets the
+remote city name (defaults to &lt;name&gt;). At most one credential technique applies:
+--grant-command mints an X-GC-City-Write grant for a direct hardened self-host;
+--credential-command mints a transport bearer consumed by an edge/proxy.
+
+```
+gc context add <name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--ca-file` | string |  | PEM CA bundle to verify the server certificate |
+| `--city` | string |  | remote city name (default: &lt;name&gt;) |
+| `--credential-command` | string |  | command that mints a transport bearer (edge/proxy fronted) |
+| `--grant-command` | string |  | command that mints an X-GC-City-Write grant (direct hardened self-host) |
+| `--insecure-skip-verify` | bool |  | skip TLS verification (dev only) |
+| `--timeout` | string |  | REST request timeout, e.g. 120s (never applied to SSE streams) |
+| `--tls-server-name` | string |  | override the TLS SNI / certificate name |
+| `--url` | string |  | remote city base URL (https required for non-loopback) |
+
+## gc context current
+
+Dry-run the target resolver and report the winning tier.
+
+Applies the same precedence as every command — explicit flag &gt; explicit env &gt;
+local city discovery &gt; sticky default — and prints the target it would use,
+noting what was shadowed. Makes no network call.
+
+```
+gc context current
+```
+
+## gc context list
+
+List named remote cities
+
+```
+gc context list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSONL record per context |
+
+## gc context remove
+
+Remove a named remote city
+
+```
+gc context remove <name>
+```
+
+## gc context show
+
+Show a named remote city
+
+```
+gc context show <name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit a JSONL record |
+
+## gc context use
+
+Set the sticky default remote city.
+
+The default is used only when no local city is discoverable from the current
+directory — a local city always wins (git-like). Clear it with 'gc context use'
+with no arguments is not supported; remove the default by removing the context.
+
+```
+gc context use <name>
+```
 
 ## gc converge
 
@@ -1193,12 +1380,11 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
-gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
+| `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
@@ -1336,7 +1522,24 @@ gc events --follow --after-cursor city-a:12,city-b:9
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc events reemit-execution](#gc-events-reemit-execution) | Project one graph execution run into event facts |
 | [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events reemit-execution
+
+Project exactly one stopped local graph.v2 execution run into execution facts.
+
+The default is a dry run. Pass --apply to append the projected snapshot to the
+default city event log.
+
+```
+gc events reemit-execution --city <city> --run <run> [--apply] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | append projected facts to the default file event log |
+| `--run` | string |  | graph.v2 workflow root ID to project |
 
 ## gc events rotate
 
@@ -1491,6 +1694,34 @@ per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
 
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+gc storage recover-stranded --from-work --fleet-stopped.
+
 ```
 gc formula cook <formula-name> [flags]
 ```
@@ -1529,6 +1760,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -1647,8 +1879,10 @@ Convenience command for context handoff.
 Self-handoff (default): sends mail to self. If the current session is
 controller-restartable, requests a restart and blocks until the controller
 stops the session. For on-demand configured named sessions, sends mail and
-returns without requesting restart because the controller cannot restart the
-user-attended process.
+returns without requesting restart: handoff intentionally leaves the
+user-attended session running instead of restarting it out from under the
+user. The controller can restart such a session via
+gc runtime request-restart; handoff deliberately does not.
 
 For controller-restartable sessions, equivalent to:
 
@@ -1753,6 +1987,7 @@ gc import
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
 | [gc import check](#gc-import-check) | Validate installed pack import state |
+| [gc import credential](#gc-import-credential) | Manage pack-source git credentials |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
@@ -1810,6 +2045,57 @@ Validate installed pack import state
 ```
 gc import check
 ```
+
+## gc import credential
+
+Manage pack-source git credentials
+
+```
+gc import credential
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import credential add](#gc-import-credential-add) | Register a pack-source credential |
+| [gc import credential list](#gc-import-credential-list) | List registered pack-source credentials |
+| [gc import credential remove](#gc-import-credential-remove) | Remove a registered pack-source credential |
+
+## gc import credential add
+
+Register a pack-source credential
+
+```
+gc import credential add <match> (--helper CMD | --token-file PATH | --token-env NAME | --ssh-key-file PATH) [--username NAME] [--global] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Write $GC_HOME/credentials.toml instead of the city file |
+| `--helper` | string |  | Command whose stdout is the token (executed per fetch) |
+| `--ssh-key-file` | string |  | Path to an SSH private key for git@/ssh:// sources |
+| `--token-env` | string |  | Name of an environment variable holding the token |
+| `--token-file` | string |  | Path to a file containing the token |
+| `--username` | string |  | Username sent to the remote (default x-access-token) |
+
+## gc import credential list
+
+List registered pack-source credentials
+
+```
+gc import credential list
+```
+
+## gc import credential remove
+
+Remove a registered pack-source credential
+
+```
+gc import credential remove <match> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Remove from $GC_HOME/credentials.toml instead of the city file |
 
 ## gc import install
 
@@ -1900,14 +2186,16 @@ gc import why <name-or-source>
 
 ## gc init
 
-Create a new Gas City workspace in the given directory (or cwd).
+Create a new Gas City workspace in the given directory. With no path, the
+current directory is used only when stdin is an interactive terminal;
+otherwise pass an explicit path ("." for the current directory).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, and
 pins the builtin pack imports (resolved from the user-global pack cache).
-Use --template with --default-provider to create a city non-interactively,
-or --file to initialize from an existing TOML config file.
+Use --template with --default-provider and an explicit path to create a city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1952,7 +2240,7 @@ gc init --template gascity --default-provider claude \
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -1971,6 +2259,44 @@ gc lint <pack> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit structured JSON report |
+
+## gc login
+
+Log in to a hosted Gas City service and store a local API token.
+
+By default this targets https://gascity.com; pass --at &lt;url&gt; to log in to
+any server that implements the Gas City Service Protocol v0. It opens a browser
+to sign in; use --device for headless shells, or --token to store an existing
+token. The token is stored per service under ~/.gc/credentials.json.
+
+```
+gc login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string |  | label for the minted token; defaults to &lt;user&gt;@&lt;host&gt; |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | existing API token to store; defaults to GC_SERVICE_TOKEN |
+
+## gc logout
+
+Log out of a hosted Gas City service: revoke the session server-side, then
+remove the stored token. Because the session is the only long-lived credential,
+this is the kill switch for a leaked ~/.gc/credentials.json — the local token is
+always removed even if the server-side revoke fails or is not yet supported.
+
+```
+gc logout [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | log out of every stored service |
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 
 ## gc mail
 
@@ -2155,7 +2481,9 @@ gc mail read <id> [flags]
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
-Use --notify to nudge the recipient after replying.
+Use --notify to request a recipient turn after replying. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -2166,7 +2494,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
-| `--notify` | bool |  | nudge the recipient about this reply, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
@@ -2174,8 +2502,10 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
-the recipient after sending. Use --from to override the sender identity.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
+a recipient turn after sending. In a managed city, it can request a wake for
+a non-running recipient. Unread mail alone does not request a wake.
+Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
@@ -2202,7 +2532,7 @@ gc mail send --all "Status update: tests passing"
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
-| `--notify` | bool |  | nudge the recipient about this message, even if earlier mail is still unread |
+| `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
 
@@ -2289,6 +2619,62 @@ gc mcp list [flags]
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
 
+## gc metrics
+
+Inspect or control Gas City command usage metrics
+
+```
+gc metrics
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc metrics example](#gc-metrics-example) | Print the fixed state-independent command-usage request example |
+| [gc metrics off](#gc-metrics-off) | Disable command usage metrics and delete local queued data |
+| [gc metrics on](#gc-metrics-on) | Read and accept the command-usage disclosure on a verified TTY |
+| [gc metrics status](#gc-metrics-status) | Show redacted local command-usage metrics status |
+
+## gc metrics example
+
+Print the fixed state-independent command-usage request example
+
+```
+gc metrics example [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write only the exact example JSON |
+
+## gc metrics off
+
+Disable command usage metrics and delete local queued data
+
+```
+gc metrics off
+```
+
+## gc metrics on
+
+Read and accept the command-usage disclosure on a verified TTY
+
+```
+gc metrics on
+```
+
+## gc metrics status
+
+Show redacted local command-usage metrics status
+
+```
+gc metrics status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write the redacted status as JSON |
+| `--show-installation-id` | bool |  | print the stable linkable installation pseudonym with a warning |
+
 ## gc nudge
 
 Inspect and deliver deferred nudges.
@@ -2363,6 +2749,11 @@ Show execution history for orders.
 Queries bead history for past order runs. Optionally filter by order
 name. Use --rig to filter by rig.
 
+The read is bounded by default: only the most recent runs are fetched.
+Widen it with --limit (0 fetches every retained run) or bound it by time
+with --since. On a city with a long order-run history an unbounded read
+costs tens of seconds, so prefer keeping a bound when triaging.
+
 ```
 gc order history [name] [flags]
 ```
@@ -2370,7 +2761,9 @@ gc order history [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | output JSONL summary |
+| `--limit` | int | `50` | maximum runs to show (0 = every retained run) |
 | `--rig` | string |  | rig name to filter order history |
+| `--since` | string |  | only show runs from within this duration ago (e.g. 1h, 24h) |
 
 ## gc order list
 
@@ -2397,6 +2790,9 @@ to the configured target (if any). Exec orders run their script directly
 write arbitrary stdout. Useful for testing orders or triggering them
 outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
+Use --var key=value (repeatable) to pass args to the order: formula orders
+receive them as formula vars, exec orders as environment variables. A param
+declared required in [order.params] must be supplied or the run fails.
 
 ```
 gc order run <name> [flags]
@@ -2406,6 +2802,7 @@ gc order run <name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+| `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |
 
 ## gc order show
 
@@ -2463,12 +2860,18 @@ subtrees whose open descendants are also older than --stale-after. Pass one
 or more scoped order names when --include-wisps is set; wisp recovery is
 order-scoped to avoid scanning unrelated beads.
 
+When the number of eligible closed-bead deletions exceeds
+GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
+proceed. This guard prevents accidental mass-deletes without an explicit
+operator acknowledgement.
+
 ```
 gc order sweep-tracking [order ...] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
@@ -2518,7 +2921,15 @@ gc pack list
 
 ## gc pack registry
 
-Manage configured Gas City pack registries and inspect cached catalog entries.
+Manage configured Gas City pack registries, inspect cached catalog entries,
+authenticate to the hosted Registry, and publish packs.
+
+Native Registry login stores a per-registry API token. When no explicit,
+environment, stored native, development, or GitHub Actions credential applies,
+the canonical hosted Registry uses the existing Gasworks login through
+"gasworks credential-provider". Set GC_CREDENTIAL_PROVIDER to a JSON argv array
+to configure that command without invoking a shell. Gasworks credentials are
+never persisted by gc and are never sent to custom Registry origins.
 
 ```
 gc pack registry
@@ -2532,6 +2943,7 @@ gc pack registry
 | [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry requests](#gc-pack-registry-requests) | Show your Registry publish request status |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
 | [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
@@ -2589,6 +3001,13 @@ The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
 
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.
+
 ```
 gc pack registry publish <path-to-pack-root> [flags]
 ```
@@ -2632,6 +3051,22 @@ gc pack registry remove <registry-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 
+## gc pack registry requests
+
+Show recent publish requests you submitted to Registry, or one request with its feedback comments.
+
+This command is read-only. Use a personal Registry token; run "gc pack registry login" if you have not logged in yet.
+
+```
+gc pack registry requests [request-id] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSON response object |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | personal registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
+
 ## gc pack registry search
 
 Search cached pack registry catalogs
@@ -2663,7 +3098,11 @@ gc pack registry show <pack-name> [flags]
 
 ## gc pack registry whoami
 
-Show the authenticated registry account
+Show the Registry account for the active credential.
+
+Explicit, environment, and stored native Registry tokens take precedence. For
+the canonical hosted Registry, gc otherwise uses the existing Gasworks login
+through the configured credential provider without storing its credential.
 
 ```
 gc pack registry whoami [flags]
@@ -2876,6 +3315,48 @@ gc prompt synth [flags]
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
 
+## gc ready
+
+List ready, claimable work as a JSON array, federating the city store, the
+rig stores, and — on a split city — the relocated graph store where molecule
+roots, step beads and control beads live.
+
+It is the in-process, city-wide drop-in for the single-store "bd ready" work
+query, so workers and the control plane see graph-class work instead of an
+authoritative-looking short answer. On a city that relocates no coordination
+class it reads the one store, unchanged.
+
+The flags mirror the "bd ready" contract the default work_query builds:
+  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+           --exclude-type=epic --exclude-label "hold:mayor" \
+           --sort oldest --limit 20 --json
+
+Rows are emitted in canonical ready order (priority, created_at, id) unless
+--sort selects a created_at order, and --limit is applied last, so a bounded
+read is the true top-N of the merged set rather than the top-N of whichever
+store answered first.
+
+Every leg is read across both storage tiers, so the wisp/ephemeral rows an
+orchestration step runs as are claimable work here whether or not
+--include-ephemeral is passed.
+
+```
+gc ready [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | only work assigned to this identity |
+| `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
+| `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
+| `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--limit` | int |  | max beads to return (0 = unlimited) |
+| `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
+| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
+| `--unassigned` | bool |  | only unassigned work |
+
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -2998,6 +3479,14 @@ to apply a pack source that defines the rig's agent configuration;
 repeat the flag to compose multiple packs for one rig. The flag is
 compatibility sugar: gc rig add writes canonical rig imports.
 
+--include takes a pack source (local path or remote URL) or a pack name: a
+bundled pack ("gastown"), or a registry pack resolved from the cached
+registry catalogs, including a scoped community name ("owner/pack"). A "./"
+prefix or a "packs/&lt;name&gt;" token is never read as a registry name (a
+bundled pack still canonicalizes, so "./gastown" resolves to the bundled
+source), and an existing directory always wins over a registry pack of the
+same name.
+
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --default-branch to set the rig's mainline branch explicitly. By default,
@@ -3026,6 +3515,7 @@ gc rig add /path/to/project --prefix r1
 gc rig add /path/to/master-repo --default-branch master
 gc rig add ./my-project --include gastown
 gc rig add ./my-project --include packs/planner --include packs/architect
+gc rig add ./my-project --include acme/planner
 gc rig add ./my-project --include gastown --start-suspended
 gc rig add /path/to/existing --adopt
 ```
@@ -3034,10 +3524,12 @@ gc rig add /path/to/existing --adopt
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
-| `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
+| `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
+| `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
-| `--name` | string |  | rig name (default: directory basename) |
+| `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
+| `--request-id` | string |  | idempotency key for a remote --git-url add; reuse it to resume/retry a provision |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
 
 ## gc rig list
@@ -3198,6 +3690,7 @@ gc runtime
 | [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
+| [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
@@ -3306,6 +3799,31 @@ gc runtime drain-check [name] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
 
+## gc runtime heartbeat
+
+Extend the idle-timeout and max-session-age windows during a long operation.
+
+Sets held_until on the current session's bead, suppressing the idle-timeout
+and max-session-age timers until the hold expires. Call this at the start of
+slow operations that produce no terminal output and would otherwise trigger
+a false-alarm watchdog kill.
+
+The hold is automatically cleared by the reconciler once held_until passes.
+This is the agent-facing API for the held_until bead-metadata mechanism; it
+does not put the session into a suspended state or change its sleep_intent.
+
+The default duration (45m0s) covers long-running operations.
+Pass --duration to override.
+
+```
+gc runtime heartbeat [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--duration` | string |  | hold duration (e.g. 30m, 1h); default 45m0s |
+| `--json` | bool |  | Output as JSON |
+
 ## gc runtime request-restart
 
 Signal the controller to stop and restart this session.
@@ -3321,11 +3839,6 @@ runtime is already gone, or a SIGINT/SIGTERM is received, the command
 exits 0 cleanly. If the controller has not acted within a bounded
 timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
 1 with a diagnostic pointing at controller health.
-
-For on-demand configured named sessions, the controller cannot restart
-the user-attended process. In that case this command reports that
-restart was skipped and returns immediately. No session.draining event
-is emitted when restart is skipped.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event before waiting.
@@ -3866,7 +4379,8 @@ The second argument is a bead ID, a formula name when --formula is set, or
 arbitrary text (which auto-creates a task bead).
 
 When target is omitted, the bead's rig prefix is used to look up the rig's
-default_sling_target from config. Requires --formula to have an explicit target.
+default_sling_targets (or default_sling_target) from config and one is chosen
+at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
 With --formula, the formula is instantiated and its root bead is routed to
@@ -3976,6 +4490,94 @@ gc stop [path|name] [flags]
 | `--force` | bool |  | skip the interrupt grace period and force-kill all sessions immediately |
 | `--json` | bool |  | emit JSONL summary |
 | `--timeout` | duration | `0s` | wall-clock cap for the stop sequence (0 = derive from city config) |
+
+## gc storage
+
+Move this city's storage-class layout, and report on it.
+
+These are operator commands. Nothing here runs on boot: a city whose
+[storage.classes] name a binding it has not converged on refuses to start and
+names the migrate command, because the source's writer set is something an
+operator arranges rather than something a program can observe.
+
+```
+gc storage
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
+
+## gc storage migrate
+
+Copy this city's infrastructure-class beads out of the work store and into
+the binding [storage.classes] assigns them to.
+
+Every bead is copied with its id and its within-class dependency topology
+preserved, proven field-equal against a closed and reopened destination, and
+then recorded in a proven-copy manifest and a convergence marker. The source is
+RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
+rollback before cutover is a config edit with no data recovery step.
+
+The move refuses while a writer can reach the source. This binary can prove the
+absence of a controller and cannot prove the absence of anything else, so that
+half is an explicit operator attestation.
+
+```
+gc storage migrate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage recover-stranded
+
+Copy the infrastructure beads a converged city's proven copy never carried
+out of the retained work store and into the binding that is already serving.
+
+This is the recovery the stranded-write refusal names. It is additive: it moves
+only ids the binding does not hold and the proven-copy manifest does not record,
+it deletes nothing from either store, and it extends the manifest only after
+every moved bead has been proven equal against a closed and reopened
+destination. A bead whose class it cannot state is named and left where it is.
+
+It refuses on a city that has NOT converged — the whole copy is still owed
+there, and `gc storage migrate --from-work` is what owes it. It is not that
+command run twice: the migration is one-shot on purpose, and forcing it to
+re-copy would re-import a serving binding from a source that no longer holds
+what the binding does.
+
+```
+gc storage recover-stranded [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
+| `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage status
+
+Report which binding serves each storage class, whether this city has
+converged onto it, and what the retained source and the binding each hold.
+
+This path is read-only against a LIVE city: it creates no directory, database,
+write-ahead log, shared-memory index, schema, marker or manifest. It does not
+open the binding's engine unless that database already exists, because opening
+it would create the very database the report is being asked about.
+
+It exits non-zero when the city is configured for a binding it has not
+converged on, so a deployment script can gate on it.
+
+```
+gc storage status
+```
 
 ## gc supervisor
 
@@ -4370,3 +4972,16 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc whoami
+
+Show the authenticated hosted Gas City account
+
+```
+gc whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |

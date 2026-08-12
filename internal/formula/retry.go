@@ -89,6 +89,12 @@ func expandRetry(step *Step) ([]*Step, error) {
 	run.Metadata = withMetadata(run.Metadata, map[string]string{
 		beadmeta.AttemptMetadataKey: strconv.Itoa(attempt),
 		beadmeta.StepIDMetadataKey:  step.ID,
+		// gc.control_for records the durable lineage pointer back to the retry
+		// control. At compile time no store bead ID exists yet, so the value is
+		// the control's identity as known now (step.ID, which the control also
+		// carries as gc.step_id). findLatestAttempt matches on this metadata
+		// instead of parsing ref strings.
+		beadmeta.ControlForMetadataKey: step.ID,
 		// gc.step_ref is NOT set here — molecule.Instantiate fills it from
 		// step.ID which includes the formula prefix (e.g., "mol.finalize.attempt.1"
 		// instead of the bare "finalize.attempt.1").

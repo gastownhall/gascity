@@ -42,7 +42,7 @@ func TestReconcile_WaitingTrigger_NoAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(report.Details) != 1 || report.Details[0].Action != "no_action" {
+	if len(report.Details) != 1 || report.Details[0].Action != ActionNoAction {
 		t.Errorf("action = %+v, want no_action", report.Details)
 	}
 	// State must be preserved so the tick re-evaluates the trigger.
@@ -67,7 +67,7 @@ func TestReconcile_WaitingTrigger_CompletesInterruptedStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(report.Details) != 1 || report.Details[0].Action != "completed_terminal" {
+	if len(report.Details) != 1 || report.Details[0].Action != ActionCompletedTerminal {
 		t.Errorf("action = %+v, want completed_terminal", report.Details)
 	}
 	info, _ := store.GetBead("root-1")
@@ -103,8 +103,8 @@ func TestReconcile_MissingState_NoWisps_PoursFirst(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "poured_wisp" {
-		t.Errorf("Action = %q, want %q", d.Action, "poured_wisp")
+	if d.Action != ActionPouredWisp {
+		t.Errorf("Action = %q, want %q", d.Action, ActionPouredWisp)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -139,8 +139,8 @@ func TestReconcile_MissingState_WispExists_Adopts(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "adopted_wisp" {
-		t.Errorf("Action = %q, want %q", d.Action, "adopted_wisp")
+	if d.Action != ActionAdoptedWisp {
+		t.Errorf("Action = %q, want %q", d.Action, ActionAdoptedWisp)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -177,8 +177,8 @@ func TestReconcile_StateCreating_TerminatesPartialCreation(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "completed_terminal" {
-		t.Errorf("Action = %q, want %q", d.Action, "completed_terminal")
+	if d.Action != ActionCompletedTerminal {
+		t.Errorf("Action = %q, want %q", d.Action, ActionCompletedTerminal)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -224,8 +224,8 @@ func TestReconcile_TerminatedNotClosed_CompletesClosure(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "completed_terminal" {
-		t.Errorf("Action = %q, want %q", d.Action, "completed_terminal")
+	if d.Action != ActionCompletedTerminal {
+		t.Errorf("Action = %q, want %q", d.Action, ActionCompletedTerminal)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -270,8 +270,8 @@ func TestReconcile_TerminatedNotClosed_BackfillsActor(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "completed_terminal" {
-		t.Errorf("Action = %q, want %q", d.Action, "completed_terminal")
+	if d.Action != ActionCompletedTerminal {
+		t.Errorf("Action = %q, want %q", d.Action, ActionCompletedTerminal)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -295,8 +295,8 @@ func TestReconcile_TerminatedAlreadyClosed_NoAction(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "no_action" {
-		t.Errorf("Action = %q, want %q", d.Action, "no_action")
+	if d.Action != ActionNoAction {
+		t.Errorf("Action = %q, want %q", d.Action, ActionNoAction)
 	}
 }
 
@@ -322,8 +322,8 @@ func TestReconcile_WaitingManual_TerminalReasonSet_CompletesTerminal(t *testing.
 	}
 
 	d := report.Details[0]
-	if d.Action != "completed_terminal" {
-		t.Errorf("Action = %q, want %q", d.Action, "completed_terminal")
+	if d.Action != ActionCompletedTerminal {
+		t.Errorf("Action = %q, want %q", d.Action, ActionCompletedTerminal)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -366,8 +366,8 @@ func TestReconcile_WaitingManual_GenuineHold_NoStateChange(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "no_action" {
-		t.Errorf("Action = %q, want %q", d.Action, "no_action")
+	if d.Action != ActionNoAction {
+		t.Errorf("Action = %q, want %q", d.Action, ActionNoAction)
 	}
 
 	// State should remain waiting_manual.
@@ -414,8 +414,8 @@ func TestReconcile_WaitingManual_GenuineHold_RepairsLastProcessedWisp(t *testing
 	}
 
 	d := report.Details[0]
-	if d.Action != "repaired_state" {
-		t.Errorf("Action = %q, want %q", d.Action, "repaired_state")
+	if d.Action != ActionRepairedState {
+		t.Errorf("Action = %q, want %q", d.Action, ActionRepairedState)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -452,8 +452,8 @@ func TestReconcile_Active_ClosedUnprocessedWisp_Replays(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "repaired_state" {
-		t.Errorf("Action = %q, want %q", d.Action, "repaired_state")
+	if d.Action != ActionRepairedState {
+		t.Errorf("Action = %q, want %q", d.Action, ActionRepairedState)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -503,8 +503,8 @@ func TestReconcile_Active_MissingActiveWisp_ReconstructsChain(t *testing.T) {
 	if d.Error != nil {
 		t.Fatalf("reconcile error: %v", d.Error)
 	}
-	if d.Action != "poured_wisp" && d.Action != "adopted_wisp" {
-		t.Fatalf("Action = %q, want %q or %q", d.Action, "poured_wisp", "adopted_wisp")
+	if d.Action != ActionPouredWisp && d.Action != ActionAdoptedWisp {
+		t.Fatalf("Action = %q, want %q or %q", d.Action, ActionPouredWisp, ActionAdoptedWisp)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -546,8 +546,8 @@ func TestReconcile_Active_MissingActiveWisp_ReplaysRecoveredClosedReplacement(t 
 	if d.Error != nil {
 		t.Fatalf("reconcile error: %v", d.Error)
 	}
-	if d.Action != "repaired_state" {
-		t.Fatalf("Action = %q, want %q", d.Action, "repaired_state")
+	if d.Action != ActionRepairedState {
+		t.Fatalf("Action = %q, want %q", d.Action, ActionRepairedState)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -586,8 +586,8 @@ func TestReconcile_Active_MissingActiveWisp_RepairsOpenReplacementMetadata(t *te
 	if d.Error != nil {
 		t.Fatalf("reconcile error: %v", d.Error)
 	}
-	if d.Action != "repaired_state" {
-		t.Fatalf("Action = %q, want %q", d.Action, "repaired_state")
+	if d.Action != ActionRepairedState {
+		t.Fatalf("Action = %q, want %q", d.Action, ActionRepairedState)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -620,8 +620,8 @@ func TestReconcile_Active_StoreErrorReadingActiveWisp_ReportsError(t *testing.T)
 	if got := d.Error.Error(); !strings.Contains(got, "store unavailable for wisp-iter-1") {
 		t.Fatalf("reconcile error = %q, want store failure", got)
 	}
-	if d.Action != "no_action" {
-		t.Fatalf("Action = %q, want %q", d.Action, "no_action")
+	if d.Action != ActionNoAction {
+		t.Fatalf("Action = %q, want %q", d.Action, ActionNoAction)
 	}
 }
 
@@ -643,8 +643,8 @@ func TestReconcile_Active_OpenWisp_NoAction(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "no_action" {
-		t.Errorf("Action = %q, want %q", d.Action, "no_action")
+	if d.Action != ActionNoAction {
+		t.Errorf("Action = %q, want %q", d.Action, ActionNoAction)
 	}
 }
 
@@ -666,8 +666,8 @@ func TestReconcile_Active_TerminalReasonSet_CompletesStop(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "completed_terminal" {
-		t.Errorf("Action = %q, want %q", d.Action, "completed_terminal")
+	if d.Action != ActionCompletedTerminal {
+		t.Errorf("Action = %q, want %q", d.Action, ActionCompletedTerminal)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -707,8 +707,8 @@ func TestReconcile_Active_EmptyActiveWisp_PoursNext(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "poured_wisp" {
-		t.Errorf("Action = %q, want %q", d.Action, "poured_wisp")
+	if d.Action != ActionPouredWisp {
+		t.Errorf("Action = %q, want %q", d.Action, ActionPouredWisp)
 	}
 	if d.Error != nil {
 		t.Errorf("unexpected error: %v", d.Error)
@@ -741,8 +741,8 @@ func TestReconcile_Active_EmptyActiveWisp_AdoptsExisting(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "adopted_wisp" {
-		t.Errorf("Action = %q, want %q", d.Action, "adopted_wisp")
+	if d.Action != ActionAdoptedWisp {
+		t.Errorf("Action = %q, want %q", d.Action, ActionAdoptedWisp)
 	}
 
 	meta, _ := store.GetMetadata("root-1")
@@ -771,8 +771,8 @@ func TestReconcile_Active_AlreadyProcessed_NoAction(t *testing.T) {
 	}
 
 	d := report.Details[0]
-	if d.Action != "no_action" {
-		t.Errorf("Action = %q, want %q", d.Action, "no_action")
+	if d.Action != ActionNoAction {
+		t.Errorf("Action = %q, want %q", d.Action, ActionNoAction)
 	}
 }
 
@@ -818,8 +818,8 @@ func TestReconcile_MultipleBeads_ContinuesOnError(t *testing.T) {
 	}
 
 	// bead-1: completed_terminal
-	if report.Details[0].Action != "completed_terminal" {
-		t.Errorf("bead-1 Action = %q, want %q", report.Details[0].Action, "completed_terminal")
+	if report.Details[0].Action != ActionCompletedTerminal {
+		t.Errorf("bead-1 Action = %q, want %q", report.Details[0].Action, ActionCompletedTerminal)
 	}
 
 	// bead-2: error
@@ -828,8 +828,8 @@ func TestReconcile_MultipleBeads_ContinuesOnError(t *testing.T) {
 	}
 
 	// bead-3: no_action (already closed)
-	if report.Details[2].Action != "no_action" {
-		t.Errorf("bead-3 Action = %q, want %q", report.Details[2].Action, "no_action")
+	if report.Details[2].Action != ActionNoAction {
+		t.Errorf("bead-3 Action = %q, want %q", report.Details[2].Action, ActionNoAction)
 	}
 }
 

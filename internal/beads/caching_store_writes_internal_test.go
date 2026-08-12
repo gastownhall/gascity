@@ -65,6 +65,25 @@ type releaseRefreshFailOnceStore struct {
 	failNextGet bool
 }
 
+type ambiguousMetadataBatchStore struct {
+	Store
+	err        error
+	commitKeys []string
+}
+
+func (s *ambiguousMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	committed := make(map[string]string, len(s.commitKeys))
+	for _, key := range s.commitKeys {
+		committed[key] = kvs[key]
+	}
+	if len(committed) > 0 {
+		if err := s.Store.SetMetadataBatch(id, committed); err != nil {
+			return err
+		}
+	}
+	return s.err
+}
+
 func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
 	if s.failNextGet {
 		s.failNextGet = false
@@ -265,6 +284,80 @@ func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
 	}
 	if updated.Metadata["review"] != "fixed" {
 		t.Fatalf("notification metadata = %#v, want review=fixed", updated.Metadata)
+	}
+}
+
+func TestCachingStoreSetMetadataBatchErrorFencesStaleRow(t *testing.T) {
+	patch := map[string]string{"state": "asleep", "reason": "healed"}
+	for _, tc := range []struct {
+		name       string
+		commitKeys []string
+		wantState  string
+		wantReason string
+	}{
+		{name: "rejected", wantState: "active", wantReason: "old"},
+		{name: "partially committed", commitKeys: []string{"state"}, wantState: "asleep", wantReason: "old"},
+		{name: "fully committed", commitKeys: []string{"state", "reason"}, wantState: "asleep", wantReason: "healed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := NewMemStore()
+			bead, err := mem.Create(Bead{
+				Title:    "worker",
+				Type:     "session",
+				Metadata: map[string]string{"state": "active", "reason": "old"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeErr := errors.New("ambiguous metadata batch")
+			backing := &ambiguousMetadataBatchStore{
+				Store:      mem,
+				err:        writeErr,
+				commitKeys: tc.commitKeys,
+			}
+			notifications := 0
+			cache := NewCachingStoreForTest(backing, func(string, string, json.RawMessage) {
+				notifications++
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			cache.mu.RLock()
+			startSeq := cache.mutationSeq
+			cache.mu.RUnlock()
+
+			if err := cache.SetMetadataBatch(bead.ID, patch); !errors.Is(err, writeErr) {
+				t.Fatalf("SetMetadataBatch error = %v, want %v", err, writeErr)
+			}
+
+			cache.mu.RLock()
+			fence := cache.beadSeq[bead.ID]
+			_, dirty := cache.dirty[bead.ID]
+			_, local := cache.localBeadAt[bead.ID]
+			cache.mu.RUnlock()
+			if fence <= startSeq || !dirty || local {
+				t.Fatalf("ambiguity fence = seq:%d start:%d dirty:%v local:%v", fence, startSeq, dirty, local)
+			}
+			if notifications != 0 {
+				t.Fatalf("notifications = %d, want 0 for an unconfirmed write", notifications)
+			}
+			query := ListQuery{Type: "session"}
+			if _, ok := cache.CachedList(query); ok {
+				t.Fatal("CachedList served a row whose backing write outcome is unknown")
+			}
+
+			rows, err := cache.List(query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("List metadata = %#v, want state=%q reason=%q", rows, tc.wantState, tc.wantReason)
+			}
+			if rows, ok := cache.CachedList(query); !ok || len(rows) != 1 ||
+				rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("CachedList after reread = %#v, ok=%v", rows, ok)
+			}
+		})
 	}
 }
 
@@ -1082,5 +1175,116 @@ func TestCachingStoreUpdateFallsThroughPerFieldMismatch(t *testing.T) {
 					backing.updateCalls, tc.name)
 			}
 		})
+	}
+}
+
+func TestCachingStoreCloseAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after close: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close = %q, want %q", got.Status, "closed")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Close = %d, backing = %d; the successful refresh read must be adopted, "+
+			"or a Get→conditional-write consumer fences against a revision that no longer exists",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "reopen-adopt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := cache.Reopen(b.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	fresh, err := backing.Get(b.ID)
+	if err != nil {
+		t.Fatalf("backing Get after reopen: %v", err)
+	}
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after reopen: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("cached status after Reopen = %q, want %q", got.Status, "open")
+	}
+	if got.Revision != fresh.Revision {
+		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
+			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	// When the post-close refresh Get fails, Close must still fall back to the
+	// cached-status synthesis (today's behavior) rather than dropping the entry.
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	b, err := cache.Create(Bead{Title: "close-refresh-fails"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The synthesis keeps the entry cached (distinguishing it from an evict,
+	// whose follow-up Get would fall through to the backing and also report
+	// closed).
+	cache.mu.RLock()
+	_, inBeads := cache.beads[b.ID]
+	cache.mu.RUnlock()
+	if !inBeads {
+		t.Fatal("entry missing from the cache after Close with failed refresh; want the cached-status synthesis, not an evict")
+	}
+
+	got, err := cache.Get(b.ID)
+	if err != nil {
+		t.Fatalf("cache Get after close with failed refresh: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
 	}
 }

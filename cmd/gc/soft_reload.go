@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -81,7 +80,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 // Returns accepted-session, failed-session, stale-drain-cancellation, and
 // empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
-	sessFront *session.InfoStore,
+	sessFront *session.Store,
 	desired map[string]TemplateParams,
 	sessionBeads *sessionBeadSnapshot,
 	sp runtime.Provider,
@@ -89,7 +88,7 @@ func acceptConfigDriftAcrossSessions(
 	stderr io.Writer,
 ) softReloadAcceptanceResult {
 	result := softReloadAcceptanceResult{DesiredEmpty: len(desired) == 0}
-	if sessFront == nil || sessFront.Store().Store == nil {
+	if !sessFront.Backed() {
 		return result
 	}
 	if sessionBeads == nil {
@@ -100,25 +99,25 @@ func acceptConfigDriftAcrossSessions(
 			return result
 		}
 	}
-	open := sessionBeads.Open()
-	result.OpenSessions = len(open)
-	if len(open) == 0 {
+	openInfos := sessionBeads.OpenInfos()
+	result.OpenSessions = len(openInfos)
+	if len(openInfos) == 0 {
 		return result
 	}
 	if len(desired) == 0 {
 		return result
 	}
 
-	for i := range open {
-		session := open[i]
-		if session.Status == "closed" {
+	for i := range openInfos {
+		info := openInfos[i]
+		if info.Closed {
 			continue
 		}
-		name := strings.TrimSpace(session.Metadata["session_name"])
+		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
 			continue
 		}
-		storedHash := strings.TrimSpace(session.Metadata["started_config_hash"])
+		storedHash := strings.TrimSpace(info.StartedConfigHash)
 		if storedHash == "" {
 			continue
 		}
@@ -126,12 +125,12 @@ func acceptConfigDriftAcrossSessions(
 		if !ok {
 			continue
 		}
-		agentCfg := sessionCoreConfigForHash(tp, session)
+		agentCfg := sessionCoreConfigForHashInfo(tp, info)
 		currentHash := runtime.CoreFingerprint(agentCfg)
 		if storedHash == currentHash {
 			continue
 		}
-		if err := clearSoftReloadConfigDriftDrainAck(session, sp, dt); err != nil {
+		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
@@ -144,13 +143,13 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := sessFront.ApplyPatch(session.ID, metadata); err != nil {
+		if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if cancelSoftReloadConfigDriftDrain(session, sp, dt) {
+		if cancelSoftReloadConfigDriftDrainInfo(info, sp, dt) {
 			result.CanceledDrains++
 		}
 		result.Updated++
@@ -175,26 +174,26 @@ func softReloadAcceptedHashMetadata(agentCfg runtime.Config, currentHash string)
 	}, nil
 }
 
-func cancelSoftReloadConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+func cancelSoftReloadConfigDriftDrainInfo(info session.Info, sp runtime.Provider, dt *drainTracker) bool {
 	if dt == nil {
 		return false
 	}
-	ds := dt.get(session.ID)
+	ds := dt.get(info.ID)
 	if ds == nil || ds.reason != "config-drift" {
 		return false
 	}
-	return cancelSessionConfigDriftDrain(session, sp, dt)
+	return cancelSessionConfigDriftDrainInfo(info, sp, dt)
 }
 
-func clearSoftReloadConfigDriftDrainAck(session beads.Bead, sp runtime.Provider, dt *drainTracker) error {
+func clearSoftReloadConfigDriftDrainAckInfo(info session.Info, sp runtime.Provider, dt *drainTracker) error {
 	if dt == nil {
 		return nil
 	}
-	ds := dt.get(session.ID)
+	ds := dt.get(info.ID)
 	if ds == nil || ds.reason != "config-drift" || !ds.ackSet {
 		return nil
 	}
-	name := strings.TrimSpace(session.Metadata["session_name"])
+	name := strings.TrimSpace(info.SessionNameMetadata)
 	if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
 		return err
 	}

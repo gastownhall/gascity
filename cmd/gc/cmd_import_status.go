@@ -132,7 +132,7 @@ func doImportStatus(cityPath string, jsonOut bool, stdout, stderr io.Writer) int
 // buildImportStatus assembles the import status document for cityPath.
 func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 	fs := fsys.OSFS{}
-	allImports, err := collectAllImportsFS(fs, cityPath)
+	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		return nil, err
 	}

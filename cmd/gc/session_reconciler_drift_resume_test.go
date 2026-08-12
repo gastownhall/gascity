@@ -46,7 +46,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -76,14 +76,23 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	clk := &clock.Fake{Time: time.Date(2026, 5, 13, 16, 23, 30, 0, time.UTC)}
 
 	prepared, err := prepareStartCandidateForCity(
-		startCandidate{session: &got, tp: tp, order: 0},
+		startCandidate{info: env.sessionInfo(got.ID), tp: tp, order: 0},
 		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
-	if _, err := startPreparedStartCandidate(context.Background(), *prepared, "", env.store, env.sp, cfg, nil); err != nil {
+	if _, err := startPreparedStartCandidate(
+		context.Background(),
+		*prepared,
+		"",
+		env.store,
+		env.sp,
+		cfg,
+		nil,
+		immediateSessionStaleKeyDetectionWaiter,
+	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
 	}
 
@@ -233,14 +242,11 @@ func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *te
 }
 
 // TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd
-// is the slow integration cousin of the fast preserve test. It runs the
-// full executePlannedStarts pipeline (which adds the post-Start
-// staleKeyDetectDelay sleep), so the assertion is on the actually-Started
-// runtime exec — not just the prepared command. Skipped in the default
-// fast suite; opt in with GC_FAST_UNIT=0 or make test-cmd-gc-process.
+// runs the full executePlannedStarts pipeline, so the assertion is on the
+// actually-started runtime command rather than only the prepared command.
+// Deterministic inner and outer lifecycle signals keep the fake-runtime path
+// in the fast suite without weakening either liveness probe.
 func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t *testing.T) {
-	skipSlowCmdGCTest(t, "executePlannedStarts waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
-
 	env := newReconcilerTestEnv()
 	session := env.createSessionBead("mayor", "mayor")
 
@@ -255,7 +261,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -279,7 +285,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 
 	woken := executePlannedStarts(
 		context.Background(),
-		[]startCandidate{{session: &got, tp: tp, order: 0}},
+		[]startCandidate{{info: env.sessionInfo(got.ID), tp: tp, order: 0}},
 		cfg,
 		map[string]TemplateParams{"mayor": tp},
 		env.sp,
@@ -290,6 +296,8 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		10*time.Second,
 		&env.stdout,
 		&env.stderr,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
 	if woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
@@ -333,7 +341,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 		"started_config_hash": priorStartedConfigHash,
 	})
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -360,7 +368,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 	session := env.createSessionBead("mayor", "mayor")
 	// No session_key, no started_config_hash — the session never started.
 
-	resetConfiguredNamedSessionForConfigDrift(&session, env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -372,5 +380,71 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 	if got.Metadata["started_config_hash"] != "" {
 		t.Errorf("started_config_hash must remain cleared on the no-prior-conversation path; got %q",
 			got.Metadata["started_config_hash"])
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftDefersPinnedNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "new-cmd", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "new-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		ResolvedProvider:        &config.ResolvedProvider{Name: "fake", Command: "new-cmd"},
+	}
+	env.desiredState[sessionName] = tp
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	priorStartedConfigHash := runtime.CoreFingerprint(oldRuntime)
+	if currentHash := runtime.CoreFingerprint(templateParamsToConfig(tp)); priorStartedConfigHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", priorStartedConfigHash, currentHash)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"pin_awake":                  "true",
+		"session_key":                "prior-key",
+		"started_config_hash":        priorStartedConfigHash,
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("reconcile woken = %d, want 0 while pinned drift is deferred", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned named session %q was stopped for config drift", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] == string(sessionpkg.StateStartPending) || got.Metadata["state"] == string(sessionpkg.StateCreating) {
+		t.Fatalf("state = %q, want no config-drift reset while pinned", got.Metadata["state"])
+	}
+	if got.Metadata["started_config_hash"] != priorStartedConfigHash {
+		t.Fatalf("started_config_hash = %q, want preserved", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" {
+		t.Fatal("config_drift_deferred_at = empty, want pinned deferral recorded")
+	}
+	if got.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		t.Fatal("config_drift_deferred_key = empty, want pinned deferral recorded")
 	}
 }

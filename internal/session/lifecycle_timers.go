@@ -68,7 +68,7 @@ type TimerFacts struct {
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
 	// AssignedWork is the open-assigned-work fact, gathered on demand.
-	// Only the max-session-age ladder consults it.
+	// Both the max-session-age and idle-timeout ladders consult it.
 	AssignedWork AssignedWorkFact
 }
 
@@ -120,15 +120,18 @@ func DecideMaxSessionAge(f TimerFacts) TimerDecision {
 		Action:       TimerActionStop,
 		TraceReason:  "max_session_age",
 		TraceOutcome: "stop",
-		SleepReason:  "max-session-age",
+		SleepReason:  string(SleepReasonMaxSessionAge),
 	}
 }
 
 // DecideIdleTimeout evaluates the idle-timeout ladder: blocker, then pending
-// interaction, then stop. Idle stops never consult assigned work. A pending
-// interaction cancels any pending drain and keeps the session out of this
-// tick's wake pass — asymmetries with max-session-age that are part of the
-// existing reconciler contract.
+// interaction, then assigned work, then stop. A pending interaction cancels
+// any pending drain and keeps the session out of this tick's wake pass — an
+// asymmetry with max-session-age that is part of the existing reconciler
+// contract. Assigned work defers the stop, mirroring DecideMaxSessionAge:
+// without this rung, ComputeAwakeSet's assigned-work exemption re-wakes the
+// session within seconds of the kill, producing an unbounded idle-kill/wake
+// treadmill (ga-3ox7rk).
 func DecideIdleTimeout(f TimerFacts) TimerDecision {
 	if !f.Triggered {
 		return TimerDecision{Action: TimerActionNone}
@@ -145,14 +148,42 @@ func DecideIdleTimeout(f TimerFacts) TimerDecision {
 		dec.SkipWakePass = true
 		return dec
 	}
+	switch f.AssignedWork {
+	case AssignedWorkUnknown:
+		return TimerDecision{Action: TimerActionGatherAssignedWork}
+	case AssignedWorkHas:
+		return deferDecision("assigned_work", "deferred_busy")
+	}
 	return TimerDecision{
 		Action:       TimerActionStop,
 		TraceReason:  "idle_timeout",
 		TraceOutcome: "stop",
-		SleepReason:  "idle-timeout",
+		SleepReason:  string(SleepReasonIdleTimeout),
 	}
 }
 
 func deferDecision(reason, outcome string) TimerDecision {
 	return TimerDecision{Action: TimerActionDefer, TraceReason: reason, TraceOutcome: outcome}
+}
+
+// DecideAssignedWorkExhausted is the forced-stop decision for a session that
+// has deferred the idle-timeout stop on the same assigned-work bead more
+// times than the reconciler's configured consecutive-defer limit. The
+// reconciler owns the anchor bead identity, the consecutive-defer count, and
+// the limit; this function only supplies the decision vocabulary once the
+// caller has decided to override DecideIdleTimeout's AssignedWorkHas defer.
+// The distinct TraceReason/SleepReason (as opposed to plain "idle_timeout")
+// make the override traceable back to the backstop rather than an ordinary
+// idle stop. SleepReasonAssignedWorkExhausted is deliberately absent from
+// IsDeliberateSleepReason and shouldResetContinuation, mirroring
+// SleepReasonMaxSessionAge: a session that keeps hitting this backstop across
+// respawns should accrue churn and reset continuation, the same
+// defense-in-depth treatment as a forced max-session-age restart.
+func DecideAssignedWorkExhausted() TimerDecision {
+	return TimerDecision{
+		Action:       TimerActionStop,
+		TraceReason:  "assigned_work_exhausted",
+		TraceOutcome: "stop_defer_exhausted",
+		SleepReason:  string(SleepReasonAssignedWorkExhausted),
+	}
 }

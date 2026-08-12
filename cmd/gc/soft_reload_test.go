@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // Every writer of started_config_hash must stamp the partition sub-hashes
@@ -257,8 +258,8 @@ func TestAcceptConfigDriftAcrossSessions_CancelsExistingConfigDriftDrain(t *test
 	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	clk := &clock.Fake{Time: time.Unix(100, 0)}
-	if !beginSessionDrain(sessionBead, sp, dt, "config-drift", clk, time.Minute) {
-		t.Fatal("beginSessionDrain returned false")
+	if !beginSessionDrainInfo(sessiontest.SeedBead(t, sessionBead), sp, dt, "config-drift", clk, time.Minute) {
+		t.Fatal("beginSessionDrainInfo returned false")
 	}
 
 	desired := map[string]TemplateParams{

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,8 @@ import (
 // simulates filesystem state (fake). Pre-populate Dirs, Files, Symlinks,
 // and Errors before calling methods. ModTimes is optional unless a test needs
 // exact timestamp control; Stat synthesizes and stores a mod time on demand.
+// A directly seeded descendant implies its parent directories for fixture
+// compatibility, while mutating operations still reject truly missing parents.
 type Fake struct {
 	Dirs     map[string]bool   // pre-populated directories
 	Files    map[string][]byte // pre-populated files
@@ -56,6 +59,144 @@ func (f *Fake) nextModTime() time.Time {
 	return f.clock
 }
 
+type fakeEntryKind uint8
+
+const (
+	fakeEntryMissing fakeEntryKind = iota
+	fakeEntryDirectory
+	fakeEntryFile
+	fakeEntrySymlink
+)
+
+func (f *Fake) entryKind(path string) fakeEntryKind {
+	if _, ok := f.Symlinks[path]; ok {
+		return fakeEntrySymlink
+	}
+	if f.Dirs[path] {
+		return fakeEntryDirectory
+	}
+	if _, ok := f.Files[path]; ok {
+		return fakeEntryFile
+	}
+	if f.directoryExists(path) {
+		return fakeEntryDirectory
+	}
+	return fakeEntryMissing
+}
+
+func (f *Fake) directoryExists(path string) bool {
+	if f.Dirs[path] {
+		return true
+	}
+	clean := filepath.Clean(path)
+	if clean == "." || filepath.Dir(clean) == clean {
+		return true
+	}
+	return f.hasDescendant(path)
+}
+
+func (f *Fake) hasDescendant(path string) bool {
+	for candidate := range f.Dirs {
+		if isDescendant(candidate, path) {
+			return true
+		}
+	}
+	for candidate := range f.Files {
+		if isDescendant(candidate, path) {
+			return true
+		}
+	}
+	for candidate := range f.Symlinks {
+		if isDescendant(candidate, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *Fake) materializeParentDirectories(path string) {
+	var parents []string
+	for parent := filepath.Dir(filepath.Clean(path)); parent != "." && filepath.Dir(parent) != parent; parent = filepath.Dir(parent) {
+		parents = append(parents, parent)
+	}
+	if f.Dirs == nil {
+		f.Dirs = make(map[string]bool)
+	}
+	for i := len(parents) - 1; i >= 0; i-- {
+		parent := parents[i]
+		if f.entryKind(parent) != fakeEntryDirectory {
+			return
+		}
+		f.Dirs[parent] = true
+	}
+}
+
+func isDescendant(candidate, parent string) bool {
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(candidate))
+	if err != nil || relative == "." || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func immediateChild(parent, candidate string) (path string, direct bool, ok bool) {
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(candidate))
+	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false, false
+	}
+	first := relative
+	if separator := strings.IndexRune(relative, filepath.Separator); separator >= 0 {
+		first = relative[:separator]
+	}
+	return filepath.Join(parent, first), first == relative, true
+}
+
+func fakePathError(operation, path string, err error) error {
+	return &os.PathError{Op: operation, Path: path, Err: err}
+}
+
+func rebasedPath(candidate, oldRoot, newRoot string) (string, bool) {
+	if filepath.Clean(candidate) == filepath.Clean(oldRoot) {
+		return newRoot, true
+	}
+	if !isDescendant(candidate, oldRoot) {
+		return "", false
+	}
+	relative, err := filepath.Rel(oldRoot, candidate)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(newRoot, relative), true
+}
+
+func moveMapEntries[V any](entries map[string]V, oldRoot, newRoot string) {
+	type move struct {
+		oldPath string
+		newPath string
+		value   V
+	}
+	var moves []move
+	for path, value := range entries {
+		if destination, ok := rebasedPath(path, oldRoot, newRoot); ok {
+			moves = append(moves, move{oldPath: path, newPath: destination, value: value})
+		}
+	}
+	for _, item := range moves {
+		delete(entries, item.oldPath)
+	}
+	for _, item := range moves {
+		entries[item.newPath] = item.value
+	}
+}
+
+func (f *Fake) clearEntry(path string) {
+	delete(f.Dirs, path)
+	delete(f.Files, path)
+	delete(f.Symlinks, path)
+	delete(f.Modes, path)
+	delete(f.ModTimes, path)
+}
+
 // MkdirAll records the call and adds the directory (and parents) to Dirs.
 func (f *Fake) MkdirAll(path string, perm os.FileMode) error {
 	f.Calls = append(f.Calls, Call{Method: "MkdirAll", Path: path})
@@ -68,8 +209,19 @@ func (f *Fake) MkdirAll(path string, perm os.FileMode) error {
 	if f.Modes == nil {
 		f.Modes = make(map[string]os.FileMode)
 	}
-	// Record this directory and all parents.
-	for p := filepath.Clean(path); p != "." && p != "/" && p != string(filepath.Separator); p = filepath.Dir(p) {
+
+	var missing []string
+	for p := filepath.Clean(path); p != "." && filepath.Dir(p) != p; p = filepath.Dir(p) {
+		switch f.entryKind(p) {
+		case fakeEntryDirectory:
+			continue
+		case fakeEntryMissing:
+			missing = append(missing, p)
+		default:
+			return fakePathError("mkdir", path, fs.ErrExist)
+		}
+	}
+	for _, p := range missing {
 		if !f.Dirs[p] {
 			f.Modes[p] = perm.Perm()
 		}
@@ -84,6 +236,13 @@ func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
+	if f.entryKind(filepath.Dir(name)) != fakeEntryDirectory {
+		return fakePathError("open", name, fs.ErrNotExist)
+	}
+	if f.entryKind(name) == fakeEntryDirectory {
+		return fakePathError("open", name, fs.ErrInvalid)
+	}
+	_, existed := f.Files[name]
 	modTime := f.nextModTime()
 	cp := make([]byte, len(data))
 	copy(cp, data)
@@ -94,7 +253,9 @@ func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 		f.Modes = make(map[string]os.FileMode)
 	}
 	f.Files[name] = cp
-	f.Modes[name] = perm.Perm()
+	if !existed {
+		f.Modes[name] = perm.Perm()
+	}
 	f.ModTimes[name] = modTime
 	return nil
 }
@@ -176,6 +337,9 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 		}
 		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true, modTime: modTime}, nil
 	}
+	if f.directoryExists(name) {
+		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
+	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 }
 
@@ -194,6 +358,9 @@ func (f *Fake) Lstat(name string) (os.FileInfo, error) {
 	}
 	if data, ok := f.Files[name]; ok {
 		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
+	}
+	if f.directoryExists(name) {
+		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
 	}
 	return nil, &os.PathError{Op: "lstat", Path: name, Err: os.ErrNotExist}
 }
@@ -234,59 +401,97 @@ func (f *Fake) ReadDir(name string) ([]os.DirEntry, error) {
 		return nil, err
 	}
 
-	name = filepath.Clean(name)
-	seen := make(map[string]bool)
-	var entries []os.DirEntry
-
-	// Collect direct child directories.
-	for d := range f.Dirs {
-		if filepath.Dir(d) == name && d != name {
-			base := filepath.Base(d)
-			if !seen[base] {
-				seen[base] = true
-				entries = append(entries, fakeDirEntry{name: base, dir: true, mode: f.modeFor(d), id: fakeIdentity(d), hasID: true})
-			}
-		}
-	}
-	// Collect direct child files.
-	for p, data := range f.Files {
-		if filepath.Dir(p) == name {
-			base := filepath.Base(p)
-			if !seen[base] {
-				seen[base] = true
-				entries = append(entries, fakeDirEntry{name: base, size: int64(len(data)), mode: f.modeFor(p), id: fakeIdentity(p), hasID: true})
-			}
-		}
-	}
-	// Collect direct child symlinks.
-	for p := range f.Symlinks {
-		if filepath.Dir(p) == name {
-			base := filepath.Base(p)
-			if !seen[base] {
-				seen[base] = true
-				entries = append(entries, fakeDirEntry{name: base, symlink: true, id: fakeIdentity(p), hasID: true})
-			}
-		}
+	switch f.entryKind(name) {
+	case fakeEntryMissing:
+		return nil, fakePathError("readdir", name, fs.ErrNotExist)
+	case fakeEntryFile, fakeEntrySymlink:
+		return nil, fakePathError("readdir", name, fs.ErrInvalid)
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
+	entriesByName := make(map[string]os.DirEntry)
+	addImpliedDirectory := func(candidate string) {
+		child, direct, ok := immediateChild(name, candidate)
+		if !ok || direct {
+			return
+		}
+		base := filepath.Base(child)
+		if _, exists := entriesByName[base]; !exists {
+			entriesByName[base] = fakeDirEntry{name: base, dir: true, mode: f.modeFor(child), id: fakeIdentity(child), hasID: true}
+		}
+	}
+	for path := range f.Dirs {
+		addImpliedDirectory(path)
+	}
+	for path := range f.Files {
+		addImpliedDirectory(path)
+	}
+	for path := range f.Symlinks {
+		addImpliedDirectory(path)
+	}
+	for path, data := range f.Files {
+		if child, direct, ok := immediateChild(name, path); ok && direct {
+			base := filepath.Base(child)
+			entriesByName[base] = fakeDirEntry{name: base, size: int64(len(data)), mode: f.modeFor(path), id: fakeIdentity(path), hasID: true}
+		}
+	}
+	for path := range f.Dirs {
+		if child, direct, ok := immediateChild(name, path); ok && direct {
+			base := filepath.Base(child)
+			entriesByName[base] = fakeDirEntry{name: base, dir: true, mode: f.modeFor(path), id: fakeIdentity(path), hasID: true}
+		}
+	}
+	for path := range f.Symlinks {
+		if child, direct, ok := immediateChild(name, path); ok && direct {
+			base := filepath.Base(child)
+			entriesByName[base] = fakeDirEntry{name: base, symlink: true, id: fakeIdentity(path), hasID: true}
+		}
+	}
+
+	entries := make([]os.DirEntry, 0, len(entriesByName))
+	for _, entry := range entriesByName {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil
 }
 
-// Rename records the call and moves the file in the Files map.
+// Rename records the call and moves a file, symlink, or directory tree.
 func (f *Fake) Rename(oldpath, newpath string) error {
 	f.Calls = append(f.Calls, Call{Method: "Rename", Path: oldpath})
 	if err, ok := f.Errors[oldpath]; ok {
 		return err
 	}
-	if target, ok := f.Symlinks[oldpath]; ok {
+	sourceKind := f.entryKind(oldpath)
+	if sourceKind == fakeEntryMissing {
+		return fakePathError("rename", oldpath, fs.ErrNotExist)
+	}
+	if oldpath == newpath {
+		return nil
+	}
+	if f.entryKind(filepath.Dir(newpath)) != fakeEntryDirectory {
+		return fakePathError("rename", newpath, fs.ErrNotExist)
+	}
+	destinationKind := f.entryKind(newpath)
+
+	switch sourceKind {
+	case fakeEntrySymlink:
+		if destinationKind == fakeEntryDirectory {
+			return fakePathError("rename", newpath, fs.ErrInvalid)
+		}
+		f.materializeParentDirectories(oldpath)
+		target := f.Symlinks[oldpath]
+		f.clearEntry(newpath)
 		f.Symlinks[newpath] = target
 		delete(f.Symlinks, oldpath)
 		return nil
-	}
-	if data, ok := f.Files[oldpath]; ok {
+
+	case fakeEntryFile:
+		if destinationKind == fakeEntryDirectory {
+			return fakePathError("rename", newpath, fs.ErrInvalid)
+		}
+		f.materializeParentDirectories(oldpath)
+		data := f.Files[oldpath]
+		f.clearEntry(newpath)
 		f.Files[newpath] = data
 		delete(f.Files, oldpath)
 		if mode, ok := f.Modes[oldpath]; ok {
@@ -295,7 +500,6 @@ func (f *Fake) Rename(oldpath, newpath string) error {
 			delete(f.Modes, newpath)
 		}
 		delete(f.Modes, oldpath)
-		delete(f.Symlinks, newpath)
 		if modTime, ok := f.ModTimes[oldpath]; ok {
 			f.ModTimes[newpath] = modTime
 			delete(f.ModTimes, oldpath)
@@ -303,32 +507,49 @@ func (f *Fake) Rename(oldpath, newpath string) error {
 			f.ModTimes[newpath] = f.nextModTime()
 		}
 		return nil
+
+	case fakeEntryDirectory:
+		if destinationKind != fakeEntryMissing || isDescendant(newpath, oldpath) {
+			return fakePathError("rename", newpath, fs.ErrInvalid)
+		}
+		f.materializeParentDirectories(oldpath)
+		moveMapEntries(f.Dirs, oldpath, newpath)
+		moveMapEntries(f.Files, oldpath, newpath)
+		moveMapEntries(f.Symlinks, oldpath, newpath)
+		moveMapEntries(f.Modes, oldpath, newpath)
+		moveMapEntries(f.ModTimes, oldpath, newpath)
+		return nil
 	}
-	return &os.PathError{Op: "rename", Path: oldpath, Err: os.ErrNotExist}
+	return fakePathError("rename", oldpath, fs.ErrInvalid)
 }
 
-// Remove records the call and deletes the file from the Files map.
+// Remove records the call and deletes a file, symlink, or empty directory.
 func (f *Fake) Remove(name string) error {
 	f.Calls = append(f.Calls, Call{Method: "Remove", Path: name})
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
 	if _, ok := f.Symlinks[name]; ok {
-		delete(f.Symlinks, name)
+		f.materializeParentDirectories(name)
+		f.clearEntry(name)
 		return nil
 	}
 	if _, ok := f.Files[name]; ok {
-		delete(f.Files, name)
+		f.materializeParentDirectories(name)
+		f.clearEntry(name)
+		return nil
+	}
+	if f.directoryExists(name) {
+		if f.hasDescendant(name) {
+			return fakePathError("remove", name, fs.ErrInvalid)
+		}
+		f.materializeParentDirectories(name)
+		delete(f.Dirs, name)
 		delete(f.Modes, name)
 		delete(f.ModTimes, name)
 		return nil
 	}
-	if f.Dirs[name] {
-		delete(f.Dirs, name)
-		delete(f.Modes, name)
-		return nil
-	}
-	return &os.PathError{Op: "remove", Path: name, Err: os.ErrNotExist}
+	return fakePathError("remove", name, fs.ErrNotExist)
 }
 
 // Chmod records the call and updates the stored mode.
@@ -347,7 +568,9 @@ func (f *Fake) Chmod(name string, mode os.FileMode) error {
 		f.Modes[name] = mode.Perm()
 		return nil
 	}
-	if f.Dirs[name] {
+	if f.directoryExists(name) {
+		f.materializeParentDirectories(name)
+		f.Dirs[name] = true
 		f.Modes[name] = mode.Perm()
 		return nil
 	}

@@ -202,6 +202,142 @@ func TestV2RoutedToNamespaceCheckWarnsOnSkippedStoreScopes(t *testing.T) {
 	}
 }
 
+func TestV2RoutedToNamespaceCheckCanFix(t *testing.T) {
+	check := newV2RoutedToNamespaceCheck(&config.City{}, t.TempDir(), nil)
+	if !check.CanFix() {
+		t.Fatal("expected CanFix to return true")
+	}
+}
+
+func TestV2RoutedToNamespaceCheckFixRewritesUnambiguousShortRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+		},
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
+	}, nil)
+
+	check := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	})
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix returned error: %v", err)
+	}
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status after fix = %v, want ok: %#v", result.Status, result)
+	}
+
+	items, err := cityStore.List(beads.ListQuery{Metadata: map[string]string{"gc.routed_to": "gastown.dog"}})
+	if err != nil {
+		t.Fatalf("listing city store: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "CITY-1" {
+		t.Fatalf("expected CITY-1 rewritten to gastown.dog, got %+v", items)
+	}
+}
+
+func TestV2RoutedToNamespaceCheckFixLeavesAmbiguousRoutesUntouched(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "dog", BindingName: "otherpack"},
+		},
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
+	}, nil)
+
+	check := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	})
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix returned error: %v", err)
+	}
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status after fix = %v, want warning (ambiguous route must stay unresolved): %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	want := `city bead CITY-1 has gc.routed_to="dog"; use one of gastown.dog, otherpack.dog`
+	if !strings.Contains(details, want) {
+		t.Fatalf("details missing %q:\n%s", want, details)
+	}
+
+	items, err := cityStore.List(beads.ListQuery{Metadata: map[string]string{"gc.routed_to": "dog"}})
+	if err != nil {
+		t.Fatalf("listing city store: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "CITY-1" {
+		t.Fatalf("expected CITY-1 to still carry the unresolved short route, got %+v", items)
+	}
+}
+
+func TestV2RoutedToNamespaceCheckFixIsPartialFailureTolerant(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "polecat", Dir: "repo", BindingName: "gastown"},
+		},
+		Rigs: []config.Rig{
+			{Name: "repo", Path: rigDir},
+		},
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
+	}, nil)
+	failingRigStore := routeSetMetadataErrorStore{
+		Store: beads.NewMemStoreFrom(0, []beads.Bead{
+			{ID: "RIG-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "repo/polecat"}},
+		}, nil),
+		err: errors.New("write denied"),
+	}
+	stores := map[string]beads.Store{
+		cityDir: cityStore,
+		rigDir:  failingRigStore,
+	}
+
+	check := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		store, ok := stores[path]
+		if !ok {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	err := check.Fix(&doctor.CheckContext{})
+	if err == nil {
+		t.Fatal("expected Fix to return an error for the failing store, got nil")
+	}
+	if !strings.Contains(err.Error(), "write denied") {
+		t.Fatalf("error %q does not mention the underlying SetMetadata failure", err.Error())
+	}
+
+	items, listErr := cityStore.List(beads.ListQuery{Metadata: map[string]string{"gc.routed_to": "gastown.dog"}})
+	if listErr != nil {
+		t.Fatalf("listing city store: %v", listErr)
+	}
+	if len(items) != 1 || items[0].ID != "CITY-1" {
+		t.Fatalf("expected CITY-1 rewritten to gastown.dog despite the rig store's failure, got %+v", items)
+	}
+}
+
 type routeListErrorStore struct {
 	beads.Store
 	err error
@@ -209,6 +345,15 @@ type routeListErrorStore struct {
 
 func (s routeListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
+}
+
+type routeSetMetadataErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s routeSetMetadataErrorStore) SetMetadata(string, string, string) error {
+	return s.err
 }
 
 type routeQuerySpyStore struct {

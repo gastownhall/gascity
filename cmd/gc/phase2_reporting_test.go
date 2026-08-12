@@ -444,8 +444,8 @@ func phase2PreparedEvidence(tc phase2ProviderCase, prepared *preparedStart) map[
 	evidence["command"] = prepared.cfg.Command
 	evidence["workdir"] = prepared.cfg.WorkDir
 	evidence["session_name"] = prepared.candidate.name()
-	evidence["started_config_hash"] = prepared.candidate.session.Metadata["started_config_hash"]
-	evidence["template_overrides"] = prepared.candidate.session.Metadata["template_overrides"]
+	evidence["started_config_hash"] = prepared.candidate.info.StartedConfigHash
+	evidence["template_overrides"] = prepared.candidate.info.TemplateOverrides
 	evidence["hook_enabled"] = strconv.FormatBool(prepared.candidate.tp.HookEnabled)
 
 	if prepared.candidate.tp.ResolvedProvider != nil {

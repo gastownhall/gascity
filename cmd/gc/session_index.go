@@ -8,7 +8,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // sessionEntry holds indexed metadata for a single session bead.
@@ -17,7 +17,6 @@ type sessionEntry struct {
 	state         string
 	sleepReason   string
 	sessionName   string
-	poolTemplate  string
 	generation    string
 	instanceToken string
 	labels        []string
@@ -39,12 +38,12 @@ func newSessionIndex() *sessionIndex {
 // populateIndex performs a one-time scan of session beads from the store
 // and builds the in-memory index. Only open beads are indexed (closed and
 // archived beads are skipped to keep the index small).
-func (idx *sessionIndex) populateIndex(store beads.Store, stderr io.Writer) {
-	if store == nil {
+func (idx *sessionIndex) populateIndex(sessFront *session.Store, stderr io.Writer) {
+	if !sessFront.Backed() {
 		return
 	}
 
-	loaded, err := loadSessionBeads(store)
+	loaded, err := sessFront.ListAll(session.ListAllOptions{})
 	if err != nil {
 		fmt.Fprintf(stderr, "session index: populate: %v\n", err) //nolint:errcheck
 		return
@@ -54,15 +53,15 @@ func (idx *sessionIndex) populateIndex(store beads.Store, stderr io.Writer) {
 	defer idx.mu.Unlock()
 
 	idx.entries = make(map[string]*sessionEntry, len(loaded))
-	for _, b := range loaded {
-		state := b.Metadata["state"]
+	for _, info := range loaded {
+		state := info.MetadataState
 		// Skip archived/closed — they don't affect reconciliation.
 		// Check both metadata state (includes legacy "stopped" mapped to
 		// "closed") and bead-level status.
-		if state == "archived" || state == "closed" || b.Status == "closed" {
+		if state == "archived" || state == "closed" || info.Closed {
 			continue
 		}
-		idx.entries[b.ID] = entryFromBead(b)
+		idx.entries[info.ID] = entryFromInfo(info)
 	}
 }
 
@@ -140,16 +139,18 @@ func (idx *sessionIndex) get(beadID string) *sessionEntry {
 	return idx.entries[beadID]
 }
 
-// entryFromBead constructs a sessionEntry from a bead's metadata.
-func entryFromBead(b beads.Bead) *sessionEntry {
+// entryFromInfo constructs a sessionEntry from a session.Info projection. Each
+// field is a verbatim codec mirror of the raw bead metadata the index formerly
+// cracked (MetadataState/SessionNameMetadata are the raw, un-normalized forms —
+// NOT the closed-blanked State or the sessionNameFor-fallback SessionName).
+func entryFromInfo(info session.Info) *sessionEntry {
 	return &sessionEntry{
-		template:      b.Metadata["template"],
-		state:         b.Metadata["state"],
-		sleepReason:   b.Metadata["sleep_reason"],
-		sessionName:   b.Metadata["session_name"],
-		poolTemplate:  b.Metadata["pool_template"],
-		generation:    b.Metadata["generation"],
-		instanceToken: b.Metadata["instance_token"],
-		labels:        b.Labels,
+		template:      info.Template,
+		state:         info.MetadataState,
+		sleepReason:   info.SleepReason,
+		sessionName:   info.SessionNameMetadata,
+		generation:    info.Generation,
+		instanceToken: info.InstanceToken,
+		labels:        info.Labels,
 	}
 }

@@ -9,12 +9,30 @@ import (
 	"testing"
 )
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 var (
 	testGCBinaryOnce sync.Once
 	testGCBinaryPath string
 	testGCBinaryErr  error
 )
 
+// reexecGCTestBinaryForTests returns the current Go test executable through a
+// symlink named gc. TestMain recognizes that basename and dispatches the
+// supplied arguments through the real CLI command tree without rebuilding gc.
+func reexecGCTestBinaryForTests(t *testing.T) string {
+	t.Helper()
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	gcPath := filepath.Join(t.TempDir(), "gc")
+	if err := os.Symlink(testExecutable, gcPath); err != nil {
+		t.Fatalf("symlink test executable as gc: %v", err)
+	}
+	return gcPath
+}
+
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
 	testGCBinaryOnce.Do(func() {

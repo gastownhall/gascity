@@ -25,6 +25,7 @@ City is the top-level configuration for a Gas City instance.
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
+| `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
@@ -41,6 +42,8 @@ City is the top-level configuration for a Gas City instance.
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
+| `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
@@ -65,8 +68,11 @@ APIConfig configures the HTTP API server.
 | `port` | integer |  |  | Port is the TCP port to listen on. Defaults to 9443; 0 = disabled. |
 | `bind` | string |  |  | Bind is the address to bind the listener to. Defaults to "127.0.0.1". |
 | `allow_mutations` | boolean |  |  | AllowMutations overrides the default read-only behavior when bind is non-localhost. Set to true in containerized environments where the API must bind to 0.0.0.0 for health probes but mutations are still safe. |
-| `write_auth_verify_key` | string |  |  | WriteAuthVerifyKey, when set, requires every mutating request to an already-registered city — the per-city routes under /v0/city/&#123;cityName&#125; — to carry a signed write grant from a configured trusted authority. It gates all per-city writes (beads, mail, sessions, agents, and config), not only config edits. City registry creation (POST /v0/city) is not covered: a grant binds a path-resident city name, which a not-yet-created city lacks, so creation stays governed by the supervisor-registry guards. Built-in callers (the bundled gc API client and dashboard SPA) send only the CSRF header and mint no grant, so enabling this gate turns their direct city mutations away with a clear 401; such deployments front mutations through the trusted authority that mints grants instead. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. |
+| `write_auth_verify_key` | string |  |  | WriteAuthVerifyKey, when set, requires every mutating request to an already-registered city — the per-city routes under /v0/city/&#123;cityName&#125; — to carry a signed write grant from a configured trusted authority. It gates all per-city writes (beads, mail, sessions, agents, and config), not only config edits. City registry creation (POST /v0/city) is not covered: a grant binds a path-resident city name, which a not-yet-created city lacks, so creation stays governed by the supervisor-registry guards. Built-in callers (the bundled gc API client and dashboard SPA) send only the CSRF header and mint no grant, so enabling this gate turns their direct city mutations away with a clear 401; such deployments front mutations through the trusted authority that mints grants instead. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted multi-tenant deployments the GC_CITY_WRITE_CID env var (ops-plane only, no config field) additionally binds the gate to the controller's own city id: every grant must then carry that exact cid claim, failing closed on a mismatching or missing cid. |
 | `write_auth_required` | boolean |  |  | WriteAuthRequired makes a missing or empty WriteAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate writes fails closed if the key is ever dropped. The GC_CITY_WRITE_REQUIRED=1 env var has the same effect. |
+| `write_auth_allow_unverified` | boolean |  |  | WriteAuthAllowUnverified acknowledges running a non-loopback bind with allow_mutations and NO write-auth verify key — an unauthenticated write plane fronted only by the network. Without it, that combination is a fail-closed startup error (gate G10) so a hardened deployment cannot boot wide open by omission. Set it (or GC_CITY_WRITE_ALLOW_UNVERIFIED=1) only for a network-fronted deployment that intentionally trusts its perimeter. |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an already-registered city on the typed per-city API — the routes under /v0/city/&#123;cityName&#125; — to carry a signed read grant from a configured trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding in-process, grant-based admission control to the typed city read surface (beads, mail, sessions, agent transcripts) instead of trusting network position.  Scope boundary: this gate covers ONLY the typed /v0/city/&#123;cityName&#125; read routes. It does NOT cover other surfaces on the same listener that can also expose per-city data: the supervisor-scope aggregate event feed (/v0/events and /v0/events/stream, which multiplex every running city's events), the default-on dashboard host plane (/api/*, including its /api/city/&#123;cityName&#125;/* samplers, run detail, run diff, and config reads), and the supervisor-scope routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the only complete mitigation is to front the whole listener with the grant-minting authority/edge (the intended deployment), which protects every surface above. Disabling the dashboard host plane with GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/* only, while the supervisor-scope event feed /v0/events and /v0/events/stream stays readable by network position until the follow-up supervisor-scope grant lands. Gating those feeds is tracked as that follow-up work.  Built-in callers (the bundled gc API client and dashboard SPA) mint no grant, so enabling this gate turns their direct /v0/city reads away with a clear 401; such deployments front reads through the authority that mints grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_READ_EPOCH_FLOOR env var; it has no config field. |
+| `read_auth_required` | boolean |  |  | ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1 env var has the same effect. |
 
 ## Agent
 
@@ -110,6 +116,7 @@ Agent defines a configured agent in the city.
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `max_session_age` | string |  |  | MaxSessionAge is the maximum wall-clock lifetime of a single runtime session before the controller preemptively restarts it. Duration string (e.g., "5h"). Empty (default) disables preemptive restarts. The restart is idle-gated: sessions with a pending interaction or an in-progress assigned work bead are left alone until they settle.  Motivation: provider SDKs that cache credentials at session start (e.g., Claude Code via Bedrock) can wedge when the underlying token expires if the SDK doesn't re-chain providers. Cycling long-running sessions before the token-expiry window prevents that failure mode without requiring upstream provider fixes. |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a per-session basis so a fleet of identically-configured agents doesn't synchronize restarts. Duration string (e.g., "15m"). Empty or 0 disables jitter (every session restarts at exactly MaxSessionAge). Ignored when MaxSessionAge is unset. |
+| `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the idle-timeout ladder may defer on the same assigned-work bead (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler overrides the defer and forces a stop via DecideAssignedWorkExhausted. Nil means use the built-in default. Without this backstop a session anchored to a bead that never clears assigned-work (e.g. a bead stuck open due to an upstream status-mapping bug) would defer indefinitely, reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at the single-tick level. The counter resets whenever the anchor bead changes or the session is not idle-kill-eligible; see sessionHasAwakeAssignedWorkForReachableStore's caller in session_reconciler.go. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides workspace-level install_agent_hooks for this agent. When set, replaces (not adds to) the workspace default. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
@@ -173,6 +180,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). Empty disables preemptive restart. |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge. Duration string (e.g., "15m"). Empty disables jitter. |
+| `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
@@ -230,6 +238,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m"). |
+| `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string or "off". |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
@@ -279,6 +288,8 @@ BeadsConfig holds bead store settings.
 | `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
+| `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -325,7 +336,9 @@ DaemonConfig holds controller daemon settings.
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Fresh generic pool session-bead creation uses the same budget so the controller does not materialize more ordinary pool sessions than it can wake. Bounded dependency-floor prerequisites are exempt. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 | `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
 | `auto_restart_on_drift` | boolean |  | `true` | AutoRestartOnDrift controls whether `gc start` automatically restarts the supervisor when it detects the running supervisor's binary or pack snapshot has drifted from on-disk state. Nil (unset) defaults to true — operators get the correct-by-default behavior. Set to false as a global kill switch (e.g., for production cities where a rebuild on the host should not auto-restart the supervisor). |
-| `auto_reap_closed_bead_worktrees` | boolean |  | `false` | AutoReapClosedBeadWorktrees controls whether the reconciler patrol automatically removes per-bead git worktrees once their associated work bead reaches closed status. Only worktrees with a clean working tree, no unpushed commits, and no stashes are removed; unsafe worktrees are logged as warnings and left in place for operator review. Session home directories (agent template directories) are never touched. Defaults to false. Set to true to enable automated worktree cleanup. |
+| `auto_reap_closed_bead_worktrees` | boolean |  | `false` | AutoReapClosedBeadWorktrees controls whether the reconciler patrol automatically removes per-bead git worktrees once their associated work bead reaches closed status. Only worktrees with a clean working tree, no stashes, and no commits that removal would orphan — commits reachable from no branch, tag, or remote-tracking ref — are removed; push state is deliberately not the test, since `git worktree remove` deletes the checkout and not refs/heads. Unsafe worktrees are logged as warnings and left in place for operator review. Session home directories (agent template directories) are never touched. Defaults to false. Set to true to enable automated worktree cleanup. |
+| `auto_reap_closed_bead_worktrees_dry_run` | boolean |  | `false` | AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the full worktree-reap classification each tick — discovery, closed-bead match, liveness gate, and git-safety probes — but emit bead.worktree.reap_skipped events describing what it WOULD reap and what it protected, without removing anything. This is the safe staged-rollout surface: an operator enables dry-run first, confirms via `gc events` that no live worktree appears in the would-reap set, then enables AutoReapClosedBeadWorktrees for real removal. Those events are edge-triggered: each worktree is reported when the patrol first classifies it and again whenever its verdict changes, not once per tick, so the would-reap set is complete right after dry-run is enabled rather than reprinted every sweep. Dry-run has no effect when AutoReapClosedBeadWorktrees is already true (real removal supersedes it). Defaults to false. |
+| `auto_reap_closed_bead_worktrees_min_age_minutes` | integer |  | `10` | AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age, in minutes, before a closed-bead worktree becomes eligible for reap classification at all (borrow-veto scan and beyond). This quarantines a worktree against the race between its creation and its owning bead's gc.work_dir/work_dir metadata being stamped by the next reconcile pass — without it, a just-created worktree could look unclaimed to the borrow-veto scan before the metadata that would protect it has been written. Nil (unset) defaults to DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the quarantine entirely (every closed-bead worktree is immediately eligible for the rest of the gate chain, regardless of age). |
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
@@ -354,6 +367,7 @@ DoltConfig holds optional dolt server overrides.
 | `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
 | `read_timeout_millis` | integer |  | `15000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
 | `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
+| `wait_timeout_seconds` | integer |  | `30` | WaitTimeoutSeconds overrides the managed server's wait_timeout system variable, which is how long Dolt keeps an idle connection before reaping it. Cities that raise ReadTimeoutMillis above the reconcile tick gap generally need this raised with it, or the controller's long-lived dispatch-pool connections are still reaped between ticks. Before this field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process environment, which no city.toml could express and no shell-invoked restart inherited — so a restart from an operator shell silently rewrote the value. 0 (omitted) means use the managed default. |
 | `dolt_lock_release_timeout` | string |  | `1m` | DoltLockReleaseTimeout is how long managed-dolt lifecycle operations wait for dolt's on-disk exclusive store locks (the root-level `&lt;data_dir&gt;/.dolt/noms/LOCK` and per-database `&lt;data_dir&gt;/&lt;db&gt;/.dolt/noms/LOCK` forms) to be released by a prior server process before failing closed. The start path refuses to launch a second `dolt sql-server` against a data_dir whose lock is still held — a prior instance that is shutting down holds the lock until its chunk journal is flushed, and binding before release corrupts the journal (see gastownhall/gascity#3174). The stop path uses the same window to wait for lock release after process exit before reporting success. Duration string (e.g., "1m", "90s"). Defaults to "1m", which covers the flush window of multi-GB journals on commodity SSDs. Set to "0s" to probe once with no wait (still fail-closed when held). Negative values are rejected at config load. The managed lifecycle also projects this value into the gc-beads-bd.sh shell fallback as GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor the configured window. |
 
 ## DoltMaintenance
@@ -571,6 +585,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `check_timeout` | string |  |  | CheckTimeout overrides the condition trigger's check-command deadline. Go duration string. Lets a deployment tune check_timeout for a scanned shared-pack order (e.g. a slow-store queue check) without editing the pack source. |
 | `idempotent` | boolean |  |  | Idempotent overrides whether the order's dispatch is safe to repeat. Idempotent orders fail open when the open-work gate times out (#2893). |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
@@ -581,7 +596,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
-| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on per-order timeouts. No order gets more than this duration. Go duration string (e.g., "60s"). Empty means uncapped (no override). |
+| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -717,6 +732,7 @@ Rig defines an external project registered in the city.
 | `overrides` | []AgentOverride |  |  | Overrides are per-agent patches applied after pack expansion. V2 renames this to "patches" for consistency with [[patches.agent]]. Both TOML keys are accepted during migration. |
 | `patches` | []AgentOverride |  |  | Patches is the V2 name for rig-level agent overrides. Takes precedence over Overrides if both are set. |
 | `default_sling_target` | string |  |  | DefaultSlingTarget is the agent qualified name used when gc sling is invoked with only a bead ID (no explicit target). Resolved via resolveAgentIdentity. Example: "rig/polecat" |
+| `default_sling_targets` | []string |  |  | DefaultSlingTargets is the plural form of DefaultSlingTarget. When set, targetless gc sling picks one entry at random each dispatch. Takes precedence over DefaultSlingTarget when non-empty. Each entry is resolved the same way as DefaultSlingTarget. Example:   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"] |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides workspace-level idle sleep defaults for agents in this rig. |
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
 | `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
@@ -787,13 +803,16 @@ SessionConfig holds session provider settings.
 | `k8s` | K8sConfig |  |  | K8s holds Kubernetes-specific settings for the native K8s provider. |
 | `acp` | ACPSessionConfig |  |  | ACP holds settings for the ACP (Agent Client Protocol) session provider. |
 | `setup_timeout` | string |  | `10s` | SetupTimeout is the per-command/script timeout for session setup and pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s". |
+| `setup_max_timeout` | string |  |  | SetupMaxTimeout enables an activity-aware budget for session setup and pre_start commands. When set (e.g. "10m"), a setup command is no longer killed after setup_timeout of wall clock; instead setup_timeout bounds how long it may run without producing output (idle budget) and setup_max_timeout bounds its total runtime regardless of output (the runaway ceiling). A slow but healthy command — a large worktree checkout streaming progress — survives, while a hung one still dies after setup_timeout of silence. Duration string. Empty (the default) keeps the fixed setup_timeout deadline. |
 | `nudge_ready_timeout` | string |  | `10s` | NudgeReadyTimeout is how long to wait for the agent to be ready before sending nudge text. Duration string. Defaults to "10s". |
 | `nudge_retry_interval` | string |  | `500ms` | NudgeRetryInterval is the retry interval between nudge readiness polls. Duration string. Defaults to "500ms". |
+| `nudge_poll_interval` | string |  | `2s` | NudgePollInterval is the cycle interval for the per-session nudge poller sidecar (`gc nudge poll`). Each cycle observes the session and checks the queued-nudge state, so on hosts running many sessions a longer interval trades nudge-delivery latency for less standing load. Duration string. Unset means the poller's built-in default (2s). |
 | `nudge_lock_timeout` | string |  | `30s` | NudgeLockTimeout is how long to wait to acquire the per-session nudge lock. Duration string. Defaults to "30s". |
 | `debounce_ms` | integer |  | `500` | DebounceMs is the default debounce interval in milliseconds for send-keys. Defaults to 500. |
 | `display_ms` | integer |  | `5000` | DisplayMs is the default display duration in milliseconds for status messages. Defaults to 5000. |
 | `startup_timeout` | string |  | `60s` | StartupTimeout is how long to wait for each agent's Start() call before treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s". |
 | `progress_stall_timeout` | string |  |  | ProgressStallTimeout, when set, enables progress-aware session recycling: a desired, alive, claim-less session on a healthy provider whose last provider-reported activity is older than this duration is restarted fresh. Such a session has likely parked (e.g. its turn ended on a provider auth error) and will not self-recover. Set this above the longest legitimate alive-idle period for the city; values below 5m are clamped to 5m. Duration string (e.g. "30m"). Unset/zero disables it. |
+| `claim_holder_stall_timeout` | string |  |  | ClaimHolderStallTimeout, when set, enables progress-aware recycling of a desired, alive session that holds in-progress work but has stopped making progress. Because recycling a claim-holder interrupts work, set this above the longest legitimate quiet period. Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero disables it. |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
 
@@ -806,6 +825,40 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StorageBindingConfig
+
+StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; the SQLite provider accepts `path` (default `.gc/store`), while every other provider accepts an opaque `config_ref` that provider resolves.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the exact ID of a provider compiled into this gc binary. |
+| `path` | string |  | `.gc/store` | Path is the SQLite binding root, relative to the city unless absolute. Empty defaults to ".gc/store". |
+| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by the provider that owns the binding, within the city that declares it. |
+| `url` | string |  |  | URL is the http or https endpoint a remote beads workspace is served from, for a binding whose workspace backend does not live on this disk. It carries no credentials, query, or fragment; a path prefix is allowed because an edge may mount the service below the root. Empty means the workspace named by config_ref is local, which is the default. |
+| `auth` | string |  |  | Auth is a reference to the credential for URL, never the credential itself: "gasworks" mints one through the configured credential-provider command, and "env:NAME" reads one from an environment variable. |
+
+## StorageClasses
+
+StorageClasses is the closed set of semantic storage assignments; when `[storage]` is authored, all six fields are required after fragment layering, while omission assigns every class to `work`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `work` | string | **yes** |  | Work selects the binding for the shareable work ledger. |
+| `graph` | string | **yes** |  | Graph selects the binding for formula graph state. |
+| `sessions` | string | **yes** |  | Sessions selects the binding for session lifecycle and durable waits. |
+| `messaging` | string | **yes** |  | Messaging selects the binding for mail and external-message state. |
+| `orders` | string | **yes** |  | Orders selects the binding for order-run state. |
+| `nudges` | string | **yes** |  | Nudges selects the binding for the durable nudge queue. |
+
+## StorageConfig
+
+StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
+| `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
 
 ## Tier
 
@@ -851,6 +904,104 @@ UsageConfig holds usage-fact sink settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the usage sink backend:   - "discard" / "fake" → drop all facts   - "exec:&lt;script&gt;" → user-supplied script (JSON fact per line on stdin)   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default) |
 
+## Webhook
+
+Webhook declares a city- or rig-scoped inbound HTTP receiver mounted under /v0/city/{city}/hook/{name}.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the unique webhook identifier and mount segment. |
+| `scope` | string |  |  | Scope selects city- or rig-scoped dispatch semantics, mirroring Order.Scope. Empty defaults to city. Enum: `city`, `rig` |
+| `rig` | string |  |  | Rig is the authoritative rig binding for a rig-scoped webhook (Scope=="rig"). It is REQUIRED when scope="rig" and forbidden otherwise: the receiver copies it into the dispatch scope so the sink constrains delivery to this rig (R4), and a rule that names any other rig is refused. Without it a rig-scoped webhook fails closed (it can target no rig). Leave unset for city scope. |
+| `publication` | ServicePublicationConfig |  |  | Publication declares generic publication intent, reusing the service publication contract. Pack/fragment-contributed public webhooks are capped to tenant unless the city grants them via [webhooks].allow_public. |
+| `verify` | WebhookVerify |  |  | Verify declares the signature verification scheme and its inputs. |
+| `rule` | []WebhookRule |  |  | Rules maps verified provider events to dispatch targets. |
+| `max_per_minute` | integer |  |  | MaxPerMinute is an optional per-webhook self-imposed sustained request ceiling for the E8 rate limiter. SECURITY: a [[webhook]] block may be pack-contributed, and a pack must never be able to weaken the operator's flood defense, so this value may only LOWER a webhook's effective limit — it is min-clamped to the operator-owned ceiling and can never raise it (see WebhookPolicyConfig.EffectiveRateLimit). Leave unset to inherit the operator default/override. |
+
+## WebhookAllowPublic
+
+WebhookAllowPublic is one operator-authored public-exposure grant.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook name being granted public exposure. |
+| `source` | string | **yes** |  | Source is the pack/fragment provenance the grant is scoped to. Matched against the webhook's stamped SourceDir. |
+| `digest` | string |  |  | Digest pins the content digest of the granted webhook's security-relevant fields (see WebhookContentDigest). It is REQUIRED for the grant to honor public exposure: applyWebhookPackGuard recomputes the digest at load and caps the webhook to tenant when the grant has no digest or the digest no longer matches (R3 content-scoped consent), so a content-swap upgrade of a public hook auto-downgrades until the operator re-consents to the new digest. The downgrade warning names the digest to pin. |
+
+## WebhookJWTPolicy
+
+WebhookJWTPolicy is one operator-owned jwt-jwks trust anchor.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the webhook this policy applies to (matched against Webhook.Name). |
+| `issuer` | string | **yes** |  | Issuer is the required "iss" claim, pinned exactly. |
+| `audience` | string | **yes** |  | Audience is the required "aud" claim. |
+| `jwks_url` | string | **yes** |  | JWKSURL is the https endpoint publishing the signing keys. |
+
+## WebhookPolicyConfig
+
+WebhookPolicyConfig holds city-level webhook governance authored in the root city.toml under [webhooks].
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `allow_public` | []WebhookAllowPublic |  |  | AllowPublic lists &#123;name, source&#125; grants that permit a pack/fragment webhook to keep publication.visibility="public". Default-closed: a pack/fragment public webhook with no matching grant is capped to tenant. |
+| `jwt_policy` | []WebhookJWTPolicy |  |  | JWTPolicies pins the operator-owned trust anchor for each jwt-jwks webhook, keyed by webhook name. Per security review R1, a jwt-jwks webhook's issuer, audience, and JWKS URL are operator-owned and must come from here (the root city.toml [webhooks] block), never from a pack-authored [webhook.verify] table — otherwise a pack could point the trust root at an attacker-controlled issuer/JWKS. The receiver (E3) reads this, not WebhookVerify.Issuer/etc., when constructing the jwt-jwks verifier. |
+| `rate_limit` | WebhookRateLimitConfig |  |  | RateLimit holds the operator-owned E8 per-webhook rate-limit governance: the fleet default plus optional per-webhook overrides. Because the whole [webhooks] table is never merged from packs or fragments, a pack cannot touch these values — it can only LOWER its own limit via Webhook.MaxPerMinute (clamped in EffectiveRateLimit). This is the trust boundary for the flood defense: the operator sets the ceiling; packs may only self-restrict below it.  A pointer so an absent [webhooks].rate_limit round-trips cleanly (a zero-value nested table is not suppressed by BurntSushi's omitempty); nil means "use the built-in defaults". |
+
+## WebhookRateLimitConfig
+
+WebhookRateLimitConfig is the operator-owned rate-limit policy authored under the root city.toml [webhooks].rate_limit table.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `per_minute` | integer |  |  | PerMinute is the default sustained request ceiling applied to every webhook that declares no lower self-limit. 0 uses defaultWebhookRateLimitPerMinute. |
+| `burst` | integer |  |  | Burst is the token-bucket burst allowance. 0 uses defaultWebhookRateLimitBurst. |
+| `override` | []WebhookRateLimitOverride |  |  | Overrides pins an operator-chosen limit for a specific webhook by name. Operator authority: an override may raise OR lower that webhook's limit — it is the operator, not a pack, declaring it. A pack's own MaxPerMinute can then only clamp further downward, never above the override. |
+
+## WebhookRateLimitOverride
+
+WebhookRateLimitOverride is one operator-authored per-webhook rate-limit pin.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  |  |
+| `per_minute` | integer |  |  |  |
+| `burst` | integer |  |  |  |
+
+## WebhookRule
+
+WebhookRule maps one verified provider event to a dispatch target.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `event` | string | **yes** |  | Event is the provider event type this rule matches (e.g. pull_request). |
+| `match` | map[string]string |  |  | Match is an exact-equality dotted-path predicate over the payload. |
+| `order` | string |  |  | Order is the target order name for target="order" rules. |
+| `rig` | string |  |  | Rig optionally scopes the dispatched order to a rig. |
+| `target` | string |  |  | Target selects the dispatch sink: "order" (default) or "conversation". Enum: `order`, `conversation` |
+| `args` | map[string]string |  |  | Args maps declared order params to &#123;&#123;payload.path&#125;&#125; projections. |
+
+## WebhookVerify
+
+WebhookVerify declares how an inbound delivery is authenticated.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scheme` | string |  |  | Scheme selects the built-in verifier (see knownWebhookSchemes). |
+| `secret_env` | string |  |  | SecretEnv names the environment variable holding the HMAC/shared secret. |
+| `secret_key` | string |  |  | SecretKey is an optional stable rotation-slot identifier. Empty defaults to SecretEnv. |
+| `signature_header` | string |  |  | SignatureHeader overrides the request header carrying the signature for generic HMAC schemes (e.g. X-Plane-Signature). |
+| `event_header` | string |  |  | EventHeader names the request header carrying the provider event type. |
+| `dedup_header` | string |  |  | DedupHeader names the request header whose value is surfaced as the delivery id on webhook.received events for observability. It does NOT key at-least-once dedup for the signature-only schemes (github-hmac-sha256, hmac-sha256, slack-v0, discord-ed25519): those dedup on a hash of the signed body, because an unsigned or coarse header cannot safely key dedup — a captured valid delivery could be replayed under a fresh header id to re-fire the order. Only jwt-jwks keys dedup directly, on its signed per-delivery-unique "jti". As a consequence two deliveries with byte-identical signed bodies inside the dedup window collapse to one dispatch, so a source that must resend an identical payload has to carry a unique value inside the signed body. |
+| `timestamp_header` | string |  |  | TimestampHeader optionally names a request header carrying a signed timestamp for replay defense. |
+| `replay_window` | string |  |  | ReplayWindow bounds the accepted signed-timestamp skew (Go duration). |
+| `issuer` | string |  |  | Issuer, JWKSURL, and Audience pin the jwt-jwks trust anchor. Per the security review (R1) these are operator-owned and must be declared in city.toml, never in pack TOML. |
+| `jwks_url` | string |  |  |  |
+| `audience` | string |  |  |  |
+| `bearer_env` | string |  |  | BearerEnv optionally names an env var holding an additional per-source bearer token checked alongside the signature. |
+| `allowed_cidrs` | []string |  |  | AllowedCIDRs optionally restricts accepted source addresses (e.g. the GitHub webhook CIDR allowlist). |
+
 ## Workspace
 
 Workspace holds city-level metadata and optional defaults that apply to all agents unless overridden per-agent.
@@ -860,6 +1011,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `name` | string |  |  | Name is the legacy checked-in city name. Runtime identity now resolves from site binding (.gc/site.toml workspace_name), declared config, and basename precedence instead; gc init writes the machine-local name to site.toml and omits it from city.toml. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived HQ bead ID prefix. When empty, the prefix is derived from the city Name via DeriveBeadsPrefix. |
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |
+| `timezone` | string |  |  | Timezone is the city-default IANA time zone (e.g. "America/New_York") in which cron order schedules are evaluated when an order does not set its own tz. Empty means the controller's process-local zone. Invalid names fail order discovery loudly rather than falling back silently. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for all agents. |
 | `suspended` | boolean |  |  | Suspended is the deprecated pre-runtime-state city suspension flag. Parsed for backwards compatibility and treated as an alias for SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so existing cities with `suspended = true` continue to start suspended after upgrade. Live suspend/resume commands no longer write this field. `gc doctor` flags it and offers `--fix` to rename to suspended_on_start. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the city's desired suspension state at start. When true and no explicit entry exists in .gc/runtime/suspension-state.json, the city is treated as suspended. Once the user has explicitly suspended or resumed via `gc suspend/resume`, the runtime state wins. |

@@ -143,6 +143,19 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	return e.write(raw)
 }
 
+// Do runs fn while holding the Editor's mutation lock, serializing it against
+// every other Editor mutation of this city. Use it for city-config writes that
+// do not fit the load → mutate → validate → write callback shape — for example
+// a multi-file pack import that writes pack.toml, packs.lock, and sometimes
+// city.toml — so they still pass through the single per-city serialization
+// boundary the [Editor] provides. The Editor does not load, validate, or write
+// city.toml for a Do call; fn owns its own I/O.
+func (e *Editor) Do(fn func() error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fn()
+}
+
 func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
@@ -152,6 +165,9 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("%w: webhooks: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
@@ -1128,20 +1144,6 @@ func (e *Editor) DeleteAgent(name string) error {
 	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
-// CreateRig adds a new rig to the config. Returns an error if a rig with
-// the same name already exists.
-func (e *Editor) CreateRig(r config.Rig) error {
-	return e.Edit(func(cfg *config.City) error {
-		for _, existing := range cfg.Rigs {
-			if existing.Name == r.Name {
-				return fmt.Errorf("%w: rig %q", ErrAlreadyExists, r.Name)
-			}
-		}
-		cfg.Rigs = append(cfg.Rigs, r)
-		return nil
-	})
-}
-
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
@@ -1526,6 +1528,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	}
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
+	}
+	if src.CheckTimeout != nil {
+		dst.CheckTimeout = src.CheckTimeout
 	}
 	if src.Idempotent != nil {
 		dst.Idempotent = src.Idempotent

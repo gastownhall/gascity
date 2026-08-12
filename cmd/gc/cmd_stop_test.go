@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type recordingStopProvider struct {
@@ -93,9 +94,11 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 			sp.release(name)
 		}
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -123,20 +126,20 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 
 	sp.release(stopped[0])
 
-	select {
-	case code := <-stopDone:
-		if code != 0 {
-			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-stopDone:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("cmdStop did not finish after releasing controller shutdown")
+	}, "cmdStop to finish after releasing controller shutdown")
+	if code != 0 {
+		t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit after cmdStop")
-	}
+	awaitClose(t, done, "controller to exit after cmdStop")
 
 	if pid := controllerAlive(dir); pid != 0 {
 		t.Fatalf("controllerAlive after cmdStop = %d, want 0", pid)
@@ -181,26 +184,28 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// cmdStop's wall-clock cap returns 1 while cmdStopBody is still blocked
-	// in hangingProvider.Stop. The body goroutine eventually calls back into
+	// cmdStop's wall-clock cap returns 1 while its worker is still blocked in
+	// hangingProvider.Stop. The worker eventually calls back into
 	// shutdownBeadsProviderForStop; if it does so after another test has
-	// installed its own override, the global state races. Capture the body's
+	// installed its own override, the global state races. Capture the worker's
 	// done channel via stopBodyLifecycleHook and wait for it to close in
 	// teardown so the leaked goroutine cannot outlive this test.
 	oldFactory := sessionProviderForStopCity
 	oldHook := stopBodyLifecycleHook
 	var bodyDone <-chan struct{}
 	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
-		return sp
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return sp, nil
 	}
 	t.Cleanup(func() {
 		sp.release()
 		if bodyDone != nil {
+			// Reports via Errorf (not Fatal) so a stuck goroutine doesn't skip
+			// the global-state restore below; bumped to hangBudget.
 			select {
 			case <-bodyDone:
-			case <-time.After(10 * time.Second):
-				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
+			case <-time.After(hangBudget):
+				t.Errorf("gc stop worker did not exit after hangingProvider release")
 			}
 		}
 		sessionProviderForStopCity = oldFactory
@@ -208,15 +213,23 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	})
 
 	var stdout, stderr lockedBuffer
+	const testWallClockCap = 100 * time.Millisecond
 	started := time.Now()
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 100*time.Millisecond, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, testWallClockCap, false)
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("cmdStop returned after %s, want wall-clock cap near 100ms", elapsed)
+	// This is the "subject under test" exception in TESTING.md's Test deadline
+	// rule, not a hang budget: it asserts cmdStop actually honors
+	// testWallClockCap instead of blocking indefinitely on the still-hung
+	// provider, so it must stay well below hangBudget. The multiplier is
+	// evidence-based rather than arbitrary -- the previous 10x bound (1s) was
+	// still too tight under real make test-fast-parallel shard contention
+	// (observed 1.230021478s).
+	if elapsed := time.Since(started); elapsed > 50*testWallClockCap {
+		t.Fatalf("cmdStop returned after %s, want wall-clock cap near %s", elapsed, testWallClockCap)
 	}
-	if !strings.Contains(stderr.String(), "timed out after 100ms") {
+	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
 		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
 	}
 }
@@ -256,9 +269,11 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -271,7 +286,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	stopDone := make(chan int, 1)
 	go func() {
-		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 2*time.Second, true)
+		stopDone <- cmdStop([]string{dir}, &stdout, &stderr, 5*time.Second, true)
 	}()
 
 	select {
@@ -281,7 +296,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		if stopped != sess {
 			t.Fatalf("stopped = %q, want %q", stopped, sess)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for delegated force stop")
 	}
 
@@ -290,7 +305,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q controller stderr=%q", code, stdout.String(), stderr.String(), controllerStderr.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("cmdStop did not finish after delegated force stop")
 	}
 }
@@ -330,9 +345,11 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		tryStopControllerWithForce(dir, io.Discard, true)
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -375,14 +392,18 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 		{name: "normal stop", ch: normalDone, out: &normalStdout, err: &normalStderr},
 		{name: "force stop", ch: forceDone, out: &forceStdout, err: &forceStderr},
 	} {
-		select {
-		case code := <-result.ch:
-			if code != 0 {
-				t.Fatalf("%s code = %d, want 0; stdout=%q stderr=%q controller stderr=%q",
-					result.name, code, result.out.String(), result.err.String(), controllerStderr.String())
+		var code int
+		awaitCond(t, func() bool {
+			select {
+			case code = <-result.ch:
+				return true
+			default:
+				return false
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s did not finish after force escalation", result.name)
+		}, fmt.Sprintf("%s to finish after force escalation", result.name))
+		if code != 0 {
+			t.Fatalf("%s code = %d, want 0; stdout=%q stderr=%q controller stderr=%q",
+				result.name, code, result.out.String(), result.err.String(), controllerStderr.String())
 		}
 	}
 }
@@ -420,9 +441,9 @@ func TestCmdStopExplicitRegisteredRigPathUsesSharedResolver(t *testing.T) {
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 	var gotCityPath string
-	sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+	sessionProviderForStopCity = func(_ *config.City, cityPath string) (runtime.Provider, error) {
 		gotCityPath = cityPath
-		return runtime.NewFake()
+		return runtime.NewFake(), nil
 	}
 
 	var stdout, stderr lockedBuffer
@@ -486,9 +507,9 @@ func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *test
 			oldFactory := sessionProviderForStopCity
 			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 			var gotCityPath string
-			sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+			sessionProviderForStopCity = func(_ *config.City, cityPath string) (runtime.Provider, error) {
 				gotCityPath = cityPath
-				return runtime.NewFake()
+				return runtime.NewFake(), nil
 			}
 
 			var stdout, stderr lockedBuffer
@@ -505,6 +526,29 @@ func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *test
 }
 
 func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testing.T) {
+	cityDir := setupSupervisorManagedInvalidCity(t)
+	var waitedPath string
+	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+		waitedPath = path
+		return nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertSameTestPath(t, waitedPath, cityDir)
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid config") {
+		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func setupSupervisorManagedInvalidCity(t *testing.T) string {
+	t.Helper()
 	resetFlags(t)
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -532,23 +576,117 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 		20*time.Millisecond,
 		time.Millisecond,
 	)
-	var waitedPath string
-	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
-		waitedPath = path
+	return cityDir
+}
+
+func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *testing.T) {
+	cityDir := setupSupervisorManagedInvalidCity(t)
+	waitEntered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	waitExited := make(chan struct{})
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		close(waitEntered)
+		<-releaseWait
+		close(waitExited)
 		return nil
 	}
 
+	oldHook := stopBodyLifecycleHook
+	var bodyDone <-chan struct{}
+	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
+
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
-	if code != 0 {
-		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	stopDone := make(chan int, 1)
+	commandExited := make(chan struct{})
+	released := false
+	workerDrained := false
+	releaseAndDrainWorker := func() {
+		if !released {
+			close(releaseWait)
+			released = true
+		}
+		select {
+		case <-waitExited:
+		case <-time.After(hangBudget):
+			t.Errorf("supervisor controller wait did not exit after release")
+		}
+		select {
+		case <-commandExited:
+		case <-time.After(hangBudget):
+			t.Errorf("gc stop command did not exit after supervisor wait release")
+		}
+		if bodyDone != nil {
+			select {
+			case <-bodyDone:
+			case <-time.After(hangBudget):
+				t.Errorf("gc stop worker did not exit after supervisor wait release")
+			}
+		}
+		workerDrained = true
 	}
-	assertSameTestPath(t, waitedPath, cityDir)
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	const testWallClockCap = 100 * time.Millisecond
+	started := time.Now()
+	go func() {
+		defer close(commandExited)
+		stopDone <- cmdStopJSON([]string{cityDir}, &stdout, &stderr, testWallClockCap, false, true)
+	}()
+	t.Cleanup(func() {
+		if !workerDrained {
+			releaseAndDrainWorker()
+		}
+		stopBodyLifecycleHook = oldHook
+	})
+
+	select {
+	case <-waitEntered:
+	case <-time.After(hangBudget):
+		t.Fatal("gc stop did not enter the supervisor controller wait")
+	}
+
+	var code int
+	select {
+	case code = <-stopDone:
+	case <-time.After(50 * testWallClockCap):
+		t.Fatalf("cmdStop did not honor wall-clock cap %s while unregistering invalid-config city", testWallClockCap)
+	}
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want timeout code 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if elapsed := time.Since(started); elapsed > 50*testWallClockCap {
+		t.Fatalf("cmdStop returned after %s, want wall-clock cap near %s", elapsed, testWallClockCap)
+	}
+	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
+		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
+	}
+	releaseAndDrainWorker()
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q after timed-out worker exited, want no late success JSON", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "invalid config") {
-		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+		t.Fatalf("stderr = %q after timed-out worker exited, want invalid-config diagnostic", stderr.String())
+	}
+}
+
+func TestControllerStopTimeoutUsesHostingMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode controllerHostingMode
+		want string
+	}{
+		{name: "supervisor", mode: controllerHostingSupervisor, want: "supervisor-hosted controller"},
+		{name: "standalone", mode: controllerHostingStandalone, want: "standalone controller"},
+		{name: "legacy unknown", mode: controllerHostingUnknown, want: "waiting for controller (PID 4242)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := controllerStopTimeoutError(controllerIdentityReply{PID: 4242, HostingMode: tt.mode}, false)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("controllerStopTimeoutError = %v, want %q", err, tt.want)
+			}
+			if tt.mode == controllerHostingUnknown && strings.Contains(err.Error(), "standalone") {
+				t.Fatalf("controllerStopTimeoutError = %v, legacy unknown must not be labeled standalone", err)
+			}
+		})
 	}
 }
 
@@ -579,7 +717,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	})
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 5*time.Second, false)
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -633,13 +771,17 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	select {
-	case cmd := <-stopCommands:
-		if cmd != "stop" {
-			t.Fatalf("controller command = %q, want stop", cmd)
+	var cmd string
+	awaitCond(t, func() bool {
+		select {
+		case cmd = <-stopCommands:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatalf("controller did not receive stop command; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}, fmt.Sprintf("controller to receive stop command; stdout=%q stderr=%q", stdout.String(), stderr.String()))
+	if cmd != "stop" {
+		t.Fatalf("controller command = %q, want stop", cmd)
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
@@ -652,6 +794,51 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if !strings.Contains(stderr.String(), "invalid config") {
 		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func TestCmdStopBodyDoesNotTakeOverAfterAmbiguousControllerRequest(t *testing.T) {
+	cityDir := setupCity(t, "ambiguous-controller-stop")
+	writeRigAnywhereCityToml(t, cityDir, `
+[workspace]
+name = "ambiguous-controller-stop"
+
+[beads]
+provider = "file"
+`)
+	stopCommands := startStandaloneControllerWithReply(t, cityDir, nil)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "orphan", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "ambiguous-controller-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("cmdStopBody() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if calls := sp.CountCalls("Stop", "orphan"); calls != 0 {
+		t.Fatalf("direct orphan stop calls = %d, want 0 after ambiguous controller request", calls)
+	}
+	select {
+	case command := <-stopCommands:
+		if command != "stop" {
+			t.Fatalf("controller command = %q, want stop", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controller did not receive stop command")
 	}
 }
 
@@ -757,6 +944,11 @@ func overrideShutdownBeadsProviderForStop(t *testing.T, fn func(string) error) {
 
 func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan string {
 	t.Helper()
+	return startStandaloneControllerWithReply(t, cityDir, []byte("ok\n"))
+}
+
+func startStandaloneControllerWithReply(t *testing.T, cityDir string, reply []byte) <-chan string {
+	t.Helper()
 
 	lock, err := acquireControllerLock(cityDir)
 	if err != nil {
@@ -788,7 +980,9 @@ func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan
 			return
 		}
 		commands <- strings.TrimSpace(string(buf[:n]))
-		_, _ = conn.Write([]byte("ok\n"))
+		if len(reply) > 0 {
+			_, _ = conn.Write(reply)
+		}
 		_ = lis.Close()
 		_ = os.Remove(sockPath)
 		_ = lock.Close()
@@ -797,9 +991,11 @@ func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan
 		_ = lis.Close()
 		_ = os.Remove(sockPath)
 		_ = lock.Close()
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 	return commands
@@ -921,8 +1117,8 @@ func TestMarkCityStopSessionSleepReasonSkipsCreatingSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := activeUpdated.Metadata["sleep_reason"]; got != sleepReasonCityStop {
-		t.Fatalf("active sleep_reason = %q, want %q", got, sleepReasonCityStop)
+	if got := activeUpdated.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonCityStop) {
+		t.Fatalf("active sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonCityStop))
 	}
 	creatingUpdated, err := store.Get(creating.ID)
 	if err != nil {
@@ -972,13 +1168,13 @@ func TestCmdStopUsesTargetCitySessionProviderOutsideCityDir(t *testing.T) {
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 
 	var gotPath, gotName, gotProvider string
-	sessionProviderForStopCity = func(cfg *config.City, cityPath string) runtime.Provider {
+	sessionProviderForStopCity = func(cfg *config.City, cityPath string) (runtime.Provider, error) {
 		gotPath = cityPath
 		if cfg != nil {
 			gotName = cfg.Workspace.Name
 			gotProvider = cfg.Session.Provider
 		}
-		return runtime.NewFake()
+		return runtime.NewFake(), nil
 	}
 
 	var stdout, stderr lockedBuffer
@@ -1039,9 +1235,11 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 			sp.release(name)
 		}
 		tryStopController(dir, &bytes.Buffer{})
+		// Best-effort cleanup wait, not a hang detector; bumped to hangBudget
+		// to avoid spurious CPU-starvation failures.
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(hangBudget):
 		}
 	})
 
@@ -1072,20 +1270,20 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		sp.release(sess)
 	})
 
-	select {
-	case code := <-stopDone:
-		if code != 0 {
-			t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-stopDone:
+			return true
+		default:
+			return false
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("cmdStop did not finish within margin budget")
+	}, "cmdStop to finish within margin budget")
+	if code != 0 {
+		t.Fatalf("cmdStop = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("controller did not exit after cmdStop")
-	}
+	awaitClose(t, done, "controller to exit after cmdStop")
 
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
@@ -1097,16 +1295,8 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 
 func waitForControllerAvailable(t *testing.T, dir string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if controllerAcceptsPing(dir, 100*time.Millisecond) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for controller socket to become available")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitCond(t, func() bool { return controllerAcceptsPing(dir, 100*time.Millisecond) },
+		"controller socket accepting pings")
 }
 
 func controllerAcceptsPing(dir string, timeout time.Duration) bool {

@@ -78,6 +78,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
+	sessStore := cliSessionStore(store, cfg, cityPath)
 
 	var (
 		id                 string
@@ -85,9 +86,9 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		materializedForPin bool
 	)
 	if pinned {
-		id, err = resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+		id, err = resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 		if err != nil {
-			id, err = resolveSessionIDMaterializingNamedWithMetadata(cityPath, cfg, store, args[0], map[string]string{
+			id, err = resolveSessionIDMaterializingNamedWithMetadata(cityPath, cfg, sessStore, args[0], map[string]string{
 				"pin_awake":                 "true",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
@@ -95,14 +96,14 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			materializedForPin = err == nil
 		}
 	} else {
-		id, err = resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+		id, err = resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
 		return 1
 	}
 
-	b, err := store.Get(id)
+	b, err := sessStore.Get(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
 		return 1
@@ -111,7 +112,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session %s: %s is not a session\n", action, id) //nolint:errcheck
 		return 1
 	}
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(sessStore, &b)
 	if b.Status == "closed" {
 		fmt.Fprintf(stderr, "gc session %s: session %s is closed\n", action, id) //nolint:errcheck
 		return 1
@@ -122,7 +123,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		value = "true"
 	}
 	if !materializedForPin {
-		if err := sessionFrontDoor(store).SetMarker(id, "pin_awake", value); err != nil {
+		if err := sessionFrontDoor(sessStore).SetMarker(id, "pin_awake", value); err != nil {
 			fmt.Fprintf(stderr, "gc session %s: updating metadata: %v\n", action, err) //nolint:errcheck
 			return 1
 		}

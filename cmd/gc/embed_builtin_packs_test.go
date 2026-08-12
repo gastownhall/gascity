@@ -120,7 +120,7 @@ func bundledPackDirForTest(t testing.TB, packName string) string {
 	if !ok {
 		t.Fatalf("bundled %s pack is not registered", packName)
 	}
-	cachePath, err := packman.EnsureRepoInCache(source, bundledPackImportCommit())
+	cachePath, err := packman.EnsureRepoInCache("", source, bundledPackImportCommit())
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache(%s): %v", packName, err)
 	}

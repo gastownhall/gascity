@@ -280,6 +280,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			}
 			root.Services = append(packServices, root.Services...)
 		}
+		// Merge root-pack webhooks with pack provenance stamped. The public
+		// pack-guard runs once post-composition; here we only record source.
+		if len(pc.Webhooks) > 0 {
+			root.Webhooks = append(stampWebhookSource(pc.Webhooks, cityRoot), root.Webhooks...)
+		}
 		// Merge pack agent patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
 		if len(pc.Global.SessionLive) > 0 {
@@ -415,9 +420,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
-		mergeFragment(root, frag, fragMeta, fragPath, prov)
+		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
+			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
+		}
 		prov.Sources = append(prov.Sources, fragPath)
 		prov.recordSource(fragPath, fragData)
+	}
+	if err := ValidateStorageConfig(root); err != nil {
+		return nil, nil, err
 	}
 
 	// Append caller-supplied extra pack includes to Workspace.Includes,
@@ -707,6 +717,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
 
+	// Enforce the default-closed webhook public pack-guard over the fully
+	// composed webhook set (every merge site has stamped SourceDir by now).
+	prov.Warnings = append(prov.Warnings, applyWebhookPackGuard(root, cityRoot)...)
+
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors
 	// (cycles, unknown base, wrapper-resume missing) surface here so
@@ -968,7 +982,11 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
-func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) error {
+	if err := mergeStorageConfig(base, fragment, fragMeta, fragPath); err != nil {
+		return err
+	}
+
 	// Agents and named sessions: concatenate.
 	trackAgents(prov, fragment.Agents, fragPath)
 	base.Agents = append(base.Agents, fragment.Agents...)
@@ -980,6 +998,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
+
+	// Webhooks: concatenate WITH fragment provenance stamped. A fragment is not
+	// the root city.toml, so its webhooks must not read as operator-trusted
+	// (security review attack #9). Stamping SourceDir here makes the
+	// post-composition public pack-guard cap an unauthorized public fragment
+	// webhook to tenant by default.
+	base.Webhooks = append(base.Webhooks, stampWebhookSource(fragment.Webhooks, filepath.Dir(fragPath))...)
 
 	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
 	// ownership after patches have had a chance to adjust declarations.
@@ -1012,7 +1037,21 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
+		// Preserve rollout-gate fields the fragment did not itself set: a
+		// fragment defining any [beads] key would otherwise reset the whole
+		// struct and silently downgrade an explicit conditional_writes /
+		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
+		// below). Capture before the overwrite; a fragment that DOES set the
+		// field still wins.
+		conditionalWrites := base.Beads.ConditionalWrites
+		guardedRelease := base.Beads.GuardedRelease
 		base.Beads = fragment.Beads
+		if !fragMeta.IsDefined("beads", "conditional_writes") {
+			base.Beads.ConditionalWrites = conditionalWrites
+		}
+		if !fragMeta.IsDefined("beads", "guarded_release") {
+			base.Beads.GuardedRelease = guardedRelease
+		}
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
@@ -1058,6 +1097,39 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}
+	return nil
+}
+
+func mergeStorageConfig(base, fragment *City, fragMeta toml.MetaData, fragPath string) error {
+	if !fragMeta.IsDefined("storage") || fragment.Storage == nil {
+		return nil
+	}
+	if base.Storage == nil {
+		base.Storage = &StorageConfig{}
+	}
+
+	for _, class := range storageConfigClassOrder() {
+		if fragMeta.IsDefined("storage", "classes", class.String()) {
+			base.Storage.Classes.setBinding(class, fragment.Storage.Classes.BindingFor(class))
+		}
+	}
+
+	names := sortedStorageBindingNames(fragment.Storage.Bindings)
+	for _, name := range names {
+		if _, exists := base.Storage.Bindings[name]; exists {
+			return fmt.Errorf("storage binding %q is defined more than once (again in %q)", name, fragPath)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	if base.Storage.Bindings == nil {
+		base.Storage.Bindings = make(map[string]StorageBindingConfig, len(names))
+	}
+	for _, name := range names {
+		base.Storage.Bindings[name] = fragment.Storage.Bindings[name]
+	}
+	return nil
 }
 
 type sessionSleepField struct {

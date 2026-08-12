@@ -698,3 +698,125 @@ func TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds(t *testing.T) {
 		t.Error("teardown-role step was marked as an output sink")
 	}
 }
+
+func TestApplyRalph_StampsControlForOnIterationRoot(t *testing.T) {
+	// Simple ralph (no children): iteration.1 work bead carries the stamp.
+	simple := []*Step{
+		{
+			ID:    "implement",
+			Title: "Implement",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+		},
+	}
+	got, err := ApplyRalph(simple)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	control, iteration := got[0], got[2]
+	if iteration.Metadata[beadmeta.ControlForMetadataKey] != "implement" {
+		t.Fatalf("simple iteration gc.control_for = %q, want implement", iteration.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if control.Metadata[beadmeta.StepIDMetadataKey] != "implement" {
+		t.Fatalf("control gc.step_id = %q, want implement (must match iteration gc.control_for)", control.Metadata[beadmeta.StepIDMetadataKey])
+	}
+	if _, ok := control.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("control must not carry gc.control_for")
+	}
+
+	// Nested ralph: only the iteration scope root carries the stamp; body
+	// children (which are not attempt roots) must not.
+	nested := []*Step{
+		{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+			Children: []*Step{
+				{ID: "review", Title: "Review"},
+				{ID: "apply", Title: "Apply", Needs: []string{"review"}},
+			},
+		},
+	}
+	got2, err := ApplyRalph(nested)
+	if err != nil {
+		t.Fatalf("ApplyRalph nested failed: %v", err)
+	}
+	scope, reviewChild, applyChild := got2[2], got2[3], got2[4]
+	if scope.Metadata[beadmeta.ControlForMetadataKey] != "review-loop" {
+		t.Fatalf("nested scope gc.control_for = %q, want review-loop", scope.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if _, ok := reviewChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", reviewChild.ID)
+	}
+	if _, ok := applyChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", applyChild.ID)
+	}
+}
+
+// TestApplyRalph_NamespacesNestedControlForAcrossBody is the S38 nested-lineage
+// regression guard for the producer side. An outer ralph with a retry child
+// must stamp the nested retry's attempt root with the *namespaced* control ref
+// (the cloned inner control's gc.step_ref), not the bare inner step id.
+//
+// The bare step id ("inner") is shared by the inner control of every sibling
+// outer ralph iteration, so a bare gc.control_for let findLatestAttempt's
+// primary lookup match a foreign iteration's inner control through the shared
+// gc.step_id identity member. Namespacing the stamp scopes it to this outer
+// iteration's inner control, mirroring the runtime buildNestedControlSeed path.
+func TestApplyRalph_NamespacesNestedControlForAcrossBody(t *testing.T) {
+	// Mirror the compile pipeline order: retries expand before ralph, so the
+	// ralph body already holds the inner control + attempt beads when
+	// namespaceRalphBodySteps runs over them.
+	steps := []*Step{
+		{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+			Children: []*Step{
+				{
+					ID:    "inner",
+					Title: "Inner",
+					Retry: &RetrySpec{MaxAttempts: 2},
+				},
+			},
+		},
+	}
+	retried, err := ApplyRetries(steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries: %v", err)
+	}
+	expanded, err := ApplyRalph(retried)
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	var innerControl, innerAttempt *Step
+	for _, s := range expanded {
+		switch {
+		case s.ID == "review-loop.iteration.1.inner" && s.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry:
+			innerControl = s
+		case s.ID == "review-loop.iteration.1.inner.attempt.1":
+			innerAttempt = s
+		}
+	}
+	if innerControl == nil {
+		t.Fatalf("nested inner control not found among expanded steps")
+	}
+	if innerAttempt == nil {
+		t.Fatalf("nested inner attempt root not found among expanded steps")
+	}
+
+	wantCF := innerControl.Metadata[beadmeta.StepRefMetadataKey]
+	if wantCF == "" || wantCF == "inner" {
+		t.Fatalf("inner control gc.step_ref = %q, want a namespaced ref", wantCF)
+	}
+	got := innerAttempt.Metadata[beadmeta.ControlForMetadataKey]
+	if got == "inner" {
+		t.Fatalf("nested attempt gc.control_for is the bare step id %q; must be namespaced to the inner control ref", got)
+	}
+	if got != wantCF {
+		t.Fatalf("nested attempt gc.control_for = %q, want %q (must equal inner control gc.step_ref)", got, wantCF)
+	}
+}

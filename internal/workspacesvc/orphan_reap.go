@@ -26,7 +26,9 @@ import (
 // (see orphanIdentity.matchesLive):
 //
 //  1. it is alive and not a zombie;
-//  2. it has re-parented to init (ppid 1), so no live supervisor owns it;
+//  2. it has re-parented to a subreaper — init (ppid 1), or the detected
+//     `systemd --user` manager under a user@.service — so no live supervisor
+//     owns it (see orphanIdentity.parentIsSubreaper);
 //  3. its command line is exactly the service's configured command; and
 //  4. its environment carries GC_SERVICE_NAME=<service> and
 //     GC_SERVICE_STATE_ROOT=<this instance's state root>, proving a gc
@@ -55,6 +57,12 @@ type orphanIdentity struct {
 	serviceName string
 	stateRoot   string
 	command     []string
+	// subreaperPID is the pid of the `systemd --user` subreaper that adopts
+	// this user session's orphans, or 0 when there is none (plain init host /
+	// container). It is set at sweep time by reapOrphanedServiceProcesses;
+	// newOrphanIdentity leaves it 0 so the identity keeps the strict
+	// re-parented-to-init (ppid 1) rule until a subreaper is detected.
+	subreaperPID int
 }
 
 // newOrphanIdentity builds the sweep identity for one service instance.
@@ -84,7 +92,8 @@ func (id orphanIdentity) matchesLive(pid int) bool {
 	if !pidutil.Alive(pid) {
 		return false
 	}
-	if ppid, err := processParentPID(pid); err != nil || ppid != 1 {
+	ppid, err := processParentPID(pid)
+	if err != nil || !id.parentIsSubreaper(ppid) {
 		return false
 	}
 	if !processCmdlineEquals(pid, id.command) {
@@ -93,17 +102,75 @@ func (id orphanIdentity) matchesLive(pid int) bool {
 	return processEnvironMatchesService(pid, id.serviceName, id.stateRoot)
 }
 
+// parentIsSubreaper reports whether ppid is a subreaper that would own this
+// process only if the supervisor that spawned it has already exited: init
+// (pid 1) on hosts without a user subreaper, or the detected `systemd --user`
+// manager under a user@.service. A live gc supervisor is never a subreaper, so
+// a still-owned service child — whose ppid is its live supervisor's pid —
+// never matches, and neither does the sweeper's own supervisor process (it
+// fails the command/environ checks regardless). Rule 2 of the file header
+// ("no live supervisor owns it") thus holds under both the plain-init and
+// systemd --user reparenting models.
+func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
+	if ppid == 1 {
+		return true
+	}
+	return id.subreaperPID > 1 && ppid == id.subreaperPID
+}
+
 // reapOrphanedServiceProcesses terminates orphaned survivors of previous
 // hard exits that match the service instance's identity. Best-effort: scan
 // or signal failures are logged and never block the spawn; on hosts without
 // /proc the sweep is a no-op.
 func reapOrphanedServiceProcesses(id orphanIdentity) {
+	// The sweeper runs under the same subreaper that adopts this supervisor's
+	// orphans, so detect it from the sweeper's own ancestry. On a plain-init
+	// host this stays 0 and matchesLive keeps the strict ppid==1 rule.
+	id.subreaperPID = detectUserSubreaperPID(os.Getpid())
 	pids := findOrphanedServiceProcesses(id)
 	if len(pids) == 0 {
 		return
 	}
 	log.Printf("workspacesvc: terminating %d orphaned process(es) for service %q: %v", len(pids), id.serviceName, pids)
 	terminateOrphanedProcesses(id, pids)
+}
+
+// detectUserSubreaperPID returns the pid of the `systemd --user` manager that
+// acts as the child subreaper for this user session, or 0 if there is none.
+//
+// Under a user@UID.service, systemd --user sets PR_SET_CHILD_SUBREAPER, so any
+// orphan in the session reparents to it (not to pid 1). The sweeper is itself a
+// descendant of that manager, so we walk the sweeper's parent chain and return
+// the nearest ancestor named "systemd" whose pid is not 1 — i.e. the user
+// manager, distinct from the system systemd at pid 1. The walk is bounded to
+// guard against malformed /proc data and stops at pid 1.
+func detectUserSubreaperPID(self int) int {
+	return detectUserSubreaperPIDWith(self, processParentPID, processComm)
+}
+
+func detectUserSubreaperPIDWith(self int, parentOf func(int) (int, error), commOf func(int) string) int {
+	pid := self
+	for depth := 0; depth < 64; depth++ {
+		ppid, err := parentOf(pid)
+		if err != nil || ppid <= 1 {
+			return 0
+		}
+		if commOf(ppid) == "systemd" {
+			return ppid
+		}
+		pid = ppid
+	}
+	return 0
+}
+
+// processComm returns the executable name from /proc/<pid>/comm, or "" if it
+// cannot be read.
+func processComm(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // findOrphanedServiceProcesses scans /proc for processes matching id.

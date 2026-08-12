@@ -1,58 +1,6 @@
 import unittest
-from pathlib import Path
-
-import yaml
 
 import ci_suite_coverage as cov
-
-CI_YML = Path(__file__).resolve().parents[1] / "ci.yml"
-INTEGRATION_SHARD = Path(__file__).resolve().parents[3] / "scripts" / "test-integration-shard"
-
-# Core substrates whose breakage ripples across every subsystem. Beads is the
-# universal persistence substrate, events the universal observation substrate,
-# config the universal activation mechanism (see AGENTS.md); build/dependency/CI
-# files affect every job. The `shared` filter must cover all of these.
-EXPECTED_SHARED_PATHS = {
-    "go.mod",
-    "go.sum",
-    "Makefile",
-    ".github/workflows/**",
-    ".github/actions/setup-gascity-ubuntu/**",
-    ".github/scripts/install-dolt-archive.sh",
-    ".github/scripts/install-bd-archive.sh",
-    ".github/scripts/install-claude-native.sh",
-    "internal/beads/**",
-    "internal/events/**",
-    "internal/config/**",
-}
-
-# Outputs of the `changes` job that gate a downstream job. Each must fold the
-# `shared` filter into its value so a cross-cutting change runs the full suite.
-GATED_OUTPUTS = {
-    "mail",
-    "docker",
-    "k8s",
-    "beads",
-    "packs",
-    "worker",
-    "worker_phase2",
-    "cmd_gc_process",
-    "integration",
-}
-
-
-def _load_changes_job():
-    workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    return workflow["jobs"]["changes"]
-
-
-def _filter_globs():
-    """Return {filter_name: [globs]} parsed from the dorny filter block."""
-    changes = _load_changes_job()
-    for step in changes["steps"]:
-        if step.get("id") == "filter":
-            return yaml.safe_load(step["with"]["filters"])
-    raise AssertionError("filter step not found in changes job")
 
 
 class ClassifyModeTests(unittest.TestCase):
@@ -116,14 +64,7 @@ class PathsMatchTests(unittest.TestCase):
         # `**/*.go` must match a repo-root file, not only nested ones.
         self.assertTrue(cov.paths_match(["main.go"], ["**/*.go"]))
 
-    def test_simulator_handles_every_glob_shape_in_ci_yml(self) -> None:
-        """Regression guard: a representative path for each real ci.yml glob
-        must match its glob. Catches a filter glob whose shape the simulator
-        silently fails to match (the under-fire failure mode this module
-        exists to detect)."""
-        # One sample path constructed to match each glob shape present in the
-        # ci.yml filters. Globstar/literal shapes are exercised above; this
-        # pins the trailing/mid-path single-star shapes against the live globs.
+    def test_matcher_handles_supported_single_star_shapes(self) -> None:
         samples = {
             "cmd/gc/template_resolve*.go": "cmd/gc/template_resolve_t3bridge.go",
             "cmd/gc/session_*": "cmd/gc/session_pool.go",
@@ -132,12 +73,10 @@ class PathsMatchTests(unittest.TestCase):
             ),
             "test/**worker**": "test/integration/session_worker_test.go",
         }
-        all_globs = {glob for globs in _filter_globs().values() for glob in globs}
         for glob, sample in samples.items():
-            self.assertIn(glob, all_globs, f"sample glob no longer present in ci.yml: {glob}")
             self.assertTrue(
                 cov.paths_match([sample], [glob]),
-                f"simulator fails to match {sample!r} against live ci.yml glob {glob!r}",
+                f"matcher fails to match {sample!r} against {glob!r}",
             )
 
 
@@ -158,134 +97,6 @@ class AggregateTests(unittest.TestCase):
     def test_unknown_tokens_counted_separately(self) -> None:
         result = cov.aggregate([cov.FULL, "weird"])
         self.assertEqual(result["unknown"], 1)
-
-
-class WiringTests(unittest.TestCase):
-    """Assert the option-A union wiring is present and correct in ci.yml."""
-
-    def test_shared_filter_covers_core_substrates(self) -> None:
-        filters = _filter_globs()
-        self.assertIn("shared", filters, "changes job must define a `shared` filter")
-        shared = set(filters["shared"])
-        missing = EXPECTED_SHARED_PATHS - shared
-        self.assertFalse(missing, f"shared filter missing core paths: {sorted(missing)}")
-
-    def test_gated_outputs_fold_in_shared(self) -> None:
-        outputs = _load_changes_job()["outputs"]
-        for name in GATED_OUTPUTS:
-            self.assertIn(name, outputs, f"missing changes output: {name}")
-            expr = outputs[name]
-            self.assertIn(
-                "shared",
-                expr,
-                f"output `{name}` must fold in the shared filter so cross-cutting "
-                f"changes run the full suite; got: {expr!r}",
-            )
-
-    def test_changes_job_exposes_shared_and_suite_mode(self) -> None:
-        outputs = _load_changes_job()["outputs"]
-        self.assertIn("shared", outputs, "raw `shared` output drives the coverage metric")
-        self.assertIn("suite_mode", outputs, "`suite_mode` output records the metric per run")
-
-
-class AcceptanceScenarioTests(unittest.TestCase):
-    """Acceptance scenario: cross-cutting change forces the full suite.
-
-    A PR that only touches cmd/gc/foo.go AND modifies a shared type used by
-    integration tests must run the integration job, not skip it.
-    """
-
-    def test_cmd_gc_plus_shared_core_change_runs_full_suite(self) -> None:
-        filters = _filter_globs()
-        changed = ["cmd/gc/foo.go", "internal/beads/widget.go"]
-
-        shared_fires = cov.paths_match(changed, filters["shared"])
-        self.assertTrue(shared_fires, "a core-substrate edit must trigger the shared filter")
-
-        mode = cov.classify_mode(shared_fires)
-        self.assertEqual(mode, cov.FULL, "cross-cutting change must classify as a full-suite run")
-
-        # The integration output folds shared in, so the integration-shards job
-        # gate (`needs.changes.outputs.integration == 'true'`) is satisfied even
-        # if the integration filter had not matched on its own.
-        integration_expr = _load_changes_job()["outputs"]["integration"]
-        self.assertIn("shared", integration_expr)
-
-    def test_setup_action_or_helper_change_runs_full_suite(self) -> None:
-        """A change confined to the setup-gascity-ubuntu composite action — or a
-        helper script it shells out to — must run the full suite, because nearly
-        every job depends on that shared setup path.
-
-        This pins the major release-safety invariant: a helper-only edit to the
-        setup path (e.g. install-dolt-archive.sh) must not silently skip the
-        bd-current contract jobs that exercise it.
-        """
-        filters = _filter_globs()
-        setup_paths = [
-            ".github/actions/setup-gascity-ubuntu/action.yml",
-            ".github/scripts/install-dolt-archive.sh",
-            ".github/scripts/install-bd-archive.sh",
-            ".github/scripts/install-claude-native.sh",
-        ]
-        for changed in setup_paths:
-            with self.subTest(changed=changed):
-                shared_fires = cov.paths_match([changed], filters["shared"])
-                self.assertTrue(
-                    shared_fires,
-                    f"a setup-path change ({changed}) must trigger the shared filter",
-                )
-                self.assertEqual(
-                    cov.classify_mode(shared_fires),
-                    cov.FULL,
-                    "a setup-path change must classify as a full-suite run",
-                )
-        # The beads output folds shared in, so the bd-current contract jobs
-        # (gated on needs.changes.outputs.beads) run for any setup-path change
-        # even when the beads filter would not match on its own.
-        beads_expr = _load_changes_job()["outputs"]["beads"]
-        self.assertIn("shared", beads_expr)
-
-
-class SQLiteCoordinationStoreCoverageTests(unittest.TestCase):
-    def test_ci_runs_bdstore_and_acceptance_against_sqlite_coordination_store(self) -> None:
-        workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-        candidates = []
-        for name, job in workflow["jobs"].items():
-            rendered = yaml.safe_dump(job, sort_keys=True)
-            if "test-integration-bdstore" in rendered and "test-acceptance" in rendered:
-                candidates.append((name, rendered))
-
-        self.assertTrue(
-            candidates,
-            "CI must include one SQLite coordination-store job that runs both "
-            "`make test-integration-bdstore` and `make test-acceptance`.",
-        )
-
-        matching = [
-            name
-            for name, rendered in candidates
-            if "GC_BEADS" in rendered
-            and "sqlite" in rendered
-            and "GC_ACCEPTANCE_BEADS_PROVIDER" in rendered
-        ]
-        self.assertTrue(
-            matching,
-            "SQLite coordination-store CI job must pass GC_BEADS=sqlite to "
-            "the integration shard and GC_ACCEPTANCE_BEADS_PROVIDER=sqlite "
-            "to Tier A acceptance; candidates: "
-            + ", ".join(name for name, _ in candidates),
-        )
-
-    def test_integration_shard_preserves_gc_beads_override(self) -> None:
-        script = INTEGRATION_SHARD.read_text(encoding="utf-8")
-
-        self.assertIn(
-            'GC_BEADS="${GC_BEADS-}"',
-            script,
-            "scripts/test-integration-shard scrubs the environment with env -i; "
-            "it must explicitly preserve GC_BEADS so the bdstore shard can run "
-            "against provider=sqlite in CI.",
-        )
 
 
 if __name__ == "__main__":

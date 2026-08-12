@@ -158,6 +158,7 @@ function detailWithNodes(nodeIds: string[]): FormulaRunDetail {
       snapshotVersion: 1,
       snapshotEventSeq: { kind: 'known', seq: 1 },
       snapshotPartial: false,
+      terminal: false,
       totalNodeCount: nodeIds.length,
       visibleNodeCount: nodeIds.length,
       edgeCount: 0,

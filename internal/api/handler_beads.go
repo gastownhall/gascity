@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -26,7 +27,10 @@ func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, childr
 	for _, child := range children {
 		seen[child.ID] = struct{}{}
 	}
-	for _, key := range []string{"molecule_id", "workflow_id"} {
+	// NOTE: "workflow_id" is the bare (non-prefixed) metadata key, distinct
+	// from beadmeta.WorkflowIDMetadataKey ("gc.workflow_id") — do NOT substitute
+	// the prefixed constant here or this would surface a different key.
+	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
 		attachedID := strings.TrimSpace(parent.Metadata[key])
 		if attachedID == "" {
 			continue
@@ -49,7 +53,11 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	if assignee == "" {
 		return []string{""}
 	}
-	store := s.state.CityBeadStore()
+	// The ?assignee filter is applied to WORK beads, but the identifier it takes
+	// is resolved against SESSION beads, and the identity expansion below reads
+	// one — so this store is the sessions class even though the caller is a work
+	// query. Identity to the work store on a city that relocates nothing.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return []string{assignee}
 	}
@@ -59,10 +67,10 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	// A work bead's stored assignee may be ANY of the resolved session's
 	// identity forms — the bead ID, session_name, alias, configured named
-	// identity, or a prior alias — so match against all of them (mirrors
-	// sessionBeadAssigneeIdentities used by the reconciler). Without this the
-	// session-name form written by assign/update (and the claim path) would be
-	// invisible to ?assignee=<alias|id> list filters.
+	// identity, or a prior alias — so match against all of them via the confined
+	// session.AssigneeIdentities codec. Without this the session-name form
+	// written by assign/update (and the claim path) would be invisible to
+	// ?assignee=<alias|id> list filters.
 	seen := map[string]bool{}
 	var terms []string
 	add := func(v string) {
@@ -75,12 +83,13 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	}
 	add(assignee)
 	add(id)
-	if b, getErr := store.Get(id); getErr == nil {
-		add(b.Metadata["session_name"])
-		add(b.Metadata["alias"])
-		add(b.Metadata[session.NamedSessionIdentityMetadata])
-		for _, prior := range session.AliasHistory(b.Metadata) {
-			add(prior)
+	// id is a resolved session id; read its identity forms through the session
+	// front door. A non-session or absent id (the front door rejects it) simply
+	// contributes no extra identity terms — the base assignee/id terms above still
+	// drive the ?assignee filter.
+	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+		for _, identity := range session.AssigneeIdentities(info) {
+			add(identity)
 		}
 	}
 	return terms
@@ -91,7 +100,12 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	if assignee == "" {
 		return "", nil
 	}
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the materialize arm below CREATES a
+	// session bead when the named session has no canonical one, and the
+	// RepairTypeBestEffort heal writes to it. Through the work store on a
+	// relocated city that create is a stranded infrastructure bead — the class
+	// binding never sees it and the boot containment re-check names it.
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return assignee, nil
 	}
@@ -105,34 +119,29 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	b, err := store.Get(id)
+	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	info, err := sessFront.Get(id)
 	if err != nil {
+		// The front door rejects a present-but-non-session bead with
+		// ErrSessionNotFound — keep the "must resolve to a session" contract; any
+		// other error surfaces as the lookup failure.
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
+		}
 		return "", fmt.Errorf("looking up resolved assignee session %q: %w", id, err)
 	}
-	if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+	if info.Closed {
 		return "", fmt.Errorf("assignee must resolve to a concrete open session bead ID: %q", assignee)
 	}
-	session.RepairEmptyType(store, &b)
-	return sessionBeadAssigneeIdentifier(b), nil
-}
-
-// sessionBeadAssigneeIdentifier returns the durable agent-facing identity form
-// of a session bead — its session_name, else alias, else configured named
-// identity — falling back to the bead ID when no name metadata is present so a
-// resolved assignment is never silently cleared. This is the form the agent
-// claims and verifies work with (BEADS_ACTOR / GC_SESSION_NAME), so stamping it
-// keeps assign/update consistent with the claim path (which already stores the
-// raw session-name) and with the form-agnostic session matching in the
-// reconciler (sessionBeadAssigneeIdentities). Stamping the bare bead ID here
-// instead made template-routed continuation work unclaimable by name-matching
-// agents.
-func sessionBeadAssigneeIdentifier(b beads.Bead) string {
-	for _, key := range []string{"session_name", "alias", session.NamedSessionIdentityMetadata} {
-		if v := strings.TrimSpace(b.Metadata[key]); v != "" {
-			return v
-		}
+	// Preserve the empty-type heal RepairEmptyType performed here: a repairable
+	// (type-lost) session bead is healed back to the canonical type as a side
+	// effect of being assigned. RepairTypeBestEffort writes only the type field
+	// and logs a failed write (as RepairEmptyType did), so this is byte-equivalent
+	// to the retired heal.
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
 	}
-	return b.ID
+	return session.AssigneeIdentifier(info), nil
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns
@@ -160,36 +169,48 @@ func (s *Server) findStore(rig string) beads.Store {
 // The result is the per-class by-id candidate set: a successful prefix/route
 // match returns the single store that owns the ID's namespace (which is already
 // the bead's class+rig store), and the unrouted fallback leads with the
-// city/HQ store ahead of the per-rig work stores. A graph-relocated city adds a
-// class-prefix arm so graph-class ids reach the dedicated graph store.
+// city/HQ store ahead of the per-rig work stores. A graph-relocated city is
+// resolved by the class-prefix arm, which runs first so a reserved class prefix
+// can never be captured by a rig/HQ prefix or a routes.jsonl entry — but that
+// arm returns a probe LIST, not a route, so a work store configured with the
+// reserved prefix keeps its own ids reachable behind the class store and the
+// city store.
+//
+// The handlers probe this list in order and stop at the first store that
+// answers, and they surface a non-ErrNotFound read as a 500 rather than
+// continuing — an unreachable store must not be reported as a missing bead, and
+// on a city where two stores claim one namespace it must not be silently
+// replaced by the other store's row of the same id. The class arm's list is
+// ordered so that the legs it ADDS sit behind the ones this resolver already
+// returned, which is what keeps that fail-fast rule from costing availability:
+// an added store can only be probed after the previously-answering ones have
+// already missed.
 func (s *Server) beadStoresForID(id string) []beads.Store {
 	id = strings.TrimSpace(id)
-	if store := s.resolveStoreByConfiguredIDPrefix(id); store != nil {
+	// Built once and shared by both prefix resolvers below: they answer
+	// different questions about the same set of configured work prefixes.
+	configured := s.configuredPrefixStores()
+
+	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
+	// id-prefix "gcg") in a dedicated graph store, which is the only store that
+	// MINTS that prefix. The arm runs FIRST — ahead of the configured prefix and
+	// routes.jsonl resolvers — because both of those can name the reserved prefix
+	// and would otherwise hand a class id to a work store: a routed prefix wins
+	// unconditionally, and a shadowing rig/HQ prefix is warned-but-allowed
+	// (config.ReservedPrefixWarnings), which documents the class store as the
+	// owner once relocation is active. Skipped for a default (non-relocated)
+	// city, where GraphBeadStore() == CityBeadStore(): the arm never fires and
+	// this path stays byte-identical.
+	if candidates := s.classStoresForID(id, configured); len(candidates) > 0 {
+		return candidates
+	}
+
+	if store := resolveStoreByConfiguredIDPrefix(id, configured); store != nil {
 		return []beads.Store{store}
 	}
 	if prefix := beadPrefix(id); prefix != "" {
 		if store := s.resolveStoreByPrefix(prefix); store != nil {
 			return []beads.Store{store}
-		}
-	}
-
-	// Class-prefix arm: a graph-relocated city keeps graph-class beads (reserved
-	// id-prefix "gcg") in a dedicated graph store that is NOT reachable via a
-	// rig/HQ prefix or a routes.jsonl entry, so a graph-class id would otherwise
-	// fall through to the candidate scan and miss. Return [graph, work] —
-	// graph-first (prefix-owner first) — so the per-store Get-then-mutate loop in
-	// the by-id handlers federates the graph store ahead of work and pins it on
-	// the first probe. Skipped for a default (non-relocated) city, where
-	// GraphBeadStore() == CityBeadStore(): the arm never fires and this path stays
-	// byte-identical.
-	if graph := s.state.GraphBeadStore().Store; graph != nil {
-		if city := s.state.CityBeadStore(); graph != city {
-			if prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph); ok && beadIDHasConfiguredPrefix(id, prefix) {
-				if city != nil {
-					return []beads.Store{graph, city}
-				}
-				return []beads.Store{graph}
-			}
 		}
 	}
 
@@ -205,55 +226,104 @@ func (s *Server) beadStoresForID(id string) []beads.Store {
 	return candidates
 }
 
-func (s *Server) resolveStoreByConfiguredIDPrefix(id string) beads.Store {
-	if id == "" {
+// classStoresForID returns the by-id candidate probe list for a relocated
+// coordination class, or nil when id is not a relocated class id.
+//
+// It delegates to storeref.ClassCandidates, the shared resolver: the same
+// question is asked by cmd/gc's one-shot commands, and answering it twice is
+// exactly how the split-store bug class reproduces. The routing is keyed on
+// STORE IDENTITY (GraphBeadStore() != CityBeadStore()) rather than a marker
+// file or a migration flag, and it returns a probe list rather than a route, so
+// a work store that legitimately holds an id inside the class namespace stays
+// reachable behind the class store.
+//
+// NOT covered here: a bead `gc storage migrate` relocated with its id PRESERVED
+// (infra_class_migrate.go). That id keeps its HQ/rig-era prefix, so it is
+// outside the class namespace, the arm never fires, and the configured-prefix
+// resolver below answers it from the work store — which still holds the
+// migration's retained source copy, frozen at migration time. Covering it needs
+// a residence probe that asks the class store about every id; that is what
+// cmd/gc/cmd_bd_by_id.go's bdByIDClassDoor.resolve does, and this path has no
+// equivalent yet.
+//
+// GRAPH ONLY. Sessions, orders and nudges have relocated-store accessors on
+// State, but adding them here would change which stores answer for gcs-/gco-/
+// gcn- ids, which is a production routing change and not part of lifting this
+// arm. Messaging has no State accessor at all (mail routes through
+// mail.Provider). The shared resolver takes the prefix as data, so adding a
+// class is a call-site change here, not a change to the resolver.
+func (s *Server) classStoresForID(id string, configured []storeref.PrefixedStore) []beads.Store {
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
 		return nil
 	}
+	return storeref.ClassCandidates(id, storeref.ClassRouting{
+		Prefix:  prefix,
+		Class:   s.state.GraphBeadStore().Store,
+		Work:    s.state.CityBeadStore(),
+		Shadows: configured,
+	})
+}
+
+// configuredPrefixStores returns the loaded work stores paired with the id
+// prefixes they were CONFIGURED with — the city/HQ prefix first, then each rig
+// in config order.
+//
+// Only stores that are actually loaded are listed: a configured prefix whose
+// store is missing must not win a slot, so a shorter loaded prefix can still own
+// an id (and otherwise the id is left to the legacy scan).
+//
+// This walks every rig, which the pre-seam resolver did not: it looked the store
+// up only for a rig whose prefix already covered the id and beat the best match
+// so far. The set is built here because two resolvers now consume it and they
+// select different subsets of it. State.BeadStore is a map read under an RLock,
+// so the widened walk costs a lookup per rig and no I/O.
+func (s *Server) configuredPrefixStores() []storeref.PrefixedStore {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return nil
 	}
-
-	// Only stores that are actually loaded are candidates: a configured prefix
-	// whose store is missing must not win the slot, so a shorter loaded prefix
-	// can still own the id (and otherwise the id is left to the legacy scan).
-	//
-	// This caller routes on the configured (rig/HQ) prefixes with a
-	// longest-prefix, exact-or-hyphen match (beadIDHasConfiguredPrefix). It
-	// resolves against the configured prefixes (not each store's own IDPrefix)
-	// and requires the longest configured prefix to win, so it keeps the scan
-	// inline rather than using the namespace-only, first-match by-id resolver.
-	var bestStore beads.Store
-	bestLen := -1
-	if prefix := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); beadIDHasConfiguredPrefix(id, prefix) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			bestStore = cityStore
-			bestLen = len(prefix)
-		}
+	prefixed := make([]storeref.PrefixedStore, 0, len(cfg.Rigs)+1)
+	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+		prefixed = append(prefixed, storeref.PrefixedStore{
+			Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg)),
+			Store:  cityStore,
+		})
 	}
 	for _, rig := range cfg.Rigs {
-		prefix := strings.TrimSpace(rig.EffectivePrefix())
-		if !beadIDHasConfiguredPrefix(id, prefix) || len(prefix) <= bestLen {
-			continue
-		}
 		store := s.state.BeadStore(rig.Name)
 		if store == nil {
 			continue
 		}
-		bestStore = store
-		bestLen = len(prefix)
+		prefixed = append(prefixed, storeref.PrefixedStore{
+			Prefix: strings.TrimSpace(rig.EffectivePrefix()),
+			Store:  store,
+		})
 	}
-	return bestStore
+	return prefixed
 }
 
-// beadIDHasConfiguredPrefix reports whether id falls under prefix, matching a
-// bare id == prefix exactly or the "prefix-" namespace. This is the
-// exact-or-hyphen match the configured-prefix resolver uses.
-func beadIDHasConfiguredPrefix(id, prefix string) bool {
-	if prefix == "" {
-		return false
+// resolveStoreByConfiguredIDPrefix routes an id on the configured (rig/HQ)
+// prefixes with a longest-prefix, exact-or-hyphen match
+// (storeref.IDInNamespace). It resolves against the configured prefixes, not
+// each store's own IDPrefix, and requires the longest configured prefix to win
+// — so it is not the namespace-only, first-match storeref.PrefixOwner. Ties keep
+// config order (HQ first), which cannot arise between distinct prefixes: two
+// prefixes of equal length never cover the same id.
+func resolveStoreByConfiguredIDPrefix(id string, configured []storeref.PrefixedStore) beads.Store {
+	if id == "" {
+		return nil
 	}
-	return id == prefix || strings.HasPrefix(id, prefix+"-")
+	var bestStore beads.Store
+	bestLen := -1
+	for _, candidate := range configured {
+		if !storeref.IDInNamespace(id, candidate.Prefix) || len(candidate.Prefix) <= bestLen {
+			continue
+		}
+		bestStore = candidate.Store
+		bestLen = len(candidate.Prefix)
+	}
+	return bestStore
 }
 
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
@@ -336,9 +406,15 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 				return store
 			}
 		}
-		// Fallback: the route pointed to the same rig.
-		if store, exists := stores[rig.Name]; exists {
-			return store
+		// Fallback: the route pointed back at this rig itself (a self-route).
+		// Only then may this rig answer. A route that resolves to some OTHER
+		// path — one that is not a registered rig, e.g. a relocated class store
+		// directory — says the prefix does NOT live here, so it must fall
+		// through to the caller's candidate scan rather than pin the wrong store.
+		if cleanPath == filepath.Clean(rigPath) {
+			if store, exists := stores[rig.Name]; exists {
+				return store
+			}
 		}
 	}
 	return nil
@@ -370,13 +446,49 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 
 // BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.
 // Returns raw beads and deps — no status mapping, no presentation logic.
+//
+// Membership states which rule produced Beads. It is on the wire because a
+// consumer cannot tell one rule's answer from another's by looking at the
+// result: a dependency walk and a root-id scan return the same count on many
+// molecules and different counts on the next one. A client that needs
+// beads.MembershipDirectRootID should assert on this field rather than assume.
 type BeadGraphResponse struct {
-	Root  beads.Bead            `json:"root"`
-	Beads []beads.Bead          `json:"beads"`
-	Deps  []workflowDepResponse `json:"deps"`
+	Root       beads.Bead            `json:"root"`
+	Beads      []beads.Bead          `json:"beads"`
+	Deps       []workflowDepResponse `json:"deps"`
+	Membership beads.Membership      `json:"membership" enum:"direct-root-id+parent-closure,direct-root-id+parent-closure+convoy-members" doc:"Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars."`
 }
 
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, error) {
+// collectBeadGraph resolves the member set of the graph rooted at root and the
+// parent-child edges within it. The membership rule it applied is returned
+// alongside, so the handler reports it on the wire instead of the caller
+// inferring it: beads.MembershipRootIDAndParentClosure, widened to
+// beads.MembershipRootIDParentClosureAndConvoy when the root is a convoy.
+//
+// The root-id arm is what makes this NOT beads.MembershipDepReachable, and the
+// difference is not cosmetic — on the measured live molecule gcg-arn a
+// dependency walk returns 48 of the 61 beads this returns, dropping every
+// gc.kind=spec sidecar, because spec steps are built with no dependency edges.
+// See beads.Membership.
+//
+// Both list arms read beads.TierBoth because the declared rule has no tier
+// axis. beads.DirectMembers reads both tiers (HandlesFor(store).Live forces
+// it), so a tier-scoped read here would answer a strictly different question
+// from the one the wire names: a wisp molecule materializes with every node in
+// ephemeral storage (the wisp bead policy maps to ephemeral under bd-1.0.5
+// semantics, and molecule instantiation stamps gc.root_bead_id on every node),
+// so the default TierIssues would drop every member of one while still
+// answering 200 with an unqualified "direct-root-id+parent-closure" — an empty
+// wisp molecule is indistinguishable from a finished one. The read handle is
+// deliberately still the store's own, not the LIVE handle beads.DirectMembers
+// uses: this is a hot dashboard path and bypassing the cache is a separate
+// change (see beads.Membership's note on the duplicated implementations).
+//
+// The parent-child walk is seeded from the whole accumulated member set, so
+// the closure covers the convoy members too and a convoy member brings its own
+// subtree. That is what the "+parent-closure" half of both spellings means; it
+// is not the closure of the root alone.
+func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -402,21 +514,25 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 	upsert(root)
 
+	membership := beads.MembershipRootIDAndParentClosure
+
 	metadataChildren, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
+		return nil, nil, "", fmt.Errorf("listing metadata children for bead %q: %w", root.ID, err)
 	}
 	for _, child := range metadataChildren {
 		upsert(child)
 	}
 
 	if root.Type == "convoy" {
+		membership = beads.MembershipRootIDParentClosureAndConvoy
 		members, err := convoycore.Members(store, root.ID, true)
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
+			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}
 		for _, member := range members {
 			upsert(member)
@@ -460,9 +576,10 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 			IncludeClosed: true,
 			AllowScan:     true,
 			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
+			return nil, nil, "", fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
 		}
 		var next []string
 		for _, child := range children {
@@ -478,7 +595,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		frontier = next
 	}
 
-	return graphBeads, parentEdges, nil
+	return graphBeads, parentEdges, membership, nil
 }
 
 func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepResponse {

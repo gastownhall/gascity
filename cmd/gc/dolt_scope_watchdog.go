@@ -146,17 +146,28 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt scope watchdog: %w", err)
 	}
-	pid, err := readManagedDoltTestWatchdogPID(stdout, cmd.Process.Pid)
+	pid, startTimeTicks, startIdentity, err := readManagedDoltScopeWatchdogStart(stdout, cmd.Process.Pid)
 	if err != nil {
 		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 		_ = cmd.Wait()
 		return managedDoltStartedProcess{}, err
 	}
+	watchdogPID := cmd.Process.Pid
+	// Snapshot the watchdog's own OS start identity while it is definitely alive
+	// (it has just handed off the dolt PID and entered its supervise loop), before
+	// the reaper goroutine below can Wait() it and free the PID. Startup-failure
+	// cleanup then re-verifies the watchdog PID the same way it does the dolt
+	// child's, so a reused watchdog PID is never signaled.
+	watchdogTicks, watchdogIdentity := snapshotManagedDoltStartIdentity(watchdogPID)
 	go func() { _ = cmd.Wait() }()
 	return managedDoltStartedProcess{
-		CityPath:    cityPath,
-		PID:         pid,
-		WatchdogPID: cmd.Process.Pid,
+		CityPath:               cityPath,
+		PID:                    pid,
+		WatchdogPID:            watchdogPID,
+		StartTimeTicks:         startTimeTicks,
+		StartIdentity:          startIdentity,
+		WatchdogStartTimeTicks: watchdogTicks,
+		WatchdogStartIdentity:  watchdogIdentity,
 	}, nil
 }
 
@@ -192,7 +203,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	// the direct production spawn (managedDoltSQLServerSysProcAttr) and the
 	// test watchdog's layout, and keeping the server's descendants out of
 	// the watchdog's own group. Termination here is leader-only:
-	// terminateManagedDoltPID signals just this PID — group-kill
+	// the guarded terminate below signals just this PID — group-kill
 	// (kill(-pgid, ...)) exists only in terminateManagedDoltTestPID, the
 	// test-registry reaper. Leader-only is accepted on this path because
 	// the managed config disables auto_gc/stats helper workers (see
@@ -205,7 +216,22 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d\n", cmd.Process.Pid) //nolint:errcheck
+	// Report the dolt child's PID and OS start identity to the parent BEFORE the
+	// reap goroutine below can Wait() the child and free its numeric PID.
+	// Snapshotting here — while the watchdog still holds the un-reaped child — is
+	// race-free and mirrors the direct-spawn snapshot in startManagedDoltSQLServer,
+	// so the parent's startup-failure cleanup guard
+	// (terminateManagedDoltStartedProcess) never signals an unrelated process that
+	// reused the PID after this child exited and was reaped. The watchdog also
+	// reuses this snapshot to guard its own scope-gone and signal-forward
+	// termination of the child below (terminateManagedDoltScopeWatchdogChild), so
+	// a reaped-then-reused PID is never signaled on the local reap path either.
+	// snapshotManagedDoltStartIdentity reads the ps fallback lazily, so this
+	// handshake — which the parent reads under a timeout — never blocks on a ps
+	// fork when /proc ticks are available.
+	startPID := cmd.Process.Pid
+	startTicks, startIdentity := snapshotManagedDoltStartIdentity(startPID)
+	fmt.Fprintln(stdout, formatManagedDoltWatchdogStartLine(startPID, startTicks, startIdentity)) //nolint:errcheck
 
 	interval := managedDoltScopeWatchdogInterval()
 	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s)\n", //nolint:errcheck
@@ -225,7 +251,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 		select {
 		case sig := <-signals:
 			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
 			<-done
 			return 0
 		case <-ticker.C:
@@ -239,7 +265,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			}
 			fmt.Fprintf(logFile, "gc scope watchdog: config %s gone for %d consecutive checks; terminating dolt sql-server pid %d\n", //nolint:errcheck
 				configFile, goneStreak, cmd.Process.Pid)
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
 			<-done
 			return 0
 		case err := <-done:
@@ -251,4 +277,21 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			return 0
 		}
 	}
+}
+
+// terminateManagedDoltScopeWatchdogChild terminates the watchdog's own dolt
+// sql-server child by PID, guarded against PID reuse with the child's OS start
+// identity that the watchdog snapshotted at startup (startTicks/startIdentity,
+// captured before the reap goroutine could Wait() the child and free its
+// numeric PID). This is the production scope-gone/signal reap path — the reason
+// the watchdog exists — so it carries the same reuse hazard the parent-side
+// cleanup does: the reaper goroutine frees the PID when a server that outlived
+// the SIGTERM grace finally exits, and terminateManagedDoltPIDGuarded re-checks
+// identity before both SIGTERM and SIGKILL so neither signal lands on an
+// unrelated process that reused the number. A zero identity (no /proc ticks and
+// no ps fallback) composes to the legacy unconditional terminate.
+func terminateManagedDoltScopeWatchdogChild(cityPath string, pid int, startTicks uint64, startIdentity string) error {
+	return terminateManagedDoltPIDGuarded(cityPath, pid, func() bool {
+		return managedDoltPIDStartIdentityMatches(pid, startTicks, startIdentity)
+	})
 }

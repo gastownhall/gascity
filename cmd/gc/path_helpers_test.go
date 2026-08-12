@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 func canonicalTestPath(path string) string {
@@ -31,21 +33,30 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
-func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, error) {
-	parent, err := os.MkdirTemp("/tmp", "gct-")
+// cmdGCTmuxSocketRoot returns a tmux socket root under socketParentRoot.
+// TestMain normally supplies /tmp rather than testTempRoot, which can be an
+// arbitrarily long macOS $TMPDIR path that blows Unix socket path limits. It
+// also returns the parent dir to remove at teardown and the *os.File holding
+// its alive sentinel. The sentinel must stay referenced by the caller for the
+// process lifetime so a concurrent sibling run's orphan sweep
+// (tmuxtest.SweepOrphanPIDPrefixedDirs, invoked inside NewSocketParentDir)
+// does not reclaim this still-active directory.
+func cmdGCTmuxSocketRoot(testTempRoot, socketParentRoot string) (string, string, *os.File, error) {
+	parent, sentinel, err := tmuxtest.NewSocketParentDir(socketParentRoot, io.Discard)
 	if err != nil {
 		root := filepath.Join(testTempRoot, "tmux")
 		if err := os.MkdirAll(root, 0o700); err != nil {
-			return "", "", fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
+			return "", "", nil, fmt.Errorf("creating fallback cmd/gc tmux socket root: %w", err)
 		}
-		return root, "", nil
+		return root, "", nil, nil
 	}
 	root := filepath.Join(parent, "tmux")
 	if err := os.MkdirAll(root, 0o700); err != nil {
+		_ = sentinel.Close()
 		_ = os.RemoveAll(parent)
-		return "", "", fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
+		return "", "", nil, fmt.Errorf("creating cmd/gc tmux socket root: %w", err)
 	}
-	return root, parent, nil
+	return root, parent, sentinel, nil
 }
 
 // clearInheritedBeadsEnv prevents tests that explicitly write
@@ -90,35 +101,79 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m            *testing.M
-	tempRoot     string
+	m        *testing.M
+	tempRoot string
+	// sourceRoot is the package directory the test binary runs in. A managed
+	// dolt provider handed a city root of "" or "." resolves it to this
+	// directory, so the server and its data_dir land in the source checkout
+	// at cmd/gc/.gc and cmd/gc/.beads instead of under tempRoot. Those
+	// escaped the guard entirely while it watched tempRoot alone, and
+	// .gitignore hides the on-disk half, so they accumulated unnoticed.
+	//
+	// Watching this root is safe for the reaping paths as well as detection:
+	// no real city lives inside the checkout, so a dolt sql-server rooted
+	// here is a test leak by construction. That is why the fix names a
+	// second root rather than watching every dolt process on the machine —
+	// an unscoped guard would reap the developer's own city servers, which
+	// legitimately start and stop during a long test run.
+	sourceRoot   string
 	cleanupPaths []string
 }
 
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+	// A failure here must not be fatal: os.Getwd only fails in exotic cases
+	// (an unlinked cwd), and losing the second root degrades the guard to its
+	// previous tempRoot-only behavior rather than breaking every test run.
+	sourceRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: resolving source root: %v\n", err) //nolint:errcheck
+		sourceRoot = ""
+	}
 	return &doltLeakGuardedTestingM{
 		m:            m,
 		tempRoot:     tempRoot,
+		sourceRoot:   sourceRoot,
 		cleanupPaths: cleanupPaths,
 	}
 }
 
+// leakRoots are the config-path roots the guard treats as test-owned. A dolt
+// sql-server whose --config lies under any of them is this run's to detect and
+// reap.
+func (g *doltLeakGuardedTestingM) leakRoots() []string {
+	return []string{g.tempRoot, g.sourceRoot}
+}
+
+// nonEmptyLeakRoots is leakRoots minus unresolved entries, for diagnostics that
+// name the roots a leak was found under.
+func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
+	roots := make([]string, 0, 2)
+	for _, root := range g.leakRoots() {
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
 	runTests func() int,
 	enumerate func() ([]DoltProcInfo, error),
 	sweepStale func(string) bool,
+	sweepOrphanDirs func(),
 	reapRegistered func(),
 	reapLeaks func([]DoltProcInfo),
 ) int {
 	_ = sweepStale("startup")
+	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
-	initial, initialErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+	initial, initialErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
 	if initialErr != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
@@ -127,12 +182,12 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
 			guardFailed = true
@@ -181,7 +236,7 @@ func (g *doltLeakGuardedTestingM) cleanupTemporaryPaths() {
 }
 
 func (g *doltLeakGuardedTestingM) reapDoltProcessesUnderRoot(label string) bool {
-	procs, err := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+	procs, err := snapshotDoltProcessesForConfigRoots(discoverDoltProcesses, g.leakRoots())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s scan failed: %v\n", label, err) //nolint:errcheck
 		return true
@@ -196,7 +251,7 @@ func (g *doltLeakGuardedTestingM) reapDoltProcessesUnderRoot(label string) bool 
 	sort.Slice(leaked, func(i, j int) bool {
 		return leaked[i].PID < leaked[j].PID
 	})
-	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d dolt sql-server process(es) under %s\n", label, len(leaked), g.tempRoot) //nolint:errcheck
+	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d dolt sql-server process(es) under %s\n", label, len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
 	writeDoltLeakReport(os.Stderr, leaked)
 	reapDoltLeakProcesses(leaked)
 	return true
@@ -227,6 +282,24 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	writeDoltLeakReport(os.Stderr, leaked)
 	reapDoltLeakProcesses(leaked)
 	return true
+}
+
+// sweepOrphanDoltStoreDirs runs the symptom-based fallback sweep
+// (internal/doltorphan.Sweep) over os.TempDir(), removing stray dolt store
+// directories regardless of what created them (ga-ntbpyb.2 acceptance
+// criterion 2). It composes with, but does not replace,
+// sweepStaleCmdGCTestDoltProcesses above: that reaps stale *processes* by
+// config-path heuristics; this catches the *directory* left behind when a
+// process is already gone by the time any process-level sweep runs (e.g. a
+// SIGKILLed test binary whose pid was later reused).
+func sweepOrphanDoltStoreDirs() {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: os.TempDir()})
+	for _, dir := range result.Removed {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir %s\n", dir) //nolint:errcheck
+	}
+	for _, err := range result.Errors {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep error: %v\n", err) //nolint:errcheck
+	}
 }
 
 func cmdGCTestActiveRoots(currentRoot string) []string {
@@ -279,7 +352,11 @@ func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
 	return 0, false
 }
 
-func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
+// snapshotDoltProcessesForConfigRoots returns the dolt sql-servers whose
+// --config path lies under any of roots. Empty roots are ignored, so a caller
+// that could not resolve one still gets the others rather than matching
+// everything.
+func snapshotDoltProcessesForConfigRoots(enumerate func() ([]DoltProcInfo, error), roots []string) (map[int]DoltProcInfo, error) {
 	procs, err := enumerate()
 	if err != nil {
 		return nil, err
@@ -287,12 +364,19 @@ func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error)
 	out := make(map[int]DoltProcInfo, len(procs))
 	for _, p := range procs {
 		configPath := extractConfigPath(p.Argv)
-		if root == "" || !pathutil.PathWithin(root, configPath) {
-			continue
+		for _, root := range roots {
+			if root == "" || !pathutil.PathWithin(root, configPath) {
+				continue
+			}
+			out[p.PID] = p
+			break
 		}
-		out[p.PID] = p
 	}
 	return out, nil
+}
+
+func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
+	return snapshotDoltProcessesForConfigRoots(enumerate, []string{root})
 }
 
 func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInfo {

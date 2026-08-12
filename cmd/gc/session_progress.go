@@ -1,6 +1,30 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+)
+
+// openPoolSessionCountForTemplate counts the reconciler working-set sessions
+// that are still open and resolve to the given agent template. It reads each
+// session's typed Info from the coherent snapshot (infoByID), not the raw bead,
+// so a session closed earlier in the tick is excluded as soon as its close has
+// been refreshed onto the snapshot. It feeds the min-floor idle-worker
+// exemption: a pool at or below its floor is entirely always-warm contingent.
+//
+// The count is order-independent (unique session IDs), so it ranges infoByID
+// directly rather than the raw `ordered` beads (Step 5e demotion).
+func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *config.City, template string) int {
+	open := 0
+	for _, info := range infoByID {
+		if !info.Closed && normalizedSessionTemplateInfo(info, cfg) == template {
+			open++
+		}
+	}
+	return open
+}
 
 // isMinFloorIdleWorker reports whether a session is a legitimate pool floor
 // worker that should be exempt from the progress-stall recycler.
@@ -47,4 +71,33 @@ func sessionProgressStalled(threshold time.Duration, holdsClaim, providerHealthy
 		return false
 	}
 	return now.Sub(lastProgress) > threshold
+}
+
+// sessionClaimHolderStalled reports whether a confirmed claim-holder has made
+// no provider-reported progress long enough to require a fresh restart. It is
+// deliberately separate from sessionProgressStalled: claim-less sessions are
+// safe to recycle sooner, while recycling a holder risks interrupting work.
+// Unknown activity, provider failure, and protected sessions always suppress
+// the recycle.
+func sessionClaimHolderStalled(threshold time.Duration, holdsClaim, providerHealthy, exempt bool, lastProgress, now time.Time) bool {
+	if threshold <= 0 || !holdsClaim || !providerHealthy || exempt || lastProgress.IsZero() {
+		return false
+	}
+	return now.Sub(lastProgress) > threshold
+}
+
+// minPositiveDuration returns the smaller positive duration, or zero when both
+// are disabled. It lets the reconciler defer its more expensive checks until
+// either stall policy could apply.
+func minPositiveDuration(first, second time.Duration) time.Duration {
+	switch {
+	case first <= 0:
+		return second
+	case second <= 0:
+		return first
+	case first < second:
+		return first
+	default:
+		return second
+	}
 }

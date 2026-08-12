@@ -233,7 +233,7 @@ than idealized semantic phases:
 4. pool demand / cap calculation
 5. `beadReconcileTick` and `reconcileSessionBeads`
 6. `executePlannedStarts`
-7. `advanceSessionDrainsWithSessions`
+7. `advanceSessionDrainsWithSessionsTraced`
 8. tick finalization
 
 Records may still interleave logically. Flush groups are ordering and

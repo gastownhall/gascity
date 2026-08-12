@@ -86,7 +86,8 @@ type ConvoyGetInput struct {
 // ConvoyCreateInput is the Huma input for POST /v0/city/{cityName}/convoys.
 type ConvoyCreateInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Rig   string   `json:"rig,omitempty" doc:"Rig name."`
 		Title string   `json:"title" doc:"Convoy title." minLength:"1"`
 		Items []string `json:"items,omitempty" doc:"Bead IDs to include."`

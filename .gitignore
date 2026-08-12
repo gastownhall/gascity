@@ -6,7 +6,19 @@ coverage.noncmdgc.txt
 coverage.cmdgc.*.txt
 cmd/gc/.runtime/
 /bin/
+/dist/
 /gc
+
+# Dashboard e2e (Layer B) build + run artifacts. The fakesupervisor is a
+# compiled -tags integration binary; Playwright emits reports/results/browsers.
+# The bare /fakesupervisor guard catches `go build ./test/.../fakesupervisor/`
+# run from the repo root (which drops the binary in cwd), not just the -o form.
+test/dashport/cmd/fakesupervisor/fakesupervisor
+/fakesupervisor
+internal/api/dashboardspa/web/frontend/test-results/
+internal/api/dashboardspa/web/frontend/playwright-report/
+internal/api/dashboardspa/web/frontend/blob-report/
+internal/api/dashboardspa/web/frontend/.playwright/
 /genschema
 /bd
 /br

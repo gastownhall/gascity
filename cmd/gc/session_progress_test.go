@@ -3,7 +3,32 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+// TestOpenPoolSessionCountForTemplateExcludesClosed guards the min-floor scan's
+// read-after-close contract: a session whose Info snapshot is Closed (the shape
+// the reconciler produces after refreshing a mid-tick close onto infoByID) must
+// not count toward the pool's open floor. Only open, same-template sessions are
+// counted; a closed same-template session and an open other-template session are
+// both excluded.
+func TestOpenPoolSessionCountForTemplateExcludesClosed(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Ranged as a map (Step 5e): membership + Closed/template drive the count, not
+	// order. Two open workers count; the closed worker and the scout are excluded.
+	infoByID := map[string]sessionpkg.Info{
+		"s-open-1":        {ID: "s-open-1", Template: "worker"},
+		"s-open-2":        {ID: "s-open-2", Template: "worker"},
+		"s-closed-worker": {ID: "s-closed-worker", Template: "worker", Closed: true},
+		"s-open-scout":    {ID: "s-open-scout", Template: "scout"},
+	}
+
+	if got := openPoolSessionCountForTemplate(infoByID, cfg, "worker"); got != 2 {
+		t.Fatalf("openPoolSessionCountForTemplate = %d, want 2 (two open workers; the closed worker and the scout must be excluded)", got)
+	}
+}
 
 func TestSessionProgressStalled(t *testing.T) {
 	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
@@ -36,6 +61,55 @@ func TestSessionProgressStalled(t *testing.T) {
 				t.Errorf("sessionProgressStalled = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSessionClaimHolderStalled(t *testing.T) {
+	now := time.Date(2026, 7, 25, 20, 0, 0, 0, time.UTC)
+	const threshold = 20 * time.Minute
+
+	tests := []struct {
+		name            string
+		threshold       time.Duration
+		holdsClaim      bool
+		providerHealthy bool
+		exempt          bool
+		lastProgress    time.Time
+		want            bool
+	}{
+		{"stale confirmed holder is recyclable", threshold, true, true, false, now.Add(-time.Hour), true},
+		{"disabled", 0, true, true, false, now.Add(-time.Hour), false},
+		{"recent activity", threshold, true, true, false, now.Add(-time.Second), false},
+		{"claimless session belongs to other recycler", threshold, false, true, false, now.Add(-time.Hour), false},
+		{"unhealthy provider", threshold, true, false, false, now.Add(-time.Hour), false},
+		{"protected session", threshold, true, true, true, now.Add(-time.Hour), false},
+		{"unknown activity", threshold, true, true, false, time.Time{}, false},
+		{"at threshold", threshold, true, true, false, now.Add(-threshold), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionClaimHolderStalled(tc.threshold, tc.holdsClaim, tc.providerHealthy, tc.exempt, tc.lastProgress, now); got != tc.want {
+				t.Fatalf("sessionClaimHolderStalled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMinPositiveDuration(t *testing.T) {
+	tests := []struct {
+		first, second time.Duration
+		want          time.Duration
+	}{
+		{0, 0, 0},
+		{0, time.Minute, time.Minute},
+		{time.Minute, 0, time.Minute},
+		{time.Minute, 2 * time.Minute, time.Minute},
+		{2 * time.Minute, time.Minute, time.Minute},
+	}
+	for _, tc := range tests {
+		if got := minPositiveDuration(tc.first, tc.second); got != tc.want {
+			t.Errorf("minPositiveDuration(%s, %s) = %s, want %s", tc.first, tc.second, got, tc.want)
+		}
 	}
 }
 

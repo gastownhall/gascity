@@ -48,6 +48,19 @@ type ConfigState struct {
 	// When empty, the existing dolt.mode value is preserved.
 	DoltMode string
 	Dolt     DoltConfig
+	// CustomTypes is a caller-supplied list of bd custom bead types to ensure
+	// in the canonical `types.custom` config key. When non-empty,
+	// EnsureCanonicalConfig unions these with any types already on disk
+	// (never narrowing — pre-existing entries are preserved) and writes the
+	// merged `types.custom: a,b,c` line. When empty, the existing
+	// `types.custom` value is left untouched (passthrough). The list itself is
+	// opaque to this package; cmd/gc sources it from doctor.RequiredCustomTypes.
+	//
+	// This is the Go-owned replacement for gc-beads-bd.sh's former
+	// ensure_types_custom_in_yaml shell function; bd reads this YAML key as a
+	// fallback when its DB config table is unset, so materializing it here
+	// avoids bd's per-command auto-migrate cost on populated stores.
+	CustomTypes []string
 }
 
 // DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
@@ -66,25 +79,23 @@ func (c DoltConfig) DisableEventFlushEnabled() bool {
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
 //
-// Backend determines which backend-specific fields are meaningful. When
-// returned from LoadMetadataState the populated backend-specific fields are
-// guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
-// always has every Postgres field non-empty and PostgresPort already verified
-// as a TCP-port-shaped string.
+// It is the subset gc *implements*, not the whole file. Backend names a
+// backend this build registers (backend_bundle.go) and the dolt fields are the
+// only backend-specific ones gc reads. Every other key on disk — including the
+// connection fields of a backend served by the linked beads library rather
+// than by gc — is passed through untouched by EnsureCanonicalMetadata, which
+// canonicalises over the raw object. gc must never force an operator to
+// hand-convert away from a shape bd itself writes.
 type MetadataState struct {
-	Database         string `json:"database"`
-	Backend          string `json:"backend"`
-	DoltMode         string `json:"dolt_mode,omitempty"`
-	DoltDatabase     string `json:"dolt_database,omitempty"`
-	PostgresHost     string `json:"postgres_host,omitempty"`
-	PostgresPort     string `json:"postgres_port,omitempty"`
-	PostgresUser     string `json:"postgres_user,omitempty"`
-	PostgresDatabase string `json:"postgres_database,omitempty"`
+	Database     string `json:"database"`
+	Backend      string `json:"backend"`
+	DoltMode     string `json:"dolt_mode,omitempty"`
+	DoltDatabase string `json:"dolt_database,omitempty"`
 }
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
 //
-// Returned by LoadMetadataState for JSON parse failures and for every E1–E5
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E2
 // rejection in the metadata contract. Callers may use errors.As to
 // discriminate parse failures from I/O failures (which surface as plain OS
 // errors).
@@ -93,11 +104,19 @@ type MetadataParseError struct {
 	Path string
 	// Reason is the verbatim rejection reason text (the part after `: `).
 	Reason string
+	// Err is the typed cause, when the rejection has one. The unknown-backend
+	// rejection carries *UnknownBackendError so a caller can ask whether this
+	// build simply does not register the backend — a fact worth acting on
+	// differently from malformed metadata — without matching on Reason.
+	Err error
 }
 
 func (e *MetadataParseError) Error() string {
 	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
 }
+
+// Unwrap exposes the typed cause for errors.Is and errors.As.
+func (e *MetadataParseError) Unwrap() error { return e.Err }
 
 var deprecatedMetadataKeys = []string{
 	"dolt_host",
@@ -109,30 +128,18 @@ var deprecatedMetadataKeys = []string{
 	"dolt_port",
 }
 
-var doltBackendKeys = []string{
-	"dolt_mode",
-	"dolt_database",
-}
-
-var postgresBackendKeys = []string{
-	"postgres_host",
-	"postgres_port",
-	"postgres_user",
-	"postgres_database",
-}
-
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
-// removed when canonicalising for the given backend. An empty backend
-// preserves all backend-specific keys (today's behavior for unknown-shape
-// metadata).
+// removed when canonicalising for the given backend.
+//
+// It scrubs only keys gc itself writes and a backend gc implements does not
+// read — today, dolt_mode on a doltlite scope. A key belonging to a backend gc
+// does not implement is left alone: it is the linked beads library's to read,
+// gc cannot tell an inert leftover from live configuration, and a scope bound
+// to such a backend never reaches this function at all.
 func crossBackendKeysToScrub(backend string) []string {
 	switch backend {
-	case "dolt":
-		return postgresBackendKeys
 	case "doltlite":
-		return append([]string{"dolt_mode"}, postgresBackendKeys...)
-	case "postgres":
-		return doltBackendKeys
+		return []string{"dolt_mode"}
 	default:
 		return nil
 	}
@@ -320,21 +327,52 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadDoltMode reports the dolt_mode recorded in metadata.json at path, if any.
+//
+// It is the tolerant reader ReadDoltDatabase is, for the same reason: a caller
+// that is about to REWRITE this file needs to know what it is replacing even
+// when the file would not survive full validation, and a rejection here would
+// hide the change rather than report it. Malformed JSON and an absent file both
+// report "no recorded mode" rather than an error.
+func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["dolt_mode"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // LoadMetadataState parses .beads/metadata.json at path and returns the
 // canonical MetadataState if the file exists and validates.
 //
 // Returns (zero, false, nil) when the file does not exist — callers decide
 // whether absence is an error in their context (mirrors ReadIssuePrefix and
 // ReadDoltDatabase). Returns a non-nil error for read failures other than
-// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
+// ENOENT and for any of the E1–E2 rejection cases. Validation failures are
 // wrapped in *MetadataParseError; callers may use errors.As to discriminate.
 //
 // Validation order is deterministic: the operator always sees the same
 // top-most message when several things are wrong. Order is JSON parse (E1) →
-// mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5). An empty Backend is permitted at the parse
-// layer; downstream consumers that need a backend must check
-// state.Backend != "" themselves.
+// unknown backend (E2), and E2 is now the last rung: the rejections that once
+// followed it all validated a connection shape for a backend gc no longer
+// implements. Both remaining rungs are pinned by
+// TestLoadMetadataStateRejectionOrderIsPinned.
+//
+// E2 asks the compiled backend-name registry (backend_bundle.go) rather than a
+// literal allowlist, so its refusal enumerates what this build actually
+// registers. An empty Backend is permitted — it is a registered name — and
+// downstream consumers that need a backend must check state.Backend != ""
+// themselves.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -357,93 +395,11 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	if other, ok := mixedBackendField(state); ok {
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("cannot mix dolt and postgres fields in a single scope (backend=%s but %s is also set)", state.Backend, other),
-		}
-	}
-
-	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres":
-		// allowed
-	default:
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres)", state.Backend),
-		}
-	}
-
-	if state.Backend == "postgres" {
-		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-			}
-		}
-		port, err := strconv.Atoi(state.PostgresPort)
-		if err != nil || port < 1 || port > 65535 {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
-			}
-		}
+	if err := RecognizeBackend(state.Backend); err != nil {
+		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
 	}
 
 	return state, true, nil
-}
-
-// mixedBackendField reports the first populated "other-backend" field name
-// (relative to state.Backend). For explicit backends, any populated field from
-// the opposite backend is mixed. For empty or unknown backends, mixed still
-// means both Dolt-shaped and Postgres-shaped fields are populated.
-//
-// Field-iteration order is the JSON-key declaration order on MetadataState
-// (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database). When state.Backend is empty or unknown and both backend
-// families appear, the first populated field across both backends wins (with
-// Dolt fields preferred per declaration order).
-func mixedBackendField(state MetadataState) (string, bool) {
-	type entry struct {
-		name    string
-		value   string
-		backend string
-	}
-	fields := []entry{
-		{"dolt_mode", state.DoltMode, "dolt"},
-		{"dolt_database", state.DoltDatabase, "dolt"},
-		{"postgres_host", state.PostgresHost, "postgres"},
-		{"postgres_port", state.PostgresPort, "postgres"},
-		{"postgres_user", state.PostgresUser, "postgres"},
-		{"postgres_database", state.PostgresDatabase, "postgres"},
-	}
-	var firstDolt, firstPostgres string
-	for _, f := range fields {
-		if f.value == "" {
-			continue
-		}
-		if f.backend == "dolt" && firstDolt == "" {
-			firstDolt = f.name
-		}
-		if f.backend == "postgres" && firstPostgres == "" {
-			firstPostgres = f.name
-		}
-	}
-	switch state.Backend {
-	case "postgres":
-		if firstDolt != "" {
-			return firstDolt, true
-		}
-	case "dolt", "doltlite":
-		if firstPostgres != "" {
-			return firstPostgres, true
-		}
-	default:
-		if firstDolt != "" && firstPostgres != "" {
-			return firstDolt, true
-		}
-	}
-	return "", false
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
@@ -525,6 +481,18 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "dolt.mode", mode) || changed
 	}
 
+	if len(state.CustomTypes) > 0 {
+		// Union with what's already on disk, never narrowing — pack/operator
+		// custom types beyond the GC baseline must survive. `types.custom` is a
+		// flat dotted top-level key (not nested `types: {custom:}`); this reads
+		// and writes that same flat form the shell and bd emit.
+		existing, _ := configStringValue(root, "types.custom")
+		merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes)
+		if len(merged) > 0 {
+			changed = setString(root, "types.custom", strings.Join(merged, ",")) || changed
+		}
+	}
+
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
 	if !changed {
 		return false, nil
@@ -553,14 +521,10 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 
 	changed := false
 	defaults := map[string]string{
-		"database":          strings.TrimSpace(state.Database),
-		"backend":           strings.TrimSpace(state.Backend),
-		"dolt_mode":         strings.TrimSpace(state.DoltMode),
-		"dolt_database":     strings.TrimSpace(state.DoltDatabase),
-		"postgres_host":     strings.TrimSpace(state.PostgresHost),
-		"postgres_port":     strings.TrimSpace(state.PostgresPort),
-		"postgres_user":     strings.TrimSpace(state.PostgresUser),
-		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
+		"database":      strings.TrimSpace(state.Database),
+		"backend":       strings.TrimSpace(state.Backend),
+		"dolt_mode":     strings.TrimSpace(state.DoltMode),
+		"dolt_database": strings.TrimSpace(state.DoltDatabase),
 	}
 	for key, want := range defaults {
 		if want == "" {
@@ -665,6 +629,16 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		replacements["dolt.mode"] = "dolt.mode: " + mode
 	}
+	if len(state.CustomTypes) > 0 {
+		// Same never-narrow union as the main path, but sourced from the raw
+		// (post-repair) bytes: bd init emits a glued `sync.remote: "…"types.custom: …`
+		// line that routes here, and the shell's ensure_types_custom_in_yaml
+		// unioned regardless of YAML validity — so the fallback must too.
+		existing, _ := scanConfigLineValueFromData(data, "types.custom:")
+		if merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes); len(merged) > 0 {
+			replacements["types.custom"] = "types.custom: " + strings.Join(merged, ",")
+		}
+	}
 	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
 
 	lines := strings.Split(string(data), "\n")
@@ -720,6 +694,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"dolt.port",
 		"dolt.user",
 		"dolt.mode",
+		"types.custom",
 	}
 	for _, key := range orderedKeys {
 		want, ok := replacements[key]
@@ -740,6 +715,55 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		out = append(out, "")
 	}
 	return true, fs.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+}
+
+// parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
+// trimmed, unquoted, non-empty entries. A blank value yields nil.
+//
+// Quote stripping matters for the malformed-YAML fallback path, which scans
+// raw bytes rather than YAML-unquoted node values: a quoted `types.custom:
+// "alpha,beta"` line splits on the comma into `"alpha` and `beta"`, so each
+// entry must have its quote characters removed before comparison — otherwise
+// the union never matches the required set and re-appends corrupted duplicates.
+// Mirrors the deleted shell function's `gsub(/"/, "", t)`.
+func parseCustomTypesValue(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(strings.ReplaceAll(p, `"`, "")); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// MergeCustomTypes returns the union of current and required, current entries
+// first (preserving on-disk order), then any required entries not already
+// present. Empty/whitespace-only entries are dropped and duplicates removed.
+// Current-first ordering matches the shell's former merge, so re-running
+// against an unchanged set produces the identical value and setString
+// short-circuits (no mtime churn). Exported so higher layers (e.g. doctor)
+// share this one implementation rather than duplicating the union algorithm.
+func MergeCustomTypes(current, required []string) []string {
+	seen := make(map[string]bool, len(current)+len(required))
+	merged := make([]string, 0, len(current)+len(required))
+	add := func(list []string) {
+		for _, t := range list {
+			t = strings.TrimSpace(t)
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			merged = append(merged, t)
+		}
+	}
+	add(current)
+	add(required)
+	return merged
 }
 
 func isConfigParseError(err error) bool {

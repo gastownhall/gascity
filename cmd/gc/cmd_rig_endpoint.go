@@ -12,13 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
@@ -307,6 +307,7 @@ func requestedRigEndpointState(rig config.Rig, currentState, cityState contract.
 			EndpointStatus: contract.EndpointStatusVerified,
 			DoltHost:       "127.0.0.1",
 			DoltPort:       strings.TrimSpace(opts.Port),
+			DoltMode:       "server",
 		}
 		if opts.AdoptUnverified {
 			state.EndpointStatus = contract.EndpointStatusUnverified
@@ -326,6 +327,7 @@ func requestedRigEndpointState(rig config.Rig, currentState, cityState contract.
 		DoltHost:       strings.TrimSpace(opts.Host),
 		DoltPort:       strings.TrimSpace(opts.Port),
 		DoltUser:       user,
+		DoltMode:       "server",
 	}
 	if opts.AdoptUnverified {
 		state.EndpointStatus = contract.EndpointStatusUnverified
@@ -360,6 +362,14 @@ func requireCanonicalScopeMetadata(fs fsys.FS, scopeRoot string) error {
 	return nil
 }
 
+// ensureCanonicalScopeMetadataIfPresent canonicalizes an existing scope's
+// metadata to server mode, for the endpoint commands (`gc rig set-endpoint`,
+// `gc beads city use-managed`/`use-external`).
+//
+// It announces the mode change for the same reason ensureCanonicalScopeMetadata
+// does: this is the identical rewrite through a different door, and a warning
+// that depends on which command performed the flip is a warning an operator
+// cannot rely on.
 func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	doltDatabase, err := func() (string, error) {
@@ -375,6 +385,7 @@ func ensureCanonicalScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
 	if err != nil {
 		return err
 	}
+	announceStorageModeChange(fs, path, "server", doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
@@ -612,11 +623,9 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 	}
 
 	var issuesTable string
-	if err := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
-		}
-		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
+	issuesScanErr := db.QueryRowContext(ctx, "SHOW TABLES LIKE 'issues'").Scan(&issuesTable)
+	if err := validateExternalDoltIssuesTableScan(database, issuesScanErr); err != nil {
+		return err
 	}
 
 	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
@@ -640,6 +649,16 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 		)
 	}
 	return nil
+}
+
+func validateExternalDoltIssuesTableScan(database string, scanErr error) error {
+	if scanErr == nil {
+		return nil
+	}
+	if scanErr == sql.ErrNoRows { //nolint:errorlint // Preserve the pre-extraction exact-sentinel contract.
+		return fmt.Errorf("beads store not usable on external endpoint: database %q is missing the issues table", strings.TrimSpace(database))
+	}
+	return fmt.Errorf("beads store not usable on external endpoint: %w", scanErr)
 }
 
 func readCanonicalProjectID(metadataPath string) (string, error) {
@@ -681,11 +700,9 @@ func isMissingDoltMetadataTableError(err error) bool {
 		strings.Contains(msg, "no such table: metadata")
 }
 
-type fileSnapshot struct {
-	path   string
-	data   []byte
-	exists bool
-}
+// fileSnapshot aliases rig.FileSnapshot so cmd/gc's existing rollback call sites
+// keep compiling while the primitives live in internal/rig (C2.1 extraction).
+type fileSnapshot = rig.FileSnapshot
 
 func snapshotRigCanonicalFiles(fs fsys.FS, scopeRoot string) ([]fileSnapshot, error) {
 	paths := []string{
@@ -708,8 +725,21 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		if !strings.EqualFold(cfg.Rigs[i].Name, rigName) {
 			continue
 		}
-		cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
-		cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		// An inherited rig must not carry the deprecated per-rig
+		// dolt_host/dolt_port in city.toml. A stamped target makes the beads
+		// reconciler treat the rig as an explicit override and churn its
+		// .beads/config.yaml back to `explicit` (dropping the inherited
+		// dolt.user) on every city start, and drifts into a hard error if the
+		// city endpoint later changes (validateCanonicalCompatDoltDrift). Clear
+		// it so the rig truly inherits — matching the managed-city path.
+		// Explicit and self targets keep their host/port.
+		if state.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			cfg.Rigs[i].DoltHost = ""
+			cfg.Rigs[i].DoltPort = ""
+		} else {
+			cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
+			cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		}
 		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)
@@ -737,34 +767,11 @@ func snapshotRigEndpointFiles(fs fsys.FS, cityPath, scopeRoot string) ([]fileSna
 	return snapshots, nil
 }
 
-// snapshotResolvedFile snapshots path for rollback through any symlink
-// chain: restoring at the link path would replace the link with a regular
-// file (the ga-lurp5d failure mode), so the snapshot records the resolved
-// target and the restore writes there instead. Resolve-only by design — a
-// rollback writes the original bytes back, so the key-loss rewrite guard
-// does not apply. A path blocked by a regular-file intermediate cannot
-// exist; it snapshots as missing, matching snapshotOptionalFile.
+// snapshotResolvedFile delegates to internal/rig, which owns the rollback
+// primitives (C2.1). The symlink-resolution rationale lives on
+// rig.SnapshotResolvedFile.
 func snapshotResolvedFile(fs fsys.FS, path string) (fileSnapshot, error) {
-	resolved, err := fsys.ResolveSymlinks(fs, path)
-	if err != nil {
-		if errors.Is(err, syscall.ENOTDIR) {
-			return fileSnapshot{path: path}, nil
-		}
-		return fileSnapshot{}, err
-	}
-	return snapshotOptionalFile(fs, resolved)
-}
-
-func snapshotOptionalFile(fs fsys.FS, path string) (fileSnapshot, error) {
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
-			return fileSnapshot{path: path}, nil
-		}
-		return fileSnapshot{}, err
-	}
-	cp := append([]byte(nil), data...)
-	return fileSnapshot{path: path, data: cp, exists: true}, nil
+	return rig.SnapshotResolvedFile(fs, path)
 }
 
 // cityTomlRollbackPath returns the symlink-resolved city.toml path that a
@@ -789,24 +796,5 @@ func writeRigEndpointRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fil
 }
 
 func restoreSnapshots(fs fsys.FS, snapshots []fileSnapshot) error {
-	var failures []string
-	for _, snap := range snapshots {
-		if err := restoreSnapshot(fs, snap); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", snap.path, err))
-		}
-	}
-	if len(failures) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s", strings.Join(failures, "; "))
-}
-
-func restoreSnapshot(fs fsys.FS, snap fileSnapshot) error {
-	if !snap.exists {
-		if err := fs.Remove(snap.path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	return fsys.WriteFileAtomic(fs, snap.path, snap.data, 0o644)
+	return rig.RestoreSnapshots(fs, snapshots)
 }

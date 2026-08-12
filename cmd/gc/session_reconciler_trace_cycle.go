@@ -26,7 +26,7 @@ func (m *SessionReconcilerTracer) beginCycle(info sessionReconcilerTraceCycleInf
 	}
 	if cycle != nil && sessionBeads != nil {
 		cycle.RecordSessionBaseline("", "", traceRecordPayload{
-			"open_count": len(sessionBeads.Open()),
+			"open_count": len(sessionBeads.OpenInfos()),
 		})
 		_ = cycle.flushCurrentBatch(TraceDurabilityDurable)
 	}
@@ -49,29 +49,6 @@ func (c *SessionReconcilerTraceCycle) sourceFor(template string) string {
 		return source
 	}
 	return string(TraceSourceAlwaysOn)
-}
-
-func (c *SessionReconcilerTraceCycle) recordDecision(siteCode, template, sessionName, reason, outcome string, data traceRecordPayload, _ []string, _ string) {
-	if c == nil {
-		return
-	}
-	fields := make(map[string]any, len(data))
-	for k, v := range data {
-		fields[k] = v
-	}
-	normSite, rawSite := normalizeTraceSiteCode(siteCode)
-	normReason, rawReason := normalizeTraceReasonCode(reason)
-	normOutcome, rawOutcome := normalizeTraceOutcomeCode(outcome)
-	if rawSite != "" {
-		fields["raw_site_code"] = rawSite
-	}
-	if rawReason != "" {
-		fields["raw_reason_code"] = rawReason
-	}
-	if rawOutcome != "" {
-		fields["raw_outcome_code"] = rawOutcome
-	}
-	c.RecordDecision(normSite, normReason, normOutcome, template, sessionName, fields)
 }
 
 // RecordControllerDecision records a baseline daemon-level decision that is
@@ -114,56 +91,6 @@ func (c *SessionReconcilerTraceCycle) RecordControllerOperation(site TraceSiteCo
 		rec.Fields[k] = v
 	}
 	c.addRecord(rec)
-}
-
-func (c *SessionReconcilerTraceCycle) recordOperation(siteCode, template, sessionName, _ string, reason, outcome string, data traceRecordPayload, _ string) {
-	if c == nil {
-		return
-	}
-	fields := make(map[string]any, len(data)+1)
-	for k, v := range data {
-		fields[k] = v
-	}
-	var duration time.Duration
-	if durMs, ok := fields["duration_ms"].(int64); ok {
-		duration = time.Duration(durMs) * time.Millisecond
-	}
-	normSite, rawSite := normalizeTraceSiteCode(siteCode)
-	normReason, rawReason := normalizeTraceReasonCode(reason)
-	normOutcome, rawOutcome := normalizeTraceOutcomeCode(outcome)
-	if rawSite != "" {
-		fields["raw_site_code"] = rawSite
-	}
-	if rawReason != "" {
-		fields["raw_reason_code"] = rawReason
-	}
-	if rawOutcome != "" {
-		fields["raw_outcome_code"] = rawOutcome
-	}
-	c.RecordOperation(normSite, normReason, normOutcome, "", template, sessionName, duration, fields)
-}
-
-func (c *SessionReconcilerTraceCycle) recordMutation(siteCode, template, _ string, targetKind, targetID, writeMethod string, before, after any, outcome string, data traceRecordPayload, _ string) {
-	if c == nil {
-		return
-	}
-	fields := make(map[string]any)
-	for k, v := range data {
-		fields[k] = v
-	}
-	fields["template"] = template
-	fields["before"] = before
-	fields["after"] = after
-	fields["field"] = writeMethod
-	normSite, rawSite := normalizeTraceSiteCode(siteCode)
-	normOutcome, rawOutcome := normalizeTraceOutcomeCode(outcome)
-	if rawSite != "" {
-		fields["raw_site_code"] = rawSite
-	}
-	if rawOutcome != "" {
-		fields["raw_outcome_code"] = rawOutcome
-	}
-	c.RecordMutation(normSite, TraceReasonUnknown, normOutcome, targetKind, targetID, writeMethod, fields)
 }
 
 func (c *SessionReconcilerTraceCycle) end(completion TraceCompletionStatus, data traceRecordPayload) {

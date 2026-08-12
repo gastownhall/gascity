@@ -36,6 +36,10 @@ const (
 	// ToDisplayMetadataKey stores the human-readable recipient captured when
 	// the message was created.
 	ToDisplayMetadataKey = "mail.to_display"
+	// ReadMetadataKey mirrors the "read" label as a queryable metadata flag
+	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
+	// sweeps query it directly (the label-based query is recipient-scoped).
+	ReadMetadataKey = "mail.read"
 )
 
 // Message represents a mail message between agents or humans.

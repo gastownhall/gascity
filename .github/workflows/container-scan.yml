@@ -181,7 +181,7 @@ jobs:
           mkdir -p "$bin_dir"
           BD_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-bd-archive.sh "$BD_VERSION"
           BR_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-br-archive.sh "$BR_VERSION"
-          go build -o gc ./cmd/gc
+          CGO_ENABLED=0 go build -o gc ./cmd/gc
           cp -f "$bin_dir/bd" bd
           cp -f "$bin_dir/br" br
 

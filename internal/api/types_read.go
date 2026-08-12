@@ -64,7 +64,12 @@ type StatusView struct {
 	SessionCounts StatusSessionCountsView
 	StoreHealth   *StatusStoreHealthView
 	Beads         *beads.BeadsDiagnostic
-	Summary       StatusSummaryView
+	// ConditionalWrites is the daemon's latched §12.5 snapshot, verbatim from
+	// the wire (the view reuses the wire struct — it is already CLI-shaped).
+	ConditionalWrites *StatusConditionalWrites
+	Summary           StatusSummaryView
+	Partial           bool
+	PartialErrors     []string
 }
 
 // StatusAgentView is the CLI-facing per-agent row.

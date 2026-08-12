@@ -54,10 +54,10 @@ exit 1
 	}
 	testMakefile := filepath.Join(tmp, "Makefile")
 	makefileText := string(makefile)
-	if !strings.Contains(makefileText, "\ninstall: build\n") {
-		t.Fatal("Makefile install target no longer depends on build as expected")
+	if !strings.Contains(makefileText, "\ninstall: check-self-contained\n") {
+		t.Fatal("Makefile install target no longer depends on check-self-contained as expected")
 	}
-	makefileContent := strings.Replace(makefileText, "\ninstall: build\n", "\ninstall:\n", 1)
+	makefileContent := strings.Replace(makefileText, "\ninstall: check-self-contained\n", "\ninstall:\n", 1)
 	if err := os.WriteFile(testMakefile, []byte(makefileContent), 0o644); err != nil {
 		t.Fatalf("write test Makefile: %v", err)
 	}

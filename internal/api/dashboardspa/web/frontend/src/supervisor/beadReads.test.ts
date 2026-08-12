@@ -15,6 +15,8 @@ const baseApi: SupervisorApi = {
   health: vi.fn(),
   cityHealth: vi.fn(),
   cityStatus: vi.fn(),
+  cityUsage: vi.fn(),
+  runCensus: vi.fn(),
   listCities: vi.fn(),
   listAgents: vi.fn(),
   listRigs: vi.fn(),
@@ -24,8 +26,6 @@ const baseApi: SupervisorApi = {
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),
-  nudgeAgent: vi.fn(),
-  agentPrime: vi.fn(),
   sling: vi.fn(),
   formulaFeed: vi.fn(),
   listMail: vi.fn(),
@@ -73,6 +73,15 @@ describe('supervisor bead reads', () => {
     expect(result.items.map((item) => item.id)).toEqual(['rc-decision', 'td-task']);
     expect(result.total).toBe(2);
     expect(result.upstream_total).toBe(4);
+  });
+
+  it('uses an explicit city instead of re-reading the active city', async () => {
+    const listBeads = vi.fn(async () => ({ items: [], total: 0 }));
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    await listSupervisorBeads({ city: 'captured-city' });
+
+    expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 1000 });
   });
 
   // gascity-dashboard-sg9o: a "needs you" decision alert can deep-link to a

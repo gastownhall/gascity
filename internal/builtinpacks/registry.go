@@ -399,7 +399,7 @@ func SyntheticContentHash() (string, error) {
 	var entries []string
 	for _, layout := range syntheticPackLayouts() {
 		pack := layout.Pack
-		manifest, err := manifestForFS(pack.FS)
+		manifest, err := manifestForPack(pack)
 		if err != nil {
 			return "", fmt.Errorf("hashing bundled pack %q: %w", pack.Name, err)
 		}
@@ -476,8 +476,16 @@ func materializeFS(src fs.FS, dst string) error {
 	return nil
 }
 
+// validatePackFiles verifies a materialized pack against the embedded manifest:
+// every expected file present, with the expected mode and content.
+//
+// It does not walk dst looking for unexpected files. validateSyntheticRepoFileSet
+// already walks the whole cache once against the union of every layout's
+// manifest, and that union check strictly subsumes a per-pack one: a file
+// unexpected for its own pack is absent from the union too. Keeping both meant
+// about nine traversals of the same tree per call.
 func validatePackFiles(pack Pack, dst string) error {
-	manifest, err := manifestForFS(pack.FS)
+	manifest, err := manifestForPack(pack)
 	if err != nil {
 		return fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
 	}
@@ -497,25 +505,6 @@ func validatePackFiles(pack Pack, dst string) error {
 		if !bytes.Equal(got, want.data) {
 			return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
 		}
-	}
-	if err := filepath.WalkDir(dst, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dst, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if _, ok := manifest[rel]; !ok {
-			return fmt.Errorf("bundled pack cache %q contains unexpected file %s", pack.Name, rel)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("validating bundled pack cache %q file set: %w", pack.Name, err)
 	}
 	return nil
 }
@@ -563,12 +552,36 @@ func validateSyntheticRepoFileSet(dir string) error {
 	return nil
 }
 
+// syntheticRepoAllowedPaths returns the file and directory sets a materialized
+// synthetic repo may contain.
+//
+// The result derives entirely from content embedded in the running binary, so it
+// is memoized for the process lifetime the same way syntheticContentHashOnce
+// memoizes the content hash. Rebuilding it per call re-walked every bundled
+// pack's embed.FS on every config load. Callers must treat the returned maps as
+// read-only.
 func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
+	cached := syntheticRepoAllowedPathsOnce()
+	return cached.files, cached.dirs, cached.err
+}
+
+type syntheticRepoPathSets struct {
+	files map[string]struct{}
+	dirs  map[string]struct{}
+	err   error
+}
+
+var syntheticRepoAllowedPathsOnce = sync.OnceValue(func() syntheticRepoPathSets {
+	files, dirs, err := computeSyntheticRepoAllowedPaths()
+	return syntheticRepoPathSets{files: files, dirs: dirs, err: err}
+})
+
+func computeSyntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
 	files := map[string]struct{}{syntheticMarkerFile: {}}
 	dirs := make(map[string]struct{})
 	for _, layout := range syntheticPackLayouts() {
 		subpath := filepath.ToSlash(layout.Subpath)
-		manifest, err := manifestForFS(layout.Pack.FS)
+		manifest, err := manifestForPack(layout.Pack)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", layout.Pack.Name, err)
 		}
@@ -581,6 +594,28 @@ func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, erro
 		}
 	}
 	return files, dirs, nil
+}
+
+// manifestCache memoizes per-pack manifests by pack name. A pack's manifest is a
+// pure function of content embedded in the running binary, so it cannot change
+// within a process. Rebuilding it re-read every bundled file on every call.
+// Entries are read-only once stored.
+var manifestCache sync.Map
+
+type syntheticManifestResult struct {
+	manifest map[string]fileEntry
+	err      error
+}
+
+// manifestForPack returns the memoized manifest for a bundled pack.
+func manifestForPack(pack Pack) (map[string]fileEntry, error) {
+	if cached, ok := manifestCache.Load(pack.Name); ok {
+		entry := cached.(syntheticManifestResult)
+		return entry.manifest, entry.err
+	}
+	manifest, err := manifestForFS(pack.FS)
+	manifestCache.Store(pack.Name, syntheticManifestResult{manifest: manifest, err: err})
+	return manifest, err
 }
 
 func manifestForFS(src fs.FS) (map[string]fileEntry, error) {

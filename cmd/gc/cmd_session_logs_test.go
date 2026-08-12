@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -404,7 +406,7 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -416,6 +418,45 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 	}
 	if got != want {
 		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoredSessionLogSource_ProviderConstructionFailureReturnsDiagnostic(t *testing.T) {
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_SESSION", "broken")
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     t.TempDir(),
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	path, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{t.TempDir()})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want provider failure diagnostic")
+	}
+	if path != "" {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty", path)
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got, want := diagnostic, "constructing session provider: injected provider failure"; got != want {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want %q", got, want)
 	}
 }
 
@@ -451,7 +492,7 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -491,7 +532,7 @@ func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t
 		_ = store.Close(b.ID)
 	}
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-one", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-one", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -561,7 +602,7 @@ func TestResolveStoredSessionLogSource_CodexAmbiguousWorkDirUsesStartOrder(t *te
 		t.Fatal(err)
 	}
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-two", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-two", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -591,7 +632,7 @@ func TestCanFallbackStoredSessionLogByWorkDirUsesTargetedLookup(t *testing.T) {
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: b.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -627,7 +668,7 @@ func TestCanFallbackStoredSessionLogByWorkDirIgnoresAsleepPeersForLiveTarget(t *
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: target.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -934,7 +975,7 @@ func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "worker")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "worker")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -955,7 +996,7 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "s-gc-77")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -977,7 +1018,7 @@ func TestResolveSessionLogWorkDirDoesNotUseClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	if got, ok := resolveSessionLogContext("", nil, store, "mayor"); ok {
+	if got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "mayor"); ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for historical alias", got)
 	}
 }
@@ -1052,7 +1093,7 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	got, ok := resolveSessionLogContext(cityPath, cfg, store, "demo/witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, sessionFrontDoor(store), "demo/witness")
 	if ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}

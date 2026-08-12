@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/user"
@@ -29,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -201,12 +205,7 @@ func startTestSupervisorSocket(t *testing.T, sockPath string, handler func(strin
 
 func shortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", prefix)
-	if err != nil {
-		t.Fatalf("MkdirTemp(/tmp, %q): %v", prefix, err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) }) //nolint:errcheck
-	return dir
+	return testutil.ShortTempDir(t, prefix)
 }
 
 func installFakeSystemctl(t *testing.T) string {
@@ -1764,9 +1763,21 @@ func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(
 
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
-	supervisorSystemctlRun = func(_ ...string) error { return nil }
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
 	supervisorSystemctlActive = func(service string) bool {
-		return service == unitName
+		if service != unitName {
+			return false
+		}
+		for _, call := range calls {
+			if call == "--user kill --kill-who=main --signal=SIGTERM "+unitName {
+				return false
+			}
+		}
+		return true
 	}
 	stubSupervisorRunningPreserveSignalReady(t, true)
 	t.Cleanup(func() {
@@ -4059,10 +4070,29 @@ func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *te
 	}
 }
 
-func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+// pinRealHome points HOME at the invoking user's passwd home for the duration
+// of the test.
+//
+// A non-delegated `gc supervisor start` deliberately refuses to run when HOME
+// is overridden (platformSupervisorHomeOverrideError) because the platform
+// supervisor requires the real HOME. That guard is production behavior and must
+// not be weakened. Any test that drives a non-delegated start therefore has to
+// present the real HOME, or it trips the guard instead of exercising the
+// behavior under test — deterministically, in every harness that isolates
+// itself with a custom HOME (CI sandboxes, agent worktrees).
+//
+// Isolate supervisor state with GC_HOME, never by overriding HOME.
+func pinRealHome(t *testing.T) {
+	t.Helper()
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		return
 	}
+	t.Setenv("HOME", lu.HomeDir)
+}
+
+func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
+	pinRealHome(t) // before the already-running check
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -4083,9 +4113,7 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 }
 
 func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
-	}
+	pinRealHome(t) // before the already-running check
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
 	t.Setenv("GC_HOME", gcHome)
@@ -4175,10 +4203,10 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 	var sigCh chan<- os.Signal
 	select {
 	case sigCh = <-sigChReady:
-	case <-time.After(2 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatalf("timed out waiting for supervisor signal hook; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(hangBudget)
 	for time.Now().Before(deadline) && !strings.Contains(stdout.String(), "Launching city 'bright-lights'") {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -4233,6 +4261,78 @@ func TestRunSupervisorFailsWhenAPIPortUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "api: listen") {
 		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1
+// covers the /health gate's discrimination case that the bare-listener test
+// above cannot: a binder that DOES speak HTTP on the shared port but is not
+// a gc supervisor (no {"status":"ok"} payload). EADDRINUSE alone must not be
+// treated as proof of a duplicate gc supervisor — only a positive /health
+// identification does (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithForeignHTTPBinderFallsThroughToExit1(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hello":"world"}`) //nolint:errcheck
+	}))
+	defer foreign.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(foreign.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split foreign server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1 (foreign binder, not a duplicate); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "api: listen") {
+		t.Fatalf("stderr = %q, want API listen failure", stderr.String())
+	}
+}
+
+// TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate
+// covers the true-duplicate case: the binder on the shared port answers
+// /health like a gc supervisor, so runSupervisor must take the exit-3
+// duplicate path (gc-r0k40, MAJOR-B).
+func TestRunSupervisorPortCollisionWithRespondingGCSupervisorExitsDuplicate(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"1.2.3","build_id":"deadbeef"}`) //nolint:errcheck
+	}))
+	defer other.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(other.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split other server addr: %v", err)
+	}
+	cfg := []byte("[supervisor]\nport = " + port + "\n")
+	if err := os.WriteFile(supervisor.ConfigPath(), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != supervisorExitCodePortInUse {
+		t.Fatalf("runSupervisor code = %d, want %d (duplicate gc supervisor); stderr=%q", code, supervisorExitCodePortInUse, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already in use") {
+		t.Fatalf("stderr = %q, want port-in-use message", stderr.String())
 	}
 }
 

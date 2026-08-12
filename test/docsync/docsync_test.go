@@ -34,12 +34,34 @@ var (
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
+var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
 var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
+
+// isNestedWorktreeRoot reports whether path is the root of a linked git
+// worktree checked out inside this tree. Linked worktrees have a .git FILE
+// (a "gitdir: ..." pointer) rather than a .git directory, so this catches
+// worktrees regardless of naming convention — unlike docTreeIgnored's
+// "worktrees" entry above, which only catches that exact name.
+func isNestedWorktreeRoot(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil && !info.IsDir()
+}
+
+// isSessionScaffoldRoot reports whether path is a per-session scaffold
+// directory created by the outer gc orchestration (e.g. a bead-specific
+// agent session directory holding .claude/.codex/.gc state) rather than a
+// source or doc tree. These are untracked, gitignored-in-spirit working
+// directories that can be checked out as siblings of the repo's own
+// top-level directories; a .gc marker directory identifies them the same
+// way a .git file identifies a linked worktree above.
+func isSessionScaffoldRoot(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".gc"))
+	return err == nil && info.IsDir()
+}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
 // excluded from TestLocalMarkdownLinks failures but still logged. Remove
@@ -797,14 +819,20 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "ga-") || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {
 			continue
 		}
-		// Check if this directory contains any markdown.
 		dirPath := filepath.Join(root, name)
+		if isNestedWorktreeRoot(dirPath) {
+			continue
+		}
+		if isSessionScaffoldRoot(dirPath) {
+			continue
+		}
+		// Check if this directory contains any markdown.
 		hasMarkdown := false
 		_ = filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || hasMarkdown {

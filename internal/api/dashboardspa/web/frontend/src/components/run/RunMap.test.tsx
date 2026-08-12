@@ -1,11 +1,34 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it } from 'vitest';
-import { emptyRunSummary, MAX_VISIBLE_ACTIVE_LANES } from 'gas-city-dashboard-shared';
+import { MAX_VISIBLE_ACTIVE_LANES } from 'gas-city-dashboard-shared';
 import type { RunLane, RunSummary, SourceState } from 'gas-city-dashboard-shared';
 import { RunMap } from './RunMap';
 
 afterEach(() => cleanup());
+
+// A blank server-shaped RunSummary for fixtures (the old shared emptyRunSummary
+// helper retired with the client-side fold; the wire now produces this shape).
+function emptyRunSummary(): RunSummary {
+  return {
+    totalActive: 0,
+    totalHistorical: 0,
+    runCounts: {
+      total: 0,
+      visible: 0,
+      prReview: 0,
+      designReview: 0,
+      bugfix: 0,
+      blocked: 0,
+      other: 0,
+    },
+    lanes: [],
+    historicalLanes: [],
+    blockedLanes: [],
+    recentChanges: [],
+    census: { status: 'unavailable', error: 'run health has not been derived' },
+  };
+}
 
 function historicalLane(id: string): RunLane {
   return {

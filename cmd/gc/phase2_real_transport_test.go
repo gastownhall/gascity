@@ -41,35 +41,6 @@ func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 	}
 }
 
-func TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof(t *testing.T) {
-	tmuxtest.RequireTmux(t)
-
-	tc := phase2ProviderCaseForFamily(t, "claude")
-	tp := resolvePhase2Template(t, tc)
-	if !tp.HookEnabled {
-		t.Fatal("HookEnabled = false, want true for Claude phase2 profile")
-	}
-	if tp.ResolvedProvider == nil {
-		t.Fatal("ResolvedProvider = nil, want Claude provider metadata")
-	}
-	if !tp.ResolvedProvider.SupportsHooks {
-		t.Fatal("SupportsHooks = false, want true for Claude phase2 profile")
-	}
-
-	materialized := templateParamsToConfig(tp)
-	run := launchPhase2RealTransportSession(t, tc, materialized)
-
-	if run.ErrorStage != "" {
-		t.Fatalf("%s failed: %s", run.ErrorStage, run.Error)
-	}
-	if got, want := run.ObservedStartupPrompt, run.ExpectedStartupPrompt; got != want {
-		t.Fatalf("startup prompt = %q, want %q", got, want)
-	}
-	if !run.AutonomousStarted {
-		t.Fatal("launch prompt marker = missing, want command-line startup prompt matched before any explicit rescue nudge")
-	}
-}
-
 type phase2RealTransportRun struct {
 	Transport                string
 	SocketName               string

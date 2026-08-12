@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -95,6 +96,7 @@ Use --var to substitute variables and preview the resolved output.
 
 When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
 city.toml are shown as "(rig default=...)" alongside each applicable var.
+An explicit --city pins city scope, which has no rig-scoped formula_vars.
 
 Examples:
   gc formula show mol-feature
@@ -123,7 +125,7 @@ Examples:
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
@@ -287,7 +289,7 @@ func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
@@ -625,7 +627,35 @@ With --attach on a v2 formula — one declaring
 [requires] formula_compiler = ">=2.0.0" — the invocation runs under a
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
-conflicting live workflow from the same source is an error.`,
+conflicting live workflow from the same source is an error.
+
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
@@ -636,7 +666,7 @@ conflicting live workflow from the same source is an error.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
@@ -644,6 +674,27 @@ conflicting live workflow from the same source is an error.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
+			// A graph.v2 cook materializes a workflow root and its steps, and
+			// every one of those beads is GRAPH class (molecule.Instantiate
+			// stamps gc.root_bead_id on each member of a graph pour). On a city
+			// whose graph class is served by its own binding, creating them
+			// through the scope store mints them in the WORK ledger under the
+			// work prefix — the stranded-infrastructure-bead shape that is fatal
+			// to boot. The scope store still answers the work-class beads the
+			// cook touches: the synthetic input convoy and, on the --attach arms,
+			// the attach bead. resolveGraphStore returns the exact store value it
+			// was handed on every city that relocates nothing, so a single-store
+			// cook runs against the one store it always did.
+			//
+			// The --attach arms do not use this: a graft follows its PARENT,
+			// not its class, so they route by the attach bead's id instead —
+			// see attachStore below. Following the parent is only sound when
+			// the parent's store may hold graph-class beads, which in a split
+			// city's CITY scope means the binding; attachGraftClassRefusal is
+			// the gate that keeps the two rules from contradicting each other,
+			// and it asks the scope question first because a rig store holds
+			// its own graph-class beads and the relocation never moves it.
+			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
 
@@ -652,14 +703,104 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 				}
+				// A graft is a TWO-ENDED edge, so the arm that can serve it runs
+				// WHOLE against the store that holds the ATTACH BEAD, resolved
+				// by id — parent read, sub-DAG materialization and the blocking
+				// dep alike. That is what keeps the edge co-resident: move only
+				// the sub-DAG root and the other store records a `blocks` row
+				// naming an id it cannot resolve, which no backend rejects (bd
+				// passes a cross-prefix target through as an external ref;
+				// SQLite's deps table has no foreign key) and which every Ready
+				// implementation reads as a blocker that never clears. That is
+				// the dangling edge #5150 reproduced as "attach bead gc-1 is
+				// not Ready after the whole workflow closed", and it is not
+				// re-shipped here.
+				//
+				// The arm that can serve it is the V1 one. The graph.v2 arm
+				// cannot, and refuses — see the block on isGraphFormula below.
+				//
+				// Every city that relocates nothing, and every split city whose
+				// attach bead is work resident, gets back the exact store value
+				// resolveFormulaScope opened, so attachStore != store is
+				// precisely "the class binding holds this bead".
+				attachStore, err := classRoutedStoreForID(cityPath, attach, store)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				// The other half of co-residence, and it applies to BOTH arms:
+				// keeping the graft beside a WORK-resident attach bead keeps the
+				// edge resolvable and mints graph-class beads in the work
+				// ledger, which is a stranded write. Neither placement is
+				// expressible on a split city, so the graft is refused before
+				// either arm runs — see formula_cook_attach_class.go, ga-99xhy.
+				// The scope root travels with the store because relocation is a
+				// CITY-scope property: a rig store is never relocated, so a
+				// rig-scoped graft is co-resident and stays served.
+				if err := attachGraftClassRefusal(cityPath, scope.storeRoot, attach, store, attachStore); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 				if isGraphFormula {
+					if attachStore != store {
+						// REFUSED, not routed, and not silently redirected: a
+						// graph.v2 invocation normalizes its target into an
+						// input convoy (PrepareInvocation ->
+						// NormalizeInputConvoy -> CreateSingleItemInputConvoy),
+						// and a synthetic input convoy is a WORK bead by
+						// explicit classification (coordclass.Classify). For an
+						// attach bead the class binding owns there is nowhere to
+						// put it:
+						//
+						//   - in the binding: a work-class bead born in the
+						//     infra ledger, which the migration's own equality
+						//     invariant says never happens — the rule
+						//     drainUnitConvoyStore states for the drain's unit
+						//     convoy, and graphv2's own
+						//     TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget
+						//     asserts for this one;
+						//   - in the work ledger: NormalizeInputConvoy cannot
+						//     read the target there at all, and the convoy's one
+						//     `tracks` edge to it is cross-class, which
+						//     convoy.TrackItemIn refuses with
+						//     ErrMemberNotCoResident even when the graph class
+						//     handle is named.
+						//
+						// So the missing piece is a cross-class MEMBERSHIP edge,
+						// which is a production mechanism rather than routing:
+						// ga-2orlf. Refusing costs nobody a capability — on a
+						// city without this routing the same invocation dies
+						// with "formulas v2 target <id> not found" — and the two
+						// alternatives are both silent: mis-homing the convoy,
+						// or emitting a run whose execution.work_associated is
+						// dropped because the projection's work leg reads a
+						// convoy the work ledger never held (DepList answers
+						// EMPTY there, not an error).
+						//
+						// The v1 arm below is unaffected and DOES serve this
+						// bead: PrepareInvocation returns before
+						// NormalizeInputConvoy for a non-graph formula, so it
+						// mints no convoy and the whole graft is co-resident.
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf(
+							"--attach %s: %s is owned by the relocated class binding, and a graph.v2 formula's synthetic input convoy is a work bead — it can live neither there (a work-class bead in the infra ledger) nor in the work ledger (its `tracks` edge to %s would be cross-class, which convoy.TrackItemIn refuses); grafting a graph.v2 formula onto a class-owned bead needs a cross-class membership edge: ga-2orlf. A v1 formula attaches to %s today",
+							attach, attach, attach, attach))
+					}
+					// Past both refusals — this one, and the class gate above
+					// that rejects a work-resident attach bead on a split city —
+					// only a single-store city reaches here. attachStore IS
+					// store, this arm runs on the one store it always did, and
+					// its execution-fact legs are the same value: the root, its
+					// steps and the input convoy are all minted here.
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
+					var syntheticInputConvoyID string
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
+						// PrepareInvocation may have minted a synthetic input convoy for a
+						// bare bead target; capture it so a post-prepare failure below can
+						// close it instead of stranding an open claim-attracting bead.
+						syntheticInputConvoyID = inv.InputConvoy
 						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
@@ -670,7 +811,7 @@ conflicting live workflow from the same source is an error.`,
 							return fmt.Errorf("validate runtime vars: %w", err)
 						}
 						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
-						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
 							return fmt.Errorf("decorate formulas v2 recipe: %w", err)
 						}
 						if graphRootKey != "" {
@@ -720,9 +861,14 @@ conflicting live workflow from the same source is an error.`,
 							}
 							return err
 						}
+						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
 						return ensureFormulaCookAttachDep(store, attach, result.RootID)
 					})
 					if err != nil {
+						// A post-prepare failure discards the invocation; close the
+						// synthetic input convoy it minted (the success path threads the
+						// convoy into the started workflow, so err == nil never reaches here).
+						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
@@ -749,7 +895,12 @@ conflicting live workflow from the same source is an error.`,
 					return nil
 				}
 
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+				// Non-graph formula: PrepareInvocation returns before
+				// NormalizeInputConvoy, so this call mints no input convoy and
+				// the store it is handed only has to be able to LOAD the
+				// formula. That is exactly why this arm can serve a class-owned
+				// attach bead when the graph.v2 arm above cannot.
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), attachStore, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -764,7 +915,19 @@ conflicting live workflow from the same source is an error.`,
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
-				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
+				// molecule.Attach reads the attach bead, materializes the
+				// sub-DAG and writes the blocking dep through ONE store, so it
+				// is handed the one that HOLDS the attach bead. That is the
+				// whole of the two-store attach this arm can express: the edge
+				// stays co-resident, and the sub-DAG follows its parent rather
+				// than its class. See the attachStore comment above for the
+				// half that is still deferred.
+				//
+				// The execution-fact emit below stays on `store`: it resolves
+				// its own graph leg through resolveGraphStore, which already
+				// names the binding, and its work leg is only read for an input
+				// convoy this arm never mints.
+				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -772,6 +935,7 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
+				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -798,6 +962,10 @@ conflicting live workflow from the same source is an error.`,
 				return nil
 			}
 
+			isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+			}
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
@@ -805,12 +973,72 @@ conflicting live workflow from the same source is an error.`,
 			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
-			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
-				Title: title,
-				Vars:  cookVars,
-			})
-			if err != nil {
-				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+			var result *molecule.Result
+			// rootStore is the store the cooked root ended up in, so the --meta
+			// stamp below lands on the bead it just created rather than on a
+			// store that has never held it.
+			rootStore := store
+			if isGraphFormula {
+				// Stamp the run root with its store/scope identity before
+				// instantiating, exactly as the --attach branch does via
+				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
+				// graph.v2 run root carries no gc.root_store_ref/gc.scope_kind, and
+				// the dashboard run-detail projection rejects the whole run with 422
+				// invalid_snapshot (sr-xz9f).
+				storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				// One rule for both arms: the classifier picks the store, and it
+				// answers ClassGraph for every graph.v2 pour (the compiler stamps
+				// gc.kind=workflow on the root). The recipe is decorated through
+				// the store that will own it, so the root's identity metadata is
+				// written where the root lands.
+				rootStore = moleculeClassStore(recipe, store, graphStore)
+				graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
+				if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, scope.rig, rootStore, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("decorate formulas v2 recipe: %w", err))
+				}
+				if graphRootKey != "" {
+					unlock := graphv2.LockKey(graphRootKey)
+					defer unlock()
+				}
+				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, molecule.Options{
+					Title:          title,
+					Vars:           cookVars,
+					IdempotencyKey: graphRootKey,
+				})
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				emitFormulaCookExecutionFacts(rootStore, store, cityPath, result, stderr)
+			} else {
+				// The legacy compiler still emits a graph-class root for a
+				// root-only formula: `phase = "vapor"` (or no [[steps]]) compiles
+				// to a root stamped gc.kind=wisp, which is coordclass.Classify's
+				// first arm. Asking the classifier instead of asking which
+				// compiler ran is what keeps such a wisp out of the work ledger,
+				// where it would read as a stranded infrastructure bead and stop
+				// boot. A v1 POURED molecule classifies as work and stays exactly
+				// where it always was. This is molecule.Cook's body, inlined only
+				// so the store can be chosen from the compiled recipe.
+				opts := molecule.Options{Title: title, Vars: cookVars}
+				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("compiling formula %q: %w", args[0], err))
+				}
+				if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				rootStore = moleculeClassStore(recipe, store, graphStore)
+				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, opts)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
@@ -818,7 +1046,7 @@ conflicting live workflow from the same source is an error.`,
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			if len(rootMeta) > 0 {
-				if err := store.SetMetadataBatch(result.RootID, rootMeta); err != nil {
+				if err := rootStore.SetMetadataBatch(result.RootID, rootMeta); err != nil {
 					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
@@ -856,6 +1084,26 @@ conflicting live workflow from the same source is an error.`,
 	return cmd
 }
 
+// emitFormulaCookExecutionFacts projects the cooked run's execution facts from
+// the two stores that own them: the graph store holds the root and its steps,
+// the work store holds the tracks edges of the input convoy the root names.
+// Wrapping one store as both legs reads the convoy out of the ledger it does not
+// live in; on a city that relocates nothing the two arguments are the same value.
+func emitFormulaCookExecutionFacts(graphStore, workStore beads.Store, cityPath string, result *molecule.Result, stderr io.Writer) {
+	if result == nil || !result.GraphWorkflow {
+		return
+	}
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: workStore}, result.RootID, "formula-cook"); err != nil {
+		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", result.RootID, err) //nolint:errcheck // successful cook is preserved
+	}
+}
+
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
+	}
+}
+
 type formulaCookJSONResult struct {
 	SchemaVersion  string            `json:"schema_version"`
 	OK             bool              `json:"ok"`
@@ -885,8 +1133,18 @@ func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvo
 	return rootKey
 }
 
-func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, cliGraphrouteDeps(cityPath))
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef, rigContext string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	// cook does not route the workflow root to an agent, but rig-scoped step
+	// targets still need the invocation's rig context to resolve — the same
+	// context sling derives from its entry agent's qualified name. A rig-scoped
+	// rootStoreRef already supplies that context through the store-scope
+	// fallback in DecorateGraphWorkflowRecipeWithDefaultBinding (#4175); thread
+	// the already-resolved formulaScope.rig in explicitly as well so the cook
+	// call site states the rig context directly instead of relying solely on the
+	// store-ref encoding (empty QualifiedName so the root stays unrouted;
+	// MetadataOnly mirrors the no-session default binding).
+	defaultRoute := graphroute.GraphRouteBinding{RigContext: strings.TrimSpace(rigContext), MetadataOnly: true}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
@@ -950,7 +1208,7 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
@@ -1036,12 +1294,18 @@ func parseMetadataArgs(items []string) (map[string]string, error) {
 type formulaScope struct {
 	storeRoot   string
 	searchPaths []string
+	// rig is the resolved rig name ("" for city scope). Rig-scoped formula
+	// steps need this context to resolve bare rig-scoped targets during cook.
+	rig string
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula
-// invocation should run. Priority: --rig flag > enclosing rig from cwd >
-// city.
-func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error) {
+// invocation should run. Priority: --rig flag > explicit --city flag >
+// GC_RIG env > enclosing rig from cwd > city. The GC_RIG tier mirrors
+// resolveBdScopeTarget (cmd_bd.go): the controller sets GC_RIG reliably,
+// while cwd detection fails for pool/polecat worktrees under
+// .gc/worktrees/, which are not inside the registered rig.Path.
+func resolveFormulaScope(cfg *config.City, cityPath string, stderr io.Writer) (formulaScope, error) {
 	if name := strings.TrimSpace(rigFlag); name != "" {
 		rig, ok := rigByName(cfg, name)
 		if !ok {
@@ -1053,6 +1317,35 @@ func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error
 		return rigFormulaScope(cfg, cityPath, rig), nil
 	}
 
+	// An explicit --city pins city scope, symmetric with explicit --rig: a
+	// deliberate city scope must never be silently downgraded to a rig store
+	// by GC_RIG env or cwd auto-detection below. GC_RIG is ambient on every
+	// controller-spawned agent, so without this pin `gc --city X formula
+	// cook` lands on a rig store. (gastownhall/gascity#3410 did the same for
+	// `gc bd`.)
+	if strings.TrimSpace(cityFlag) != "" {
+		return formulaScope{storeRoot: cityPath, searchPaths: cfg.FormulaLayers.City}, nil
+	}
+
+	gcRigDiscarded := ""
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return rigFormulaScope(cfg, cityPath, rig), nil
+		}
+		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
+		// (which errors on the identical value), we do not fail: falling
+		// through to cwd/city keeps formula commands working from agents
+		// whose GC_RIG names a rig this city does not bind. The discard must
+		// not be silent though — record it and warn below, naming the scope
+		// actually used.
+		gcRigDiscarded = gcRig
+	}
+
+	scope := formulaScope{
+		storeRoot:   cityPath,
+		searchPaths: cfg.FormulaLayers.City,
+	}
+	scopeDesc := "city"
 	if cwd, err := os.Getwd(); err == nil {
 		// resolveRigForDir already filters unbound rigs (see
 		// rig_scope_resolution.go), so a true return guarantees rig.Path is
@@ -1060,27 +1353,33 @@ func resolveFormulaScope(cfg *config.City, cityPath string) (formulaScope, error
 		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr != nil {
 			return formulaScope{}, rerr
 		} else if ok {
-			return rigFormulaScope(cfg, cityPath, rig), nil
+			scope = rigFormulaScope(cfg, cityPath, rig)
+			scopeDesc = fmt.Sprintf("%q rig", rig.Name)
 		}
 	}
 
-	return formulaScope{
-		storeRoot:   cityPath,
-		searchPaths: cfg.FormulaLayers.City,
-	}, nil
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc formula: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and using the %s scope instead (the same value via --rig would error)\n", gcRigDiscarded, scopeDesc) //nolint:errcheck // best-effort stderr
+	}
+
+	return scope, nil
 }
 
 func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaScope {
 	return formulaScope{
 		storeRoot:   resolveStoreScopeRoot(cityPath, rig.Path),
 		searchPaths: cfg.FormulaLayers.SearchPaths(rig.Name),
+		rig:         rig.Name,
 	}
 }
 
 // rigFormulaVarsForScope returns rig-scoped formula var defaults for the
-// active scope (honoring --rig and cwd). Returns an empty map when no rig
-// context is active so callers can treat the result as read-only
-// annotations without nil checks.
+// active scope (honoring --rig, explicit --city, GC_RIG env, and cwd — same
+// priority as resolveFormulaScope). Returns an empty map when no rig context
+// is active so callers can treat the result as read-only annotations without
+// nil checks. No stderr warning here for a discarded GC_RIG: this is always
+// called alongside resolveFormulaScope (see newFormulaShowCmd), which
+// already warns once for the same condition.
 func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string {
 	if cfg == nil {
 		return map[string]string{}
@@ -1090,6 +1389,16 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 			return cloneStringMap(rig.FormulaVars)
 		}
 		return map[string]string{}
+	}
+	// Symmetric with resolveFormulaScope: an explicit --city pins city scope,
+	// which has no rig-scoped formula vars.
+	if strings.TrimSpace(cityFlag) != "" {
+		return map[string]string{}
+	}
+	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
+		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return cloneStringMap(rig.FormulaVars)
+		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr == nil && ok {
@@ -1136,12 +1445,24 @@ since it was spawned.`,
 			if err != nil {
 				return err
 			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
+			scope, err := resolveFormulaScope(cfg, cityPath, stderr)
 			if err != nil {
 				return err
 			}
 
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
+			if err != nil {
+				return err
+			}
+			// version-check's subject is a molecule/workflow bead, which is the
+			// graph class: on a city that relocates graph, every root this
+			// command is about is minted in the binding and the scope store has
+			// never held it. Reading it there reported "not found" for a live
+			// root — a by-id read answering about the wrong ledger, which is
+			// the same defect the `gc bd` by-id surface exists to close.
+			// classRoutedStoreForID returns the exact store value passed in on
+			// every city that relocates nothing.
+			store, err = classRoutedStoreForID(cityPath, beadID, store)
 			if err != nil {
 				return err
 			}

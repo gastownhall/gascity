@@ -1,59 +1,80 @@
-import { cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import type { FormulaRunDetail } from 'gas-city-dashboard-shared';
 import { invalidate } from '../api/cache';
+import { ApiClientError } from '../api/client';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { supervisorApi, supervisorApiForRequestBudget } from '../supervisor/client';
-import type * as SupervisorClient from '../supervisor/client';
-import { SupervisorApiError } from '../supervisor/errors';
+import { loadSupervisorFormulaRunDetail, type LoadRunDetailOptions } from '../supervisor/runDetail';
 import { formulaRunDetailCacheKey, useFormulaRunDetail } from './useFormulaRunDetail';
 
 vi.mock('../api/cityBase', () => ({
   getActiveCity: () => 'test-city',
   activeCityOrThrow: () => 'test-city',
+  cityPath: (suffix: string) => `/api/city/test-city${suffix}`,
 }));
 
 vi.mock('../lib/clientErrorReporting', () => ({
   reportClientError: vi.fn(() => Promise.resolve({ status: 'reported' })),
 }));
 
-vi.mock('../supervisor/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof SupervisorClient>();
-  return {
-    // Keep the real SupervisorApiError so runDetail's `instanceof` checks work,
-    // and route the request-budget client to the same mock as the default one.
-    ...actual,
-    supervisorApi: vi.fn(),
-    supervisorApiForRequestBudget: vi.fn(),
-  };
-});
+// The run-detail loader is now a thin BFF GET (covered by runDetail.test.ts);
+// the hook's job is purely mapping its result/errors onto the view states, so
+// mock the loader directly and drive each state from what it resolves/throws.
+vi.mock('../supervisor/runDetail', () => ({
+  loadSupervisorFormulaRunDetail: vi.fn(),
+}));
 
 const mockReportClientError = reportClientError as Mock;
-const mockSupervisorApi = supervisorApi as Mock;
-const mockSupervisorApiForRequestBudget = supervisorApiForRequestBudget as Mock;
-const supervisor = {
-  workflowRun: vi.fn(),
-  listSessions: vi.fn(),
-  formulaDetail: vi.fn(),
-};
+const mockLoadDetail = loadSupervisorFormulaRunDetail as Mock;
+
+function runDetail(overrides: Partial<FormulaRunDetail> = {}): FormulaRunDetail {
+  return {
+    runId: 'wf-1',
+    rootBeadId: 'wf-1',
+    rootStoreRef: 'city:test-city',
+    resolvedRootStore: 'city:test-city',
+    scopeKind: 'city',
+    scopeRef: 'test-city',
+    title: 'Direct supervisor run',
+    formula: { kind: 'known', name: 'mol-test', source: 'metadata' },
+    formulaDetail: { kind: 'available', name: 'mol-test', target: 'test-city/codex' },
+    executionPath: { kind: 'unavailable', reason: 'missing_cwd_and_rig_root' },
+    snapshotVersion: 1,
+    snapshotEventSeq: { kind: 'known', seq: 100 },
+    completeness: { kind: 'complete' },
+    progress: {
+      snapshotVersion: 1,
+      snapshotEventSeq: { kind: 'known', seq: 100 },
+      snapshotPartial: false,
+      terminal: false,
+      totalNodeCount: 0,
+      visibleNodeCount: 0,
+      edgeCount: 0,
+      executionInstanceCount: 0,
+      sessionLinkCount: 0,
+      streamableSessionCount: 0,
+      streamableSessionIds: [],
+      statusCounts: {},
+      allStatusCounts: {},
+    },
+    phase: 'intake',
+    stages: [],
+    nodes: [],
+    edges: [],
+    lanes: [],
+    ...overrides,
+  };
+}
 
 afterEach(() => {
   cleanup();
   invalidate('');
   vi.clearAllMocks();
-  supervisor.workflowRun.mockReset();
-  supervisor.listSessions.mockReset();
-  supervisor.formulaDetail.mockReset();
-  mockSupervisorApi.mockReturnValue(supervisor);
-  mockSupervisorApiForRequestBudget.mockReturnValue(supervisor);
 });
 
 describe('useFormulaRunDetail', () => {
   beforeEach(() => {
-    mockSupervisorApi.mockReturnValue(supervisor);
-    mockSupervisorApiForRequestBudget.mockReturnValue(supervisor);
-    supervisor.workflowRun.mockResolvedValue(workflowSnapshot());
-    supervisor.listSessions.mockResolvedValue({ items: [], total: 0 });
-    supervisor.formulaDetail.mockResolvedValue(formulaDetail());
+    mockLoadDetail.mockResolvedValue(runDetail());
   });
 
   it('does not fetch or report when no run id is available', async () => {
@@ -61,20 +82,17 @@ describe('useFormulaRunDetail', () => {
 
     await waitFor(() => expect(result.current.kind).toBe('idle'));
 
-    expect(supervisor.workflowRun).not.toHaveBeenCalled();
+    expect(mockLoadDetail).not.toHaveBeenCalled();
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
   it('reports run detail load failures to the centralized client log', async () => {
-    supervisor.workflowRun.mockRejectedValue(new Error('detail unavailable'));
+    mockLoadDetail.mockRejectedValue(new Error('detail unavailable'));
 
     const { result } = renderHook(() => useFormulaRunDetail('wf-1'));
 
     await waitFor(() =>
-      expect(result.current).toMatchObject({
-        kind: 'failed',
-        error: 'detail unavailable',
-      }),
+      expect(result.current).toMatchObject({ kind: 'failed', error: 'detail unavailable' }),
     );
 
     expect(mockReportClientError).toHaveBeenCalledWith({
@@ -82,10 +100,9 @@ describe('useFormulaRunDetail', () => {
       operation: 'load detail',
       message: 'wf-1: detail unavailable',
     });
-    expect(supervisor.formulaDetail).not.toHaveBeenCalled();
   });
 
-  it('loads formula run detail from the direct supervisor workflow endpoint', async () => {
+  it('loads formula run detail from the BFF projection endpoint', async () => {
     const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
 
     await waitFor(() => expect(result.current.kind).toBe('ready'));
@@ -93,34 +110,20 @@ describe('useFormulaRunDetail', () => {
     if (result.current.kind !== 'ready') throw new Error('run detail did not load');
     expect(result.current.detail.runId).toBe('wf-1');
     expect(result.current.detail.title).toBe('Direct supervisor run');
-    expect(result.current.detail.formulaDetail).toEqual({
-      kind: 'available',
-      name: 'mol-test',
-      target: 'test-city/codex',
-    });
     expect(result.current.refreshState).toEqual({ kind: 'idle' });
     expect('diff' in result.current).toBe(false);
-    expect(supervisor.workflowRun).toHaveBeenCalledWith('test-city', 'wf-1', {
-      scope_kind: 'city',
-      scope_ref: 'test-city',
-    });
-    expect(supervisor.formulaDetail).toHaveBeenCalledWith('test-city', 'mol-test', {
-      target: 'test-city/codex',
-      scope_kind: 'city',
-      scope_ref: 'test-city',
-    });
+    // The loader is scope-independent now (the projection derives scope from the
+    // run's own root bead); the route's scope still drives only the cache key.
+    // The second argument is the warming-poll wiring (onWarming/keepPolling).
+    expect(mockLoadDetail).toHaveBeenCalledWith('wf-1', expect.anything());
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
-  it('does not stay loading for completed runs that lack formula metadata', async () => {
-    supervisor.workflowRun.mockResolvedValue(
-      workflowSnapshot({
-        status: 'completed',
-        metadata: {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.run_target': 'test-city/codex',
-        },
+  it('reaches ready for a run that lacks formula metadata (no hang)', async () => {
+    mockLoadDetail.mockResolvedValue(
+      runDetail({
+        formula: { kind: 'unavailable', reason: 'missing_formula_metadata' },
+        formulaDetail: { kind: 'unavailable', reason: 'missing_formula_metadata' },
       }),
     );
 
@@ -133,23 +136,15 @@ describe('useFormulaRunDetail', () => {
       kind: 'unavailable',
       reason: 'missing_formula_metadata',
     });
-    expect(result.current.detail.formulaDetail).toEqual({
-      kind: 'unavailable',
-      reason: 'missing_formula_metadata',
-    });
-    expect(supervisor.formulaDetail).not.toHaveBeenCalled();
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
-  it('surfaces a v1 / non-graph.v2 run as unsupported, not a generic failure', async () => {
-    // A v1 / wisp run: the root bead carries no gc.formula_contract=graph.v2,
-    // so enrichFormulaRun throws UnsupportedRunError('not_run_view'). The hook
-    // must map ONLY that case to {kind:'unsupported'} (the detail view then
-    // shows a list-only message) and NOT route it through the error path.
-    // The generic-failure branch is locked separately by the load-failure test
-    // above (a plain Error -> kind 'failed').
-    supervisor.workflowRun.mockResolvedValue(
-      workflowSnapshot({ metadata: { 'gc.kind': 'workflow' } }),
+  it('surfaces a 422 not_run_view as unsupported, not a generic failure', async () => {
+    // A v1 / wisp run loads server-side but is not a graph.v2 run, so the BFF
+    // returns 422 + reason 'not_run_view'. The hook maps ONLY that case to
+    // {kind:'unsupported'} (list-only message), never the error path.
+    mockLoadDetail.mockRejectedValue(
+      new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view'),
     );
 
     const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
@@ -158,16 +153,37 @@ describe('useFormulaRunDetail', () => {
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
-  it('surfaces a raw 404 from the workflow endpoint as not_found, not v1-unsupported', async () => {
-    // gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at
-    // all) is AMBIGUOUS — a v1/wisp id the workflow endpoint never knew, a
-    // completed run whose snapshot wasn't retained, a pruned/deleted run, or a
-    // stale/wrong derived scope. It must NOT be mislabeled as the definitive v1
-    // 'unsupported' state, and it must NOT collapse into the generic 'failed'
-    // transport state — it gets its own honest 'not_found' state.
-    supervisor.workflowRun.mockRejectedValue(
-      new SupervisorApiError(404, 'workflow gc-p7yf1m not found', undefined),
+  it('surfaces a 422 invalid_snapshot as a generic load failure, not unsupported', async () => {
+    // A malformed graph.v2 snapshot is a genuine load failure: it must propagate
+    // to the generic 'failed' state, distinct from the honest v1 'unsupported'.
+    mockLoadDetail.mockRejectedValue(
+      new ApiClientError(422, 'run snapshot is invalid', undefined, 'invalid_snapshot'),
     );
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() => expect(result.current.kind).toBe('failed'));
+  });
+
+  it('surfaces an exhausted 503 warming budget as a generic failure, never not_found/unsupported', async () => {
+    // The loader retries 503 internally and, once the budget is spent, re-throws
+    // the ApiClientError(503). The hook must route that to the generic 'failed'
+    // state — a 503 is neither an honest list-only run nor a missing one.
+    mockLoadDetail.mockRejectedValue(new ApiClientError(503, 'run view is warming'));
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() => expect(result.current.kind).toBe('failed'));
+    expect(result.current.kind).not.toBe('not_found');
+    expect(result.current.kind).not.toBe('unsupported');
+  });
+
+  it('surfaces a 404 as not_found, not v1-unsupported', async () => {
+    // gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+    // AMBIGUOUS — a v1/wisp id, a completed run whose events rotated out, a
+    // pruned run, or a wrong derived scope. It gets its own honest 'not_found'
+    // state, never mislabeled as the definitive v1 'unsupported'.
+    mockLoadDetail.mockRejectedValue(new ApiClientError(404, 'unknown run'));
 
     const { result } = renderHook(() => useFormulaRunDetail('gc-p7yf1m', 'city', 'test-city'));
 
@@ -175,6 +191,241 @@ describe('useFormulaRunDetail', () => {
     expect(result.current.kind).not.toBe('unsupported');
     expect(result.current.kind).not.toBe('failed');
     expect(mockReportClientError).not.toHaveBeenCalled();
+  });
+});
+
+describe('useFormulaRunDetail warming poll (F4)', () => {
+  // The loader polls warming 503s for up to ~180s (covered in runDetail.test.ts)
+  // and signals each one via onWarming. The hook's job: surface that signal on
+  // the loading state (so the route can render honest "may still be being
+  // recorded" copy), clear it when the poll settles, and supersede a stale poll
+  // (unmount/refresh) so it stops issuing GETs and cannot write stale state.
+
+  it('surfaces the loader warming signal (unknown_run) on the loading state', async () => {
+    mockLoadDetail.mockImplementation((_runId: string, options?: LoadRunDetailOptions) => {
+      options?.onWarming?.({ reason: 'unknown_run' });
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() =>
+      expect(result.current).toMatchObject({
+        kind: 'loading',
+        warming: { reason: 'unknown_run' },
+      }),
+    );
+  });
+
+  it('carries no warming signal while a plain first GET is pending', async () => {
+    mockLoadDetail.mockImplementation(() => new Promise<FormulaRunDetail>(() => {}));
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() => expect(result.current).toMatchObject({ kind: 'loading', warming: null }));
+  });
+
+  it('does not leak a stale warming signal into a later load', async () => {
+    // First load: warming unknown_run, then the budget-exhausted 503 → failed.
+    mockLoadDetail.mockImplementationOnce((_runId: string, options?: LoadRunDetailOptions) => {
+      options?.onWarming?.({ reason: 'unknown_run' });
+      return Promise.reject(new ApiClientError(503, 'run view is warming'));
+    });
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('failed'));
+
+    // A later refresh starts a new load that hangs on its FIRST GET (no 503
+    // seen yet): its loading state must carry NO warming left over from the
+    // dead poll.
+    mockLoadDetail.mockImplementation(() => new Promise<FormulaRunDetail>(() => {}));
+    act(() => {
+      void result.current.refresh();
+    });
+    await waitFor(() => expect(result.current).toMatchObject({ kind: 'loading', warming: null }));
+  });
+
+  it('supersedes the warming poll on unmount so it stops issuing GETs', async () => {
+    let captured: LoadRunDetailOptions | undefined;
+    mockLoadDetail.mockImplementation((_runId: string, options?: LoadRunDetailOptions) => {
+      captured = options;
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { unmount } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(captured).toBeDefined());
+    expect(captured?.keepPolling?.()).toBe(true);
+
+    unmount();
+
+    expect(captured?.keepPolling?.()).toBe(false);
+  });
+
+  it('supersedes an in-flight warming poll when a refresh starts a newer load', async () => {
+    const options: LoadRunDetailOptions[] = [];
+    mockLoadDetail.mockImplementation((_runId: string, opts?: LoadRunDetailOptions) => {
+      if (opts) options.push(opts);
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(options).toHaveLength(1));
+    expect(options[0]?.keepPolling?.()).toBe(true);
+
+    act(() => {
+      void result.current.refresh();
+    });
+
+    await waitFor(() => expect(options).toHaveLength(2));
+    // The older poll is dead; the newest owns the warming state.
+    expect(options[0]?.keepPolling?.()).toBe(false);
+    expect(options[1]?.keepPolling?.()).toBe(true);
+  });
+});
+
+describe('useFormulaRunDetail SSE stream integration (P4)', () => {
+  const eventSources = streamEventSources;
+
+  beforeEach(() => {
+    eventSources.length = 0;
+    vi.stubGlobal('EventSource', StreamFakeEventSource);
+    mockLoadDetail.mockResolvedValue(runDetail({ title: 'first paint (GET)' }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('renders a pushed frame with ZERO extra GET after first paint', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    // First paint comes from the GET (one call).
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    if (result.current.kind !== 'ready') throw new Error('did not reach ready');
+    expect(result.current.detail.title).toBe('first paint (GET)');
+    expect(mockLoadDetail).toHaveBeenCalledTimes(1);
+
+    // A pushed frame must update the rendered detail — and must NOT trigger any
+    // additional GET.
+    act(() => eventSources[0]?.open());
+    act(() =>
+      eventSources[0]?.emit('detail', JSON.stringify(runDetail({ title: 'pushed frame' }))),
+    );
+
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready');
+      expect(result.current.detail.title).toBe('pushed frame');
+    });
+    expect(mockLoadDetail).toHaveBeenCalledTimes(1); // still exactly the first-paint GET
+  });
+
+  it('falls back to the GET-backed value when the stream errors (no frame)', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // Stream errors before delivering any frame: the GET first-paint value stays
+    // rendered (the fallback), never blanked.
+    act(() => eventSources[0]?.fail());
+    if (result.current.kind !== 'ready') throw new Error('fallback lost ready');
+    expect(result.current.detail.title).toBe('first paint (GET)');
+  });
+
+  it('closes the stream on unmount', async () => {
+    const { result, unmount } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(eventSources[0]?.closed).toBe(false);
+    unmount();
+    expect(eventSources[0]?.closed).toBe(true);
+  });
+
+  it('renders the fresh GET on a manual Refresh even after a stream frame (F3)', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // A stream frame pins the rendered detail.
+    act(() => eventSources[0]?.open());
+    act(() => eventSources[0]?.emit('detail', JSON.stringify(runDetail({ title: 'streamed' }))));
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready');
+      expect(result.current.detail.title).toBe('streamed');
+    });
+
+    // A manual Refresh returns a NEWER GET result; it must render (the streamed
+    // frame must not permanently shadow the refetch — the Refresh no-op bug).
+    mockLoadDetail.mockResolvedValueOnce(runDetail({ title: 'manual refresh GET' }));
+    if (result.current.kind !== 'ready') throw new Error('lost ready before refresh');
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    await waitFor(() => {
+      if (result.current.kind !== 'ready') throw new Error('lost ready after refresh');
+      expect(result.current.detail.title).toBe('manual refresh GET');
+    });
+  });
+
+  it('reports streamActive true when EventSource is present', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(result.current.streamActive).toBe(true);
+  });
+
+  it('releases the nudge fallback (streamActive false) when the stream terminally closes', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+
+    // A live stream carries detail, so the nudge lane refreshes only the diff.
+    act(() => eventSources[0]?.open());
+    await waitFor(() => expect(result.current.streamActive).toBe(true));
+
+    // A fatal precheck (422/404/503) sets EventSource CLOSED with no reconnect,
+    // so the stream will push no further detail. streamActive MUST flip false so
+    // runDetailNudgeRefresh (tested directly in FormulaRunDetail.test.tsx) resumes
+    // refreshing detail as well as the diff — otherwise detail freezes at the last
+    // frame forever. A terminal close previously stayed "active" and froze detail.
+    act(() => eventSources[0]?.fail());
+    await waitFor(() => expect(result.current.streamActive).toBe(false));
+  });
+
+  it('keeps a ready run streaming but tears the stream down once the run resolves unsupported (F4)', async () => {
+    const { result: readyResult } = renderHook(() =>
+      useFormulaRunDetail('wf-ready', 'city', 'test-city'),
+    );
+    await waitFor(() => expect(readyResult.current.kind).toBe('ready'));
+    expect(eventSources).toHaveLength(1);
+    expect(eventSources[0]?.closed).toBe(false); // ready run → stream stays open
+
+    eventSources.length = 0;
+    mockLoadDetail.mockRejectedValueOnce(
+      new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view'),
+    );
+    const { result: unsupportedResult } = renderHook(() =>
+      useFormulaRunDetail('wf-v1', 'city', 'test-city'),
+    );
+    await waitFor(() => expect(unsupportedResult.current.kind).toBe('unsupported'));
+    // The stream may open optimistically during loading, but once the GET
+    // resolves the run as definitively non-streamable (422 not_run_view) it must
+    // be torn down — never left open on a fatal 4xx (F4).
+    await waitFor(() => {
+      expect(eventSources.every((source) => source.closed)).toBe(true);
+    });
+  });
+});
+
+describe('useFormulaRunDetail without EventSource (F2)', () => {
+  beforeEach(() => {
+    // No EventSource stub → the stream is permanently unavailable.
+    vi.stubGlobal('EventSource', undefined);
+    mockLoadDetail.mockResolvedValue(runDetail({ title: 'no-stream GET' }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reports streamActive false so the caller keeps detail on the nudge', async () => {
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('ready'));
+    expect(result.current.streamActive).toBe(false);
   });
 });
 
@@ -198,55 +449,52 @@ describe('formulaRunDetailCacheKey (bvu4)', () => {
   });
 });
 
-function workflowSnapshot(
-  overrides: {
-    status?: string;
-    metadata?: Record<string, string>;
-  } = {},
-) {
-  return {
-    workflow_id: 'wf-1',
-    root_bead_id: 'wf-1',
-    root_store_ref: 'city:test-city',
-    resolved_root_store: 'city:test-city',
-    scope_kind: 'city',
-    scope_ref: 'test-city',
-    snapshot_version: 1,
-    snapshot_event_seq: 1,
-    partial: false,
-    stores_scanned: ['city:test-city'],
-    beads: [
-      {
-        id: 'wf-1',
-        title: 'Direct supervisor run',
-        status: overrides.status ?? 'in_progress',
-        kind: 'workflow',
-        metadata: overrides.metadata ?? {
-          'gc.kind': 'workflow',
-          'gc.formula_contract': 'graph.v2',
-          'gc.formula': 'mol-test',
-          'gc.run_target': 'test-city/codex',
-        },
-      },
-    ],
-    deps: [],
-    logical_nodes: [],
-    logical_edges: [],
-    scope_groups: [],
-  };
-}
+const streamEventSources: StreamFakeEventSource[] = [];
 
-function formulaDetail() {
-  return {
-    name: 'mol-test',
-    description: 'formula detail',
-    version: 'v1',
-    preview: {
-      nodes: [{ id: 'wf-1', title: 'Direct supervisor run', kind: 'workflow' }],
-      edges: [],
-    },
-    steps: [],
-    deps: [],
-    var_defs: [],
-  };
+class StreamFakeEventSource {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  readyState = StreamFakeEventSource.CONNECTING;
+  closed = false;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor(readonly url: string | URL) {
+    streamEventSources.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close(): void {
+    this.readyState = StreamFakeEventSource.CLOSED;
+    this.closed = true;
+  }
+
+  open(): void {
+    this.readyState = StreamFakeEventSource.OPEN;
+    this.onopen?.(new Event('open'));
+  }
+
+  fail(): void {
+    this.readyState = StreamFakeEventSource.CLOSED;
+    this.onerror?.(new Event('error'));
+  }
+
+  emit(type: string, data: string): void {
+    const event = new MessageEvent<string>(type, { data });
+    this.listeners.get(type)?.forEach((listener) => listener(event));
+    if (type === 'message') this.onmessage?.(event);
+  }
 }

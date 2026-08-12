@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -123,14 +125,21 @@ type SlingDeps struct {
 	// store). When nil, graph beads collapse onto Store — the single-store
 	// default — so a single-store caller behaves exactly as before the seam.
 	GraphStore beads.Store
-	StoreRef   string
+	// Events records best-effort current execution facts after graph workflow
+	// materialization. Nil leaves sling event-silent.
+	Events   events.Recorder
+	StoreRef string
 	// ValidationQuerier overrides Store for existence checks when a caller has
 	// already resolved the bead through a narrower view.
 	ValidationQuerier BeadQuerier
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Tracer               func(format string, args ...any)
+	// SourceWorkflowStoreScanWarning reports a non-source store whose live-root
+	// scan failed and was skipped. When nil, scan failures remain fatal. The
+	// source store identified by StoreRef is always strict and is never skipped.
+	SourceWorkflowStoreScanWarning func(storeRef string, err error)
+	Tracer                         func(format string, args ...any)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -140,14 +149,6 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
-	// ControlDispatcherRuntimeMissing reports whether the named control-
-	// dispatcher agent's session is asleep with reason runtime-missing. It
-	// gates the rig→city control-dispatcher fallback on the sling graph-
-	// routing path (#3454); nil disables the fallback. Forwarded verbatim
-	// into graphroute.Deps so a freshly slung graph.v2 molecule binds its
-	// auto-injected workflow-finalize sink to the city dispatcher when the
-	// rig-local one has decayed, instead of a dead session.
-	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
@@ -171,10 +172,9 @@ func (deps SlingDeps) graphStore() beads.Store {
 // the boundary.
 func (deps SlingDeps) graphrouteDeps() graphroute.Deps {
 	return graphroute.Deps{
-		CityPath:                        deps.CityPath,
-		Resolver:                        deps.Resolver,
-		DirectSessionResolver:           deps.DirectSessionResolver,
-		ControlDispatcherRuntimeMissing: deps.ControlDispatcherRuntimeMissing,
+		CityPath:              deps.CityPath,
+		Resolver:              deps.Resolver,
+		DirectSessionResolver: deps.DirectSessionResolver,
 	}
 }
 
@@ -244,6 +244,11 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
+	// Reassign clears any existing human assignee on the bead before routing,
+	// so a sling can hand a bead claimed via `bd update --claim` to a new
+	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
+	// RouteBead nor the API sling path can express --reassign. See #1007.
+	Reassign bool
 	Nudge    bool
 	Force    bool
 	DryRun   bool
@@ -259,11 +264,24 @@ type RouteOpts struct {
 
 // FormulaOpts holds options for formula-based operations.
 type FormulaOpts struct {
-	Title     string
-	Vars      []string
-	Merge     string
-	Nudge     bool
-	Force     bool
+	Title string
+	Vars  []string
+	Merge string
+	Nudge bool
+	Force bool
+	// NoConvoy and Owned mirror RouteOpts. Meaningful on AttachFormula (attached
+	// routes are !IsFormula so auto-convoy applies); a no-op on a fresh
+	// LaunchFormula, matching the Reassign precedent below. Kept here so the API
+	// formula paths honor the wire no_convoy/owned fields.
+	NoConvoy bool
+	Owned    bool
+	// Reassign clears any existing human assignee before routing. Meaningful
+	// on AttachFormula (an existing bead may be claimed, and the attach route
+	// is !IsFormula); a guaranteed no-op on a fresh LaunchFormula, whose
+	// IsFormula route is skipped by shouldReopenForReassign so the formula name
+	// is never mistaken for a bead ID. Kept here so the API formula paths honor
+	// the wire reassign field, matching RouteOpts.
+	Reassign  bool
 	DryRun    bool
 	SkipPoke  bool
 	ScopeKind string
@@ -278,11 +296,13 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		Merge:         opts.Merge,
 		NoConvoy:      opts.NoConvoy,
 		Owned:         opts.Owned,
+		Reassign:      opts.Reassign,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
+		NoFormula:     opts.NoFormula,
 	}, s.deps, s.deps.Store)
 }
 
@@ -295,8 +315,11 @@ func (s *Sling) LaunchFormula(_ context.Context, formulaName string, target conf
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
+		Reassign:      opts.Reassign,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
@@ -313,8 +336,11 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		Title:         opts.Title,
 		Vars:          opts.Vars,
 		Merge:         opts.Merge,
+		NoConvoy:      opts.NoConvoy,
+		Owned:         opts.Owned,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
+		Reassign:      opts.Reassign,
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		ScopeKind:     opts.ScopeKind,
@@ -330,6 +356,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		Merge:         opts.Merge,
 		NoConvoy:      opts.NoConvoy,
 		Owned:         opts.Owned,
+		Reassign:      opts.Reassign,
 		Nudge:         opts.Nudge,
 		Force:         opts.Force,
 		SkipPoke:      opts.SkipPoke,
@@ -1261,31 +1288,71 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 // graph routing if the formula is a graph.v2 workflow.
 func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
-	if opts.PriorityOverride == nil && sourceBeadID != "" {
-		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
-	}
 	compileStart := time.Now()
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
 		return nil, err
 	}
+	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+	return InstantiateCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, a, deps, forceGraphV2Replace...)
+}
+
+// InstantiateCompiledSlingFormula materializes an already-compiled formula
+// recipe, applying graph routing when the recipe is a graph.v2 workflow. It is
+// the single instantiation chokepoint for every sling launch shape: the caller
+// compiles the recipe exactly once (compile-once, S14 I11/I12) and hands the
+// same *formula.Recipe here, so the recipe that decides isGraph is the recipe
+// that is validated and instantiated.
+//
+// The at-most-one-live-root-per-RootKey invariant (I1) is enforced by a
+// cross-process sourceworkflow file lock on the RootKey — replacing the former
+// process-local striped mutex that two processes (CLI + API) could each pass,
+// which was the #1053 duplicate-molecule window. The RootKey lock nests inside
+// any source-bead lock the caller already holds, preserving the fixed
+// source→root acquisition order (I5); the keys never collide, so nesting is
+// deadlock-free.
+func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
+	if opts.PriorityOverride == nil && sourceBeadID != "" {
+		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
+	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
 		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
+	rootKey := ""
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
-		if key := strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey]); key != "" {
-			unlock := lockGraphV2Root(key)
-			defer unlock()
-		}
+		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
 	}
-	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
+
+	materialize := func() (*molecule.Result, error) {
+		return materializeCompiledSlingFormula(ctx, recipe, formulaName, opts, sourceBeadID, scopeKind, scopeRef, graphWorkflow, a, deps, forceGraphV2Replace...)
+	}
+	if !graphWorkflow || rootKey == "" {
+		return materialize()
+	}
+	var result *molecule.Result
+	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), rootKey, func() error {
+		var innerErr error
+		result, innerErr = materialize()
+		return innerErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// materializeCompiledSlingFormula performs the routing, dedupe lookup, and
+// instantiation for a compiled recipe. For graph workflows the caller invokes
+// it under the RootKey file lock so the live-root lookup and creation are
+// atomic across processes.
+func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
-	if err := graphroute.ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
+	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
@@ -1337,11 +1404,16 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		return nil, err
 	}
 	SlingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
+	if graphWorkflow {
+		emitCurrentExecutionFacts(deps, graphStore, result.RootID, a.QualifiedName(), formulaName)
+	}
 	return result, nil
 }
 
-func lockGraphV2Root(key string) func() {
-	return graphv2.LockKey(key)
+func emitCurrentExecutionFacts(deps SlingDeps, graphStore beads.Store, rootID, actor, formulaName string) {
+	if err := executionevent.EmitCurrent(deps.Events, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: deps.Store}, rootID, actor); err != nil {
+		depsTracef(deps, "execution snapshot projection failed formula=%s root=%s err=%v", formulaName, rootID, err)
+	}
 }
 
 func closeReplacedGraphV2Root(store beads.Store, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
@@ -1449,7 +1521,7 @@ func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
 	for _, root := range matches {
-		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
 		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {

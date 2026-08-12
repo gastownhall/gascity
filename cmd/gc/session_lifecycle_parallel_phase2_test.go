@@ -9,6 +9,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -106,6 +108,18 @@ func TestPhase2HookEnabledClaudeFirstTurnStartupPayload(t *testing.T) {
 	if strings.Count(payload, "Do the first task.") != 1 {
 		t.Fatalf("payload = %q, want initial_message exactly once", payload)
 	}
+
+	// prompt_hash pins the rendered startup TEMPLATE prompt only. Even though the
+	// delivered payload above carries the one-shot initial_message, the stored hash
+	// must exclude it so a later Stage-4 re-derivation from the template still
+	// matches (S19); hashing the delivered payload would re-prime the session
+	// forever.
+	if got, want := prepared.promptHash, sessionpkg.PromptHash("Base worker prompt"); got != want {
+		t.Errorf("promptHash = %q, want base-template hash %q (initial_message must be excluded)", got, want)
+	}
+	if prepared.promptHash == sessionpkg.PromptHash(payload) {
+		t.Errorf("promptHash must not hash the delivered payload %q (which includes initial_message)", payload)
+	}
 }
 
 func TestPhase2InputResultFailureClassification(t *testing.T) {
@@ -178,8 +192,8 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 	}
 
 	prepared, err := prepareStartCandidate(startCandidate{
-		session: &session,
-		tp:      phase2TemplateParams(t, tc, "Base worker prompt"),
+		info: sessiontest.SeedBead(t, session),
+		tp:   phase2TemplateParams(t, tc, "Base worker prompt"),
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)
@@ -230,8 +244,8 @@ func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overri
 	tp := phase2TemplateParams(t, tc, "Base worker prompt")
 	tp.Hints.Nudge = ""
 	prepared, err := prepareStartCandidate(startCandidate{
-		session: &session,
-		tp:      tp,
+		info: sessiontest.SeedBead(t, session),
+		tp:   tp,
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)

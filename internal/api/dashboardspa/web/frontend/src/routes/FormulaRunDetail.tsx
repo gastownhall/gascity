@@ -22,21 +22,12 @@ import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { runEventIdentity, formulaRunDetailEventMatches } from '../hooks/runEventIdentity';
 import { useRunNodeSelection } from '../hooks/useRunNodeSelection';
 import { useFormulaRunDetail } from '../hooks/useFormulaRunDetail';
-import { useRunDiff } from '../hooks/useRunDiff';
 import { useEntityLinks } from '../hooks/useEntityLinks';
 import { getCached } from '../api/cache';
 import { getActiveCity } from '../api/cityBase';
 
 const RUN_DETAIL_EVENT_PREFIXES = [GC_EVENT_PREFIX.bead, GC_EVENT_PREFIX.session] as const;
 const NO_EVENT_PREFIXES: readonly string[] = [];
-const TERMINAL_STATUSES: readonly RunNodeStatus[] = ['completed', 'done', 'failed', 'skipped'];
-const NON_TERMINAL_STATUSES: readonly RunNodeStatus[] = [
-  'pending',
-  'ready',
-  'running',
-  'active',
-  'blocked',
-];
 
 export function FormulaRunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -68,32 +59,38 @@ export function FormulaRunDetailPage() {
   // signal and from a generic transport failure. We surface it as its own honest
   // "detail snapshot not found" state instead of mislabeling it as v1.
   const notFound = runDetail.kind === 'not_found';
-  const runDiff = useRunDiff(
-    routeError || detail === null ? undefined : runId,
-    detail?.executionPath,
-    scope?.scopeKind,
-    scope?.scopeRef,
-  );
   const initialLoading = runDetail.kind === 'loading';
-  const refreshing =
-    (readyRun !== null && readyRun.refreshState.kind === 'refreshing') ||
-    (runDiff.kind === 'ready' && runDiff.refreshState.kind === 'refreshing');
-  const diffInitialLoading = detail !== null && runDiff.kind === 'loading';
-  const loading = initialLoading || refreshing || diffInitialLoading;
+  const refreshing = readyRun !== null && readyRun.refreshState.kind === 'refreshing';
+  const loading = initialLoading || refreshing;
   const loadError =
     runDetail.kind === 'failed'
       ? runDetail.error
       : readyRun !== null && readyRun.refreshState.kind === 'failed'
         ? readyRun.refreshState.error
         : null;
+
+  // P4: the run detail streams (useFormulaRunDetail owns the per-run SSE stream,
+  // which pushes the whole DTO with zero refetch), so a bead/session nudge only
+  // needs to refresh detail when that stream is UNAVAILABLE — a runtime with no
+  // EventSource, where detail would otherwise be fetched once then frozen.
+  const streamActive = runDetail.streamActive;
   useGcEventRefresh(
     routeError ? NO_EVENT_PREFIXES : RUN_DETAIL_EVENT_PREFIXES,
-    () => void refreshRunResources(runDetail.refresh, runDiff.refresh),
+    () => void runDetailNudgeRefresh(streamActive, runDetail.refresh),
     {
       matches: (event) => {
-        if (detail === null) return false;
         const identity = runEventIdentity(event);
-        if (isTerminalProgress(detail.progress) && identityIsAmbient(identity)) return false;
+        // F4: before the detail loads (still warming, or the first load
+        // failed), anchor the match on the ROUTE's runId. A printed deep link
+        // lands here before the just-slung run's bead events exist, and
+        // requiring a loaded detail meant those eventual events could never
+        // nudge the page out of the failed state. An identity-less (ambient)
+        // event also matches — a root bead's own events may carry no run
+        // identity — mirroring the non-terminal ambient behavior below.
+        if (detail === null) {
+          return runId !== undefined && (identity.runIds.size === 0 || identity.runIds.has(runId));
+        }
+        if (detail.progress.terminal && identityIsAmbient(identity)) return false;
         return formulaRunDetailEventMatches(identity, {
           runId: detail.runId,
           rootBeadId: detail.rootBeadId,
@@ -101,7 +98,16 @@ export function FormulaRunDetailPage() {
       },
     },
   );
+
   const pageError = routeError ?? loadError;
+  // F4: while the initial load polls the graced warming 503 (reason
+  // 'unknown_run': the projection is warm but has never seen this run — the
+  // just-slung deep-link window, or a genuinely dead link), the interim copy
+  // must be honest about BOTH possibilities instead of an anonymous spinner. A
+  // reason-less warming 503 (the projection itself is cold-replaying) keeps
+  // the plain loading copy: the run is not in doubt there.
+  const warmingUnknownRun =
+    runDetail.kind === 'loading' && runDetail.warming?.reason === 'unknown_run';
   const { selectedNodeId, selectedNode, toggleNode } = useRunNodeSelection(
     detail,
     initialNodeId,
@@ -140,7 +146,7 @@ export function FormulaRunDetailPage() {
   }, [warmRunSummary, runId]);
 
   const synopsis = detail
-    ? `${detail.progress.visibleNodeCount} nodes. ${summarizeNodeStatuses(detail.progress)}. Local changes are shown for the run execution folder.`
+    ? `${detail.progress.visibleNodeCount} nodes. ${summarizeNodeStatuses(detail.progress)}.`
     : (initialLoading && !routeError) || unsupported || notFound
       ? undefined
       : 'Formula run unavailable.';
@@ -170,7 +176,7 @@ export function FormulaRunDetailPage() {
             )}
             <Button
               size="sm"
-              onClick={() => void refreshRunResources(runDetail.refresh, runDiff.refresh)}
+              onClick={() => void runDetail.refresh()}
               disabled={loading || Boolean(routeError)}
             >
               {refreshing ? 'Refreshing' : 'Refresh'}
@@ -185,6 +191,11 @@ export function FormulaRunDetailPage() {
             <StageLadder stages={skeletonLane.stages} label={skeletonLane.title} />
             <p className="text-body text-fg-muted italic mt-8">Loading run detail.</p>
           </>
+        ) : warmingUnknownRun ? (
+          <p className="text-body text-fg-muted italic" role="status">
+            This run may still be being recorded — new work can take a couple of minutes to appear —
+            or it may no longer exist.
+          </p>
         ) : (
           <p className="text-body text-fg-muted italic">Loading formula run.</p>
         )
@@ -213,7 +224,7 @@ export function FormulaRunDetailPage() {
               selectedNodeId={selectedNodeId}
               onToggleNode={toggleNode}
             />
-            <FormulaRunTabs diff={runDiff} selectedNode={selectedNode} />
+            <FormulaRunTabs selectedNode={selectedNode} />
           </div>
           <RelatedEntities
             view={links.view}
@@ -234,29 +245,23 @@ export function FormulaRunDetailPage() {
   );
 }
 
-async function refreshRunResources(
+/**
+ * The bead/session nudge callback (P4). When the per-run detail stream is live it
+ * carries the whole detail on its own, so a nudge does not re-GET it (avoiding a
+ * double detail refetch). When the stream is UNAVAILABLE (a runtime with no
+ * EventSource), detail would freeze after first paint, so the nudge refreshes it.
+ * Exported so the branch is unit-tested directly without the coupled EventSource
+ * harness.
+ */
+export function runDetailNudgeRefresh(
+  streamActive: boolean,
   refreshDetail: () => Promise<void>,
-  refreshDiff: () => Promise<void>,
 ): Promise<void> {
-  await Promise.all([refreshDetail(), refreshDiff()]);
+  return streamActive ? Promise.resolve() : refreshDetail();
 }
 
 function identityIsAmbient(identity: ReturnType<typeof runEventIdentity>): boolean {
   return identity.runIds.size === 0 && identity.rootBeadIds.size === 0;
-}
-
-function isTerminalProgress(progress: FormulaRunProgress): boolean {
-  if (progress.visibleNodeCount <= 0) return false;
-  const nonTerminal = NON_TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  if (nonTerminal > 0) return false;
-  const terminal = TERMINAL_STATUSES.reduce(
-    (count, status) => count + (progress.statusCounts[status] ?? 0),
-    0,
-  );
-  return terminal >= progress.visibleNodeCount;
 }
 
 function RunMetadata({ detail }: { detail: FormulaRunDetailData }) {

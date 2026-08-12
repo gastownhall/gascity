@@ -53,15 +53,9 @@ func TestHandleExtMsgInboundDefaultRouteBindsAndColdWakes(t *testing.T) {
 	}
 
 	// The notify fan-out cold-wakes the routed agent's named session.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil && id != "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for default-routed inbound to cold-wake myrig/worker")
-		}
-		time.Sleep(10 * time.Millisecond)
+	srv.waitForBackground()
+	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id == "" {
+		t.Fatalf("default-routed inbound did not cold-wake myrig/worker: id=%q err=%v", id, err)
 	}
 }
 

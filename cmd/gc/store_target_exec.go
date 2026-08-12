@@ -18,10 +18,9 @@ type execStoreTarget struct {
 }
 
 func execProjectedBackendEnvKeys() []string {
-	keys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys)+len(bdAutoBackupOptOutEnvKeys))
+	keys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys)+len(bdAutoBackupOptOutEnvKeys))
 	keys = append(keys, projectedBeadsBackendEnvKeys...)
 	keys = append(keys, projectedDoltEnvKeys...)
-	keys = append(keys, projectedPostgresEnvKeys...)
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	keys = appendBdAutoBackupOptOutEnvKeys(keys)
 	keys = appendBdContributorRoutingOptOutEnvKeys(keys)
@@ -37,8 +36,29 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 	applyBdContributorRoutingOptOut(env)
 }
 
+// execProjectedBackendCopyKeys returns the keys carried when projecting a
+// resolved backend env map onto an exec-provider / city process env. It extends
+// execProjectedBackendEnvKeys with BEADS_DOLT_CREDENTIAL_COMMAND, the hosted
+// beads-gateway credential helper mirrorBeadsDoltEnv derives from
+// GC_DOLT_CRED_CMD.
+//
+// That key is intentionally NOT in projectedDoltEnvKeys: it is a
+// preserve-from-ambient passthrough key (hostedBeadsCredentialPassthroughKeys),
+// not a strip-and-reproject key. Forcing it into projectedDoltEnvKeys would
+// break the mergeRuntimeEnv strip symmetry TestProjectedKeysCoverage pins and
+// collide with preserveHostedBeadsCredentialEnv. But the whitelist COPY paths
+// must still carry the derived value, or a controller that exports only the
+// non-sensitive GC_DOLT_CRED_CMD loses the helper on projected exec/process
+// envs and bd falls back to the root user (gateway Error 1045). The empty-set
+// path (setExecProjectedBackendEnvEmpty) deliberately keeps the original key
+// set so it never blanks an ambient credential command for providers that skip
+// the copy.
+func execProjectedBackendCopyKeys() []string {
+	return append(execProjectedBackendEnvKeys(), "BEADS_DOLT_CREDENTIAL_COMMAND")
+}
+
 func copyExecProjectedBackendEnv(dst, src map[string]string) {
-	for _, key := range execProjectedBackendEnvKeys() {
+	for _, key := range execProjectedBackendCopyKeys() {
 		if value, ok := src[key]; ok {
 			dst[key] = value
 		}
@@ -115,10 +135,20 @@ func execProviderNeedsScopedDoltStoreEnv(provider string) bool {
 }
 
 func resolveConfiguredExecStoreTarget(cityPath, storePath string) (execStoreTarget, error) {
+	return resolveConfiguredExecStoreTargetWithConfig(cityPath, storePath, nil)
+}
+
+// resolveConfiguredExecStoreTargetWithConfig is resolveConfiguredExecStoreTarget
+// for a caller that already holds this city's config. A nil config is loaded
+// here, matching resolveConfiguredExecStoreTarget.
+func resolveConfiguredExecStoreTargetWithConfig(cityPath, storePath string, cfg *config.City) (execStoreTarget, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		return execStoreTarget{}, err
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		cfg = loaded
 	}
 	if samePath(scopeRoot, cityPath) {
 		return execStoreTarget{

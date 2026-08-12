@@ -176,10 +176,14 @@ Notes per trigger:
   day-of-week) supporting `*`, integers, comma lists (`1,15`), and `*/N` steps.
   Unlike cooldown it hits the same wall-clock times every day. Fires at most
   once per minute.
-- **`condition`** — the orchestrator runs `sh -c "<check>"` with a 10-second
-  timeout each tick. Use it for external state: check a file, ping an endpoint,
-  query a database. The check runs synchronously, so a slow one delays the rest
-  of the tick — keep it fast.
+- **`condition`** — the orchestrator runs `sh -c "<check>"` each tick, bounded by
+  the order's `check_timeout` (a positive Go duration, default `10s`). This is
+  separate from `timeout`, which bounds the dispatched formula/exec rather than
+  the check. Use it for external state: check a file, ping an endpoint, query a
+  database. The check runs synchronously, so a slow one delays the rest of the
+  tick — keep it fast, or raise `check_timeout` when a check must query a slow
+  store (a check killed by its deadline never proves its condition, so the order
+  would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
   processed twice.
@@ -386,6 +390,18 @@ is so contended that the check times out, the order is skipped — it fails
 closed. Orders whose dispatch is safe to repeat (sweeps and feeders where a
 duplicate run is a no-op) can set `idempotent = true` to fail open instead:
 on a gate timeout they dispatch anyway rather than starve.
+
+A third option exists for orders that consume **no bead work at all** — pure
+probes and sweeps that track nothing. `no_work_gate = true` skips the open-work
+gate *entirely*; the dispatcher never issues the store read, so a slow store
+cannot time it out and skip the order. The canonical case is
+`provider-health-probe`, a cooldown probe whose only job is to refresh a health
+cache; under store contention its gate timed out every cycle and the cache went
+stale (#2893). `no_work_gate` and `idempotent` are distinct: `idempotent`
+*enters* the gate but fails open on timeout, while `no_work_gate` never enters
+it. Use `no_work_gate` only when the order genuinely tracks no beads — it
+disables single-flight protection, so the order must be self-idempotent or
+interval-bounded to guard against overlapping re-runs.
 
 ## Rig-scoped orders
 

@@ -132,12 +132,21 @@ func git(t *testing.T, dir string, args ...string) string {
 
 func runScript(t *testing.T, script, repoDir, wt, agent string) {
 	t.Helper()
-	cmd := exec.Command("sh", script, repoDir, wt, agent, "--sync")
-	cmd.Env = os.Environ()
-	out, err := cmd.CombinedOutput()
+	out, err := runScriptCommand(script, repoDir, wt, agent)
 	if err != nil {
 		t.Fatalf("worktree-setup.sh failed: %v\n%s", err, out)
 	}
+}
+
+// runScriptCommand runs a worktree-setup.sh script and returns its
+// combined output without asserting on the result. Shared by runScript
+// (strict) and runLifecycleScript in worktree_lifecycle_test.go
+// (tolerant of a known non-zero exit), so the package has a single
+// os/exec call site for this pattern instead of one per caller.
+func runScriptCommand(script, repoDir, wt, agent string) ([]byte, error) {
+	cmd := exec.Command("sh", script, repoDir, wt, agent, "--sync")
+	cmd.Env = os.Environ()
+	return cmd.CombinedOutput()
 }
 
 func currentBranch(t *testing.T, dir string) string {

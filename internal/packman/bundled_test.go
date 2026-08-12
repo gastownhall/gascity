@@ -30,7 +30,7 @@ func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	}
 	t.Cleanup(func() { runGit = prev })
 
-	got, err := EnsureRepoInCache(source, commit)
+	got, err := EnsureRepoInCache("", source, commit)
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestBundledSyntheticCacheKeyDoesNotCollideWithSameRepoGitSource(t *testing.
 	}
 	t.Cleanup(func() { runGit = prev })
 
-	if _, err := EnsureRepoInCache(source, commit); err != nil {
+	if _, err := EnsureRepoInCache("", source, commit); err != nil {
 		t.Fatalf("EnsureRepoInCache bundled: %v", err)
 	}
 	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
@@ -224,7 +224,7 @@ func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T)
 	}
 	t.Cleanup(func() { materializeSyntheticRepo = prevMaterialize })
 
-	_, err = EnsureRepoInCache(source, commit)
+	_, err = EnsureRepoInCache("", source, commit)
 	if err == nil {
 		t.Fatal("EnsureRepoInCache succeeded, want materialize failure")
 	}
@@ -249,6 +249,18 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	runGit = func(_ string, args ...string) (string, error) {
 		gitCalls = append(gitCalls, args)
 		switch args[0] {
+		case "checkout":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prevGit })
+
+	prevNetGit := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		gitCalls = append(gitCalls, args)
+		switch args[0] {
 		case "clone":
 			target := args[len(args)-1]
 			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
@@ -259,13 +271,11 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 				return "", err
 			}
 			return "", os.WriteFile(packToml, []byte(stubPackToml), 0o644)
-		case "checkout":
-			return "", nil
 		default:
-			return "", fmt.Errorf("unexpected git call: %v", args)
+			return "", fmt.Errorf("unexpected network git call: %v", args)
 		}
 	}
-	t.Cleanup(func() { runGit = prevGit })
+	t.Cleanup(func() { runNetworkGit = prevNetGit })
 
 	prevMaterialize := materializeSyntheticRepo
 	materializeSyntheticRepo = func(string, string) error {
@@ -274,7 +284,7 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	}
 	t.Cleanup(func() { materializeSyntheticRepo = prevMaterialize })
 
-	got, err := EnsureRepoInCache(source, commit)
+	got, err := EnsureRepoInCache("", source, commit)
 	if err != nil {
 		t.Fatalf("EnsureRepoInCache: %v", err)
 	}

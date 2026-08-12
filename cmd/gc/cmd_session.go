@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -175,7 +176,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	cfg, err := loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -217,8 +218,17 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	if store == nil {
 		return code
 	}
+	// Every store consumer in this root is session-class (alias/session-name
+	// availability checks, the session worker handle, the auto-title front door,
+	// and the start-wait front door), so route the whole flow through the session
+	// coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -242,6 +252,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// legacy bound identities).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
+
+	// Fix B: when the template is a configured named session and the user
+	// supplied no explicit alias, materialize it under the canonical configured
+	// identity so session_name, mail routing, and tmux display all agree.
+	if configuredOwner != "" && requestedAlias == "" {
+		alias = configuredOwner
+		explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, configuredOwner)
+	}
+
 	reservationIDs := []string{alias, explicitName}
 	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""
 	if reserveConcreteIdentity {
@@ -269,7 +288,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			// Controller is running — create bead only, let reconciler start it.
 			kindMeta := map[string]string{
 				"agent_name":     sessionQualifiedName,
-				"session_origin": "manual",
+				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+			}
+			if configuredOwner != "" && requestedAlias == "" {
+				kindMeta[session.NamedSessionMetadataKey] = "true"
+				kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 			}
 			if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 				kindMeta["provider_kind"] = family
@@ -293,7 +316,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			}
 			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
 				cityPath,
-				store,
+				sessStore,
 				sp,
 				cfg,
 				alias,
@@ -313,15 +336,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			}
 			var info session.Info
 			err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
 					return err
 				}
 				if reserveConcreteIdentity && sessionQualifiedName != alias {
-					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 						return err
 					}
 				}
-				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 					return err
 				}
 				var createErr error
@@ -333,7 +356,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return 1
 			}
 
-			titleDone := maybeAutoTitle(sessionFrontDoor(store), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
+			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
 			// Poke again after bead creation to trigger immediate reconciler tick.
@@ -367,7 +390,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 			// Wait for the reconciler to start the session before attaching.
 			fmt.Fprintln(stdout, "Waiting for session to start...") //nolint:errcheck // best-effort stdout
-			if waitErr := waitForSession(sp, info.SessionName, waitTimeout, sessionFrontDoor(store), info.ID, stderr); waitErr != nil {
+			if waitErr := waitForSession(sp, info.SessionName, waitTimeout, sessionFrontDoor(sessStore), info.ID, stderr); waitErr != nil {
 				fmt.Fprintf(stderr, "gc session new: %v\n", waitErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -383,7 +406,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// Fallback: controller not running — direct start via session manager.
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
-		"session_origin": "manual",
+		"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+	}
+	if configuredOwner != "" && requestedAlias == "" {
+		kindMeta[session.NamedSessionMetadataKey] = "true"
+		kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 	}
 	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 		kindMeta["provider_kind"] = family
@@ -407,7 +434,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
 		cityPath,
-		store,
+		sessStore,
 		sp,
 		cfg,
 		alias,
@@ -427,15 +454,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && sessionQualifiedName != alias {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -447,7 +474,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		return 1
 	}
 
-	titleDone := maybeAutoTitle(sessionFrontDoor(store), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
+	titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 	defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
 	if jsonOutput {
@@ -518,8 +545,8 @@ func newSessionStoredMCPMetadata(
 // channel that is closed when background title generation completes.
 // Short-lived CLI paths (e.g. --no-attach) should block on it before
 // exiting to ensure the model-refined title is persisted.
-func maybeAutoTitle(sessFront *session.InfoStore, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
-	return api.MaybeGenerateTitleAsync(sessFront.Store().Store, beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
+func maybeAutoTitle(sessFront *session.Store, beadID, userTitle, titleHint string, provider *config.ResolvedProvider, workDir string, stderr io.Writer) <-chan struct{} {
+	return api.MaybeGenerateTitleAsync(sessFront.Store(), beadID, userTitle, titleHint, provider, workDir, func(format string, args ...any) {
 		fmt.Fprintf(stderr, "session %s: "+format+"\n", append([]any{beadID}, args...)...) //nolint:errcheck // best-effort stderr
 	})
 }
@@ -642,6 +669,16 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 	return config.Agent{}, false
 }
 
+// sessionOriginForConfiguredNamed returns "named" when the session is being
+// created for a configured named-session identity without a user-supplied
+// alias, and "manual" otherwise.
+func sessionOriginForConfiguredNamed(configuredOwner, requestedAlias string) string {
+	if configuredOwner != "" && requestedAlias == "" {
+		return "named"
+	}
+	return "manual"
+}
+
 func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
 	if cfg == nil || agent == nil {
 		return ""
@@ -658,7 +695,7 @@ func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
 // waitForSession polls the provider until the session is running or timeout.
 // If a bead store is provided, it checks for early failure (bead transitioned
 // to "closed" state) and logs progress every 5 seconds.
-func waitForSession(sp runtime.Provider, sessionName string, timeout time.Duration, sessFront *session.InfoStore, beadID string, stderr io.Writer) error {
+func waitForSession(sp runtime.Provider, sessionName string, timeout time.Duration, sessFront *session.Store, beadID string, stderr io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Now()
 	for time.Now().Before(deadline) {
@@ -721,23 +758,16 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	const cmdName = "session list"
-	if c != nil {
-		cr, err := c.ListSessions(stateFilter, templateFilter, false)
-		if err == nil {
-			logRoute(stderr, cmdName, "api", "")
-			return renderSessionListFromAPI(cr, jsonOutput, stdout)
-		}
-		if !api.ShouldFallbackForRead(err) {
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
-	}
-	return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr)
+	var cr api.CachedRead[[]api.SessionView]
+	return routeRead(c, "session list", nilReason, stderr,
+		func() error {
+			var err error
+			cr, err = c.ListSessions(stateFilter, templateFilter, false)
+			return err
+		},
+		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
+	)
 }
 
 // sessionListJSONEnvelope is the API-path --json output shape for
@@ -863,13 +893,26 @@ func sessionViewLastActive(lastActive string) string {
 // through the supervisor API when a controller is up and falls back to the
 // local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	c, reason := sessionListAPIClient(cityPath)
-	return routeSessionList(cityPath, stateFilter, templateFilter, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
+	})
+}
+
+// sortSessionsCreatedDesc orders a session listing newest-first, in place. It is
+// the single shared comparator for the CLI session listers (this file and
+// completion.go), restoring the created-desc order the retired sorted union feed
+// produced now that loadSessionBeadSnapshot loads unsorted (its first-wins
+// identity index must stay on store order, so the re-sort lives here in the CLI
+// projection, not the loader). It reproduces beads.SortCreatedDesc's comparison
+// exactly: CreatedAt descending, ties broken by ID descending — a total order, so
+// SliceStable is deterministic.
+func sortSessionsCreatedDesc(sessions []session.Info) {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].ID > sessions[j].ID
+		}
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
 }
 
 // doSessionListFallback is the direct-bd path for "gc session list".
@@ -887,6 +930,10 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	}
 
 	providerCtx := loadSessionProviderContext()
+	// Every store consumer here is session-class (the ready gc:wait set, the
+	// session-bead list, and the session catalog), so route the whole flow through
+	// the session coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, providerCtx.cfg, providerCtx.cityPath)
 
 	// Launch readyWaitSet concurrently with the shared session-bead load,
 	// but only on the non-JSON path — JSON output returns early and doesn't
@@ -901,14 +948,17 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		waitCh = make(chan waitResult, 1)
 
 		go func() {
-			set, err := readyWaitSetForList(store)
+			set, err := readyWaitSetForList(sessionFrontDoor(sessStore))
 			waitCh <- waitResult{set: set, err: err}
 		}()
 	}
 
-	allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
-		Sort: beads.SortCreatedDesc,
-	})
+	// One union scan feeds the whole command: the provider snapshot, the typed
+	// session list, and the raw-bead index the reason projection still reads.
+	// loadSessionBeadSnapshot routes the type+label union through the session
+	// snapshot loader (front-door migration keeps ListAllSessionBeads out of the
+	// CLI); it loads unsorted, so restore the created-desc order below.
+	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
@@ -917,9 +967,18 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return 1
 	}
 
-	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
-	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
-	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
+	sp, err := withSessionProviderConstructionContext(
+		newSessionProviderFromContext(providerCtx, sessionBeads),
+	)
+	if err != nil {
+		message := fmt.Sprintf("gc session list: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, providerCtx.cfg)
 	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "session_catalog_failed", fmt.Sprintf("gc session list: %v", err), 1)
@@ -927,17 +986,22 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
-	sessions := listResult.Sessions
+	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
+	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}
 
-	// Build bead index from the beads already fetched by ListFull (no duplicate query).
-	beadIndex := make(map[string]beads.Bead, len(listResult.Beads))
-	for _, b := range listResult.Beads {
-		beadIndex[b.ID] = b
+	// Build the per-session reason-projection index from the one snapshot (no
+	// duplicate query). WI-6 R5: the whole reason projection — the wake-reason
+	// classifiers AND LifecycleDisplayReasonWithLivenessInfo — now reads the typed
+	// Info snapshot (infoIndex, from OpenInfos), so the raw bead index is gone
+	// (Info.SessionCircuitState carries the last field the display reason needed).
+	openInfos := sessionBeads.OpenInfos()
+	infoIndex := make(map[string]session.Info, len(openInfos))
+	for _, in := range openInfos {
+		infoIndex[in.ID] = in
 	}
 
 	waitRes := <-waitCh
@@ -966,7 +1030,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	}
 
 	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
-	// in wakeReasons.
+	// in wakeReasonsInfo.
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
@@ -976,7 +1040,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
@@ -996,28 +1060,36 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 }
 
 type sessionListJSONRow struct {
-	ID                   string        `json:"id"`
-	Name                 string        `json:"name,omitempty"`
-	Template             string        `json:"template"`
-	Provider             string        `json:"provider,omitempty"`
-	State                session.State `json:"state"`
-	Title                string        `json:"title,omitempty"`
-	Rig                  string        `json:"rig,omitempty"`
-	Alias                string        `json:"alias,omitempty"`
-	AgentName            string        `json:"agent_name,omitempty"`
-	Transport            string        `json:"transport,omitempty"`
-	Command              string        `json:"command,omitempty"`
-	WorkDir              string        `json:"work_dir,omitempty"`
-	SessionName          string        `json:"session_name,omitempty"`
-	SessionKey           string        `json:"session_key,omitempty"`
-	ResumeFlag           string        `json:"resume_flag,omitempty"`
-	ResumeStyle          string        `json:"resume_style,omitempty"`
-	ResumeCommand        string        `json:"resume_command,omitempty"`
-	CreatedAt            time.Time     `json:"created_at"`
-	LastActive           time.Time     `json:"last_active"`
-	LastNudgeDeliveredAt *time.Time    `json:"last_nudge_delivered_at,omitempty"`
-	Attached             bool          `json:"attached"`
-	Closed               bool          `json:"closed"`
+	ID        string        `json:"id"`
+	Name      string        `json:"name,omitempty"`
+	Template  string        `json:"template"`
+	Provider  string        `json:"provider,omitempty"`
+	State     session.State `json:"state"`
+	Title     string        `json:"title,omitempty"`
+	Rig       string        `json:"rig,omitempty"`
+	Alias     string        `json:"alias,omitempty"`
+	AgentName string        `json:"agent_name,omitempty"`
+	Transport string        `json:"transport,omitempty"`
+	Command   string        `json:"command,omitempty"`
+	WorkDir   string        `json:"work_dir,omitempty"`
+	// WorkerDir is the canonical agent process working directory (the raw
+	// worker_dir / gc.work_dir metadata, Info.WorkerDir). It is surfaced
+	// alongside the legacy WorkDir so consumers can reliably map an active
+	// session to the nested per-bead worktree it is actually working in — the
+	// legacy work_dir is stamped at create/dispatch and is often the agent
+	// home (depth-1) or empty, which is why the worktree reaper's liveness
+	// gate needs the canonical value (gastownhall/gascity#4492 accept-crit #1).
+	WorkerDir            string     `json:"worker_dir,omitempty"`
+	SessionName          string     `json:"session_name,omitempty"`
+	SessionKey           string     `json:"session_key,omitempty"`
+	ResumeFlag           string     `json:"resume_flag,omitempty"`
+	ResumeStyle          string     `json:"resume_style,omitempty"`
+	ResumeCommand        string     `json:"resume_command,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	LastActive           time.Time  `json:"last_active"`
+	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool       `json:"attached"`
+	Closed               bool       `json:"closed"`
 }
 
 type sessionListJSON struct {
@@ -1103,6 +1175,7 @@ func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 			Transport:     s.Transport,
 			Command:       s.Command,
 			WorkDir:       s.WorkDir,
+			WorkerDir:     strings.TrimSpace(s.WorkerDir),
 			SessionName:   s.SessionName,
 			SessionKey:    s.SessionKey,
 			ResumeFlag:    s.ResumeFlag,
@@ -1176,7 +1249,7 @@ func sessionListDisplayValue(value string) string {
 }
 
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
-// results to avoid redundant tmux subprocess calls. wakeReasons calls
+// results to avoid redundant tmux subprocess calls. wakeReasonsInfo calls
 // IsAttached per session, but cmdSessionList already queried it.
 type attachmentCachingProvider struct {
 	runtime.Provider
@@ -1274,22 +1347,25 @@ const (
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
 // For closed sessions, shows "-".
-func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
+func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
 	if s.State == "" {
 		return "-" // closed
 	}
 
-	b, ok := beadIndex[s.ID]
+	// info is the typed reason source of truth — the full snapshot Info projection
+	// (OpenInfos mirrors Open one-to-one, same order), not the display Info s, which
+	// callers may pass minimally populated. A miss must render "-", never a
+	// zero-value Info fed to the reason projection (which would silently emit a
+	// wrong REASON cell).
+	info, ok := infoIndex[s.ID]
 	if !ok {
-		return "-" // no bead data available
+		return "-" // no typed session data available
 	}
 
 	now := time.Now().UTC()
-	lifecycle := session.ProjectLifecycle(session.LifecycleInput{
-		Status:   b.Status,
-		Metadata: b.Metadata,
-		Now:      now,
-	})
+	lcInput := session.LifecycleInputFromInfo(info)
+	lcInput.Now = now
+	lifecycle := session.ProjectLifecycle(lcInput)
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
 		return "-"
 	}
@@ -1297,15 +1373,17 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if sp != nil {
 		isRunning = sp.IsRunning
 	}
-	if reason := session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, now, s.SessionName, isRunning); reason != "" {
+	// WI-6 R5: the display reason now reads Info.SessionCircuitState (added this
+	// wave) and the other lifecycle markers off the typed snapshot Info.
+	if reason := session.LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning); reason != "" {
 		return reason
 	}
 
 	// If config is available and no lifecycle reason blocks display, compute
 	// full wake reasons (including WakeConfig).
 	if cfg != nil {
-		reasons := wakeReasons(b, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
-		if pinAwakeWakeReasonVisible(b, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
+		reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+		if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
 			reasons = append(reasons, WakePin)
 		}
 		if len(reasons) > 0 {
@@ -1320,21 +1398,21 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	return "-"
 }
 
-func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {
-	if strings.TrimSpace(b.Metadata["pin_awake"]) != "true" || cfg == nil {
+func pinAwakeWakeReasonVisible(info session.Info, cfg *config.City, now time.Time) bool {
+	if strings.TrimSpace(info.PinAwake) != "true" || cfg == nil {
 		return false
 	}
-	state := sessionMetadataState(b)
-	if b.Status == "closed" || state == "closed" || state == "suspended" {
+	state := sessionMetadataStateInfo(info)
+	if info.Closed || state == "closed" || state == "suspended" {
 		return false
 	}
-	if isDrainedSessionBead(b) || b.Metadata["dependency_only"] == "true" || b.Metadata["wait_hold"] != "" {
+	if isDrainedSessionInfo(info) || info.DependencyOnlyMetadata == "true" || info.WaitHold != "" {
 		return false
 	}
-	if metadataTimeInFuture(b.Metadata["held_until"], now) || metadataTimeInFuture(b.Metadata["quarantined_until"], now) {
+	if metadataTimeInFuture(info.HeldUntil, now) || metadataTimeInFuture(info.QuarantinedUntil, now) {
 		return false
 	}
-	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(b, cfg))
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
 	if agent == nil {
 		return false
 	}
@@ -1347,21 +1425,6 @@ func metadataTimeInFuture(raw string, now time.Time) bool {
 	}
 	t, err := time.Parse(time.RFC3339, raw)
 	return err == nil && !t.IsZero() && now.Before(t)
-}
-
-func readyWaitSetForList(store beads.Store) (map[string]bool, error) {
-	items, err := loadWaitBeads(store)
-	ready := make(map[string]bool)
-	for _, item := range items {
-		if item.Metadata["state"] != waitStateReady {
-			continue
-		}
-		sessionID := item.Metadata["session_id"]
-		if sessionID != "" {
-			ready[sessionID] = true
-		}
-	}
-	return ready, err
 }
 
 // cliPoolDesired computes a static pool desired count from config.
@@ -1424,15 +1487,23 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	if store == nil {
 		return code
 	}
+	// Every store consumer here is session-class (session-ID resolution, session
+	// catalog, session worker handle), so route the whole flow through the session
+	// coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
 
-	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, args[0])
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	catalog, err := workerSessionCatalogWithConfig(cityPath, sessStore, sp, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1444,7 +1515,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1612,9 +1683,13 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	// Every store consumer here is session-class (session-ID resolution, held_until
+	// suspend patch, session worker handle), so route the whole flow through the
+	// session coordination-class store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1628,7 +1703,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
 			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-			if err := sessionFrontDoor(store).ApplyPatch(sessionID, map[string]string{
+			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, map[string]string{
 				"held_until":   heldUntil,
 				"sleep_intent": "user-hold",
 				"state":        "suspended",
@@ -1656,8 +1731,12 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	}
 
 	// Fallback: controller not running — direct suspend via worker handle.
-	sp := newSessionProvider()
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1717,16 +1796,26 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	// SURGICAL route: the session-class consumers (session-ID resolution, session
+	// worker handle, session bead read) go through the session coordination-class
+	// store for relocation-safety; the post-close work-release below
+	// (unclaimWorkAssignedToRetiredSessionBead) is WORK-class and stays on the
+	// generic store.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1735,7 +1824,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// identifiers (session_name, alias, etc.) for the post-close work-release
 	// pass. Lookup is best-effort: if the session bead is already missing we
 	// fall back to a synthetic shell carrying only the resolved session ID.
-	closedSessionBead, sessionBeadErr := store.Get(sessionID)
+	closedSessionBead, sessionBeadErr := sessStore.Get(sessionID)
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
@@ -1756,11 +1845,26 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// Each Update fires the bd on_update hook, which emits a bead.updated
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
+	//
+	// The scan leads with the WORK store here, unlike the reconciler's, which
+	// leads with the sessions-class store. On a split city that difference is
+	// the whole release tier for relocated work: claim-time class routing
+	// (claim_class_route.go) can leave an in_progress assignee in the graph
+	// binding, and a work-led scan cannot see it. So the binding is handed in as
+	// a class leg — the same graphClassBinding identity the claim routes on, from
+	// the same one-shot funnel — and dropped again on a city that relocates
+	// nothing.
 	var rigStores map[string]beads.Store
+	var classStores []beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	if cityErr == nil {
+		if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
+			classStores = append(classStores, binding)
+		}
+	}
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr, classStores...)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -1810,16 +1914,24 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...boo
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	// Both store consumers here are session-class (session-ID resolution + session
+	// worker handle), so route the whole flow through the session coordination-class
+	// store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1893,8 +2005,23 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 		return code
 	}
 
-	sp := newSessionProvider()
-	catalog, err := workerSessionCatalogWithConfig("", store, sp, nil)
+	// The session catalog and prune are session-class, so route through the
+	// session coordination-class store for relocation-safety. cityPath/cfg are
+	// resolved here (best-effort, no pack refresh) to key the class store and are
+	// reused below to withdraw queued wait nudges after the prune.
+	cityPath, cityErr := resolveCity()
+	var cfg *config.City
+	if cityErr == nil {
+		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	}
+	sessStore := cliSessionStore(store, cfg, cityPath)
+
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1906,7 +2033,7 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if cityPath, err := resolveCity(); err == nil {
+	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, result.WaitNudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session prune: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -2060,12 +2187,12 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 			logRoute(stderr, cmdName, "api", "")
 			return renderSessionPeekFromAPI(cr, target, lines, jsonOutput, stdout, stderr)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -2106,13 +2233,9 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 // through the supervisor API when a controller is up and falls back to the
 // local runtime provider otherwise.
 func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	c, reason := sessionPeekAPIClient(cityPath)
-	return routeSessionPeek(cityPath, args[0], lines, c, reason, jsonOutput, stdout, stderr)
+	return routeReadCmd("session peek", stderr, sessionPeekAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeSessionPeek(cityPath, args[0], lines, c, nilReason, jsonOutput, stdout, stderr)
+	})
 }
 
 // doSessionPeekFallback is the direct runtime-provider path for
@@ -2126,16 +2249,24 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
+	// Both store consumers here are session-class (session-ID resolution + session
+	// worker handle), so route the whole flow through the session coordination-class
+	// store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2221,24 +2352,41 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	// Every store consumer here is session-class (session-ID resolution, session
+	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
+	// route the whole flow through the session coordination-class store for
+	// relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	bead, beadErr := store.Get(sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Best-effort session read via the session front door (relocation-safe: the
+	// generic sessStore is already the session-class store). Unlike the raw
+	// sessStore.Get, the front-door Get wraps "loading session %q", returns
+	// ErrSessionNotFound for a present-but-non-session bead, and rejects beads
+	// failing IsSessionBeadOrRepairable. That stricter rejection must NOT abort a
+	// kill the raw path would have attempted: a missing / damaged-past-repair /
+	// foreign target lands in the same best-effort branch below (empty identity,
+	// runtime treated as active, proceed to handle.Kill) that beadErr != nil used.
+	info, infoErr := sessionFrontDoor(sessStore).Get(sessionID)
 	identity := ""
 	runtimeAlreadyInactive := false
-	if beadErr == nil {
-		identity = namedSessionIdentity(bead)
-		runtimeAlreadyInactive = sessionKillRuntimeAlreadyInactive(bead, sp)
+	if infoErr == nil {
+		identity = namedSessionIdentityInfo(info)
+		runtimeAlreadyInactive = sessionKillRuntimeAlreadyInactive(info, sp)
 	}
 
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2250,10 +2398,10 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		return 1
 	}
 
-	if beadErr != nil {
-		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, beadErr) //nolint:errcheck // best-effort stderr
+	if infoErr != nil {
+		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, infoErr) //nolint:errcheck // best-effort stderr
 	} else if identity != "" {
-		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, store, sessionID, identity); err != nil {
+		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			if killErr != nil {
 				fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
@@ -2270,11 +2418,11 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// kill leaves behind (#3629). Written here at the CLI layer rather than in
 	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
 	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
-	if beadErr == nil {
+	if infoErr == nil {
 		now := time.Now().UTC()
 		patch := session.SleepPatch(now, "killed")
 		patch["synced_at"] = now.Format(time.RFC3339)
-		if err := store.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -2301,7 +2449,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		Message: "killed",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
-	recordSessionKillStop(bead, beadErr, cfg)
+	recordSessionKillStop(info, infoErr, cfg)
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "kill",
@@ -2323,23 +2471,23 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 // session bead failed to load (or carries no bounded session name) nothing is
 // recorded — an unknown identity must not become a garbage metric label.
 // Purely observational: it never influences control flow or the exit code.
-func recordSessionKillStop(bead beads.Bead, beadErr error, cfg *config.City) {
+func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 	if beadErr != nil {
 		return
 	}
-	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
 	if sessionName == "" {
 		return
 	}
-	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentity(bead, cfg), "killed", nil)
+	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentityInfo(info, cfg), "killed", nil)
 }
 
-func sessionKillRuntimeAlreadyInactive(bead beads.Bead, sp runtime.Provider) bool {
-	switch session.State(strings.TrimSpace(bead.Metadata["state"])) {
+func sessionKillRuntimeAlreadyInactive(info session.Info, sp runtime.Provider) bool {
+	switch session.State(strings.TrimSpace(info.MetadataState)) {
 	case session.StateActive, session.StateStartPending, session.StateCreating, session.StateDraining, session.StateAwake:
 		return false
 	}
-	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
 	return sp != nil && sessionName != "" && !sp.IsRunning(sessionName)
 }
 
@@ -2413,13 +2561,13 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		if err == nil {
 			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
-	cfg, err := loadCityConfig(cityPath, stderr)
+	cfg, err := loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2428,15 +2576,23 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	if store == nil {
 		return code
 	}
+	// Both store consumers here are session-class (session-ID resolution + session
+	// worker handle), so route the whole flow through the session coordination-class
+	// store for relocation-safety.
+	sessStore := cliSessionStore(store, cfg, cityPath)
 
-	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, target)
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sp := newSessionProvider()
-	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

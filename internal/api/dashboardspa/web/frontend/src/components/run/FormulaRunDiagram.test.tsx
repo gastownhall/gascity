@@ -197,6 +197,7 @@ function progress(
     snapshotVersion: 1,
     snapshotEventSeq: { kind: 'known', seq: 1 },
     snapshotPartial: false,
+    terminal: false,
     totalNodeCount,
     visibleNodeCount,
     edgeCount: 0,

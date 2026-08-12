@@ -11,9 +11,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -645,6 +647,64 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if _, ok := workflowStoreByRef(state, "rig:missing"); ok {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
+
+	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// is the city store, and an orders: ref there would be a second name for a store
+	// the city: ref already resolves.
+	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
+		t.Fatal("workflowStoreByRef(orders:city) on a single-store city = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheOrdersBinding covers the class ref the order
+// history list mints. A ref one endpoint publishes and its sibling cannot resolve
+// is a 404 on a bead that exists.
+func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.ordersBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "orders:bright-lights")
+	if !ok {
+		t.Fatal("workflowStoreByRef(orders:bright-lights) = false, want true")
+	}
+	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
+		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
+	}
+	if info.store != beads.Store(binding) {
+		t.Fatal("orders store mismatch")
+	}
+
+	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
+		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStorePathSkipsClassRefs pins that a class ref — one naming a
+// binding rather than a scope root — yields no rig/city path to run SQL against.
+// Answering the city path for the orders binding would point the workflow SQL
+// fast path at the wrong database.
+func TestWorkflowStorePathSkipsClassRefs(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+
+	for _, ref := range []string{"graph:bright-lights", "orders:bright-lights"} {
+		info := workflowStoreInfo{
+			ref:       ref,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  "bright-lights",
+			store:     beads.NewMemStore(),
+		}
+		if path, ok := workflowStorePath(state, info); ok {
+			t.Fatalf("workflowStorePath(%q) = %q, true; want no path", ref, path)
+		}
+	}
 }
 
 func TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap(t *testing.T) {
@@ -1039,6 +1099,94 @@ func TestWorkflowStatusTreatsSkippedAsSkipped(t *testing.T) {
 
 	if got := workflowStatus(bead); got != "skipped" {
 		t.Fatalf("workflowStatus(closed skipped) = %q, want skipped", got)
+	}
+}
+
+// oldInlineWorkflowBeadResponse reproduces the pre-refactor inline
+// struct-literal construction that the three build loops used, so
+// TestWorkflowBeadResponseFromBeadEquivalence can pin the new codec-backed
+// mapper against it field-for-field.
+func oldInlineWorkflowBeadResponse(bead beads.Bead) workflowBeadResponse {
+	return workflowBeadResponse{
+		ID:            bead.ID,
+		Title:         bead.Title,
+		Status:        workflowStatus(bead),
+		Kind:          workflowKind(bead),
+		StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
+		Attempt:       workflowAttempt(bead),
+		LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+		ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
+		Assignee:      strings.TrimSpace(bead.Assignee),
+		Metadata:      cloneStringMap(bead.Metadata),
+	}
+}
+
+func TestWorkflowBeadResponseFromBeadEquivalence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "fully populated with padded metadata",
+			bead: beads.Bead{
+				ID:       "step-1",
+				Title:    "Do the thing",
+				Status:   "in_progress",
+				Assignee: "  worker-1  ",
+				Type:     "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:          "  run  ",
+					beadmeta.OutcomeMetadataKey:       "",
+					beadmeta.AttemptMetadataKey:       "  2  ",
+					beadmeta.StepRefMetadataKey:       "  iteration.1.review  ",
+					beadmeta.LogicalBeadIDMetadataKey: "  logical-9  ",
+					beadmeta.ScopeRefMetadataKey:      "  gascity  ",
+				},
+			},
+		},
+		{
+			name: "minimal bead with nil metadata",
+			bead: beads.Bead{ID: "root-2", Title: "bare"},
+		},
+		{
+			name: "closed with fail outcome",
+			bead: beads.Bead{
+				ID:       "step-3",
+				Title:    "failed step",
+				Status:   "closed",
+				Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := workflowBeadResponseFromBead(tc.bead)
+			want := oldInlineWorkflowBeadResponse(tc.bead)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("workflowBeadResponseFromBead mismatch:\n got=%#v\nwant=%#v", got, want)
+			}
+			// Attempt pointer semantics: nil when unset, non-nil when > 0.
+			if (got.Attempt == nil) != (want.Attempt == nil) {
+				t.Fatalf("attempt pointer nilness mismatch: got=%v want=%v", got.Attempt, want.Attempt)
+			}
+			// nil source metadata must stay nil so the wire keeps "metadata": null.
+			if tc.bead.Metadata == nil && got.Metadata != nil {
+				t.Fatalf("nil metadata projected to non-nil: %#v", got.Metadata)
+			}
+		})
+	}
+
+	// Clone independence: mutating the source metadata after projection must
+	// not change the response map.
+	src := map[string]string{beadmeta.KindMetadataKey: "workflow"}
+	resp := workflowBeadResponseFromBead(beads.Bead{ID: "root-1", Metadata: src})
+	src[beadmeta.KindMetadataKey] = "mutated"
+	if resp.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+		t.Fatalf("response metadata not independent of source: %q", resp.Metadata[beadmeta.KindMetadataKey])
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -253,6 +256,14 @@ func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
 }
 
+func (s *prefixedAliasStore) SetLocalString(id, key, value string) error {
+	return s.base.SetLocalString(s.aliasToBase(id), key, value)
+}
+
+func (s *prefixedAliasStore) GetLocalString(id, key string) (string, error) {
+	return s.base.GetLocalString(s.aliasToBase(id), key)
+}
+
 func (s *prefixedAliasStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
 	if fn == nil {
 		return s.base.Tx(commitMsg, nil)
@@ -338,6 +349,55 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
 	if got := beadPrefix("mcdi3bsyeryols-yyn"); got != "mcdi3bsyeryols" {
 		t.Fatalf("beadPrefix() = %q, want alphanumeric prefix", got)
+	}
+}
+
+// TestResolveStoreByPrefixKeepsRigRouteResolution pins the non-class routing
+// behavior: a self-route ("ga" -> ".") resolves to the rig that owns the routes
+// file, and a cross-rig route ("gb" -> "../beta") resolves to the rig it points
+// at. Both must stay exactly as they are.
+func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
+		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	}
+	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
+		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	}
+}
+
+// TestResolveStoreByPrefixDoesNotCaptureForeignRoute pins that a rig route
+// resolving to a path which is NOT a registered rig no longer answers with that
+// rig's store. The route says the prefix lives elsewhere, so resolution falls
+// through to the by-id candidate scan — which still contains every store, so the
+// bead stays reachable instead of being pinned to the wrong one.
+func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	cityStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	routes := `{"prefix":"ga","path":"."}` + "\n" +
+		`{"prefix":"gb","path":"../beta"}` + "\n" +
+		`{"prefix":"gz","path":"../../elsewhere"}`
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("gz"); got != nil {
+		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	}
+	got := s.beadStoresForID("gz-1")
+	want := []beads.Store{cityStore, alphaStore, betaStore}
+	if len(got) != len(want) {
+		t.Fatalf("beadStoresForID(gz-1) = %v (len %d), want the full candidate scan %v", got, len(got), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("beadStoresForID(gz-1)[%d] = %p, want %p", i, got[i], want[i])
+		}
 	}
 }
 
@@ -658,6 +718,10 @@ func TestBeadListFiltering(t *testing.T) {
 func TestBeadListCrossRig(t *testing.T) {
 	state := newFakeState(t)
 	store2 := beads.NewMemStore()
+	// Two rigs mint under different prefixes (config.Rig.EffectivePrefix); two
+	// MemStores left on the default prefix would both mint "gc-1", i.e. one bead
+	// co-resident in two legs rather than two beads.
+	store2.IDPrefix = "r2"
 	state.stores["rig2"] = store2
 
 	state.stores["myrig"].Create(beads.Bead{Title: "Bead from rig1"}) //nolint:errcheck
@@ -1743,8 +1807,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 
 	listReq := httptest.NewRequest("GET", cityURL(state, "/beads?assignee=worker"), nil)
@@ -1764,16 +1828,28 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 	}
 }
 
-func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
+// TestPhase2BeadListAssigneeAliasServesEveryRigsBeads pins that resolving an
+// assignee alias into several identity terms does not cost a rig its rows: every
+// bead assigned to the session, in every rig, is in the response exactly once.
+//
+// The rigs mint under different prefixes because that is the only shape a
+// running city can have — config.ValidateRigs rejects a colliding rig prefix on
+// every start, reload and config-edit path, so two rigs cannot mint the same id.
+// (Its ancestor left both MemStores on the default prefix, which made "two beads"
+// and "one bead resident in two legs" the same fixture; the fan-out reads bead
+// ids as identity, the way GET /v0/beads/ready and every by-id endpoint do.)
+func TestPhase2BeadListAssigneeAliasServesEveryRigsBeads(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.stores["otherrig"] = beads.NewMemStore()
-	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig"})
+	otherStore := beads.NewMemStore()
+	otherStore.IDPrefix = "or"
+	state.stores["otherrig"] = otherStore
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "or"})
 	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
 	workA, _ := state.stores["myrig"].Create(beads.Bead{Title: "Task A", Assignee: sessionBead.ID})
-	workB, _ := state.stores["otherrig"].Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
-	if workA.ID != workB.ID {
-		t.Fatalf("test setup expected duplicate local IDs, got %q and %q", workA.ID, workB.ID)
+	workB, _ := otherStore.Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
+	if workA.ID == workB.ID {
+		t.Fatalf("test setup expected distinct per-rig IDs, got %q twice", workA.ID)
 	}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
@@ -1795,6 +1871,56 @@ func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
 	if listed.Total != 2 || len(listed.Items) != 2 {
 		t.Fatalf("list by alias total/items = %d/%d, want 2/2: %#v", listed.Total, len(listed.Items), listed.Items)
 	}
+	for _, want := range []string{workA.ID, workB.ID} {
+		found := false
+		for _, b := range listed.Items {
+			if b.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("alias fan-out dropped %q: %#v", want, listed.Items)
+		}
+	}
+}
+
+// TestBeadListAssigneeTermsIncludesAllSessionIdentityForms pins the term SET
+// beadListAssigneeTerms enumerates for a resolved session: the input term, the
+// bead ID, session_name, alias, configured named identity, and every prior
+// alias. Order is not part of the contract (huma_handlers_beads re-sorts
+// globally when len(terms)>1); the set must stay stable across the codec swap
+// onto session.AssigneeIdentities.
+func TestBeadListAssigneeTermsIncludesAllSessionIdentityForms(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	sessionBead, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "Worker session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"alias":                     "worker",
+			"configured_named_identity": "reviewer",
+			"alias_history":             "nux,rictus",
+			"template":                  "myrig/worker",
+			"state":                     "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	srv := New(state)
+
+	terms := srv.beadListAssigneeTerms(context.Background(), "worker")
+	got := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		got[term] = true
+	}
+	for _, want := range []string{"worker", sessionBead.ID, "test-city--worker", "reviewer", "nux", "rictus"} {
+		if !got[want] {
+			t.Errorf("beadListAssigneeTerms(worker) missing %q; got %v", want, terms)
+		}
+	}
 }
 
 func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
@@ -1815,8 +1941,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want session_name preserved as %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want session_name normalized to canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -1950,8 +2076,8 @@ func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
 		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want repairable session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want repairable session alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
 	if gotSession.Type != session.BeadType {
@@ -1977,8 +2103,8 @@ func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
 		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2003,8 +2129,8 @@ func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("created %d beads, want 1", len(items))
 	}
-	if items[0].Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("created assignee = %q, want alias normalized to session_name %q", items[0].Assignee, sessionBead.Metadata["session_name"])
+	if items[0].Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("created assignee = %q, want canonical alias %q", items[0].Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2152,15 +2278,20 @@ func TestBeadUpdateParentOpenAPISchemaAllowsNull(t *testing.T) {
 	}
 }
 
+// GET /packs lists the import-binding namespace (the same scope add/remove
+// operate on), via the packListImports seam, so the list shape matches the
+// forge-web {name, source, version} contract.
 func TestPackList(t *testing.T) {
-	state := newFakeState(t)
-	state.cfg.Packs = map[string]config.PackSource{
-		"gastown": {
-			Source: "https://github.com/example/gastown-pack",
-			Ref:    "v1.0.0",
-			Path:   "packs/gastown",
-		},
+	orig := packListImports
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		return map[string]config.Import{
+			"gastown": {Source: "https://github.com/example/gastown-pack", Version: "^1.0.0"},
+			"local":   {Source: "../packs/local"},
+		}, nil
 	}
+	defer func() { packListImports = orig }()
+
+	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/packs"), nil)
@@ -2175,18 +2306,31 @@ func TestPackList(t *testing.T) {
 		Packs []packResponse `json:"packs"`
 	}
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Packs) != 1 {
-		t.Fatalf("packs count = %d, want 1", len(resp.Packs))
+	if len(resp.Packs) != 2 {
+		t.Fatalf("packs count = %d, want 2: %#v", len(resp.Packs), resp.Packs)
 	}
+	// Bindings are returned sorted by name.
 	if resp.Packs[0].Name != "gastown" {
-		t.Errorf("Name = %q, want %q", resp.Packs[0].Name, "gastown")
+		t.Errorf("Packs[0].Name = %q, want gastown", resp.Packs[0].Name)
 	}
 	if resp.Packs[0].Source != "https://github.com/example/gastown-pack" {
-		t.Errorf("Source = %q", resp.Packs[0].Source)
+		t.Errorf("Packs[0].Source = %q", resp.Packs[0].Source)
+	}
+	if resp.Packs[0].Version != "^1.0.0" {
+		t.Errorf("Packs[0].Version = %q, want ^1.0.0", resp.Packs[0].Version)
+	}
+	if resp.Packs[1].Name != "local" || resp.Packs[1].Version != "" {
+		t.Errorf("Packs[1] = %#v, want local with empty version", resp.Packs[1])
 	}
 }
 
 func TestPackListEmpty(t *testing.T) {
+	orig := packListImports
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		return map[string]config.Import{}, nil
+	}
+	defer func() { packListImports = orig }()
+
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
@@ -2204,6 +2348,81 @@ func TestPackListEmpty(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if len(resp.Packs) != 0 {
 		t.Errorf("packs count = %d, want 0", len(resp.Packs))
+	}
+}
+
+// TestPackListAddRemoveShareNamespace is the regression for the red-team
+// MUST-FIX: a binding surfaced by add must be listable by GET and removable by
+// DELETE {name}. All three handlers are stubbed at the importsvc seam, and the
+// stub's in-memory binding store is the single namespace they share.
+func TestPackListAddRemoveShareNamespace(t *testing.T) {
+	bindings := map[string]config.Import{}
+
+	origList, origAdd, origRemove := packListImports, packAddImport, packRemoveImport
+	packListImports = func(_ fsys.FS, _ string) (map[string]config.Import, error) {
+		out := make(map[string]config.Import, len(bindings))
+		for k, v := range bindings {
+			out[k] = v
+		}
+		return out, nil
+	}
+	packAddImport = func(_ fsys.FS, _, source, name, version string) (*importsvc.AddResult, error) {
+		if name == "" {
+			name = "review"
+		}
+		bindings[name] = config.Import{Source: source, Version: version}
+		return &importsvc.AddResult{Name: name, Source: source, Version: version, GitBacked: true}, nil
+	}
+	packRemoveImport = func(_ fsys.FS, _, name string) (*importsvc.RemoveResult, error) {
+		if _, ok := bindings[name]; !ok {
+			return nil, importsvc.ErrNotFound
+		}
+		delete(bindings, name)
+		return &importsvc.RemoveResult{Name: name}, nil
+	}
+	defer func() {
+		packListImports, packAddImport, packRemoveImport = origList, origAdd, origRemove
+	}()
+
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	doReq := func(method, path, body string) *httptest.ResponseRecorder {
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, cityURL(state, path), rdr)
+		req.Header.Set("X-GC-Request", "true")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// POST a pack -> it must appear in the GET listing by the same binding name.
+	if rec := doReq("POST", "/packs", `{"source":"https://github.com/org/repo/tree/main/packs/review"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	rec := doReq("GET", "/packs", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Packs []packResponse `json:"packs"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Packs) != 1 || resp.Packs[0].Name != "review" {
+		t.Fatalf("GET after POST = %#v, want one binding named review", resp.Packs)
+	}
+
+	// DELETE by that listed name -> the GET listing is empty again.
+	if rec := doReq("DELETE", "/packs/review", ""); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq("GET", "/packs", "")
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if len(resp.Packs) != 0 {
+		t.Fatalf("GET after DELETE = %#v, want empty", resp.Packs)
 	}
 }
 

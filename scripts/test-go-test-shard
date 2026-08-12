@@ -52,7 +52,7 @@ while IFS='=' read -r name _; do
   esac
 done < <(env)
 
-run_go_test() {
+run_in_test_env() {
   local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -60,7 +60,7 @@ run_go_test() {
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \
@@ -86,10 +86,38 @@ run_go_test() {
     GC_TEST_SHARD_TOTAL="${shard_total}"
   )
   if (( ${#extra_env[@]} > 0 )); then
-    env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"
+    env -i "${base_env[@]}" "${extra_env[@]}" "$@"
   else
-    env -i "${base_env[@]}" go test "$@"
+    env -i "${base_env[@]}" "$@"
   fi
+}
+
+run_go_test() {
+  run_in_test_env go test "$@"
+}
+
+run_observable_go_test() {
+  local timing_name="${GO_TEST_TIMING_NAME:-${test_pkg#./}-shard-${shard_index}-of-${shard_total}}"
+  local observable_env=(
+    OBSERVABLE_TIMING_FILE="${GO_TEST_TIMING_FILE}"
+    OBSERVABLE_SHARD_ID="${timing_name}"
+    OBSERVABLE_VARIANT="${GO_TEST_TIMING_VARIANT:-default}"
+    OBSERVABLE_COMMIT_SHA="${GITHUB_SHA:-}"
+    OBSERVABLE_WORKFLOW="${GITHUB_WORKFLOW:-}"
+    OBSERVABLE_RUN_ID="${GITHUB_RUN_ID:-}"
+    OBSERVABLE_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
+    OBSERVABLE_JOB="${GITHUB_JOB:-}"
+    OBSERVABLE_RUNNER_LABEL="${GO_TEST_RUNNER_LABEL:-}"
+    OBSERVABLE_RUNNER_NAME="${RUNNER_NAME:-}"
+    OBSERVABLE_RUNNER_OS="${RUNNER_OS:-}"
+    OBSERVABLE_RUNNER_ARCH="${RUNNER_ARCH:-}"
+    OBSERVABLE_RUNNER_CPU_COUNT="${GO_TEST_RUNNER_CPU_COUNT:-}"
+  )
+  if [[ "${GC_TEST_NO_SLICE:-0}" == "1" ]]; then
+    observable_env+=(GC_TEST_NO_SLICE=1)
+  fi
+  run_in_test_env "${observable_env[@]}" \
+    "$repo_root/scripts/go-test-observable" "$timing_name" -- "$@"
 }
 
 go_test_args=(-timeout "$timeout")
@@ -103,26 +131,65 @@ if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
   go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
 fi
 
-# Capture the enumeration separately so a build/compile failure here surfaces
-# its output. `go test -list` builds the test binary; if that fails, the bare
-# assignment's non-zero status is swallowed by `set -e` (the script dies before
-# the "no tests discovered" branch below), producing an undebuggable empty
-# shard failure. Check the status explicitly and print what go printed.
-if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
-  echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
-  printf '%s\n' "$list_output" >&2
-  exit 1
-fi
 tests=()
-while IFS= read -r line; do
-  [[ "$line" == Test* ]] || continue
-  tests+=("$line")
-done <<< "$list_output"
+if [[ ${GO_TEST_MANIFEST+x} == x ]]; then
+  if [[ ! -f "$GO_TEST_MANIFEST" || ! -r "$GO_TEST_MANIFEST" ]]; then
+    echo "go test manifest is not readable: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
+  if ! LC_ALL=C tr -d '\000' < "$GO_TEST_MANIFEST" | cmp -s "$GO_TEST_MANIFEST" -; then
+    echo "go test manifest contains NUL bytes or could not be validated: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
 
-if [[ ${#tests[@]} -eq 0 ]]; then
-  echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
-  printf '%s\n' "$list_output" >&2
-  exit 1
+  line_number=0
+  manifest_test_count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    if ! [[ "$line" =~ ^Test$ || "$line" =~ ^Test[A-Z0-9_][A-Za-z0-9_]*$ ]]; then
+      echo "invalid go test manifest entry in ${GO_TEST_MANIFEST} at line ${line_number}: ${line}" >&2
+      exit 1
+    fi
+    if (( manifest_test_count > 0 )); then
+      for existing in "${tests[@]}"; do
+        if [[ "$existing" == "$line" ]]; then
+          echo "duplicate go test manifest entry: ${line}" >&2
+          exit 1
+        fi
+      done
+    fi
+    tests+=("$line")
+    manifest_test_count=$((manifest_test_count + 1))
+  done < "$GO_TEST_MANIFEST"
+
+  if (( manifest_test_count == 0 )); then
+    echo "go test manifest contains no tests: ${GO_TEST_MANIFEST}" >&2
+    exit 1
+  fi
+else
+  # Capture the enumeration separately so a build/compile failure here surfaces
+  # its output. `go test -list` builds the test binary; if that fails, the bare
+  # assignment's non-zero status is swallowed by `set -e` (the script dies before
+  # the "no tests discovered" branch below), producing an undebuggable empty
+  # shard failure. Check the status explicitly and print what go printed.
+  if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
+    echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
+    printf '%s\n' "$list_output" >&2
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [[ "$line" == Test* ]] || continue
+    tests+=("$line")
+  done <<< "$list_output"
+
+  if [[ ${#tests[@]} -eq 0 ]]; then
+    echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
+    printf '%s\n' "$list_output" >&2
+    exit 1
+  fi
 fi
 
 selected=()
@@ -145,4 +212,8 @@ join_regex() {
 regex="^($(join_regex "${selected[@]}"))$"
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
-run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
+  run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+else
+  run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+fi

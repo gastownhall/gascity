@@ -94,6 +94,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 			},
 		},
 		{
@@ -116,6 +119,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
 			},
 		},
@@ -180,6 +186,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
 			},
 		},
@@ -200,6 +209,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
 			},
 		},
@@ -215,6 +227,11 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 				"session_key":                "new-session-key",
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2 C-7): a restart handoff forces a fresh re-prime.
+				"primed_at":            "",
+				"priming_attempted_at": "",
+				"prompt_hash":          "",
 			},
 		},
 		{
@@ -228,6 +245,11 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2 C-7): a restart handoff forces a fresh re-prime.
+				"primed_at":            "",
+				"priming_attempted_at": "",
+				"prompt_hash":          "",
 			},
 		},
 		{
@@ -239,6 +261,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
@@ -256,6 +281,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
@@ -273,6 +301,9 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
 				"last_woke_at":               "",
 				"restart_requested":          "",
 				"continuation_reset_pending": "true",
@@ -325,6 +356,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"alias":                     "",
 				"session_name":              "",
 				"session_name_explicit":     "",
+				"canonical_instance_name":   "",
+				"canonical_pool_slot":       "",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"retired_named_identity":    "worker",
@@ -525,6 +558,7 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 		"started_provision_hash":     "provision-hash",
 		"started_launch_hash":        "launch-hash",
 		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
 		"core_hash_breakdown":        `{"command":"core-hash"}`,
 		"state":                      string(StateActive),
 		"state_reason":               "creation_complete",
@@ -535,6 +569,27 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestCommitStartedPatchClearsResetCommittedAt(t *testing.T) {
+	committedAt := "2026-07-08T20:09:10Z"
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:     "core-hash",
+		ConfirmState: true,
+		Now:          time.Date(2026, 7, 8, 20, 10, 30, 0, time.UTC),
+	})
+
+	if got, ok := patch[ResetCommittedAtKey]; !ok || got != "" {
+		t.Fatalf("successful start must clear %s after prior reset %s; got present=%v value=%q", ResetCommittedAtKey, committedAt, ok, got)
+	}
+
+	merged := patch.Apply(MetadataPatch{ResetCommittedAtKey: committedAt, "continuation_reset_pending": "true"})
+	if merged[ResetCommittedAtKey] != "" {
+		t.Fatalf("merged metadata kept stale %s = %q", ResetCommittedAtKey, merged[ResetCommittedAtKey])
+	}
+	if merged["continuation_reset_pending"] != "" {
+		t.Fatalf("merged metadata kept continuation_reset_pending = %q", merged["continuation_reset_pending"])
 	}
 }
 
@@ -597,6 +652,7 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 		"started_provision_hash":     "provision-hash",
 		"started_launch_hash":        "launch-hash",
 		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
 		"sleep_reason":               "",
 	}
 	if !reflect.DeepEqual(patch, want) {

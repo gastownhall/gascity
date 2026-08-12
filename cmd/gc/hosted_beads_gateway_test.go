@@ -191,3 +191,53 @@ dolt.user: orchestrator
 		t.Fatalf("managed-catalog lister was called for an external dolt endpoint; the SHOW DATABASES guard must be skipped")
 	}
 }
+
+// TestCityRuntimeProcessEnvProjectsHostedBeadsCredentialCommand pins the
+// exec-provider / city process-env projection path. mirrorBeadsDoltEnv derives
+// BEADS_DOLT_CREDENTIAL_COMMAND for a controller that exports only the
+// non-sensitive GC_DOLT_CRED_CMD, but cityRuntimeProcessEnvWithError copies the
+// resolved source map through a backend-key whitelist. That whitelist
+// (execProjectedBackendEnvKeys) omits the credential command because it is a
+// preserve-from-ambient passthrough key, not a strip-and-reproject projectedDolt
+// key — so before execProjectedBackendCopyKeys carried it, a GC_DOLT_CRED_CMD-only
+// controller silently dropped the helper on the projected process env and bd fell
+// back to the root user (gateway Error 1045). The ambient BEADS_DOLT_CREDENTIAL_COMMAND
+// is left unset here so preserveHostedBeadsCredentialEnv has nothing to fall back
+// on: the projection is the only channel that can carry the derived value.
+func TestCityRuntimeProcessEnvProjectsHostedBeadsCredentialCommand(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_CRED_CMD", "/usr/local/bin/eia-helper")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+	_ = os.Unsetenv("BEADS_DOLT_CREDENTIAL_COMMAND")
+	for _, k := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: e2e
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: gw.beads.example.com
+dolt.port: 3306
+dolt.user: orchestrator
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !cityUsesBdStoreContract(cityPath) {
+		t.Fatalf("precondition: expected cityUsesBdStoreContract(cityPath)=true for the default bd provider")
+	}
+
+	env, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
+	}
+	if got := hostedEnvEntriesToMap(env)["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/usr/local/bin/eia-helper" {
+		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (projected from ambient GC_DOLT_CRED_CMD)", got, "/usr/local/bin/eia-helper")
+	}
+}

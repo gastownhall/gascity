@@ -11,7 +11,10 @@ interface RunNodeSessionPanelProps {
 
 export function RunNodeSessionPanel({ node, visible }: RunNodeSessionPanelProps) {
   const instances = useMemo(() => node?.executionInstances.sort(compareInstances) ?? [], [node]);
-  const defaultInstance = useMemo(() => preferredInstance(instances), [instances]);
+  const defaultInstance = useMemo(
+    () => defaultVisibleInstance(node?.visibleExecutionInstanceId, instances),
+    [node?.visibleExecutionInstanceId, instances],
+  );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   useEffect(() => {
@@ -129,13 +132,23 @@ function SessionTranscript({
   visible: boolean;
 }) {
   const attached = instance.session.kind === 'attached' ? instance.session : null;
-  const sessionId = attached?.link.sessionId ?? null;
+  const sessionId = attached?.link?.sessionId ?? null;
   const stream = visible && Boolean(attached?.streamable);
   const sessionState = useSessionStream(sessionId, stream);
   if (attached === null) {
     return (
       <p className="mt-5 text-body text-fg-muted italic">
         {instanceSessionUnavailableCopy(instance)}
+      </p>
+    );
+  }
+  if (sessionId === null) {
+    // An `attached` session with no link is the public floor's redacted shape:
+    // there is no session id to fetch, so render graceful copy instead of
+    // dereferencing an absent link (which previously crashed the run view).
+    return (
+      <p className="mt-5 text-body text-fg-muted italic">
+        Session transcript is unavailable for this node.
       </p>
     );
   }
@@ -229,17 +242,28 @@ function isRunningStatus(status: RunExecutionInstance['status']): boolean {
   return status === 'active' || status === 'running';
 }
 
-function preferredInstance(instances: RunExecutionInstance[]): RunExecutionInstance | undefined {
-  return (
-    instances.find(
-      (instance) => instance.session.kind === 'attached' && instance.session.streamable,
-    ) ??
-    [...instances]
-      .filter((instance) => instance.session.kind === 'attached')
-      .sort(compareInstances)
-      .at(-1) ??
-    [...instances].sort(compareInstances).at(-1)
-  );
+/**
+ * Resolve the instance to show first, honoring the server's already-computed
+ * `visibleExecutionInstanceId` instead of re-deriving a preference client-side.
+ * That server field is the node's CURRENT-iteration instance (the last in Go's
+ * sort order) — the same instance that drives the node's status pill and
+ * current-bead — so the panel default now stays consistent with the rest of the
+ * run view. This INTENTIONALLY differs from the retired client fold, which
+ * preferred a streamable-attached (then last-attached) instance: when the
+ * current iteration is queued/not-started but a prior iteration has a transcript,
+ * the panel now defaults to the current not-started instance (the prior
+ * transcript stays reachable via the Iteration selector). Falls back to the last
+ * instance in sort order when the id is absent or matches no instance — e.g. a
+ * snapshot whose visible instance rotated out of this node.
+ */
+function defaultVisibleInstance(
+  visibleExecutionInstanceId: string | undefined,
+  instances: RunExecutionInstance[],
+): RunExecutionInstance | undefined {
+  const preferred = visibleExecutionInstanceId
+    ? instances.find((instance) => instanceKey(instance) === visibleExecutionInstanceId)
+    : undefined;
+  return preferred ?? instances.at(-1);
 }
 
 function groupIterations(instances: RunExecutionInstance[]) {

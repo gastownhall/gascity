@@ -1,21 +1,21 @@
 #!/bin/sh
-# _bd_trace.sh — shell-side bd call trace helper.
+# _bd_trace.sh — shell-side bead call trace helper.
 #
 # Sourced by gas city application scripts (maintenance pack scripts, tmux
-# status-line). Overrides `bd` and `gc bd` in the calling shell so each
-# invocation appends a JSONL record to $GC_BD_TRACE_JSON. When $GC_BD_TRACE_JSON is
-# unset, calls pass through with no logging overhead.
+# status-line). Overrides `gc` in the calling shell so each `gc bd` invocation
+# appends a JSONL record to $GC_BD_TRACE_JSON. When $GC_BD_TRACE_JSON is unset,
+# calls pass through with no logging overhead.
 #
 # Source with a source tag identifying the calling script:
 #
 #   . "$(dirname "$0")/_bd_trace.sh" "gate-sweep"
 #
-# Then call `bd ...` and `gc ...` normally — calls are traced.
+# Then call `gc bd ...` normally — calls are traced.
 
 __bd_trace_source="${1:-unknown}"
 
 __bd_trace_emit() {
-    # $1 = command name (bd or gc), $2 = exit code, $3 = start_ns, $4..N = args
+    # $1 = command name, $2 = exit code, $3 = start_ns, $4..N = args
     if [ -z "${GC_BD_TRACE_JSON:-}" ]; then
         return 0
     fi
@@ -44,14 +44,6 @@ __bd_trace_emit() {
         "$$" \
         "${PPID:-0}" \
         >> "$GC_BD_TRACE_JSON" 2>/dev/null || true
-}
-
-bd() {
-    __bd_start="$(date +%s%N 2>/dev/null || printf '%s000000000' "$(date +%s)")"
-    command bd "$@"
-    __bd_exit=$?
-    __bd_trace_emit bd "$__bd_exit" "$__bd_start" "$@"
-    return "$__bd_exit"
 }
 
 gc() {

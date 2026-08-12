@@ -56,7 +56,8 @@ type ProviderGetInput struct {
 // ProviderCreateInput is the Huma input for POST /v0/city/{cityName}/providers.
 type ProviderCreateInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Name               string            `json:"name" doc:"Provider name." minLength:"1"`
 		DisplayName        string            `json:"display_name,omitempty" doc:"Human-readable display name."`
 		Base               *string           `json:"base,omitempty" doc:"Optional provider base for inheritance."`

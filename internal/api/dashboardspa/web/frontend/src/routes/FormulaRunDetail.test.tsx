@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FormulaRunDetailPage } from './FormulaRunDetail';
+import { FormulaRunDetailPage, runDetailNudgeRefresh } from './FormulaRunDetail';
 import { invalidate, setCached } from '../api/cache';
 import { setActiveCity } from '../api/cityBase';
 import { NowProvider } from '../contexts/NowContext';
@@ -10,16 +10,16 @@ import {
   GC_EVENT_PREFIX,
   type TranscriptResult,
   type TranscriptTurn,
-  type RunDiffResponse,
   type FormulaRunDetail,
   type RunScopeKind,
   type RunLane,
   type RunSummary,
   type SourceState,
-  UnsupportedRunError,
 } from 'gas-city-dashboard-shared';
-import { SupervisorApiError } from '../supervisor/errors';
+import { ApiClientError } from '../api/client';
 import rawFormulaRunDetailFixture from '../test/fixtures/formula-run-detail.json';
+
+import type { LoadRunDetailOptions } from '../supervisor/runDetail';
 
 const loadSupervisorFormulaRunDetail = vi.hoisted(() => vi.fn());
 
@@ -35,20 +35,17 @@ const eventSources: FakeEventSource[] = [];
 
 interface FormulaRunDetailFixture {
   detail: FormulaRunDetail;
-  diff: RunDiffResponse;
   transcripts: Record<string, TranscriptResult>;
   streamTurns: Record<string, TranscriptTurn[]>;
 }
 
 const formulaRunDetailFixture = parseFormulaRunDetailFixture(rawFormulaRunDetailFixture);
 const detail = formulaRunDetailFixture.detail;
-const diff = formulaRunDetailFixture.diff;
 const transcripts = formulaRunDetailFixture.transcripts;
 const reviewPipelineName = /multi-model review pipeline/i;
 const applyFixesName = /apply review fixes/i;
 const fetchUrls: string[] = [];
 let currentDetail: FormulaRunDetail = detail;
-let currentDiff: RunDiffResponse = diff;
 
 beforeEach(() => {
   setActiveCity('test-city');
@@ -60,16 +57,12 @@ beforeEach(() => {
   loadSupervisorFormulaRunDetail.mockReset();
   loadSupervisorFormulaRunDetail.mockImplementation(async () => currentDetail);
   currentDetail = detail;
-  currentDiff = diff;
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       fetchUrls.push(url);
-      if (url.startsWith('/api/city/test-city/runs/gc-adopt-pr-active/diff')) {
-        return jsonResponse(currentDiff);
-      }
       if (url.startsWith('/api/city/test-city/runs/gc-adopt-pr-active')) {
         throw new Error(`old dashboard formula-run mirror should not be called: ${url}`);
       }
@@ -118,7 +111,7 @@ describe('FormulaRunDetailPage', () => {
     // (gascity-dashboard-wqsk). When the operator arrives from /runs the
     // run-summary cache already holds this run's lane, so the page shows its
     // title + phase stages instantly instead of a blank spinner. Here the
-    // detail (and diff) fetch hangs while the warm summary supplies the lane.
+    // detail fetch hangs while the warm summary supplies the lane.
     setCached('runs:summary:test-city', runSummarySourceWithActiveLane());
     vi.stubGlobal(
       'fetch',
@@ -139,7 +132,7 @@ describe('FormulaRunDetailPage', () => {
     // The plain spinner is replaced by the skeleton, and the heavy detail
     // diagram has not rendered yet.
     expect(screen.queryByText(/^Loading formula run\.$/i)).toBeNull();
-    expect(screen.queryByRole('heading', { name: /local changes/i })).toBeNull();
+    expect(screen.queryByRole('heading', { name: /adopt pr #42/i })).toBeNull();
   });
 
   it('renders the optimistic skeleton for a BLOCKED run lane (gascity-dashboard-4xcv)', async () => {
@@ -244,11 +237,12 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     expect(screen.getByText(/3 running, 1 done, 1 ready, 1 skipped/i)).toBeTruthy();
     expect(screen.getByText(/v11 · seq 91/i)).toBeTruthy();
-    expect(screen.getByRole('tab', { name: /diff/i }).getAttribute('aria-controls')).toBe(
+    expect(screen.queryByRole('tab', { name: /diff/i })).toBeNull();
+    expect(screen.getByRole('tab', { name: /session/i }).getAttribute('aria-controls')).toBe(
       'run-evidence-panel',
     );
     expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(
-      'run-evidence-tab-diff',
+      'run-evidence-tab-session',
     );
     expect(nodePressed(reviewPipelineName)).toBe('false');
     expect(nodePressed(applyFixesName)).toBe('false');
@@ -264,7 +258,10 @@ describe('FormulaRunDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(reviewPipelineName)).toBe('false');
     expect(nodePressed(applyFixesName)).toBe('true');
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // Server-picked visible instance is the current iteration 2 (not-started),
+    // so the default panel shows the not-started copy, not the historical
+    // iteration 1 transcript.
+    await screen.findByText('This node has not started a session yet.');
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(applyFixesName)).toBe('false');
@@ -315,21 +312,25 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByText(/checking graph\.v2 node grouping/i);
   });
 
-  it('refreshes the whole run projection when matching city events arrive', async () => {
+  it('renders a pushed detail frame from the per-run stream with no re-GET (P4)', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
+    const detailStream = requireRunDetailStream();
+    // First paint spent exactly one detail GET; the stream must not add another.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    currentDetail = {
+    detailStream.open();
+    detailStream.dispatch('detail', {
       ...detail,
       title: 'Adopt PR #42 refreshed',
       snapshotVersion: 12,
       snapshotEventSeq: { kind: 'known', seq: 92 },
-    };
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.bead}updated` });
+    });
 
     await screen.findByRole('heading', { name: /adopt pr #42 refreshed/i });
     expect(screen.getByText(/v12 · seq 92/i)).toBeTruthy();
+    // The pushed frame rendered with ZERO additional detail GET.
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
   });
 
   it('does not refresh terminal runs from ambient city events without run identity', async () => {
@@ -337,95 +338,150 @@ describe('FormulaRunDetailPage', () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+    // Detach the detail stream so a MATCHING event would refresh detail; the
+    // terminal + identity-less event must still be suppressed by the matcher.
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
     cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
     await Promise.resolve();
 
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
-    expect(diffUrls()).toHaveLength(1);
   });
 
-  it('does not refresh from city events before the initial run detail identifies the run', async () => {
-    const initialLoad = deferred<FormulaRunDetail>();
-    loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
-
-    renderPage();
-    const cityStream = requireCityEventSource();
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
-
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.bead}updated` });
-    await Promise.resolve();
-
-    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
-    initialLoad.resolve(detail);
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-  });
-
-  it('does not load the execution-folder diff before the initial run detail is ready', async () => {
-    const initialLoad = deferred<FormulaRunDetail>();
-    loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
-
-    renderPage();
-    await Promise.resolve();
-
-    expect(diffUrls()).toHaveLength(0);
-
-    initialLoad.resolve(detail);
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    await waitFor(() => expect(diffUrls()).toHaveLength(1));
-  });
-
-  it('refreshes the execution-folder diff during a run without leaving an explicit Diff tab choice', async () => {
-    renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    const cityStream = requireCityEventSource();
-
-    fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
-    expect(nodePressed(reviewPipelineName)).toBe('true');
-    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
-    await screen.findByRole('heading', { name: /local changes/i });
-
-    currentDiff = {
-      ...diff,
-      changedFiles: [{ path: 'src/live-run.ts', status: 'M', kind: 'code' }],
-      status: [' M src/live-run.ts'],
-      patch: [
-        'diff --git a/src/live-run.ts b/src/live-run.ts',
-        'index 3a4e79a..b6c9d02 100644',
-        '--- a/src/live-run.ts',
-        '+++ b/src/live-run.ts',
-        '@@ -1 +1 @@',
-        '-stale diff',
-        '+live run diff update',
-      ].join('\n'),
-    };
+  it('drives ambient suppression from the server progress.terminal flag, not a client taxonomy', async () => {
+    // An all-`done` census that the OLD client fold would classify terminal, but
+    // the server reports progress.terminal=false. The retired isTerminalProgress
+    // derivation would suppress here; the server flag must win and the ambient
+    // event must still refresh — proving the flag, not a re-derived taxonomy,
+    // gates suppression. With the detail stream detached, the nudge lane refreshes
+    // detail directly, so the refresh is observable as a re-GET.
     currentDetail = {
-      ...detail,
-      snapshotVersion: 12,
-      snapshotEventSeq: { kind: 'known', seq: 92 },
+      ...terminalDetail(),
+      progress: { ...terminalDetail().progress, terminal: false },
     };
-    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    await screen.findByText('live run diff update');
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(
-      'run-evidence-tab-diff',
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
+  });
+
+  it('refreshes a not-yet-loaded run from city events anchored on the ROUTE runId (F4)', async () => {
+    // The printed deep-link case: before the initial detail load resolves (or
+    // after it failed), the run's own eventual bead events must nudge a
+    // refresh — the matcher anchors on the route's runId, never on a loaded
+    // detail (the old `detail === null → return false` early-return made the
+    // failed state permanent). Events identifying a DIFFERENT run stay
+    // ignored; an identity-less (ambient) event matches, mirroring the
+    // non-terminal ambient behavior after load — a root bead's own events may
+    // carry no run identity.
+    const initialLoad = deferred<FormulaRunDetail>();
+    loadSupervisorFormulaRunDetail.mockReturnValue(initialLoad.promise);
+
+    renderPage();
+    const cityStream = requireCityEventSource();
+    // The SSE precheck 503 is fatal to EventSource: the detail stream closes
+    // terminally, releasing the nudge lane back to detail refreshes.
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    // Another run's event: no refresh.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'other-run' } } },
+    });
+    await Promise.resolve();
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    // This run's event: the detail refresh fires even though no detail ever
+    // loaded.
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
+
+    initialLoad.resolve(detail);
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+  });
+
+  it('recovers a failed warming load when the run’s bead events later arrive (F4)', async () => {
+    // A deep link printed right after `gc sling` can exhaust even the long
+    // warming budget before the controller's cache-reconcile emits the run's
+    // bead events. Those eventual events must nudge the page out of the
+    // failed state — the run's detail loads on the retriggered refresh.
+    loadSupervisorFormulaRunDetail.mockRejectedValueOnce(
+      new ApiClientError(503, 'run view is warming', undefined, 'unknown_run'),
     );
-    expect(screen.queryByText(/checking graph\.v2 node grouping/i)).toBeNull();
+
+    renderPage();
+    await screen.findByRole('alert');
+    const cityStream = requireCityEventSource();
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
+
+    cityStream.dispatch('event', {
+      type: `${GC_EVENT_PREFIX.bead}updated`,
+      payload: { bead: { metadata: { 'gc.run_id': 'gc-adopt-pr-active' } } },
+    });
+
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('renders honest recording copy while an unknown run is inside its warming grace (F4)', async () => {
+    // While the loader polls the graced 503 (body reason 'unknown_run': the
+    // projection is warm but has never seen this run), the interim copy must
+    // say honestly that the run may still be being recorded — or may not
+    // exist — rather than implying a client-side wait bug or failing outright.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: 'unknown_run' });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toMatch(/may still be being recorded/i);
+    expect(status.textContent).toMatch(/couple of minutes/i);
+    expect(status.textContent).toMatch(/may no longer exist/i);
+    // Interim, not terminal: no error alert while the poll is still running.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the generic loading copy for a cold-replay warming 503 (no reason)', async () => {
+    // The projection-still-warming 503 carries no reason: the run is not in
+    // doubt, the fold just hasn't caught up — so the plain loading copy stays.
+    loadSupervisorFormulaRunDetail.mockImplementation(
+      (_runId: string, options?: LoadRunDetailOptions) => {
+        options?.onWarming?.({ reason: undefined });
+        return new Promise<FormulaRunDetail>(() => {});
+      },
+    );
+
+    renderPage();
+
+    expect(await screen.findByText(/^Loading formula run\.$/i)).toBeTruthy();
+    expect(screen.queryByText(/may still be being recorded/i)).toBeNull();
   });
 
   it('ignores city events whose gc metadata identifies another formula run', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     const cityStream = requireCityEventSource();
-    const runFetchCount = runUrls().length;
+    // Detach the detail stream so a MATCHING event would refresh detail; an event
+    // whose gc metadata identifies a DIFFERENT run must be filtered out and leave
+    // the detail unrefreshed.
+    act(() => requireRunDetailStream().fail());
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
 
-    currentDetail = {
-      ...detail,
-      title: 'Different formula run should not refresh this page',
-      snapshotVersion: 99,
-      snapshotEventSeq: { kind: 'known', seq: 199 },
-    };
     cityStream.dispatch('event', {
       type: `${GC_EVENT_PREFIX.bead}updated`,
       payload: {
@@ -439,29 +495,8 @@ describe('FormulaRunDetailPage', () => {
     });
 
     await Promise.resolve();
-    expect(runUrls()).toHaveLength(runFetchCount);
+    expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('heading', { name: /adopt pr #42/i })).toBeTruthy();
-
-    currentDetail = {
-      ...detail,
-      title: 'Adopt PR #42 current formula run refresh',
-      snapshotVersion: 12,
-      snapshotEventSeq: { kind: 'known', seq: 92 },
-    };
-    cityStream.dispatch('event', {
-      type: `${GC_EVENT_PREFIX.bead}updated`,
-      payload: {
-        bead: {
-          metadata: {
-            'gc.run_id': detail.runId,
-            'gc.root_bead_id': detail.rootBeadId,
-          },
-        },
-      },
-    });
-
-    await screen.findByRole('heading', { name: /adopt pr #42 current formula run refresh/i });
-    expect(screen.getByText(/v12 · seq 92/i)).toBeTruthy();
   });
 
   it('rejects a half-specified scope query without loading the formula run', async () => {
@@ -475,18 +510,16 @@ describe('FormulaRunDetailPage', () => {
     expect(fetchUrls.some((url) => url.startsWith('/api/city/test-city/runs/'))).toBe(false);
   });
 
-  it('passes complete scope query params when loading detail and diff', async () => {
+  it('passes complete scope query params when loading detail', async () => {
     renderPage('/runs/gc-adopt-pr-active?scope_kind=city&scope_ref=racoon-city');
     await screen.findByRole('heading', { name: /adopt pr #42/i });
 
-    const runUrls = fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
+    // The detail loader is scope-independent now (the BFF projection derives the
+    // run's scope from its own root bead). The second argument is the
+    // warming-poll wiring (onWarming/keepPolling).
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledWith(
       'gc-adopt-pr-active',
-      'city',
-      'racoon-city',
-    );
-    expect(runUrls).toContain(
-      '/api/city/test-city/runs/gc-adopt-pr-active/diff?scope_kind=city&scope_ref=racoon-city',
+      expect.anything(),
     );
   });
 
@@ -593,7 +626,7 @@ describe('FormulaRunDetailPage', () => {
     await screen.findByText(/supervisor snapshot event replaced the active transcript/i);
   });
 
-  it('closes the active session stream when selection changes or the Session tab is hidden', async () => {
+  it('closes the active session stream when selection changes', async () => {
     renderPage();
     await screen.findByRole('heading', { name: /adopt pr #42/i });
     fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
@@ -605,18 +638,11 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // apply-fixes defaults to the server-picked current iteration 2 (not-started),
+    // so switching nodes shows the not-started copy — and must close the prior
+    // review-pipeline stream.
+    await screen.findByText('This node has not started a session yet.');
     await waitFor(() => expect(firstStream?.closed).toBe(true));
-
-    fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
-    await screen.findByText(/checking graph\.v2 node grouping/i);
-    await waitFor(() => expect(sessionEventSources()).toHaveLength(2));
-    const secondStream = sessionEventSources()[1];
-    expect(secondStream?.closed).toBe(false);
-
-    fireEvent.click(screen.getByRole('tab', { name: /diff/i }));
-    await screen.findByRole('heading', { name: /local changes/i });
-    await waitFor(() => expect(secondStream?.closed).toBe(true));
   });
 
   it('surfaces current not-started instances beside historical attached evidence', async () => {
@@ -625,11 +651,14 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
-
-    fireEvent.click(screen.getByRole('radio', { name: /iteration 2/i }));
-
+    // The server's visibleExecutionInstanceId points at the current iteration 2
+    // instance (not the historical attached iteration 1 the old heuristic
+    // surfaced), so the not-started current instance shows by default.
     await screen.findByText('This node has not started a session yet.');
+
+    fireEvent.click(screen.getByRole('radio', { name: /iteration 1/i }));
+
+    await screen.findByText(/apply the iteration 1 review fixes/i);
   });
 
   it('keeps the Session tab available so a selected node can explain unresolved sessions', async () => {
@@ -648,23 +677,12 @@ describe('FormulaRunDetailPage', () => {
     expect(sessionTab.getAttribute('aria-disabled')).toBeNull();
   });
 
-  it('renders the current execution-folder diff as grouped files', async () => {
-    const { container } = renderPage();
-    await screen.findByRole('heading', { name: /adopt pr #42/i });
-    expect(screen.getByRole('heading', { name: /local changes/i })).toBeTruthy();
-    expect(screen.getByText('shared/src/runs/enrich.ts')).toBeTruthy();
-    expect(screen.getByText('docs/plan.md')).toBeTruthy();
-    await screen.findByText('preserve failed attempt transcript links');
-    expect(container.querySelector('.diff-code-insert')?.textContent).toContain('preserve failed');
-    expect(container.querySelector('.diff-code-delete')?.textContent).toContain('old session');
-  });
-
   it('renders an informative list-only message for a v1 / wisp (unsupported) run, not the generic failure (gascity-dashboard-9w3k)', async () => {
     // A v1 / wisp run is clickable in the run list but has no graph.v2 detail
-    // view: enrichFormulaRun throws UnsupportedRunError('not_run_view'). The page
-    // must explain that clearly rather than show the opaque generic fallback.
+    // view: the BFF rejects it with 422 + reason 'not_run_view'. The page must
+    // explain that clearly rather than show the opaque generic fallback.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new UnsupportedRunError('run is not a graph.v2 run', 'not_run_view');
+      throw new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view');
     });
 
     renderPage();
@@ -679,13 +697,13 @@ describe('FormulaRunDetailPage', () => {
   });
 
   it('renders an honest not-found message for a raw 404 (ambiguous), not the v1 over-claim or the generic failure (Major 2)', async () => {
-    // gascity-dashboard (Major 2): a raw SupervisorApiError 404 (no snapshot at
-    // all) is ambiguous — it can be a v1/wisp id, a completed run whose snapshot
-    // wasn't retained, a pruned run, or a stale/wrong derived scope. The page
-    // must NOT assert it is definitively v1 (the 'unsupported' copy) and must NOT
-    // fall to the generic "Formula run unavailable." dead-end either.
+    // gascity-dashboard (Major 2): a 404 (no run root in the projection) is
+    // ambiguous — it can be a v1/wisp id, a completed run whose events rotated
+    // out, a pruned run, or a stale/wrong derived scope. The page must NOT assert
+    // it is definitively v1 (the 'unsupported' copy) and must NOT fall to the
+    // generic "Formula run unavailable." dead-end either.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new SupervisorApiError(404, 'workflow gc-p7yf1m not found', undefined);
+      throw new ApiClientError(404, 'unknown run');
     });
 
     renderPage();
@@ -699,10 +717,10 @@ describe('FormulaRunDetailPage', () => {
   });
 
   it('still shows the generic failure for a malformed graph.v2 snapshot (invalid_snapshot)', async () => {
-    // A genuine load failure (malformed graph.v2 snapshot, or any other
-    // UnsupportedRunError reason) must NOT be mistaken for a v1 list-only run.
+    // A genuine load failure (malformed graph.v2 snapshot: 422 +
+    // 'invalid_snapshot') must NOT be mistaken for a v1 list-only run.
     loadSupervisorFormulaRunDetail.mockImplementation(async () => {
-      throw new UnsupportedRunError('run snapshot identity is missing or invalid');
+      throw new ApiClientError(422, 'run snapshot is invalid', undefined, 'invalid_snapshot');
     });
 
     renderPage();
@@ -764,6 +782,23 @@ describe('FormulaRunDetailPage', () => {
     expect(screen.getByRole('radio', { name: /attempt 1/i })).toBeTruthy();
     expect(screen.getByRole('radio', { name: /attempt 2/i })).toBeTruthy();
     await screen.findByText(/rebased cleanly/i);
+  });
+});
+
+describe('runDetailNudgeRefresh (P4 stream-vs-nudge division)', () => {
+  it('does not re-GET detail when the detail stream is live', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    // The stream carries detail, so a nudge must NOT re-GET it (no double refetch).
+    await runDetailNudgeRefresh(true, refreshDetail);
+    expect(refreshDetail).not.toHaveBeenCalled();
+  });
+
+  it('refreshes detail when the stream is unavailable (F2)', async () => {
+    const refreshDetail = vi.fn(() => Promise.resolve());
+    // No EventSource → the stream can't carry detail, so the nudge must keep the
+    // detail auto-refresh alive (otherwise detail freezes after first paint).
+    await runDetailNudgeRefresh(false, refreshDetail);
+    expect(refreshDetail).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -923,18 +958,18 @@ function requireCityEventSource(): FakeEventSource {
   return source;
 }
 
+// P4: the per-run detail stream is a distinct BFF EventSource
+// (/api/city/.../runs/{id}/detail/stream) that pushes the whole FormulaRunDetail
+// as a `detail` frame. Detail refresh now arrives here instead of via a nudge
+// re-GET.
+function requireRunDetailStream(): FakeEventSource {
+  const source = eventSources.find((eventSource) => eventSource.url.endsWith('/detail/stream'));
+  if (source === undefined) throw new Error('expected run-detail stream source');
+  return source;
+}
+
 function sessionEventSources(): FakeEventSource[] {
   return eventSources.filter((eventSource) => eventSource.url.includes('/session/'));
-}
-
-function runUrls(): string[] {
-  return fetchUrls.filter((url) => url.startsWith('/api/city/test-city/runs/'));
-}
-
-function diffUrls(): string[] {
-  return fetchUrls.filter(
-    (url) => url.startsWith('/api/city/test-city/runs/') && url.includes('/diff'),
-  );
 }
 
 function terminalDetail(): FormulaRunDetail {
@@ -945,6 +980,7 @@ function terminalDetail(): FormulaRunDetail {
       visibleNodeCount: 8,
       statusCounts: { done: 8 },
       allStatusCounts: { done: 8 },
+      terminal: true,
     },
     nodes: detail.nodes.map((node) => ({
       ...node,
@@ -1047,7 +1083,6 @@ function parseFormulaRunDetailFixture(raw: unknown): FormulaRunDetailFixture {
   if (typeof raw.detail.phase !== 'string') {
     throw new Error('run detail fixture missing detail.phase');
   }
-  if (!isRecord(raw.diff)) throw new Error('run detail fixture missing diff');
   if (!isRecord(raw.transcripts)) {
     throw new Error('run detail fixture missing transcripts');
   }

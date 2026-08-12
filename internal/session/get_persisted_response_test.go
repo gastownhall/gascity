@@ -1,19 +1,20 @@
 package session
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestGetWithPersistedResponse asserts the manager can return the
-// runtime-enriched Info and the persisted-response projection in a single
-// fetch, so the API response path no longer needs a redundant raw store.Get
-// beside mgr.Get. The Info must match mgr.Get and the projection must match
-// PersistedResponseFromBead of the stored bead, with bead serialization
-// confined inside the session package.
-func TestGetWithPersistedResponse(t *testing.T) {
+// TestGetPersistedResponseWithEnrich asserts the production Get read-model
+// composition — Store.GetPersistedResponse for the persisted (Info,
+// PersistedResponse) pair plus Manager.EnrichInfo for the runtime overlay —
+// reproduces mgr.Get's enriched Info and PersistedResponseFromBead's projection,
+// with bead serialization confined inside the session package. This is the
+// composition that replaced the retired Manager.GetWithPersistedResponse.
+func TestGetPersistedResponseWithEnrich(t *testing.T) {
 	b := sessionBeadFixture("s-pr-1", "open", map[string]string{
 		"__title":                   "Persisted",
 		"template":                  "polecat",
@@ -26,18 +27,19 @@ func TestGetWithPersistedResponse(t *testing.T) {
 		"real_world_app_project_id": "proj-9",
 	})
 	store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-	mgr := NewManager(store, runtime.NewFake())
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
 
-	info, pr, err := mgr.GetWithPersistedResponse("s-pr-1")
+	persistedInfo, pr, err := mgr.PersistedStore().GetPersistedResponse("s-pr-1")
 	if err != nil {
-		t.Fatalf("GetWithPersistedResponse: %v", err)
+		t.Fatalf("GetPersistedResponse: %v", err)
 	}
+	info := mgr.EnrichInfo(persistedInfo)
 
 	wantInfo, err := mgr.Get("s-pr-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if info != wantInfo {
+	if !reflect.DeepEqual(info, wantInfo) {
 		t.Fatalf("Info mismatch:\n got = %+v\nwant = %+v", info, wantInfo)
 	}
 
@@ -55,12 +57,12 @@ func TestGetWithPersistedResponse(t *testing.T) {
 	}
 }
 
-// TestGetWithPersistedResponseNotFound asserts a missing id surfaces the same
-// error mgr.Get would return.
-func TestGetWithPersistedResponseNotFound(t *testing.T) {
+// TestGetPersistedResponseNotFound asserts a missing id surfaces an error
+// through the Store front door (the persisted-read half of the Get read model).
+func TestGetPersistedResponseNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := NewManager(store, runtime.NewFake())
-	if _, _, err := mgr.GetWithPersistedResponse("missing"); err == nil {
-		t.Fatal("GetWithPersistedResponse(missing): want error, got nil")
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	if _, _, err := mgr.PersistedStore().GetPersistedResponse("missing"); err == nil {
+		t.Fatal("GetPersistedResponse(missing): want error, got nil")
 	}
 }

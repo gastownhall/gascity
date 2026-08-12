@@ -93,15 +93,37 @@ Each header's schema is documented in the operation's
 ## Errors
 
 Every error response is an RFC 9457 Problem Details body
-(`application/problem+json`). Error types are documented in the spec
-under `components.schemas.ErrorModel`. The `detail` field carries a
-short `code: ` prefix (e.g. `pending_interaction: ...`,
-`conflict: ...`, `not_found: ...`, `read_only: ...`) so clients can
-pattern-match on the semantic code without needing a typed error
-enum. Body-field validation errors (e.g. a required string posted
-empty) come back as `422 Unprocessable Entity` or `400 Bad Request`
-depending on the operation; the `errors` array of the Problem Details
-body pinpoints which fields failed.
+(`application/problem+json`), described by `components.schemas.ErrorModel`.
+
+**Branch on the machine-readable identity, not on prose.** An error carries a
+stable `type` URN of the form `urn:gascity:error:<code>` and a convenience
+`code` member (the URN's final segment) — for example
+`type: "urn:gascity:error:bead-not-found"`, `code: "bead-not-found"`. This is
+the canonical identifier to switch on; it never changes between occurrences and
+is independent of the human-readable `title`/`detail`. The full catalog of
+codes the API can return is published in the spec as the
+`x-gascity-problem-types` extension on the `ErrorModel.type` schema.
+
+The `detail` field remains a human-readable, occurrence-specific explanation.
+Some legacy paths still encode a semantic hint as a `code: ` prefix on `detail`
+(e.g. `not_found: ...`, `conflict: ...`, `read_only: ...`, `in_flight: ...`);
+prefer the `type`/`code` members and treat detail-prefix parsing as
+deprecated. An error whose body omits `code` is an as-yet-unconverted legacy
+path — match it by `status` and `detail` until it gains a code.
+
+The framework's built-in request validation (e.g. a required string posted
+empty, or `limit=-1`) carries `type: "urn:gascity:error:validation-failed"`,
+usually as `422 Unprocessable Entity` — but as `400 Bad Request` for a body it
+cannot parse and `415 Unsupported Media Type` for an unsupported content type;
+the `code`/`type` is the constant across those statuses, and the `errors` array
+pinpoints the fields that failed. A few endpoints perform their own additional
+validation and return a code-less `400`/`422` until converted, so treat a
+missing `code` as a legacy path (match on `status`/`detail`). Operations that
+enumerate their error responses (currently the bead and sling endpoints) list
+each status explicitly in the spec; others declare a single catch-all `default`
+error response. An enumerated list covers the operation's own errors plus the
+always-applied middleware errors (e.g. `403` on mutations); framework-level
+transport statuses may still occur, as with any HTTP API.
 
 ## Streaming
 

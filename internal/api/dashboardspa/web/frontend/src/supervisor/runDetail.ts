@@ -1,213 +1,117 @@
-import type {
-  FormulaRunDetail,
-  FormulaRunPartialReason,
-  FormulaDetail,
-  RunSnapshot,
-  DashboardSession,
-  RunFormulaDetailFetchFailure,
-  RunFormulaDetailState,
-  RunScopeKind,
-} from 'gas-city-dashboard-shared';
-import {
-  enrichFormulaRun,
-  formulaRunCompleteness,
-  resolveRunFormulaIdentity,
-} from 'gas-city-dashboard-shared';
-import { activeCityOrThrow } from '../api/cityBase';
-import type {
-  FormulaDetailResponse,
-  WorkflowSnapshotResponse,
-} from 'gas-city-dashboard-shared/gc-supervisor';
-import { SupervisorApiError, supervisorApi, supervisorApiForRequestBudget } from './client';
-import type { SupervisorApi } from './client';
-import { fetchCoreRead } from './coreRead';
-import { normalizeSessions } from './sessionReads';
+import type { FormulaRunDetail } from 'gas-city-dashboard-shared';
+import { api, ApiClientError } from '../api/client';
 
-// The workflow snapshot is the run-detail core read — the one fetch whose
-// failure blanks the whole detail view (sessions and formula detail degrade to
-// 'partial'). It gets the same treatment as the runs-list core read
-// (runSummary.ts): a burst-tolerant budget so a CPU spike doesn't time it out,
-// and one retry on a transient timeout/5xx. A city-scoped (no-rig) fetch hits
-// the supervisor's full-store scan (~12-14s, upstream gascity-dashboard#88), so
-// the wider budget is what lets that path complete instead of timing out; the
-// rig-scoped fetch (the common case once scope is passed) is sub-second.
-const RUN_DETAIL_CORE_TIMEOUT_MS = 60_000;
+// The run-detail view reads from the BFF run-projection endpoint
+// (GET /api/city/{city}/runs/{runId}/detail): one warm read of the same fold
+// the summary uses, so detail stages == summary stages by construction. The
+// whole client-side detail pipeline (the workflowRun snapshot + formulaDetail
+// fetch + enrichFormulaRun) moved to Go (internal/runproj.BuildRunDetail) and
+// is golden-gated byte-for-byte. Scope is no longer threaded into the read —
+// the projection derives a run's scope from its own root bead — though the
+// route still parses scope for the separate run-diff endpoint.
 
+// A warming 503 is a poll signal, not a failure. The BFF answers 503 both
+// while a city's projection cold-replays (usually clears within ~5s) and — the
+// deep-link case — while a truly-unknown runId sits inside its post-sling
+// grace window (rundetail_grace.go, 180s): a run slung from the CLI stays
+// invisible to the projection until the controller's cache-reconcile emits its
+// bead events, 30-120s later. So the loader polls: the fast delays first, then
+// a capped cadence, for a total budget sized to the server's grace window.
+// A non-503 transient failure (a 5xx upstream-proxy blip, a network-level
+// fetch reject) gets ONLY the fast delays, restoring the pre-cutover
+// single-transient-retry resilience. A 4xx (404 unknown run, 422 unsupported)
+// is definitive and surfaces immediately; SSE refresh and the manual Refresh
+// button recover anything past the budget.
+const WARMING_RETRY_DELAYS_MS = [600, 1_200, 2_400];
+// The capped poll cadence once the fast delays are spent. Matches the
+// Retry-After: 5 the BFF pins on the graced unknown-run 503; ApiClientError
+// does not carry response headers, so the pinned value is encoded here rather
+// than read per-response.
+const WARMING_POLL_CAP_MS = 5_000;
+// Total warming-poll budget, sized to the BFF's unknown-run grace window
+// (unknownRunWarmingGrace = 180s). When the budget is spent the last 503
+// surfaces and the caller falls through to its failed state.
+const WARMING_POLL_BUDGET_MS = 180_000;
+
+/**
+ * A warming 503 observed while the loader polls. `reason` is the BFF's
+ * discriminator: 'unknown_run' when the projection is warm but has not seen
+ * this run yet (the just-slung grace window); undefined while the projection
+ * itself is still cold-replaying.
+ */
+export interface RunDetailWarming {
+  reason: string | undefined;
+}
+
+/** Optional hooks into {@link loadSupervisorFormulaRunDetail}'s warming poll. */
+export interface LoadRunDetailOptions {
+  /**
+   * Called on each warming 503 before the next poll, so the caller can render
+   * honest interim copy (e.g. "this run may still be being recorded") instead
+   * of an anonymous spinner or a premature failure.
+   */
+  onWarming?: (warming: RunDetailWarming) => void;
+  /**
+   * Polled between attempts; return false to stop (the caller navigated away
+   * or superseded this load with a fresh one). The pending error surfaces
+   * immediately and no further GET is issued.
+   */
+  keepPolling?: () => boolean;
+}
+
+/**
+ * Load a run's detail DTO from the BFF run-projection endpoint, polling
+ * through warming 503s (see the retry policy above) and retrying other
+ * transient failures a few times before surfacing one.
+ */
 export async function loadSupervisorFormulaRunDetail(
   runId: string,
-  scopeKind?: RunScopeKind,
-  scopeRef?: string,
+  options?: LoadRunDetailOptions,
 ): Promise<FormulaRunDetail> {
-  const cityName = activeCityOrThrow('load supervisor formula run detail');
-  const query = runScopeQuery(scopeKind, scopeRef);
-  const coreApi = supervisorApiForRequestBudget(RUN_DETAIL_CORE_TIMEOUT_MS);
-  const api = supervisorApi();
-  const [raw, sessionsLookup] = await Promise.all([
-    fetchCoreRead(() => coreApi.workflowRun(cityName, runId, query)),
-    loadRunSessions(cityName),
-  ]);
-  const snapshot = toRunSnapshot(raw);
-  const formulaDetailLookup = await loadRunFormulaDetail(api, cityName, snapshot, query);
-  const detail = enrichFormulaRun(snapshot, {
-    sessions: sessionsLookup.sessions,
-    formulaDetailState: formulaDetailLookup.state,
-    ...(formulaDetailLookup.kind === 'available'
-      ? { formulaDetail: formulaDetailLookup.detail }
-      : {}),
-  });
-  const reasons: FormulaRunPartialReason[] = [
-    ...(detail.completeness.kind === 'partial' ? detail.completeness.reasons : []),
-    ...(sessionsLookup.kind === 'unavailable' ? ['session_list_failed' as const] : []),
-    ...(formulaDetailLookup.kind === 'unavailable'
-      ? [formulaDetailPartialReason(formulaDetailLookup.state.reason)]
-      : []),
-  ];
-  return {
-    ...detail,
-    completeness: formulaRunCompleteness(reasons),
-  };
-}
-
-type RunSessionsLookup =
-  | { kind: 'available'; sessions: readonly DashboardSession[] }
-  | { kind: 'unavailable'; sessions: readonly DashboardSession[] };
-
-type RunFormulaDetailLookup =
-  | { kind: 'available'; detail: FormulaDetail; state: RunFormulaDetailState }
-  | {
-      kind: 'unavailable';
-      state: Extract<RunFormulaDetailState, { kind: 'unavailable' }>;
-    };
-
-async function loadRunSessions(cityName: string): Promise<RunSessionsLookup> {
-  try {
-    const list = await supervisorApi().listSessions(cityName);
-    return {
-      kind: 'available',
-      sessions: normalizeSessions(list),
-    };
-  } catch {
-    return { kind: 'unavailable', sessions: [] };
+  let elapsedMs = 0;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await api.runDetail(runId);
+    } catch (err) {
+      const delayMs = retryDelayMs(err, attempt, elapsedMs);
+      if (delayMs === undefined || options?.keepPolling?.() === false) throw err;
+      if (isWarmingError(err)) options?.onWarming?.({ reason: err.reason });
+      elapsedMs += delayMs;
+      await delay(delayMs);
+      // Re-check after the delay so a superseded poll stops BEFORE issuing
+      // another GET (the failure-time check above already let this attempt's
+      // delay be scheduled).
+      if (options?.keepPolling?.() === false) throw err;
+    }
   }
 }
 
-async function loadRunFormulaDetail(
-  api: SupervisorApi,
-  cityName: string,
-  snapshot: RunSnapshot,
-  scopeQuery: { scope_kind?: string; scope_ref?: string } | undefined,
-): Promise<RunFormulaDetailLookup> {
-  const root = snapshot.beads?.find((bead) => bead.id === snapshot.root_bead_id);
-  const resolved = resolveRunFormulaIdentity('route', { root });
-  const name = resolved.name ?? undefined;
-  const target = resolved.target ?? undefined;
-  if (name === undefined) {
-    return {
-      kind: 'unavailable',
-      state: { kind: 'unavailable', reason: 'missing_formula_metadata' },
-    };
+// A warming 503 polls on the extended schedule: the fast delays, then the
+// capped cadence, until the next delay would overrun the grace-window budget.
+// Any other transient failure gets only the fast delays. Undefined = give up.
+function retryDelayMs(err: unknown, attempt: number, elapsedMs: number): number | undefined {
+  if (isWarmingError(err)) {
+    const delayMs = WARMING_RETRY_DELAYS_MS[attempt] ?? WARMING_POLL_CAP_MS;
+    return elapsedMs + delayMs <= WARMING_POLL_BUDGET_MS ? delayMs : undefined;
   }
-  if (target === undefined) {
-    return {
-      kind: 'unavailable',
-      state: { kind: 'unavailable', reason: 'missing_run_target', name },
-    };
-  }
-  try {
-    const detail = toFormulaDetail(
-      await api.formulaDetail(cityName, name, {
-        target,
-        ...(scopeQuery ?? {}),
-      }),
-    );
-    return {
-      kind: 'available',
-      detail,
-      state: { kind: 'available', name, target },
-    };
-  } catch (err) {
-    return {
-      kind: 'unavailable',
-      state: {
-        kind: 'unavailable',
-        reason: 'fetch_failed',
-        name,
-        target,
-        failure: formulaDetailFetchFailure(err),
-      },
-    };
-  }
+  return isTransientDetailError(err) ? WARMING_RETRY_DELAYS_MS[attempt] : undefined;
 }
 
-function toRunSnapshot(raw: WorkflowSnapshotResponse): RunSnapshot {
-  const snapshot: RunSnapshot = {
-    run_id: raw.workflow_id,
-    root_bead_id: raw.root_bead_id,
-    root_store_ref: raw.root_store_ref,
-    resolved_root_store: raw.resolved_root_store,
-    scope_kind: raw.scope_kind,
-    scope_ref: raw.scope_ref,
-    snapshot_version: raw.snapshot_version,
-    partial: raw.partial,
-    stores_scanned: raw.stores_scanned,
-    beads: raw.beads,
-    deps: raw.deps,
-    logical_nodes: raw.logical_nodes as RunSnapshot['logical_nodes'],
-    logical_edges: raw.logical_edges,
-    scope_groups: raw.scope_groups as RunSnapshot['scope_groups'],
-  };
-  if (raw.snapshot_event_seq !== undefined) {
-    snapshot.snapshot_event_seq = raw.snapshot_event_seq;
-  }
-  return snapshot;
+// The BFF's warming signal: 503 while the projection cold-replays (no reason)
+// or while an unknown run is inside its grace window (reason 'unknown_run').
+function isWarmingError(err: unknown): err is ApiClientError {
+  return err instanceof ApiClientError && err.status === 503;
 }
 
-function toFormulaDetail(raw: FormulaDetailResponse): FormulaDetail {
-  const detail: FormulaDetail = { name: raw.name };
-  const preview: NonNullable<FormulaDetail['preview']> = {};
-  if (Array.isArray(raw.preview.nodes)) {
-    preview.nodes = raw.preview.nodes;
-  }
-  if (Array.isArray(raw.preview.edges)) {
-    preview.edges = raw.preview.edges;
-  }
-  if (preview.nodes !== undefined || preview.edges !== undefined) {
-    detail.preview = preview;
-  }
-  if (Array.isArray(raw.steps)) {
-    detail.steps = raw.steps;
-  }
-  if (Array.isArray(raw.deps)) {
-    detail.deps = raw.deps;
-  }
-  return detail;
+// A 4xx (404/422) is a definitive answer about the run — never retry it. A
+// non-warming 5xx is transient, as is a network-level fetch reject (a
+// TypeError, e.g. "Failed to fetch"); a malformed-body decode error
+// (ApiResponseDecodeError) is NOT transient and surfaces immediately.
+function isTransientDetailError(err: unknown): boolean {
+  if (err instanceof ApiClientError) return err.status >= 500;
+  return err instanceof TypeError;
 }
 
-function formulaDetailPartialReason(
-  reason: Extract<RunFormulaDetailState, { kind: 'unavailable' }>['reason'],
-): FormulaRunPartialReason {
-  switch (reason) {
-    case 'missing_formula_metadata':
-      return 'formula_detail_missing_formula_metadata';
-    case 'missing_run_target':
-      return 'formula_detail_missing_run_target';
-    case 'fetch_failed':
-      return 'formula_detail_fetch_failed';
-  }
-}
-
-function formulaDetailFetchFailure(err: unknown): RunFormulaDetailFetchFailure {
-  if (err instanceof SupervisorApiError && err.status === 404) return 'not_found';
-  return 'upstream_error';
-}
-
-function runScopeQuery(
-  scopeKind?: RunScopeKind,
-  scopeRef?: string,
-): { scope_kind?: string; scope_ref?: string } | undefined {
-  if (scopeKind === undefined && scopeRef === undefined) return undefined;
-  const query: { scope_kind?: string; scope_ref?: string } = {};
-  if (scopeKind !== undefined) query.scope_kind = scopeKind;
-  if (scopeRef !== undefined) query.scope_ref = scopeRef;
-  return query;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

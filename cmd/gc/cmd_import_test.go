@@ -28,7 +28,7 @@ func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -113,7 +113,7 @@ session_live = ["echo hi"]
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -182,7 +182,7 @@ knob = "keep-me"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -228,7 +228,7 @@ source = "./packs/gastown"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -297,7 +297,7 @@ source = "./packs/foo"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -347,7 +347,7 @@ source = "./packs/a-pack"
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -627,7 +627,12 @@ source = "packs/tools"
 	}
 }
 
-func TestDoImportRemoveRefusesCityOverriddenPackImport(t *testing.T) {
+// A city.toml [imports] override owns the effective binding that list surfaces,
+// so removing a name defined by BOTH pack.toml and city.toml peels the city
+// override (leaving the pack.toml entry declared and effective again) rather
+// than refusing — otherwise list would surface a binding remove could never
+// delete.
+func TestDoImportRemovePeelsCityOverriddenPackImport(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
 	writePackToml(t, dir, `[pack]
@@ -647,33 +652,37 @@ source = "packs/tools"
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
-	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
-		t.Fatal("syncImports must not run for a refused remove")
-		return nil, nil
+	var synced map[string]config.Import
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		synced = imports
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
 	code := doImportRemove(fsys.OSFS{}, dir, "tools", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1; stderr = %s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "city.toml") {
-		t.Fatalf("stderr must point at city.toml ownership:\n%s", stderr.String())
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr = %s", code, stderr.String())
 	}
 
+	// The pack.toml entry survives the peel and is effective again...
 	manifest, err := loadCityPackManifestFS(fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("loadCityPackManifestFS: %v", err)
 	}
-	if _, ok := manifest.Imports["tools"]; !ok {
-		t.Fatal("pack.toml imports.tools must survive a refused remove")
+	if got, ok := manifest.Imports["tools"]; !ok || got.Source != "https://example.com/tools.git" {
+		t.Fatalf("pack.toml imports.tools = %#v ok=%v; must survive the peel", got, ok)
 	}
+	// ...and the city.toml override is removed.
 	cfg, err := loadCityImportManifestFS(fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("loadCityImportManifestFS: %v", err)
 	}
-	if _, ok := cfg.Imports["tools"]; !ok {
-		t.Fatal("city.toml imports.tools must survive a refused remove")
+	if _, ok := cfg.Imports["tools"]; ok {
+		t.Fatal("city.toml imports.tools override must be peeled off by remove")
+	}
+	// Lock sync keeps tools re-pointed to the pack value, not dropped.
+	if got, ok := synced["pack:tools"]; !ok || got.Source != "https://example.com/tools.git" {
+		t.Fatalf("synced pack:tools = %#v ok=%v; want the pack binding preserved", got, ok)
 	}
 }
 
@@ -1397,8 +1406,67 @@ func TestDoImportAddRejectsReservedDefaultRigPrefix(t *testing.T) {
 	if code == 0 {
 		t.Fatal("expected reserved prefix import add to fail")
 	}
-	if !strings.Contains(stderr.String(), "reserved prefix") {
-		t.Fatalf("stderr = %q", stderr.String())
+	// The historical CLI printed this bare, with no source-quoted prefix and no
+	// "invalid import source:" wrapper. Pin the exact line to catch drift.
+	want := "gc import add: import name \"default-rig:worker\" uses reserved prefix \"default-rig:\"\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestDoImportAddBareMessageWhenNameUnderivable(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	var stdout, stderr bytes.Buffer
+	// A bare scheme with no path derives to an empty name.
+	code := doImportAdd(fsys.OSFS{}, dir, "https://", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected underivable name to fail")
+	}
+	want := "gc import add: could not derive import name; use --name\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// The ErrImportExists arm surfaces importsvc's sentinel prefix verbatim after
+// the extraction. Pin the exact line so this blessed (non-byte-identical)
+// contract cannot drift silently.
+func TestDoImportAddExactLineWhenImportExists(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n\n[imports.tools]\nsource = \"https://example.com/tools.git\"\nversion = \"^1.4\"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "https://example.com/tools.git", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected duplicate import add to fail")
+	}
+	want := "gc import add: import already exists: import \"tools\" already exists\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// The remove ErrNotFound arm likewise surfaces the sentinel prefix verbatim.
+func TestDoImportRemoveExactLineWhenNotFound(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doImportRemove(fsys.OSFS{}, dir, "ghost", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected removing a missing import to fail")
+	}
+	want := "gc import remove: import not found: import \"ghost\" not found\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
 
@@ -2509,7 +2577,7 @@ func TestDoImportAddBareGitHubSourceDefaultsVersion(t *testing.T) {
 		defaultImportConstraint = prevConstraint
 		syncImports = prevSync
 	})
-	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, source, _ string) (packman.ResolvedVersion, error) {
 		if source != "github.com/example/tools" {
 			t.Fatalf("ResolveVersion source = %q", source)
 		}
@@ -2551,14 +2619,14 @@ func TestDefaultImportVersionForSourceFallsBackToSHAWhenTagsAbsent(t *testing.T)
 		resolveImportVersion = prevResolve
 		resolveImportHeadCommit = prevHead
 	})
-	resolveImportVersion = func(source, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, source, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{}, fmt.Errorf("%w for %q", packman.ErrNoSemverTags, source)
 	}
-	resolveImportHeadCommit = func(_ string) (string, error) {
+	resolveImportHeadCommit = func(_, _ string) (string, error) {
 		return "deadbeef", nil
 	}
 
-	got, err := defaultImportVersionForSource("github.com/example/tools")
+	got, err := defaultImportVersionForSource("", "github.com/example/tools")
 	if err != nil {
 		t.Fatalf("defaultImportVersionForSource: %v", err)
 	}
@@ -2611,13 +2679,8 @@ schema = 1
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
-	}
+	// production paths are NormalizePathForCompare form; compare firmlink-aware (#4934)
+	assertSameTestPath(t, got, dir)
 }
 
 func TestFindNearestImportRootSkipsRuntimeOnlyDirs(t *testing.T) {
@@ -2686,13 +2749,7 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(packDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want nearest pack %q", got, want)
-	}
+	assertSameTestPath(t, got, packDir)
 }
 
 func TestResolveImportRootRuntimeOnlyAncestorResolvesRegisteredRigCity(t *testing.T) {
@@ -2801,7 +2858,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = ""
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -2890,7 +2947,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = ""
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -2955,7 +3012,7 @@ schema = 1
 	prevSync := syncImports
 	cityFlag = dir
 	rigFlag = ""
-	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+	resolveImportVersion = func(_, _, _ string) (packman.ResolvedVersion, error) {
 		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 	}
 	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
@@ -3223,11 +3280,27 @@ func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", poison)
 	t.Setenv("GIT_INDEX_FILE", filepath.Join(poison, ".git", "index"))
 
-	got, err := defaultImportHeadCommit(repo)
+	got, err := defaultImportHeadCommit("", repo)
 	if err != nil {
 		t.Fatalf("defaultImportHeadCommit with poisoned git env: %v", err)
 	}
 	if got != wantHead {
 		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
+	}
+}
+
+// TestDefaultImportHeadCommitRedactsUserinfo proves the HEAD-resolve error never
+// echoes a userinfo token in the source. GIT_ALLOW_PROTOCOL=file fails the https
+// probe instantly (offline) so the resolve error path runs without a network hit.
+func TestDefaultImportHeadCommitRedactsUserinfo(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	_, err := defaultImportHeadCommit("", "https://user:ghp_secret@github.com/example/repo")
+	if err == nil {
+		t.Fatalf("expected the offline https probe to fail")
+	}
+	if strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("resolve error leaked the userinfo token: %v", err)
 	}
 }

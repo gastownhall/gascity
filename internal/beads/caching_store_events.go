@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -112,7 +114,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			// backing and are intentionally tolerated without declining.
 			if fieldConflictCached {
 				c.mu.Lock()
-				c.dirty[patch.ID] = struct{}{}
+				c.markDirtyLocked(patch.ID)
 				c.mu.Unlock()
 			}
 			return
@@ -217,10 +219,14 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	case "bead.created":
 		if _, exists := c.beads[b.ID]; !exists {
 			c.noteMutationLocked(b.ID)
-			c.beads[b.ID] = cloneBead(b)
+			// OC-3: absorb installs the row before updateEventDepsLocked, whose
+			// clearReadyProjectionLocked must observe the newly absorbed row.
+			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+				depsMode:   depsKeepCached,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
-			delete(c.dirty, b.ID)
-			delete(c.deletedSeq, b.ID)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -231,9 +237,11 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		existing, cached := c.beads[b.ID]
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
-			c.beads[b.ID] = cloneBead(b)
-			delete(c.dirty, b.ID)
-			delete(c.deletedSeq, b.ID)
+			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+				depsMode:   depsKeepCached,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
 			mutated = true
 		}
 		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking); depsMutated && !mutated {
@@ -248,22 +256,20 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		if _, exists := c.beads[b.ID]; !exists {
 			c.updateStatsLocked()
 		}
-		c.beads[b.ID] = cloneBead(b)
+		// OC-3: absorb before updateEventDepsLocked (see bead.created).
+		c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
-		delete(c.dirty, b.ID)
-		delete(c.deletedSeq, b.ID)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.deleted":
 		c.noteMutationLocked(b.ID)
-		delete(c.beads, b.ID)
-		delete(c.deps, b.ID)
-		delete(c.dirty, b.ID)
-		delete(c.beadSeq, b.ID)
-		delete(c.localBeadAt, b.ID)
-		c.deletedSeq[b.ID] = c.mutationSeq
+		c.tombstoneLocked(b.ID, c.mutationSeq)
 		c.updateStatsLocked()
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
@@ -351,20 +357,55 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.noteMutationLocked(beadID)
 	c.deps[beadID] = cloneDeps(deps)
 	c.clearReadyProjectionLocked(beadID)
-	delete(c.dirty, beadID)
-	delete(c.deletedSeq, beadID)
+	c.clearStalenessMarksLocked(beadID)
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 }
 
+// clearReadyProjectionLocked drops a row's is_blocked so the next read
+// recomputes it, and records the row as unanswerable when dropping the column
+// would change the answer.
+//
+// Invalidation is right — the row's own edges or a blocking target's status
+// just moved — but the dependency-derived predicate that takes over is weaker
+// than the column wherever the row has an edge the predicate does not model
+// (readyPredicateCanAnswerLocked names both gaps). A row that was BLOCKED and
+// whose remaining resident edges now read ready is the case that flips from
+// hidden to offered on the strength of that predicate alone, so its verdict is
+// recorded as lost; readiness then declines for it unless its own edges can
+// reproduce the verdict exactly (ga-cfhgr). A row that is still blocked by a
+// resident open edge loses nothing: the predicate reaches the same verdict the
+// column held.
+//
+// Caller must hold c.mu in write mode.
 func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	b, ok := c.beads[id]
 	if !ok || b.IsBlocked == nil {
 		return false
 	}
+	if *b.IsBlocked && !c.residentEdgesStillBlockLocked(id) {
+		c.markReadyProjectionLostLocked(id)
+	}
 	b.IsBlocked = nil
 	c.beads[id] = b
 	return true
+}
+
+// residentEdgesStillBlockLocked reports whether the row's own edges still prove
+// it blocked without the column. It is cachedBeadReady's fallback branch,
+// evaluated against live cache state instead of a snapshot index: a dep blocks
+// only when its type is ready-blocking AND the target is resident AND the
+// target is not closed. Caller must hold c.mu.
+func (c *CachingStore) residentEdgesStillBlockLocked(id string) bool {
+	for _, dep := range c.deps[id] {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if target, resident := c.beads[dep.DependsOnID]; resident && target.Status != "closed" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
@@ -499,7 +540,7 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	if hasCacheEventField(fields, "metadata") && !maps.Equal(current.Metadata, patch.Metadata) {
 		return true
 	}
-	if hasCacheEventField(fields, "labels") && !slices.Equal(current.Labels, patch.Labels) {
+	if hasCacheEventField(fields, "labels") && !stringSetEqual(current.Labels, patch.Labels) {
 		return true
 	}
 	if hasCacheEventField(fields, "ephemeral") && current.Ephemeral != patch.Ephemeral {
@@ -617,6 +658,13 @@ func cacheEventLooksComplete(fields map[string]json.RawMessage) bool {
 		(hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type"))
 }
 
+// decodeCacheEvent decodes a bead.* event payload into a bead patch AND the raw
+// top-level field set the cache uses for change-detection (hasCacheEventField).
+// It unwraps the tolerant {"bead": ...} envelope for the fields map, then routes
+// the bead itself through the shared canonical decoder so the cache and the
+// run-view projection can never drift apart on the wire shape or the
+// issue_type/type compat. An empty id is a decode miss (error), matching the
+// prior contract.
 func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {
 	eventPayload := payload
 	var envelope map[string]json.RawMessage
@@ -631,24 +679,9 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	if err := json.Unmarshal(eventPayload, &fields); err != nil {
 		return Bead{}, nil, err
 	}
-	var wire struct {
-		Bead
-		Metadata   StringMap `json:"metadata,omitempty"`
-		TypeCompat string    `json:"type,omitempty"`
-	}
-	if err := json.Unmarshal(eventPayload, &wire); err != nil {
-		return Bead{}, nil, err
-	}
-	b := wire.Bead
-	if wire.Metadata != nil {
-		b.Metadata = map[string]string(wire.Metadata)
-	}
-	if b.ID == "" {
+	b, ok := DecodeBeadEventPayload(eventPayload)
+	if !ok {
 		return Bead{}, nil, fmt.Errorf("missing bead id")
-	}
-	// bd hook payloads use "issue_type" while exec-style payloads may use "type".
-	if b.Type == "" && wire.TypeCompat != "" {
-		b.Type = wire.TypeCompat
 	}
 	return b, fields, nil
 }
@@ -667,14 +700,47 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||
 	// gc.root_bead_id || bead.ID) always resolves to a non-empty id since b.ID is
 	// non-empty; session id is a direct, optional metadata read. Both are
-	// safeRef-gated again at the export boundary.
+	// Run/session are safeRef-gated at the export boundary; native step topology
+	// retains its own established 256-byte domain there.
 	runID := beadmeta.ResolveRunID(b.Metadata, b.ID, "")
 	sessionID := b.Metadata[beadmeta.SessionIDMetadataKey]
-	// step_id is the acting work bead the lifecycle event is about: a work/dispatch
-	// bead carries its own gc.step_id, so a bead.created/closed on one stamps that
-	// step. Non-work beads (sessions, mail, …) carry none → empty, omitted at export.
+	// step_id is the semantic native execution step carried explicitly by the
+	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+}
+
+// nativeStepDependencies returns the explicit, canonical native topology fact.
+// It never derives edges from physical bead dependencies or other mutable state:
+// absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
+func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+	if !validTopologyStepID(stepID) {
+		return nil
+	}
+	raw, ok := metadata[beadmeta.NativeStepDependenciesMetadataKey]
+	if !ok {
+		return nil
+	}
+	var dependencies []string
+	if err := json.Unmarshal([]byte(raw), &dependencies); err != nil || dependencies == nil {
+		return nil
+	}
+	previous := ""
+	for _, dependency := range dependencies {
+		if !validTopologyStepID(dependency) || dependency == stepID || (previous != "" && dependency <= previous) {
+			return nil
+		}
+		previous = dependency
+	}
+	canonical, err := json.Marshal(dependencies)
+	if err != nil || raw != string(canonical) {
+		return nil
+	}
+	return &dependencies
+}
+
+func validTopologyStepID(id string) bool {
+	return len(id) <= 256 && utf8.ValidString(id) && strings.TrimSpace(id) != ""
 }
 
 type cacheNotification struct {
@@ -708,17 +774,67 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
 		return true
 	}
-	if !skipLabels && !slices.Equal(old.Labels, fresh.Labels) {
+	// Labels, needs, and dependencies are SETS: their order carries no meaning.
+	// Compare them order-insensitively. A backing store that returns these in a
+	// different order than the cache holds (the Dolt gcg rig store does not
+	// guarantee a stable order across scans) would otherwise register as a
+	// spurious change. For needs and dependencies that misfires on every
+	// reconcile pass — the cache-reconcile re-absorb churn that needlessly
+	// re-touched live molecule wisps (ga-ocypq2). Labels are skipped during
+	// reconcile (skipLabels: true) and so matter only for the skipLabels:false
+	// change checks.
+	if !skipLabels && !stringSetEqual(old.Labels, fresh.Labels) {
 		return true
 	}
-	if !slices.Equal(old.Needs, fresh.Needs) {
+	if !stringSetEqual(old.Needs, fresh.Needs) {
 		return true
 	}
-	return !slices.Equal(old.Dependencies, fresh.Dependencies)
+	return !depSetEqual(old.Dependencies, fresh.Dependencies)
 }
 
 func depsChanged(old, fresh []Dep) bool {
-	return !slices.Equal(old, fresh)
+	return !depSetEqual(old, fresh)
+}
+
+// stringSetEqual reports whether two string slices hold the same multiset of
+// values regardless of order. Used for order-insensitive label/needs change
+// detection so a store returning a set in a different order than the cache is
+// not mistaken for a change (ga-ocypq2).
+func stringSetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, s := range a {
+		counts[s]++
+	}
+	for _, s := range b {
+		counts[s]--
+		if counts[s] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// depSetEqual reports whether two dependency slices hold the same multiset of
+// dependencies regardless of order. Dep is a comparable struct, so it is a
+// valid map key for the multiset count.
+func depSetEqual(a, b []Dep) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[Dep]int, len(a))
+	for _, d := range a {
+		counts[d]++
+	}
+	for _, d := range b {
+		counts[d]--
+		if counts[d] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func intPtrEqual(left, right *int) bool {

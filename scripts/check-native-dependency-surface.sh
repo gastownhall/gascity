@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-725}"
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
-max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-14}"
+max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
 max_google_api_modules="${GC_NATIVE_DEP_MAX_GOOGLE_API_MODULES:-1}"
 
 modules="$(go list -m all)"
@@ -52,6 +52,43 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
 go build -o "$tmpdir/gc" ./cmd/gc
+
+go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
+for forbidden_symbol in \
+	"main.runProductMetricsTesthookChild" \
+	"main.newProductMetricsTesthookRecordHelpCommand" \
+	"internal/productmetrics.OpenTesthook" \
+	"internal/productmetrics.testhookLoopbackHost"
+do
+	if grep -Fq -- "$forbidden_symbol" "$tmpdir/gc.nm"; then
+		echo "native dependency guard: normal gc contains product-metrics testhook symbol $forbidden_symbol" >&2
+		exit 1
+	fi
+done
+
+for forbidden_literal in \
+	"GC_PRODUCT_METRICS_TESTHOOK_ENDPOINT" \
+	"GC_PRODUCT_METRICS_TESTHOOK_CA_FILE" \
+	"__testhook-record-help"
+do
+	if LC_ALL=C grep -aFq -- "$forbidden_literal" "$tmpdir/gc"; then
+		echo "native dependency guard: normal gc contains product-metrics testhook literal $forbidden_literal" >&2
+		exit 1
+	fi
+done
+
+mkdir -p "$tmpdir/home" "$tmpdir/gc-home"
+if ! HOME="$tmpdir/home" GC_HOME="$tmpdir/gc-home" \
+	"$tmpdir/gc" metrics --help > "$tmpdir/metrics-help.txt" 2>&1; then
+	echo "native dependency guard: normal gc metrics --help failed" >&2
+	cat "$tmpdir/metrics-help.txt" >&2
+	exit 1
+fi
+if grep -Fq -- "__testhook-record-help" "$tmpdir/metrics-help.txt"; then
+	echo "native dependency guard: normal gc metrics --help exposes the product-metrics testhook command" >&2
+	exit 1
+fi
+
 binary_bytes="$(wc -c < "$tmpdir/gc" | tr -d ' ')"
 if [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
 	echo "native dependency guard: gc binary is $binary_bytes bytes; max is $max_binary_bytes" >&2

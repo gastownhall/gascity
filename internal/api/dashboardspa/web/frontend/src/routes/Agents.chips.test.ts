@@ -20,6 +20,7 @@ function mkAgent(state: string, overrides: Partial<AgentResponse> = {}): AgentRe
     available: true,
     running: state === 'active' || state === 'running',
     suspended: false,
+    pack_derived: false,
     state,
     ...overrides,
   };

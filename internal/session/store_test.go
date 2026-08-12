@@ -1,22 +1,24 @@
 package session
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
-// recordingInfoStore seeds a session bead into a recording-fake store and
-// returns the InfoStore front door plus the recorder, so a test can assert the
+// recordingStore seeds a session bead into a recording-fake store and
+// returns the Store front door plus the recorder, so a test can assert the
 // typed write method emitted byte-identical bead writes.
-func recordingInfoStore(t *testing.T, b beads.Bead) (*InfoStore, *beadstest.RecordingStore) {
+func recordingStore(t *testing.T, b beads.Bead) (*Store, *beadstest.RecordingStore) {
 	t.Helper()
 	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
 	rec := beadstest.NewRecordingStore(mem)
-	return NewInfoStore(beads.SessionStore{Store: rec}), rec
+	return NewStore(beads.SessionStore{Store: rec}), rec
 }
 
 // TestApplyPatchByteIdenticalToSetMetaBatch proves ApplyPatch emits exactly one
@@ -24,7 +26,7 @@ func recordingInfoStore(t *testing.T, b beads.Bead) (*InfoStore, *beadstest.Reco
 // setMetaBatch(store, id, patch).
 func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	patch := MetadataPatch{"state": "asleep", "last_woke_at": "", "sleep_reason": "max-age"}
 	if err := is.ApplyPatch("s-1", patch); err != nil {
@@ -44,11 +46,94 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	}
 }
 
+// TestApplyPatchInfoPersistsAndFoldsEqualsReprojection proves ApplyPatchInfo
+// persists the patch byte-identically (one SetMetadataBatch) AND returns the
+// LOCAL fold — never a re-Get — and that the folded Info equals a full
+// reprojection of the patched bead. This is the write-returns-Info contract the
+// reconciler cuts over to in WI-5 W1.
+func TestApplyPatchInfoPersistsAndFoldsEqualsReprojection(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+		"last_woke_at":         "2026-01-01T00:00:00Z",
+	})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+
+	patch := MetadataPatch{"state": "asleep", "pending_create_claim": "", "last_woke_at": ""}
+	got, err := is.ApplyPatchInfo(pre, patch)
+	if err != nil {
+		t.Fatalf("ApplyPatchInfo: %v", err)
+	}
+
+	// The persist must be a single byte-identical SetMetadataBatch.
+	calls := rec.CallsForOp("SetMetadataBatch")
+	if len(calls) != 1 {
+		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+	}
+	if calls[0].ID != "s-1" || !reflect.DeepEqual(calls[0].Metadata, map[string]string(patch)) {
+		t.Errorf("persist = (%q, %#v), want (s-1, %#v)", calls[0].ID, calls[0].Metadata, map[string]string(patch))
+	}
+
+	// The returned Info is the local fold pre.ApplyPatch(patch)...
+	if want := pre.ApplyPatch(patch); !reflect.DeepEqual(got, want) {
+		t.Errorf("ApplyPatchInfo fold diverged from pre.ApplyPatch\n got=%+v\nwant=%+v", got, want)
+	}
+	// ...which is byte-identical to a full reprojection of the patched bead.
+	if want := infoFromPersistedBead(reprojectBead(b, patch)); !reflect.DeepEqual(got, want) {
+		t.Errorf("ApplyPatchInfo fold diverged from full reprojection\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// TestApplyPatchInfoEmptyIsNoOp proves an empty patch persists nothing and
+// returns the input Info unchanged (matching ApplyPatch's len==0 short-circuit).
+func TestApplyPatchInfoEmptyIsNoOp(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+	got, err := is.ApplyPatchInfo(pre, MetadataPatch{})
+	if err != nil {
+		t.Fatalf("ApplyPatchInfo: %v", err)
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("empty patch changed Info\n got=%+v\nwant=%+v", got, pre)
+	}
+	if n := len(rec.Calls()); n != 0 {
+		t.Errorf("empty patch emitted %d calls, want 0", n)
+	}
+}
+
+// TestApplyPatchInfoWriteErrorReturnsInputUnchanged proves that when the persist
+// fails, ApplyPatchInfo returns the INPUT Info unchanged (no fold) plus the
+// error — so a caller that ignores the error keeps a snapshot consistent with
+// the store, and a caller that checks it can bail.
+func TestApplyPatchInfoWriteErrorReturnsInputUnchanged(t *testing.T) {
+	// A store with no such bead: SetMetadataBatch on a missing id errors.
+	is := NewStore(seedSessionStore(t))
+	pre := infoFromPersistedBead(sessionBeadFixture("missing", "open", map[string]string{"state": "active"}))
+
+	got, err := is.ApplyPatchInfo(pre, MetadataPatch{"state": "asleep"})
+	if err == nil {
+		t.Fatal("ApplyPatchInfo(missing): want store error, got nil")
+	}
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("write error must return the input Info unchanged\n got=%+v\nwant=%+v", got, pre)
+	}
+}
+
 // TestApplyPatchEmptyIsNoOp proves an empty patch emits no write (matching
 // setMetaBatch's len==0 short-circuit).
 func TestApplyPatchEmptyIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.ApplyPatch("s-1", MetadataPatch{}); err != nil {
 		t.Fatalf("ApplyPatch: %v", err)
@@ -58,11 +143,65 @@ func TestApplyPatchEmptyIsNoOp(t *testing.T) {
 	}
 }
 
+// TestGetReflectsApplyPatch proves the store-authoritative refresh guarantee the
+// session reconciler cuts over to in front-door Step 6: after a mutation
+// persisted through ApplyPatch, a re-Get returns an Info reflecting that
+// mutation. During the lockstep-coexistence phase (Steps 3-5) refreshSessionInfo
+// refreshes the snapshot from the raw working copy instead (byte-identical by
+// construction, and preserving the reconciler's deliberate intra-tick raw/store
+// divergences like the reset_committed_at hiding); Step 6 removes the raw working
+// set and makes Get the sole source. This test pins that Get sees a persisted
+// write — the guarantee that Step-6 cutover depends on.
+func TestGetReflectsApplyPatch(t *testing.T) {
+	// A creating, still-claimed pending-create session — the shape whose lease
+	// fields (state / pending_create_claim / last_woke_at) a heal-with-rollback
+	// flips, and whose staleness would flip pendingCreateSessionStillLeasedInfo
+	// in the reconciler's post-heal switch.
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"state":                "creating",
+		"pending_create_claim": "true",
+		"last_woke_at":         "2026-01-01T00:00:00Z",
+	})
+	is, _ := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (pre): %v", err)
+	}
+	if pre.MetadataState != "creating" || !pre.PendingCreateClaim {
+		t.Fatalf("pre Get = state %q claim %v, want creating/true", pre.MetadataState, pre.PendingCreateClaim)
+	}
+
+	// Persist a heal-shaped rollback: clear the claim and drop the lease markers.
+	if err := is.ApplyPatch("s-1", MetadataPatch{
+		"state":                "asleep",
+		"pending_create_claim": "",
+		"last_woke_at":         "",
+	}); err != nil {
+		t.Fatalf("ApplyPatch: %v", err)
+	}
+
+	// The re-Get must reflect the persisted write — the refresh guarantee.
+	post, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get (post): %v", err)
+	}
+	if post.MetadataState != "asleep" {
+		t.Errorf("post MetadataState = %q, want asleep", post.MetadataState)
+	}
+	if post.PendingCreateClaim {
+		t.Errorf("post PendingCreateClaim = true, want false (cleared)")
+	}
+	if post.LastWokeAt != "" {
+		t.Errorf("post LastWokeAt = %q, want empty (cleared)", post.LastWokeAt)
+	}
+}
+
 // TestSleepEmitsSleepPatch proves the typed Sleep method emits exactly the bead
 // write that SleepPatch produces — the same write the reconciler raw op did.
 func TestSleepEmitsSleepPatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
@@ -82,7 +221,7 @@ func TestSleepEmitsSleepPatch(t *testing.T) {
 // empty-string writes the raw cmd_wait.go clear did.
 func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "x"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetWaitHold("s-1", false, ""); err != nil {
 		t.Fatalf("SetWaitHold: %v", err)
@@ -103,7 +242,7 @@ func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
 // (that is Phase 6).
 func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	closed, err := is.Close("s-1", "gc_swept", now)
@@ -128,7 +267,7 @@ func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 // TestCloseAlreadyClosedIsNoOp proves Close on a closed bead emits no writes.
 func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	closed, err := is.Close("s-1", "gc_swept", time.Now())
 	if err != nil {
@@ -146,7 +285,7 @@ func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 // without raw beads crossing the boundary.
 func TestGetStateProjectsState(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "asleep"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	state, closed, err := is.GetState("s-1")
 	if err != nil {
@@ -163,7 +302,7 @@ func TestGetStateProjectsState(t *testing.T) {
 // sleep_reason), NOT a SetMetadataBatch.
 func TestSetMarkerEmitsSingleKeySetMetadata(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetMarker("s-1", "sleep_reason", "city-stop"); err != nil {
 		t.Fatalf("SetMarker: %v", err)
@@ -182,7 +321,7 @@ func TestSetMarkerEmitsSingleKeySetMetadata(t *testing.T) {
 // (the empty-string-clear contract) via a single SetMetadata op.
 func TestSetMarkerEmptyValueClears(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"sleep_intent": "idle-stop-pending"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetMarker("s-1", "sleep_intent", ""); err != nil {
 		t.Fatalf("SetMarker: %v", err)
@@ -198,7 +337,7 @@ func TestSetMarkerEmptyValueClears(t *testing.T) {
 // recordCurrentBeadIDOnWake's raw store.SetMetadata write (NOT a batch).
 func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.RecordCurrentBead("s-1", "gcg-42"); err != nil {
 		t.Fatalf("RecordCurrentBead: %v", err)
@@ -218,7 +357,7 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 // store.Close(id) after it stamps ClosePatch separately.
 func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.CloseWithoutReason("s-1"); err != nil {
 		t.Fatalf("CloseWithoutReason: %v", err)
@@ -237,7 +376,7 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 // store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.SetStatusOpen("s-1"); err != nil {
 		t.Fatalf("SetStatusOpen: %v", err)
@@ -264,7 +403,7 @@ func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 func TestRepairTypeEmitsTypeOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", nil)
 	b.Type = ""
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	if err := is.RepairType("s-1"); err != nil {
 		t.Fatalf("RepairType: %v", err)
@@ -290,7 +429,7 @@ func TestCircuitResetGenerationReturnsPersistedValue(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{
 		SessionCircuitResetGenerationMetadataKey: "7",
 	})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	got, err := is.CircuitResetGeneration("s-1")
 	if err != nil {
@@ -310,7 +449,7 @@ func TestCircuitResetGenerationReturnsPersistedValue(t *testing.T) {
 // stamped the generation.
 func TestCircuitResetGenerationEmptyWhenUnset(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	got, err := is.CircuitResetGeneration("s-1")
 	if err != nil {
@@ -326,7 +465,7 @@ func TestCircuitResetGenerationEmptyWhenUnset(t *testing.T) {
 // store.Get error path the front door replaces.
 func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.CircuitResetGeneration("missing"); err == nil {
 		t.Fatal("CircuitResetGeneration(missing): want store error, got nil")
 	}
@@ -344,7 +483,7 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 		"continuation_epoch": "4",
 		"sleep_reason":       "wait-hold",
 	})
-	is, rec := recordingInfoStore(t, b)
+	is, rec := recordingStore(t, b)
 
 	got, err := is.PersistedMarkers("s-1")
 	if err != nil {
@@ -370,7 +509,7 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 // stamped those markers.
 func TestPersistedMarkersEmptyWhenUnset(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, _ := recordingInfoStore(t, b)
+	is, _ := recordingStore(t, b)
 
 	got, err := is.PersistedMarkers("s-1")
 	if err != nil {
@@ -386,7 +525,7 @@ func TestPersistedMarkersEmptyWhenUnset(t *testing.T) {
 // store.Get error path the front door replaces.
 func TestPersistedMarkersSurfacesStoreError(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.PersistedMarkers("missing"); err == nil {
 		t.Fatal("PersistedMarkers(missing): want store error, got nil")
 	}
@@ -398,4 +537,109 @@ func opsOf(calls []beadstest.RecordedCall) []string {
 		out = append(out, c.Op)
 	}
 	return out
+}
+
+// updateFailStore is a beads.Store whose Update always fails; every other op
+// delegates to the embedded store. It proves UpdateMetadataInfo's all-or-nothing
+// contract: a rejected Update must leave both the durable row and the caller's
+// Info untouched.
+type updateFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s updateFailStore) Update(string, beads.UpdateOpts) error { return s.err }
+
+// TestUpdateMetadataInfoEmitsSingleUpdateWithFullPatch pins the one-operation
+// contract for the pool trigger/provenance cluster (council finding 1): the whole
+// patch is written in exactly ONE Store.Update carrying the full metadata map —
+// NOT decomposed into per-key SetMetadata / SetMetadataBatch ops, whose per-key
+// decomposition on exec:/partial-write backends could commit a mixed provenance
+// row. On success the returned Info equals the local fold pre.ApplyPatch(patch).
+func TestUpdateMetadataInfoEmitsSingleUpdateWithFullPatch(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	patch := MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey:       "gcg-123",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig-a",
+		beadmeta.BrainParentSIDMetadataKey:      "sid-parent",
+		beadmeta.PackMetadataKey:                "packs/x",
+		beadmeta.PackWorkspaceMetadataKey:       "ws-1",
+		beadmeta.WorkDirMetadataKey:             "/work/dir",
+	}
+
+	got, err := is.UpdateMetadataInfo(pre, patch)
+	if err != nil {
+		t.Fatalf("UpdateMetadataInfo: %v", err)
+	}
+
+	updates := rec.CallsForOp("Update")
+	if len(updates) != 1 {
+		t.Fatalf("want exactly 1 Update op, got %d (all ops: %v)", len(updates), opsOf(rec.Calls()))
+	}
+	if updates[0].ID != "s-1" {
+		t.Errorf("Update target id = %q, want s-1", updates[0].ID)
+	}
+	if !reflect.DeepEqual(updates[0].Opts.Metadata, map[string]string(patch)) {
+		t.Errorf("Update metadata = %#v, want the FULL patch %#v", updates[0].Opts.Metadata, map[string]string(patch))
+	}
+	// One-operation contract: no per-key decomposition.
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("SetMetadata ops = %d, want 0 (one-Update contract)", n)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("SetMetadataBatch ops = %d, want 0 (one-Update contract)", n)
+	}
+	// Success folds the patch onto Info, byte-identical to a local ApplyPatch.
+	if want := pre.ApplyPatch(patch); !reflect.DeepEqual(got, want) {
+		t.Errorf("returned Info = %#v, want local fold %#v", got, want)
+	}
+	if got.TriggerBeadID != "gcg-123" || got.Pack != "packs/x" || got.WorkDirCanonical != "/work/dir" {
+		t.Errorf("returned Info did not fold the trigger cluster: %+v", got)
+	}
+}
+
+// TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged proves
+// the all-or-nothing guarantee: when the single Update fails, NOTHING is persisted
+// (the durable row keeps its pre-write metadata) and the returned Info is the
+// INPUT unchanged, so a log-and-continue caller never advances onto a half-applied
+// provenance cluster (council finding 1).
+func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	is := NewStore(beads.SessionStore{Store: updateFailStore{Store: mem, err: errors.New("update rejected")}})
+
+	pre, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	patch := MetadataPatch{
+		beadmeta.TriggerBeadIDMetadataKey:       "gcg-123",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig-a",
+		beadmeta.BrainParentSIDMetadataKey:      "sid-parent",
+	}
+
+	got, err := is.UpdateMetadataInfo(pre, patch)
+	if err == nil {
+		t.Fatal("UpdateMetadataInfo: want error on failed Update, got nil")
+	}
+	// Returned Info is the input UNCHANGED — no partial fold.
+	if !reflect.DeepEqual(got, pre) {
+		t.Errorf("returned Info = %#v, want INPUT unchanged %#v", got, pre)
+	}
+	// Nothing persisted: the durable row still has none of the cluster keys.
+	after, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get after failed update: %v", err)
+	}
+	for k := range patch {
+		if v := after.Metadata[k]; v != "" {
+			t.Errorf("durable row key %q = %q after failed Update, want unset (all-or-nothing)", k, v)
+		}
+	}
 }
