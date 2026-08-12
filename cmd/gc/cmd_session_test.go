@@ -2544,6 +2544,10 @@ const namedSessionTestWorkspace = "test-city"
 // that point no client can find them to kill by name, and they just sit
 // there.
 //
+// The "test-city" server is shared by every caller of this fixture, so the
+// teardown is only safe while none of them call t.Parallel(): a parallel
+// caller's cleanup would kill a server another test is still using.
+//
 // Kill failures are ignored: most tests never start a server, so "no server"
 // is the common case, not an error.
 func killNamedSessionTmuxServer(t *testing.T) {
