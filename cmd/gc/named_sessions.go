@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,6 +30,21 @@ func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSes
 
 func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
+}
+
+// namedSessionAssigneeMatchesSpec reports whether assignee names spec's session.
+// Work routed to a named session is claimed under the session's runtime name
+// (config.NamedSessionRuntimeName: "/" -> "--", "." -> "__"), not under its
+// qualified identity, so both forms have to count. spec.SessionName is already
+// an accepted alias for the identity in the resolver
+// (session.ResolveNamedSessionSpecForConfigTarget); matching only the qualified
+// form here left on-demand named sessions asleep on their own assigned work
+// (ga-e70d2).
+func namedSessionAssigneeMatchesSpec(spec namedSessionSpec, identity, assignee string) bool {
+	if assignee == "" {
+		return false
+	}
+	return assignee == identity || assignee == strings.TrimSpace(spec.SessionName)
 }
 
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
