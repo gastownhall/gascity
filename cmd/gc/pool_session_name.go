@@ -693,7 +693,14 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, as
 	if cfg == nil {
 		return false
 	}
-	spec, ok := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), assignee)
+	// Resolve through the assignee-aware lookup: a named session claims work
+	// under its runtime name ("seth.seth" claims as "seth__seth"), and the
+	// identity-only lookup left this guard inert for exactly that form
+	// (ga-e70d2). With the session bead closed, openSessionOwnsWork and
+	// liveOpenSessionAssignmentExists both answer false, so this is the only
+	// thing keeping a configured named session's claim from being released to a
+	// backup worker.
+	spec, ok := findNamedSessionSpecForAssignee(cfg, cfg.EffectiveCityName(), assignee)
 	if !ok {
 		return false
 	}
