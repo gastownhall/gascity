@@ -1299,7 +1299,10 @@ func reconcileSessionBeadsAtPath(
 	startOptions ...startExecutionOption,
 ) int {
 	// Compat wrapper (tests): build the row feed + carrier snapshot from raw beads.
-	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
+	// ReconcileRowsFromBeadsWithOverlay (not the plain ReconcileRowsFromBeads) so a
+	// session whose last_woke_at lives in clone-local storage still projects
+	// correctly — see that method's doc for why the overlay needs a store handle.
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.NewStore(beads.SessionStore{Store: store}).ReconcileRowsFromBeadsWithOverlay(sessions))
 	return reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
@@ -1379,7 +1382,10 @@ func reconcileSessionBeadsTraced(
 	// session beads the test/helper caller supplies (production callers pass
 	// sessionBeads.OpenForReconcile() directly). The snapshot constructor drops closed
 	// beads, exactly as the production store-load feed does.
-	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
+	// ReconcileRowsFromBeadsWithOverlay (not the plain ReconcileRowsFromBeads) so a
+	// session whose last_woke_at lives in clone-local storage still projects
+	// correctly — see that method's doc for why the overlay needs a store handle.
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.NewStore(beads.SessionStore{Store: store}).ReconcileRowsFromBeadsWithOverlay(sessions))
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,

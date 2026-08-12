@@ -23,12 +23,14 @@ func recordingStore(t *testing.T, b beads.Bead) (*Store, *beadstest.RecordingSto
 
 // TestApplyPatchByteIdenticalToSetMetaBatch proves ApplyPatch emits exactly one
 // SetMetadataBatch with the patch verbatim — the byte-identical replacement for
-// setMetaBatch(store, id, patch).
+// setMetaBatch(store, id, patch) — for a patch with no localOnlyMetadataKeys
+// key. A patch containing an allowlisted key (e.g. last_woke_at) splits
+// instead; see TestApplyPatchRoutesLastWokeAtToLocalString.
 func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
 
-	patch := MetadataPatch{"state": "asleep", "last_woke_at": "", "sleep_reason": "max-age"}
+	patch := MetadataPatch{"state": "asleep", "sleep_reason": "max-age"}
 	if err := is.ApplyPatch("s-1", patch); err != nil {
 		t.Fatalf("ApplyPatch: %v", err)
 	}
@@ -40,7 +42,7 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	if calls[0].ID != "s-1" {
 		t.Errorf("target id = %q, want s-1", calls[0].ID)
 	}
-	want := map[string]string{"state": "asleep", "last_woke_at": "", "sleep_reason": "max-age"}
+	want := map[string]string{"state": "asleep", "sleep_reason": "max-age"}
 	if !reflect.DeepEqual(calls[0].Metadata, want) {
 		t.Errorf("batch = %#v, want %#v", calls[0].Metadata, want)
 	}
@@ -79,10 +81,11 @@ func TestApplyPatchRoutesLastWokeAtToLocalString(t *testing.T) {
 }
 
 // TestApplyPatchInfoPersistsAndFoldsEqualsReprojection proves ApplyPatchInfo
-// persists the patch byte-identically (one SetMetadataBatch) AND returns the
-// LOCAL fold — never a re-Get — and that the folded Info equals a full
-// reprojection of the patched bead. This is the write-returns-Info contract the
-// reconciler cuts over to in WI-5 W1.
+// persists the patch byte-identically (one SetMetadataBatch, plus one
+// SetLocalString for the allowlisted clear) AND returns the LOCAL fold — never
+// a re-Get — and that the folded Info equals a full reprojection of the
+// patched bead. This is the write-returns-Info contract the reconciler cuts
+// over to in WI-5 W1.
 func TestApplyPatchInfoPersistsAndFoldsEqualsReprojection(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{
 		"state":                "creating",
@@ -102,13 +105,23 @@ func TestApplyPatchInfoPersistsAndFoldsEqualsReprojection(t *testing.T) {
 		t.Fatalf("ApplyPatchInfo: %v", err)
 	}
 
-	// The persist must be a single byte-identical SetMetadataBatch.
+	// The persist must be a single byte-identical SetMetadataBatch for the
+	// durable subset of the patch. last_woke_at is allowlisted, but this is a
+	// CLEAR (empty value): it propagates to BOTH SetLocalString and the
+	// durable batch, so a durable-fallback read never resurrects the fixture's
+	// stale "2026-01-01" seed (ga-igcny0.1.2.1 Phase B; see
+	// splitLocalMetadataPatch in store.go).
 	calls := rec.CallsForOp("SetMetadataBatch")
 	if len(calls) != 1 {
 		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
 	}
-	if calls[0].ID != "s-1" || !reflect.DeepEqual(calls[0].Metadata, map[string]string(patch)) {
-		t.Errorf("persist = (%q, %#v), want (s-1, %#v)", calls[0].ID, calls[0].Metadata, map[string]string(patch))
+	wantDurable := map[string]string{"state": "asleep", "pending_create_claim": "", "last_woke_at": ""}
+	if calls[0].ID != "s-1" || !reflect.DeepEqual(calls[0].Metadata, wantDurable) {
+		t.Errorf("persist = (%q, %#v), want (s-1, %#v)", calls[0].ID, calls[0].Metadata, wantDurable)
+	}
+	locals := rec.CallsForOp("SetLocalString")
+	if len(locals) != 1 || locals[0].ID != "s-1" || locals[0].Key != "last_woke_at" || locals[0].Value != "" {
+		t.Errorf("SetLocalString calls = %#v, want one (s-1,last_woke_at,\"\")", locals)
 	}
 
 	// The returned Info is the local fold pre.ApplyPatch(patch)...
@@ -231,6 +244,10 @@ func TestGetReflectsApplyPatch(t *testing.T) {
 
 // TestSleepEmitsSleepPatch proves the typed Sleep method emits exactly the bead
 // write that SleepPatch produces — the same write the reconciler raw op did.
+// SleepPatch clears last_woke_at (an allowlisted key): the clear propagates to
+// BOTH the durable SetMetadataBatch (verbatim, unchanged from the raw write)
+// AND a SetLocalString call (ga-igcny0.1.2.1 Phase B; see
+// splitLocalMetadataPatch in store.go).
 func TestSleepEmitsSleepPatch(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
@@ -246,6 +263,14 @@ func TestSleepEmitsSleepPatch(t *testing.T) {
 	want := map[string]string(SleepPatch(now, "idle-timeout"))
 	if !reflect.DeepEqual(calls[0].Metadata, want) {
 		t.Errorf("Sleep batch = %#v, want %#v", calls[0].Metadata, want)
+	}
+
+	locals := rec.CallsForOp("SetLocalString")
+	if len(locals) != 1 {
+		t.Fatalf("want 1 SetLocalString, got %d", len(locals))
+	}
+	if locals[0].ID != "s-1" || locals[0].Key != "last_woke_at" || locals[0].Value != "" {
+		t.Errorf("SetLocalString call = %#v, want (s-1,last_woke_at,\"\")", locals[0])
 	}
 }
 
@@ -364,11 +389,12 @@ func TestSetMarkerEmptyValueClears(t *testing.T) {
 	}
 }
 
-// TestSetMarkerRoutesLastWokeAtToLocalString proves SetMarker routes the
-// migrated last_woke_at key to the clone-local SetLocalString instead of the
-// durable SetMetadata (ga-igcny0.1.2.1 Phase B) — the async-start rollback and
-// wake-time marker writes both go through SetMarker, so this pins the
-// production clear/set call sites onto the new local path.
+// TestSetMarkerRoutesLastWokeAtToLocalString proves SetMarker routes an
+// allowlisted-key CLEAR (empty value) to BOTH the clone-local SetLocalString
+// AND the durable single-key SetMetadata (ga-igcny0.1.2.1 Phase B; see
+// splitLocalMetadataPatch's setMetadataValue counterpart in store.go) — the
+// async-start rollback's last_woke_at clear goes through SetMarker, so this
+// pins that production call site onto the new local+durable-clear path.
 func TestSetMarkerRoutesLastWokeAtToLocalString(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
@@ -377,12 +403,38 @@ func TestSetMarkerRoutesLastWokeAtToLocalString(t *testing.T) {
 		t.Fatalf("SetMarker: %v", err)
 	}
 	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetLocalString", "SetMetadata"}) {
+		t.Fatalf("SetMarker(last_woke_at, clear) ops = %v, want [SetLocalString SetMetadata]", gotOps)
+	}
+	local := rec.CallsForOp("SetLocalString")[0]
+	if local.ID != "s-1" || local.Key != "last_woke_at" || local.Value != "" {
+		t.Errorf("SetLocalString call = (%q,%q,%q), want (s-1,last_woke_at,\"\")", local.ID, local.Key, local.Value)
+	}
+	durable := rec.CallsForOp("SetMetadata")[0]
+	if durable.ID != "s-1" || durable.Key != "last_woke_at" || durable.Value != "" {
+		t.Errorf("SetMetadata call = (%q,%q,%q), want (s-1,last_woke_at,\"\")", durable.ID, durable.Key, durable.Value)
+	}
+}
+
+// TestSetMarkerRoutesLastWokeAtSetToLocalStringOnly proves a non-empty (SET)
+// SetMarker write of the allowlisted last_woke_at key routes to
+// SetLocalString ONLY — no durable SetMetadata call — mirroring ApplyPatch's
+// SET-stays-local-only routing (TestApplyPatchRoutesLastWokeAtToLocalString)
+// at the single-key chokepoint (setMetadataValue in store.go).
+func TestSetMarkerRoutesLastWokeAtSetToLocalStringOnly(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	if err := is.SetMarker("s-1", "last_woke_at", "2026-08-12T00:00:00Z"); err != nil {
+		t.Fatalf("SetMarker: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
 	if !reflect.DeepEqual(gotOps, []string{"SetLocalString"}) {
-		t.Fatalf("SetMarker(last_woke_at) ops = %v, want [SetLocalString]", gotOps)
+		t.Fatalf("SetMarker(last_woke_at, set) ops = %v, want [SetLocalString]", gotOps)
 	}
 	c := rec.CallsForOp("SetLocalString")[0]
-	if c.ID != "s-1" || c.Key != "last_woke_at" || c.Value != "" {
-		t.Errorf("SetLocalString call = (%q,%q,%q), want (s-1,last_woke_at,\"\")", c.ID, c.Key, c.Value)
+	if c.ID != "s-1" || c.Key != "last_woke_at" || c.Value != "2026-08-12T00:00:00Z" {
+		t.Errorf("SetLocalString call = (%q,%q,%q), want (s-1,last_woke_at,2026-08-12T00:00:00Z)", c.ID, c.Key, c.Value)
 	}
 }
 
