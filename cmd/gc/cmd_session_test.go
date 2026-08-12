@@ -2536,12 +2536,13 @@ const namedSessionTestWorkspace = "test-city"
 // workspace name binds to.
 //
 // Registering it as a t.Cleanup is what keeps the server from outliving the
-// test. The ordering matters and is load-bearing: callers take their dir from
-// t.TempDir() BEFORE calling the fixture, so Go's LIFO cleanup order runs this
-// teardown before TempDir removes the tree. Reverse that and TMUX_TMPDIR is
-// already gone, the socket becomes an unlinked inode, and the server is
-// unreachable — no client can find it to kill it by name, which is precisely
-// how these servers used to accumulate.
+// test. TestMain points TMUX_TMPDIR at a process-wide socket root
+// (tmuxtest.ConfigureProcessEnv, cmd/gc/main_test.go) that is removed only
+// after m.Run() returns, so this cleanup can always reach the server by
+// socket name no matter when it runs. What leaked before was servers
+// surviving until that end-of-package removal unlinked their sockets: at
+// that point no client can find them to kill by name, and they just sit
+// there.
 //
 // Kill failures are ignored: most tests never start a server, so "no server"
 // is the common case, not an error.
