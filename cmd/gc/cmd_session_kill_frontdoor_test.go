@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // TestCmdSessionKill_ForeignAndMissingRejectedAtResolutionWithoutWrite pins the
@@ -105,4 +108,82 @@ func TestCmdSessionKill_ForeignAndMissingRejectedAtResolutionWithoutWrite(t *tes
 			t.Fatalf("cmdSessionKill(missing) = %d, want 1 (session not found); stderr=%s", code, stderr.String())
 		}
 	})
+}
+
+// TestCmdSessionKillClearsLocalLastWokeAtNotJustDurable pins that
+// cmdSessionKill's post-kill asleep sync clears last_woke_at through the
+// session front door (sessFront.ApplyPatch), not a raw
+// sessStore.SetMetadataBatch call, so a stale non-empty local sidecar value
+// left by the migrated wake path cannot survive kill and mask the clear from
+// the front door's local-overlay projection (ga-igcny0.1.2.1 Phase B finding
+// 1; see info_store.go's projectWithLocalOverlay). A raw-store clear only
+// writes durable metadata; the local overlay would still prefer the stale
+// non-empty local value and hide the clear from crash/churn trackers.
+func TestCmdSessionKillClearsLocalLastWokeAtNotJustDurable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-kill-lwa-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                      identity,
+			"template":                   "worker",
+			"session_name":               "s-gc-kill-lwa-test",
+			"state":                      string(session.StateAsleep),
+			"last_woke_at":               "2026-04-10T12:00:00Z",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	sessFront := sessionFrontDoor(store)
+	if err := sessFront.SetLocalString(bead.ID, "last_woke_at", "2026-04-10T12:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString(last_woke_at seed): %v", err)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		controllerHostingStandalone,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	info, err := sessFront.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("sessFront.Get(post-kill): %v", err)
+	}
+	if info.LastWokeAt != "" {
+		t.Errorf("LastWokeAt = %q, want cleared (local sidecar must not mask the durable clear)", info.LastWokeAt)
+	}
 }
