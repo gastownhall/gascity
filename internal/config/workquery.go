@@ -9,6 +9,100 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+// QueryTopology is the pair of CITY facts a generated query has to be built
+// against, as opposed to the agent facts the *Agent receiver already carries.
+//
+// They have different sources and neither can be derived from the other. Beads
+// comes from [beads] in city.toml. FederatedReady comes from the storage routes
+// the process resolved — cmd/gc asks graphClassBinding, the same question
+// resolveClassStore asks to choose its branch — and a city that has served a
+// split can answer yes with no [storage] section left to read.
+type QueryTopology struct {
+	// Beads carries the bd CLI semantics this city may rely on.
+	Beads BeadsConfig
+	// FederatedReady is true when the city serves a coordination class from a
+	// store `bd` in the agent's work directory cannot reach. Generated queries
+	// then read claimable work through the city-wide federated reader instead
+	// of single-store `bd ready`, which on such a city answers with the copies
+	// the migration retained and nothing else — an authoritative-looking short
+	// array that a work query cannot tell apart from "no work".
+	//
+	// The zero value is the single-store city every deployment has today, and
+	// the generated command for it is byte-for-byte the one it already runs.
+	FederatedReady bool
+}
+
+// includeEphemeralReady reports whether generated ready reads may ask for the
+// wisp/ephemeral tier.
+func (t QueryTopology) includeEphemeralReady() bool {
+	return t.Beads.UsesBD105ReadySemantics()
+}
+
+// Ready reader commands. bdReadyCommand reads exactly one store — whichever one
+// `bd` resolves from the working directory — and is what every city runs today.
+// gcReadyCommand is the in-process federation over every store a city spreads
+// work across (cmd/gc's `gc ready`); it accepts every flag the queries in this
+// file generate, so the swap is the command word and nothing else. That is a
+// claim about THESE queries, not about all of `bd ready`: `gc ready` registers
+// the generated subset and rejects the rest of bd's ready surface, which is why
+// the operator-facing refusals that steer at it say so
+// (internal/beads/bdsql_relocation.go RelocatedClassFrontierRefusal).
+const (
+	bdReadyCommand = "bd ready"
+	gcReadyCommand = "gc ready"
+)
+
+// readyReaderCommand returns the reader a generated query asks for claimable
+// work with.
+func readyReaderCommand(federated bool) string {
+	if federated {
+		return gcReadyCommand
+	}
+	return bdReadyCommand
+}
+
+// readyReaderStderrSink returns the stderr redirect a probe tier wraps its ready
+// read in.
+//
+// The single-store tiers discard it, and that is deliberate: `bd ready` chatters
+// on a store it cannot open, and the tier has a later tier to fall through to.
+// The federated reader's stderr is the opposite — it is the ONE place a dead leg
+// is named ("gc ready: rig \"rig-A\" store: ..."), and the whole reason the
+// reader exits non-zero instead of serving a short array. Swallowing it would
+// leave the operator with an exit code and no rig name.
+func readyReaderStderrSink(federated bool) string {
+	if federated {
+		return ""
+	}
+	return ` 2>/dev/null`
+}
+
+// readyReaderFailurePropagation returns the failure clause a probe tier appends
+// to a federated ready read.
+//
+// This is the load-bearing half of the swap. `gc ready` fails LOUD by design —
+// a leg it could not open or read is a non-zero exit naming the rig, never a
+// short array, because a short array is indistinguishable from "no work"
+// (cmd/gc/ready_federation.go's header). A probe tier that captured that exit
+// into an empty $r and fell through to the next tier would re-create the exact
+// fail-open one layer up, and the whole federation would buy nothing: the query
+// would still answer "no work" while claimable beads sat in the graph store.
+//
+// So the federated tiers exit with the reader's own status. `gc hook` turns a
+// non-zero work query into an error (doHook / claimHookWork), and the
+// reconciler's count-form already did (poolDemandCountShell's && chain), so the
+// failure reaches a human instead of being spent as an idle signal.
+//
+// The single-store tiers keep their fall-through: `bd ready` failing in one work
+// directory says nothing about the tiers after it, and changing that would not
+// be byte-identical.
+func readyReaderFailurePropagation(federated bool) string {
+	if federated {
+		return ` || exit $?`
+	}
+	return ""
+}
+
 // bdReadyPoolDemandShell returns the canonical bd ready predicate for
 // unassigned, non-epic pool demand routed to target. gc.routed_to is the
 // canonical persisted routing key: the graph.v2 stamper and the legacy stamper
@@ -43,17 +137,36 @@ func excludeHoldLabelsShellArgs() string {
 	return args
 }
 
+// holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
+// the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
+// values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
+// jq-based hold filter so the label set is spelled exactly once.
+func holdLabelMatchCondsJQ() string {
+	conds := make([]string, len(beadmeta.DispatchHoldLabels))
+	for i, label := range beadmeta.DispatchHoldLabels {
+		conds[i] = `. == "` + label + `"`
+	}
+	return strings.Join(conds, " or ")
+}
+
 // excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
 // that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
 // filters that have no bd-side --exclude-label flag to lean on. Mirrors the
 // bracketed-count style of the dependency-blocking select above it so both
 // clauses read the same way (ga-x9kptu / ga-5736js).
 func excludeHoldLabelsJQClause() string {
-	conds := make([]string, len(beadmeta.DispatchHoldLabels))
-	for i, label := range beadmeta.DispatchHoldLabels {
-		conds[i] = `. == "` + label + `"`
-	}
-	return ` | select(([ (.labels // [])[] | select(` + strings.Join(conds, " or ") + `) ] | length) == 0)`
+	return ` | select(([ (.labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length) == 0)`
+}
+
+// heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
+// row of a work-query result carries. The in_progress serve gate reads it off
+// the candidate row it already holds, so the hold check costs no extra bd call.
+// `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
+// field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
+// the fail-open behavior TestInProgressTierServesUnparseableHeldCandidateFailOpen
+// pins.
+func heldLabelCountJQ() string {
+	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
 
 // jqMeta renders the jq expression that reads a bead-metadata key with an
@@ -64,8 +177,8 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
-func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
+func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -76,8 +189,8 @@ func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string
 // visible once a root carries gc.routed_to. This retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
-	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json --sort oldest ` + limitFlag
+func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -112,8 +225,8 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels 
 	return filter
 }
 
-func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
-	if includeEphemeralReady {
+func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
+	if topo.includeEphemeralReady() {
 		return `printf "[]"`
 	}
 	filter := legacyEphemeralReadyFilterJQ(
@@ -137,30 +250,31 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
-func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
+func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
+	fed := topo.FederatedReady
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
+		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
+		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
 
-func routedReadyTierCommand(includeEphemeralReady bool) string {
+func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks bd for the oldest candidates.
-	// The tier is widened past a single row (limit=20, not limit=1) so a
-	// self-blocked head (is_blocked / status==blocked) has Ready routed work
+	// sorting; the worker first-row path asks the reader for the oldest
+	// candidates. The tier is widened past a single row (limit=20, not limit=1)
+	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
 	// behind it to fall through to instead of idle-exiting; the hook layer
 	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -169,17 +283,19 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 // the reconciler's spawn decision and the worker's claim decision read the
 // same demand shape.
 //
-// Unlike the work_query probe, this form must NOT redirect bd stderr or default
-// to zero: a failed `bd ready` has to surface as an error rather than
+// Unlike the work_query probe, this form must NOT redirect the reader's stderr
+// or default to zero: a failed ready read has to surface as an error rather than
 // masquerade as "no demand", which would silently stop the pool from spawning.
-// The && chain ensures any non-zero bd exit short-circuits the whole expression
-// (TestEffectiveScaleCheckUsesReadyOnly).
-func poolDemandCountShell(target string, includeEphemeralReady bool) string {
+// The && chain ensures any non-zero reader exit short-circuits the whole
+// expression (TestEffectiveScaleCheckUsesReadyOnly). That discipline is why this
+// form needed no new failure clause when the federated reader arrived — it is
+// the shape readyReaderFailurePropagation gives the worker-side tiers.
+func poolDemandCountShell(target string, topo QueryTopology) string {
 	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
+		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
@@ -192,19 +308,33 @@ func (a *Agent) poolDemandTarget() string {
 	return target
 }
 
-func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return standardAssignedInProgressWorkQueryScript(includeEphemeralReady) +
-		standardAssignedReadyWorkQueryScript(includeEphemeralReady)
+func standardAssignedWorkQueryScript(topo QueryTopology) string {
+	return standardAssignedInProgressWorkQueryScript(topo) +
+		standardAssignedReadyWorkQueryScript(topo)
 }
 
-func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
+// standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
+//
+// It is the ONE read tier the federation swap deliberately leaves on `bd list`.
+// The tier reads a STATUS, not the ready set, and `gc ready --status in_progress`
+// is the federated form of it — cmd/gc/cmd_ready.go names this tier as the reason
+// that flag reads LIVE. Moving it is a one-line change but it is not the same
+// change: the row it returns is then fed to inProgressBlockedByEnrichmentScript,
+// which resolves the candidate's dependencies with `bd show` in the same work
+// directory, and on a split city that resolves nothing for a relocated id. The
+// tier would become half-federated — federated discovery, single-store
+// enrichment — and its recovered bead would still be unclaimable and
+// unreleasable, because on_death/on_boot are `bd list`/`bd update` too.
+// Crash recovery for relocated work is therefore a coherent slice with the
+// claim-time write routing (ga-601v2), not a rider on this one.
+func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript("r") +
 		`fi; ` +
-		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
+		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
 }
 
@@ -231,10 +361,26 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 // block readiness. Status interpretation is left to the shared Go filter:
 // any non-closed blocker counts.
 //
+// The same serve gate also skips a candidate parked on a canonical dispatch
+// hold (beadmeta.DispatchHoldLabels), read off the candidate row this tier
+// already holds — no extra bd call (gas-kg6). A held bead has no blocking
+// dependency, so the blocked_by gate alone let it through and the tier
+// re-served it on every tick; because the tier short-circuits with `exit 0`,
+// that also starved the ready tiers below it, and a worker that correctly
+// parked its bead could never reach its own ready queue. The hold dimension is
+// the same defect class as the dependency dimension above, so it shares the
+// same fall-through.
+//
+// Scope (ga-5736js): this is the WORK-SERVING decision only. The assignee-scoped
+// probes that answer "does a session still need to exist" —
+// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
+// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
+// assignment still keeps its owner visible to demand and recovery accounting.
+//
 // Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
 // degrades to the stock behavior of serving the candidate unchanged, never to
 // dropping it, so a malformed or log-prefixed bd stdout can never disable
-// crash recovery.
+// crash recovery. The hold count fails open the same way.
 func inProgressBlockedByEnrichmentScript(shellVar string) string {
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
@@ -256,7 +402,9 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 		`[ -z "$bb" ] && bb="[]"; ` +
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
 		`[ -z "$nblocked" ] && nblocked=0; ` +
-		`if [ "$nblocked" = "0" ]; then ` +
+		`nheld=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
+		`[ -z "$nheld" ] && nheld=0; ` +
+		`if [ "$nblocked" = "0" ] && [ "$nheld" = "0" ]; then ` +
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
 		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
@@ -264,21 +412,31 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 		`fi; `
 }
 
-func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
+// assignedReadyTierCommand is the assigned-ready read for one identity: the
+// pre-assigned tier, and the tier a graph step assigned to this worker arrives
+// on. It is one of the four ready reads the federation swap covers.
+func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
+	fed := topo.FederatedReady
+	return `r=$(` + readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
+		` --assignee="$` + shellVar + `" --json --limit=1` + readyReaderStderrSink(fed) + `)` +
+		readyReaderFailurePropagation(fed) + `; `
+}
+
+func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		assignedReadyTierCommand("id", topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedReadyProbeScript("id", includeEphemeralReady) +
+		ephemeralAssignedReadyProbeScript("id", topo) +
 		`done; `
 }
 
-func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) +
-		legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady)
+func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
+	return legacyControlAssignedInProgressWorkQueryScript(topo) +
+		legacyControlAssignedReadyWorkQueryScript(topo)
 }
 
-func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
+func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
@@ -288,33 +446,57 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript("r") +
 		`fi; ` +
-		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
+		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +
 		`done; `
 }
 
-func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
+func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$cand" --json --limit=1 2>/dev/null); ` +
+		assignedReadyTierCommand("cand", topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		ephemeralAssignedReadyProbeScript("cand", includeEphemeralReady) +
+		ephemeralAssignedReadyProbeScript("cand", topo) +
 		`done; ` +
 		`done; `
 }
 
-func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
-	_ = includeEphemeralReady
+// ephemeralAssignedInProgressProbeScript is the ephemeral-store sibling of the
+// `bd list --status in_progress` crash-recovery query, in the same tier-1 slot.
+// It excludes candidates parked on a canonical dispatch hold
+// (beadmeta.DispatchHoldLabels) inside its own jq selection, the equivalent
+// fall-through to the bd-list tier's nheld serve gate (gas-kg6, #5114 review):
+// without it a held ephemeral bead exited the script as the sole candidate, the
+// Go-side filter then stripped it, and the hook reported no_work while ready
+// work sat unqueried below — the same starvation, wearing a drain label.
+// Filtering before the `.[:1]` truncation also lets a second, unheld
+// in_progress candidate be served instead of being shadowed by a held first.
+//
+// Failure mode differs from the bd-list tier's fail-open serve, deliberately:
+// this probe's jq consumes `bd query` stdout directly, so unparseable output
+// yields an empty candidate and the probe falls through — it never serves raw
+// stdout, with or without the hold filter. The hold-transparent existence
+// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
+	_ = topo
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
-func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {
-	if includeEphemeralReady {
+// ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
+// `bd query` because there is no federated form of it and it needs none: a
+// relocated class store has no bead-policy layer, so an orchestration wisp lands
+// there as a DURABLE row that the plain federated ready read already returns
+// (see splitEnv.mintWispWith). The ephemeral tier only exists where the policy
+// front door put the wisp somewhere a plain read cannot see it, which is the
+// single-store city.
+func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
+	if topo.includeEphemeralReady() {
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
@@ -330,16 +512,16 @@ func poolDemandOriginGateScript() string {
 		`esac; `
 }
 
-func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady)
+func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
+	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(includeEphemeralReady, len(targets)), "--"}
+func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -363,10 +545,12 @@ type querySpec struct {
 	// override returns the user-supplied command that replaces the
 	// default entirely, or "" when the default applies.
 	override func(*Agent) string
-	// build returns the default command. includeEphemeralReady carries
-	// beads.UsesBD105ReadySemantics(); the onDeath/onBoot builders ignore
-	// it today and MUST keep ignoring it (S04b invariant I6).
-	build func(a *Agent, includeEphemeralReady bool) string
+	// build returns the default command for a city topology. The onDeath/onBoot
+	// builders ignore BOTH of the topology's fields today and MUST keep ignoring
+	// them: the ephemeral flag by S04b invariant I6, and FederatedReady because
+	// they are WRITE hooks (`bd list` + `bd update`), which the federated READER
+	// has no form of — routing those is ga-601v2.
+	build func(a *Agent, topo QueryTopology) string
 }
 
 // queryTable maps every query kind to its override field and default
@@ -384,18 +568,12 @@ var queryTable = map[queryKind]querySpec{
 // effectiveQuery is the single resolver behind every Effective*Query
 // accessor: the kind's user override verbatim if set, else the kind's
 // default builder.
-func (a *Agent) effectiveQuery(kind queryKind, includeEphemeralReady bool) string {
+func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	spec := queryTable[kind]
 	if o := spec.override(a); o != "" {
 		return o
 	}
-	return spec.build(a, includeEphemeralReady)
-}
-
-// effectiveQueryForBeads resolves a kind using the bd compatibility
-// semantics configured for the city.
-func (a *Agent) effectiveQueryForBeads(kind queryKind, beads BeadsConfig) string {
-	return a.effectiveQuery(kind, beads.UsesBD105ReadySemantics())
+	return spec.build(a, topo)
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -435,29 +613,32 @@ func (a *Agent) effectiveQueryForBeads(kind queryKind, beads BeadsConfig) string
 // EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
-	return a.effectiveQuery(queryWork, false)
+	return a.effectiveQuery(queryWork, QueryTopology{})
 }
 
-// EffectiveWorkQueryForBeads returns the default work query using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryWork, beads)
+// EffectiveWorkQueryFor returns the default work query built for a city
+// topology: the configured bd semantics, and — on a city that serves a
+// coordination class from a store `bd` in the work directory cannot reach — the
+// federated ready reader in place of `bd ready`. A zero QueryTopology is the
+// single-store city, and its command is byte-for-byte the one already deployed.
+func (a *Agent) EffectiveWorkQueryFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryWork, topo)
 }
 
-func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
+func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
+		script := standardAssignedWorkQueryScript(topo) +
 			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+			poolDemandFirstRowFunctionScript(topo) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
+	script := legacyControlAssignedWorkQueryScript(topo) +
 		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
+		poolDemandFirstRowFunctionScript(topo) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -469,21 +650,24 @@ func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
 // A custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedInProgressQuery() string {
-	return a.effectiveQuery(queryAssignedInProgress, false)
+	return a.effectiveQuery(queryAssignedInProgress, QueryTopology{})
 }
 
-// EffectiveAssignedInProgressQueryForBeads returns the assigned-in-progress
-// query using the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveAssignedInProgressQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryAssignedInProgress, beads)
+// EffectiveAssignedInProgressQueryFor returns the assigned-in-progress query
+// built for a city topology. It is topology-BLIND today: the crash-recovery tier
+// reads `bd list`, not the ready set — see
+// standardAssignedInProgressWorkQueryScript for why federating it is ga-601v2's
+// slice and not this one's.
+func (a *Agent) EffectiveAssignedInProgressQueryFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryAssignedInProgress, topo)
 }
 
-func buildAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) string {
+func buildAssignedInProgressQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
 }
 
 // EffectiveAssignedReadyQuery returns the assigned-ready-only command for
@@ -491,43 +675,43 @@ func buildAssignedInProgressQuery(a *Agent, includeEphemeralReady bool) string {
 // custom WorkQuery is treated as the caller-owned full discovery contract, so
 // split-tier prompts may run that same custom command in each query slot.
 func (a *Agent) EffectiveAssignedReadyQuery() string {
-	return a.effectiveQuery(queryAssignedReady, false)
+	return a.effectiveQuery(queryAssignedReady, QueryTopology{})
 }
 
-// EffectiveAssignedReadyQueryForBeads returns the assigned-ready-only query
-// using the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveAssignedReadyQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryAssignedReady, beads)
+// EffectiveAssignedReadyQueryFor returns the assigned-ready-only query built for
+// a city topology.
+func (a *Agent) EffectiveAssignedReadyQueryFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryAssignedReady, topo)
 }
 
-func buildAssignedReadyQuery(a *Agent, includeEphemeralReady bool) string {
+func buildAssignedReadyQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
 }
 
 // EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
 // templates that spell out claim-first startup in separate tiers. It is the
 // prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
 func (a *Agent) EffectiveRoutedPoolQuery() string {
-	return a.effectiveQuery(queryRoutedPool, false)
+	return a.effectiveQuery(queryRoutedPool, QueryTopology{})
 }
 
-// EffectiveRoutedPoolQueryForBeads returns the routed-pool-only command using
-// the bd compatibility semantics configured for the city.
-func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryRoutedPool, beads)
+// EffectiveRoutedPoolQueryFor returns the routed-pool-only command built for a
+// city topology.
+func (a *Agent) EffectiveRoutedPoolQueryFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryRoutedPool, topo)
 }
 
-func buildRoutedPoolQuery(a *Agent, includeEphemeralReady bool) string {
+func buildRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(includeEphemeralReady, target)
+		return routedPoolWorkQueryCommand(topo, target)
 	}
-	return routedPoolWorkQueryCommand(includeEphemeralReady, target, legacyTarget)
+	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -584,18 +768,54 @@ func (a *Agent) DefaultSlingQuery() string {
 // correspondence" and the protocol-mismatch class regression addressed
 // by PR #1516.
 func (a *Agent) EffectivePoolDemandQuery() string {
-	return a.effectiveQuery(queryPoolDemand, false)
+	return a.effectiveQuery(queryPoolDemand, QueryTopology{})
 }
 
-// EffectivePoolDemandQueryForBeads returns the count-form demand query using
-// the bd compatibility semantics configured for the city.
-func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryPoolDemand, beads)
+// EffectivePoolDemandQueryFor returns the count-form demand query built for a
+// city topology. It reads through the same reader as EffectiveWorkQueryFor's
+// routed tier — diverging the two is the protocol-mismatch class the
+// "scale_check ↔ work_query correspondence" note names.
+func (a *Agent) EffectivePoolDemandQueryFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryPoolDemand, topo)
 }
 
-func buildPoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
+func buildPoolDemandQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, includeEphemeralReady)
+	return poolDemandCountShell(target, topo)
+}
+
+// Query-override names as they are spelled in pack.toml / city.toml, for
+// diagnostics that have to tell an operator WHICH key is the problem.
+const (
+	workQueryOverrideKey  = "work_query"
+	scaleCheckOverrideKey = "scale_check"
+)
+
+// FederationBlindOverrides names the user-supplied query overrides that will not
+// see a relocated coordination class on this topology.
+//
+// A custom work_query or scale_check is returned VERBATIM — that is the
+// contract, and rewriting an operator's shell would be substring surgery on a
+// script this package did not write. But on a split city a verbatim `bd ready`
+// reads one store, so the operator's own command is silently blind to the graph
+// class while the generated one is not. Silence is the defect: the whole point
+// of the federated reader is that a short array cannot be told apart from "no
+// work", and an override reintroduces exactly that, invisibly.
+//
+// So the fact is returned instead of guessed at. Callers that hold a real city
+// print it; a single-store city returns nil and nothing is printed anywhere.
+func (a *Agent) FederationBlindOverrides(topo QueryTopology) []string {
+	if !topo.FederatedReady {
+		return nil
+	}
+	var keys []string
+	if strings.TrimSpace(a.WorkQuery) != "" {
+		keys = append(keys, workQueryOverrideKey)
+	}
+	if strings.TrimSpace(a.ScaleCheck) != "" {
+		keys = append(keys, scaleCheckOverrideKey)
+	}
+	return keys
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.
@@ -619,21 +839,22 @@ const RecoveryHookMarker = "gc-recovery:"
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
-	return a.effectiveQuery(queryOnDeath, false)
+	return a.effectiveQuery(queryOnDeath, QueryTopology{})
 }
 
-// EffectiveOnDeathForBeads returns the default on_death command using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryOnDeath, beads)
+// EffectiveOnDeathFor returns the default on_death command for a city topology.
+// It is topology-blind: on_death is a write hook, and the federated reader has
+// no write form (ga-601v2).
+func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryOnDeath, topo)
 }
 
-func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
+func buildOnDeath(a *Agent, topo QueryTopology) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
-	_ = includeEphemeralInProgress
+	_ = topo
 	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	// Reset both assignee and status: clearing assignee alone leaves the bead
@@ -661,21 +882,22 @@ func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 // If OnBoot is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
-	return a.effectiveQuery(queryOnBoot, false)
+	return a.effectiveQuery(queryOnBoot, QueryTopology{})
 }
 
-// EffectiveOnBootForBeads returns the default on_boot command using the bd
-// compatibility semantics configured for the city.
-func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
-	return a.effectiveQueryForBeads(queryOnBoot, beads)
+// EffectiveOnBootFor returns the default on_boot command for a city topology.
+// It is topology-blind: on_boot is a write hook, and the federated reader has no
+// write form (ga-601v2).
+func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
+	return a.effectiveQuery(queryOnBoot, topo)
 }
 
-func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
+func buildOnBoot(a *Agent, topo QueryTopology) string {
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
-	_ = includeEphemeralInProgress
+	_ = topo
 	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +

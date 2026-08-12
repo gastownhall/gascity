@@ -60,6 +60,24 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	}
 }
 
+// TestGlobalBoolFlagsIsComplete is the same pin for the valueless half. A
+// caller that must distinguish a KNOWN valueless flag from an unrecognized one
+// — because the unrecognized case means the verb is no longer decidable and the
+// guard has to fall back — reads a flag missing from this table as unknown, and
+// silently takes the ambiguous branch for an ordinary bd invocation.
+//
+// Sourced from `bd --help` (bd 1.1.0), the same pass as the value-flag table.
+func TestGlobalBoolFlagsIsComplete(t *testing.T) {
+	want := map[string]bool{
+		"--global": true, "--ignore-schema-skew": true, "--json": true,
+		"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
+		"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+	}
+	if got := GlobalBoolFlags(); !reflect.DeepEqual(got, want) {
+		t.Errorf("GlobalBoolFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
+	}
+}
+
 // TestRefusalFiresBehindAGlobalFlag composes the two halves of the guard the way
 // the caller does — locate the verb, then judge its args — and pins that a
 // global value-flag before the verb does not disarm it.

@@ -399,8 +399,11 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return "", fmt.Errorf("create pinned bd directory: %w", err)
 	}
+	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
+	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
+	// which a CGO_ENABLED=0 binary refuses at runtime.
 	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+binDir)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}

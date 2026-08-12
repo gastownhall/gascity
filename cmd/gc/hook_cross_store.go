@@ -14,12 +14,100 @@ import (
 type hookStore struct {
 	dir string
 	env []string
+	// command overrides the shared work query for this store. Empty on every
+	// store of a single-store city, where one command is run against each store
+	// in turn; set only by scopeFederatedHookStores, which pins the city-wide
+	// reader to the primary and leaves the extras on the single-store command.
+	command string
+}
+
+// hookStoreCommand returns the work query st actually runs: its own command when
+// it carries one, else the caller's shared command.
+func hookStoreCommand(st hookStore, command string) string {
+	if own := strings.TrimSpace(st.command); own != "" {
+		return own
+	}
+	return command
+}
+
+// scopeFederatedHookStores pins a city-wide work query to ONE store.
+//
+// The federated reader (`gc ready`) already covers the city store, every bound
+// rig store and the relocated graph leg in a single call, so running it once per
+// hookStore re-asks the same question R+1 times and re-opens every leg each
+// time — the store loop exists because `bd ready` reads exactly one store, and
+// that premise no longer holds for the tiers that were swapped.
+//
+// The extras are not dropped: the crash-recovery (`bd list --status
+// in_progress`) and ephemeral (`bd query`) tiers are still per-store reads the
+// city-wide reader does not answer, so collapsing the loop outright would
+// silently strip rig coverage from crash recovery. Instead every store after the
+// primary keeps the SINGLE-STORE command it ran before the swap, which is
+// exactly its previous cost and previous coverage; only the city-wide read is
+// deduplicated.
+//
+// federatedCommand and singleStoreCommand are the two forms of the same agent's
+// query. They are equal for a custom (verbatim) work_query and on a city that
+// relocates nothing, and the call is then a no-op returning stores unchanged —
+// which is what keeps a single-store city byte-identical.
+func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreCommand string) []hookStore {
+	singleStoreCommand = strings.TrimSpace(singleStoreCommand)
+	if len(stores) < 2 || singleStoreCommand == "" || singleStoreCommand == strings.TrimSpace(federatedCommand) {
+		return stores
+	}
+	scoped := make([]hookStore, len(stores))
+	copy(scoped, stores)
+	for i := 1; i < len(scoped); i++ {
+		scoped[i].command = singleStoreCommand
+	}
+	return scoped
 }
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
 // Injectable so the cross-store selection and claim paths can be tested without
 // a real bd subprocess.
 type hookStoreRunner func(command, dir string, env []string) (string, error)
+
+// hookWorkQueryStores is the whole fan-out `gc hook` queries, in probe order.
+//
+// A cross-store-eligible (city-scoped) agent federates its work query across all
+// stores — its own first, then every rig store — matched on its own identity
+// (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead queries its own
+// <rig> store FIRST: its routed work lives there, but its city-scoped
+// work-query env does not reach it, so without this the hook returns empty and
+// the spawned session exits with nothing to do. The rig store goes first (as the
+// primary entry, not a best-effort federated extra) so a rig-store work-query
+// timeout still surfaces to the reconciler via bestStoreWithWork's
+// emit-on-timeout contract — the agent's (work-less) city-scoped env stays as a
+// best-effort secondary. This extends the #2877 city-scoped cross-store delivery
+// to rig-scoped agents.
+//
+// Every leg is a bd WORKSPACE: a directory plus the env that points bd at it.
+// That is the shape of the I5 known gap — a relocated coordination class is not
+// a bd workspace, so no leg of this list can reach the binding on its own. The
+// federated `gc ready` reader (ga-bvdha) now runs AS the primary leg's command
+// and covers the binding in-process, so the hook does see class ids; what it
+// still cannot do is claim one, because the claim is a bd subprocess rooted in
+// this leg's workspace. This function is the seam that pins it
+// (conformanceClaimRouting); closing the gap makes the claim stop being a bd
+// subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
+func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
+	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	if agentIsCrossStoreEligible(a) {
+		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
+	}
+	rig := rigScopedHookRig(cfg, agentForQuery)
+	if rig == "" {
+		return stores
+	}
+	if rigStores := appendOneRigHookStore(nil, cityPath, cfg, a, rig, identityOverrides); len(rigStores) > 0 {
+		stores = append(rigStores, stores...)
+	}
+	// A rig-backed agent's own env above is ALSO rig-scoped, so without this no
+	// entry reaches the CITY store and root-only beads assigned to the agent
+	// stay invisible. Best-effort tertiary; see appendCityHookStore.
+	return appendCityHookStore(stores, cityPath, cfg, a, identityOverrides)
+}
 
 // hookIdentityEnvKeys are the identity overrides that must stay constant across
 // every federated store attempt — the query always matches the agent's OWN
@@ -203,7 +291,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 
 	now := time.Now()
 	for _, st := range stores {
-		out, err := run(command, st.dir, st.env)
+		out, err := run(hookStoreCommand(st, command), st.dir, st.env)
 		if err != nil {
 			if sameHookStore(st, primary) {
 				ownStoreOut, ownStoreErr = out, err
@@ -338,7 +426,7 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // best-effort and falls through to re-selection, mirroring bestStoreWithWork's
 // emit-on-timeout contract so a flaky rig store can't wedge the claim.
 func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
-	selectedOut, err := run(command, selected.dir, selected.env)
+	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
 	if err != nil {
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err

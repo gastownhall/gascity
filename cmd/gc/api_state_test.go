@@ -771,7 +771,7 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 		t.Fatal("precondition: matching metadata should allow store reuse")
 	}
 
-	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	nextProvider := runtime.NewFake()
 	cs.updateFromRuntime(current, nextProvider, "")
 
@@ -2142,6 +2142,55 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	}
 	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
 		t.Fatalf("reconciled completed event = %#v", got[0])
+	}
+}
+
+func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	root, err := rigStore.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := rigStore.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rigStore.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	cs := &controllerState{
+		cfg:           &config.City{Rigs: []config.Rig{{Name: "gascity"}}},
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"gascity": rigStore},
+		eventProv:     ep,
+	}
+	cs.reconcileExecutionCompletions()
+
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after rig reconciliation = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("reconciled completed event = %#v", got)
+	}
+
+	cs.reconcileExecutionCompletions()
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after repeated rig reconciliation = %#v, want exact-fact no-op", completed)
 	}
 }
 

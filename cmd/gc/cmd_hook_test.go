@@ -884,6 +884,103 @@ func TestDoHookClaimRejectsNonJSONWorkQueryOutput(t *testing.T) {
 	}
 }
 
+func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
+	var claimedID string
+	runner := func(string, string) (string, error) {
+		// First element is undecodable — "status" is a number where beads.Bead
+		// declares a string — so it is skipped; second is plain, claimable pool
+		// work and must still be claimed.
+		//
+		// Deliberately NOT a nested-object metadata value: beads.Bead.Metadata
+		// is a StringMap that coerces those to strings during decode, so such a
+		// bead decodes fine and is claimed normally rather than skipped (the
+		// stronger outcome). The skip path this test guards is for type errors
+		// outside metadata, which that coercion does not repair.
+		return `[
+			{"id":"poison-1","status":5,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"good-1","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(malformed+good) = %d, want 0 (poison skipped, good claimed); stderr=%s", code, stderr.String())
+	}
+	if claimedID != "good-1" {
+		t.Fatalf("claimed ID = %q, want good-1 (the well-formed bead)", claimedID)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "good-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	// The skip must be observable (logged) and name the offending bead — a
+	// silently-dropped bead would mask the upstream filer bug.
+	if !strings.Contains(stderr.String(), "poison-1") {
+		t.Fatalf("stderr = %q, want it to log the skipped malformed bead id poison-1", stderr.String())
+	}
+}
+
+func TestDecodeHookClaimBeadsSkipsUndecodableBead(t *testing.T) {
+	// Middle element is undecodable: "status" is a number where beads.Bead
+	// declares a string. The well-formed beads on either side must still
+	// decode, so one bad bead cannot halt dispatch city-wide.
+	//
+	// Deliberately NOT a non-string *metadata* value: beads.Bead.Metadata is a
+	// StringMap that coerces those to strings during decode, so such a bead
+	// decodes successfully and is never skipped — pinned by
+	// TestDecodeHookClaimBeadsToleratesNonStringMetadata and
+	// TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch. The per-element
+	// split this test covers is what protects the batch from type errors
+	// OUTSIDE metadata, which that coercion does not repair.
+	output := `[
+		{"id":"ok-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+		{"id":"bad-1","status":5},
+		{"id":"ok-2","status":"open"}
+	]`
+	candidates, skipped, err := decodeHookClaimBeads(output)
+	if err != nil {
+		t.Fatalf("decodeHookClaimBeads returned error %v, want nil (one malformed bead must be skipped, not fatal)", err)
+	}
+	gotIDs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if got, want := strings.Join(gotIDs, ","), "ok-1,ok-2"; got != want {
+		t.Fatalf("decoded candidate ids = %q, want %q", got, want)
+	}
+	if len(skipped) != 1 || skipped[0].ID != "bad-1" {
+		t.Fatalf("skipped = %+v, want exactly one skip naming bad-1", skipped)
+	}
+	if skipped[0].Err == nil {
+		t.Fatal("skipped[0].Err = nil, want the underlying decode error for diagnostics")
+	}
+}
+
+func TestDecodeHookClaimBeadsNonJSONStillErrors(t *testing.T) {
+	// Plain command text (not JSON at all) must remain a hard error — the
+	// per-element tolerance only relaxes decoding within a valid JSON array.
+	if _, _, err := decodeHookClaimBeads("hw-1  open  Fix the bug"); err == nil {
+		t.Fatal("decodeHookClaimBeads(text) = nil error, want a non-JSON error")
+	}
+}
+
 func TestDoHookClaimCommandErrorKeepsProtocolStdoutEmpty(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")

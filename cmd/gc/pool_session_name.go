@@ -751,48 +751,57 @@ func liveSessionBeadExistsByIdentity(store beads.Store, assignee string) bool {
 	return false
 }
 
+// directSessionBeadIDCandidates returns the bead IDs a work-bead assignee could
+// name, so liveSessionBeadExistsByIdentity can resolve the owning session bead
+// with a direct Get instead of depending on the open-session snapshot or the
+// live gc:session label list.
+//
+// A pool assignee is PoolSessionName(template, beadID) —
+// "<sanitized-template-base>-<beadID>" — and bead IDs contain a "-" themselves
+// ("th-vb20q"), so the ID is not simply the final "-"-delimited segment.
+// Enumerating every suffix that begins just after a "-" covers both the modern
+// form and the legacy "-mc-" form without special-casing either.
+//
+// Extra candidates cannot produce a false "session is live" answer: the caller
+// still requires the resolved bead to be a non-closed session bead whose own
+// assignee identities contain this exact assignee.
 func directSessionBeadIDCandidates(assignee string) []string {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return nil
 	}
 	candidates := []string{assignee}
-	if idx := strings.LastIndex(assignee, "-mc-"); idx >= 0 {
-		candidates = append(candidates, assignee[idx+1:])
+	for i := 0; i < len(assignee); i++ {
+		if assignee[i] != '-' {
+			continue
+		}
+		// A qualified agent name encodes "/" as "--" (agent.SessionNameFor),
+		// so the byte after a "-" can be another "-". Such a suffix is never a
+		// bead ID, and stores that shell out would read it as a flag.
+		suffix := assignee[i+1:]
+		if suffix == "" || suffix[0] == '-' {
+			continue
+		}
+		candidates = append(candidates, suffix)
 	}
 	return candidates
 }
 
-// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
-// before clearing assignee. The expectedStatus must match the snapshot
-// status the caller observed: if the bead has since transitioned (e.g. a
-// concurrent claim moved open→in_progress, or another release moved
-// in_progress→open) the snapshot's release decision is no longer safe.
-// Open status is required for the issue #2793 path — graph.v2 step
-// beads stuck on a dead session's long-form assignee are status=open,
-// not in_progress.
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale before
+// clearing assignee, collapsing a read failure to "not releasable" for callers
+// that have no error channel. Open status is required for the issue #2793 path —
+// graph.v2 step beads stuck on a dead session's long-form assignee are
+// status=open, not in_progress.
+//
+// The check itself lives in liveWorkAssignmentAssigneeMatches (work_assignment.go),
+// shared with the work-release and reassign paths.
 func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
-	id = strings.TrimSpace(id)
-	expectedStatus = strings.TrimSpace(expectedStatus)
-	if store == nil || id == "" || expectedStatus == "" {
-		return false
-	}
-	work, err := store.List(beads.ListQuery{
-		Status:   expectedStatus,
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
+	matches, err := liveWorkAssignmentAssigneeMatches(store, id, expectedStatus, assignee)
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)
 		return false
 	}
-	for _, wb := range work {
-		if wb.ID != id {
-			continue
-		}
-		return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(assignee)
-	}
-	return false
+	return matches
 }
 
 func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, assignee, workStoreRef string, storeRefAware bool) bool {

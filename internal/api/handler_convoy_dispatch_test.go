@@ -647,6 +647,64 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if _, ok := workflowStoreByRef(state, "rig:missing"); ok {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
+
+	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// is the city store, and an orders: ref there would be a second name for a store
+	// the city: ref already resolves.
+	if _, ok := workflowStoreByRef(state, "orders:city"); ok {
+		t.Fatal("workflowStoreByRef(orders:city) on a single-store city = true, want false")
+	}
+}
+
+// TestWorkflowStoreByRefResolvesTheOrdersBinding covers the class ref the order
+// history list mints. A ref one endpoint publishes and its sibling cannot resolve
+// is a 404 on a bead that exists.
+func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.ordersBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "orders:bright-lights")
+	if !ok {
+		t.Fatal("workflowStoreByRef(orders:bright-lights) = false, want true")
+	}
+	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
+		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
+	}
+	if info.store != beads.Store(binding) {
+		t.Fatal("orders store mismatch")
+	}
+
+	if _, ok := workflowStoreByRef(state, "orders:other-city"); ok {
+		t.Fatal("workflowStoreByRef(orders:other-city) = true, want false")
+	}
+}
+
+// TestWorkflowStorePathSkipsClassRefs pins that a class ref — one naming a
+// binding rather than a scope root — yields no rig/city path to run SQL against.
+// Answering the city path for the orders binding would point the workflow SQL
+// fast path at the wrong database.
+func TestWorkflowStorePathSkipsClassRefs(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+
+	for _, ref := range []string{"graph:bright-lights", "orders:bright-lights"} {
+		info := workflowStoreInfo{
+			ref:       ref,
+			scopeKind: beadmeta.ScopeKindCity,
+			scopeRef:  "bright-lights",
+			store:     beads.NewMemStore(),
+		}
+		if path, ok := workflowStorePath(state, info); ok {
+			t.Fatalf("workflowStorePath(%q) = %q, true; want no path", ref, path)
+		}
+	}
 }
 
 func TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap(t *testing.T) {

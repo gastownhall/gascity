@@ -1402,6 +1402,27 @@ func TestRegression_PoolReadyOpenWorkVetoesIdleSleep(t *testing.T) {
 	assertReason(t, result, "polecat-mc-p1", "assigned-work")
 }
 
+func TestRegression_ClaimedInProgressWorkVetoesIdleSleep(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: idleTimeout}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-(idleTimeout + time.Minute)),
+			},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "hw-1", Assignee: "mc-p1", Status: "in_progress", Blocked: true,
+		}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		RunningSessions:  map[string]bool{"polecat-mc-p1": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-p1")
+	assertReason(t, result, "polecat-mc-p1", "scaled:demand")
+}
+
 func TestRegression_OpenAssignedWorkWithoutReadySignalDoesNotWake(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},

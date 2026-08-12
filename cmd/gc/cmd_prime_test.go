@@ -75,9 +75,9 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 
 func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
-	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+	ctx := buildPrimeContextFor(cityPath, "", &config.Agent{
 		Name: "worker",
-	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+	}, nil, config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}, nil)
 
 	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
 		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)

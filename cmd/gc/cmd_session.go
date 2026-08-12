@@ -1845,11 +1845,26 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// Each Update fires the bd on_update hook, which emits a bead.updated
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
+	//
+	// The scan leads with the WORK store here, unlike the reconciler's, which
+	// leads with the sessions-class store. On a split city that difference is
+	// the whole release tier for relocated work: claim-time class routing
+	// (claim_class_route.go) can leave an in_progress assignee in the graph
+	// binding, and a work-led scan cannot see it. So the binding is handed in as
+	// a class leg — the same graphClassBinding identity the claim routes on, from
+	// the same one-shot funnel — and dropped again on a city that relocates
+	// nothing.
 	var rigStores map[string]beads.Store
+	var classStores []beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	if cityErr == nil {
+		if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
+			classStores = append(classStores, binding)
+		}
+	}
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr, classStores...)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

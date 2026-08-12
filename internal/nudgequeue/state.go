@@ -53,6 +53,15 @@ type State struct {
 	Pending  []Item `json:"pending,omitempty"`
 	InFlight []Item `json:"in_flight,omitempty"`
 	Dead     []Item `json:"dead,omitempty"`
+
+	// DispatchSkips counts, by reason, how many times the supervisor
+	// dispatch tick's per-session loop has silently skipped a target
+	// without delivering (see dispatchAllQueuedNudges in cmd/gc). It is a
+	// running total since this state file was first created; there is no
+	// reset/rotation. Persisted here (rather than kept in-process) so it
+	// stays visible to a `gc nudge status` invocation running in a
+	// different process than the supervisor that incremented it.
+	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
 }
 
 // SortState orders items deterministically inside each queue bucket.

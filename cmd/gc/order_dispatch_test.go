@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
-	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
@@ -270,7 +269,7 @@ func (s strictCloseReasonStore) CloseAll(ids []string, metadata map[string]strin
 }
 
 func TestOrderDispatcherNil(t *testing.T) {
-	ad := buildOrderDispatcher(t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, t.TempDir(), &config.City{}, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher for empty orders")
 	}
@@ -280,7 +279,7 @@ func TestBuildOrderDispatcherNoOrders(t *testing.T) {
 	// City with formula layers that exist but contain no orders.
 	dir := t.TempDir()
 	cfg := &config.City{}
-	ad := buildOrderDispatcher(dir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, dir, cfg, events.Discard, &bytes.Buffer{})
 	if ad != nil {
 		t.Error("expected nil dispatcher when no orders exist")
 	}
@@ -1997,7 +1996,6 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 }
 
 func TestOrderDispatchExecEnvFailureUsesEnvFailureLabel(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	store := beads.NewMemStore()
@@ -2012,7 +2010,7 @@ func TestOrderDispatchExecEnvFailureUsesEnvFailureLabel(t *testing.T) {
 	}
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -2277,11 +2275,10 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 }
 
 func TestOrderDispatchConditionTriggerEnvFailureRecordsOrderFailure(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -2349,11 +2346,10 @@ dolt.auto-start: false
 }
 
 func TestOrderDispatchTriggerEnvFailuresRespectMaxDispatchesPerTick(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4374,6 +4370,7 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{rigStore, legacyStore},
+		nil,
 		stale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		orderFilterForTest("rig-digest:rig:frontend"),
@@ -4438,6 +4435,7 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 
 	result, err := sweepStaleOrderTrackingAcrossStores(
 		[]beads.Store{failingStore, cityStore, rigStore},
+		nil,
 		cityStale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		nil,
@@ -6538,7 +6536,7 @@ pool = "polecat"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6819,7 +6817,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6888,7 +6886,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -6970,7 +6968,7 @@ pool = "dog"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7059,7 +7057,7 @@ pool = "worker"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7334,7 +7332,7 @@ pool = "worker"
 		},
 	}
 
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &bytes.Buffer{})
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &bytes.Buffer{})
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -7406,7 +7404,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7473,7 +7471,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7549,7 +7547,7 @@ interval = "2m"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
 	}
@@ -7603,7 +7601,7 @@ interval = "30s"
 	}
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("expected non-nil dispatcher (beads-health should still be found); stderr: %s", stderr.String())
 	}
@@ -9395,12 +9393,11 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 	}
 }
 
-func TestOrderExecEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestOrderExecEnvWithError_RefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "")
+	writeUnregisteredBackendMetadata(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -9412,21 +9409,18 @@ dolt.auto-start: false
 	a := orders.Order{Name: "pg-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
 	_, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
-	if err == nil {
-		t.Fatal("orderExecEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
-func TestOrderExecEnvWithError_PostgresCityClearsDoltOverlay(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+// TestOrderExecEnvWithError_BoundCityClearsDoltOverlay proves an exec order in
+// a city gc does not serve inherits no managed-Dolt overlay, even when a
+// reachable managed Dolt runtime is published beside it.
+func TestOrderExecEnvWithError_BoundCityClearsDoltOverlay(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
-	writePGScopeFixture(t, cityDir, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -9445,12 +9439,12 @@ dolt.auto-start: false
 	}
 	got := listToMap(env)
 
-	assertPostgresOrderEnv(t, got, "citypw")
 	assertNoDoltOrderEnv(t, got)
 }
 
-func TestOrderTriggerOptionsForTarget_PostgresRigClearsDoltOverlay(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+// TestOrderTriggerOptionsForTarget_BoundRigClearsDoltOverlay is the condition-
+// trigger half of the same guarantee, for a rig bound under a managed city.
+func TestOrderTriggerOptionsForTarget_BoundRigClearsDoltOverlay(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -9468,7 +9462,7 @@ dolt.auto-start: false
 	_ = writeReachableManagedDoltState(t, cityDir)
 
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "rigpw")
+	writeOpaqueBindingScopeFixture(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -9490,7 +9484,6 @@ dolt.auto-start: false
 	if opts.ConditionDir != rigDir {
 		t.Fatalf("ConditionDir = %q, want %q", opts.ConditionDir, rigDir)
 	}
-	assertPostgresOrderEnv(t, got, "rigpw")
 	assertNoDoltOrderEnv(t, got)
 }
 
@@ -9662,28 +9655,11 @@ func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
 	}
 }
 
-func assertPostgresOrderEnv(t *testing.T, env map[string]string, wantPassword string) {
-	t.Helper()
-	want := map[string]string{
-		"GC_POSTGRES_PASSWORD":    wantPassword,
-		"BEADS_POSTGRES_PASSWORD": wantPassword,
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range want {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
-		}
-	}
-}
-
 func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	for _, key := range projectedDoltEnvKeys {
 		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+			t.Errorf("env[%q] = %q, want empty/absent for an order gc does not serve", key, value)
 		}
 	}
 	for _, key := range []string{
@@ -9696,7 +9672,7 @@ func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 		"GC_DOLT_CONFIG_FILE",
 	} {
 		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+			t.Errorf("env[%q] = %q, want empty/absent for an order gc does not serve", key, value)
 		}
 	}
 }

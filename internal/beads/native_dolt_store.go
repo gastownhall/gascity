@@ -149,6 +149,71 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 	}
 }
 
+// beadsEnvPrefix is the namespace the upstream library configures itself from.
+const beadsEnvPrefix = "BEADS_"
+
+// nativeDoltWithheldEnvMu serializes whole-namespace withholding.
+//
+// It is a second lock rather than the projection lock above because the two
+// cover different sets and nest: a withheld open still runs the scoped
+// projection inside itself, and one mutex would deadlock on the second take.
+// Taking them only in this order — withhold, then project — is what keeps that
+// nesting acyclic.
+var nativeDoltWithheldEnvMu sync.Mutex
+
+// withWithheldBeadsEnv unsets every ambient BEADS_-prefixed variable and
+// returns the restore.
+//
+// It is prefix-based rather than a key list on purpose. The scoped projection
+// above names the thirteen variables gc itself sets; the library reads many
+// more — a credential command, database and directory overrides, a central
+// config path — and the list grows with the library. A caller that must be
+// sure a workspace is served by its own configuration alone cannot maintain a
+// mirror of somebody else's environment surface, so it withholds the namespace.
+func withWithheldBeadsEnv() (func(), error) {
+	nativeDoltWithheldEnvMu.Lock()
+	type withheld struct{ key, value string }
+	var previous []withheld
+	restore := func() {
+		for _, entry := range previous {
+			_ = os.Setenv(entry.key, entry.value)
+		}
+	}
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, beadsEnvPrefix) {
+			continue
+		}
+		previous = append(previous, withheld{key: key, value: value})
+		if err := os.Unsetenv(key); err != nil {
+			restore()
+			nativeDoltWithheldEnvMu.Unlock()
+			return nil, fmt.Errorf("withholding ambient %s: %w", key, err)
+		}
+	}
+	return func() {
+		restore()
+		nativeDoltWithheldEnvMu.Unlock()
+	}, nil
+}
+
+// OpenNativeDoltStoreAtWithoutAmbientEnv opens a native store at scopeRoot with
+// every ambient BEADS_-prefixed variable withheld for the duration of the open.
+//
+// It is for a caller whose whole contract is that the workspace's own
+// configuration decides how the workspace is served — so an inherited variable
+// naming another database, another directory, or a credential command must not
+// be able to re-point it. Passing an empty scoped environment is not enough:
+// that clears only the variables gc itself projects.
+func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	restore, err := withWithheldBeadsEnv()
+	if err != nil {
+		return nil, err
+	}
+	defer restore()
+	return newNativeDoltStoreAt(ctx, scopeRoot, nil, opts...)
+}
+
 // NativeDoltStore is a Store implementation backed by the upstream beads
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
@@ -652,7 +717,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	if err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
-	if err := validateNativeGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan); err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
@@ -1758,53 +1823,6 @@ func nativeBeadIDPrefix(id string) string {
 		return ""
 	}
 	return normalizeIDPrefix(before)
-}
-
-func validateNativeGraphApplyPlan(plan *GraphApplyPlan) error {
-	if len(plan.Nodes) == 0 {
-		return fmt.Errorf("plan has no nodes")
-	}
-	knownKeys := make(map[string]bool, len(plan.Nodes))
-	for i, node := range plan.Nodes {
-		if strings.TrimSpace(node.Key) == "" {
-			return fmt.Errorf("node %d has empty key", i)
-		}
-		if knownKeys[node.Key] {
-			return fmt.Errorf("duplicate node key %q", node.Key)
-		}
-		knownKeys[node.Key] = true
-		if strings.TrimSpace(node.Title) == "" {
-			return fmt.Errorf("node %q has empty title", node.Key)
-		}
-	}
-	for _, node := range plan.Nodes {
-		for metaKey, refKey := range node.MetadataRefs {
-			if !knownKeys[refKey] {
-				return fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
-			}
-		}
-		if node.ParentKey != "" && !knownKeys[node.ParentKey] {
-			return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
-		}
-	}
-	for i, edge := range plan.Edges {
-		if edge.FromKey != "" && !knownKeys[edge.FromKey] {
-			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
-		}
-		if edge.ToKey != "" && !knownKeys[edge.ToKey] {
-			return fmt.Errorf("edge %d: to key %q not found in plan", i, edge.ToKey)
-		}
-		if edge.FromKey == "" && edge.FromID == "" {
-			return fmt.Errorf("edge %d: must specify from_key or from_id", i)
-		}
-		if edge.ToKey == "" && edge.ToID == "" {
-			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
-		}
-		if depType := nativeGraphApplyDependencyType(edge.Type); !depType.IsValid() {
-			return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
-		}
-	}
-	return nil
 }
 
 func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {

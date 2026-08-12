@@ -126,7 +126,7 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 	if md.IsDefined("formulas", "dir") {
 		return fmt.Errorf("[formulas].dir is no longer supported; use the well-known formulas/ directory")
 	}
-	return nil
+	return validateStorageAuthoringSurface(md)
 }
 
 func validatePackAuthoringSurface(md toml.MetaData, source string) error {
