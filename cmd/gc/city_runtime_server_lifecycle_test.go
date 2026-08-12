@@ -192,10 +192,26 @@ type forceLifecycleProvider struct {
 	*gatedStartProvider
 	evMu   sync.Mutex
 	events []string
+
+	workerStarted chan struct{}
+	startedOnce   sync.Once
 }
 
 func newForceLifecycleProvider() *forceLifecycleProvider {
-	return &forceLifecycleProvider{gatedStartProvider: newGatedStartProvider()}
+	return &forceLifecycleProvider{
+		gatedStartProvider: newGatedStartProvider(),
+		workerStarted:      make(chan struct{}),
+	}
+}
+
+// Start signals workerStarted once the released gated start has actually
+// landed in the fake, so ListRunning can wait on it instead of polling.
+func (p *forceLifecycleProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	err := p.gatedStartProvider.Start(ctx, name, cfg)
+	if err == nil && name == "worker" {
+		p.startedOnce.Do(func() { close(p.workerStarted) })
+	}
+	return err
 }
 
 func (p *forceLifecycleProvider) record(ev string) {
@@ -224,9 +240,9 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
 		p.release("worker")
-		deadline := time.Now().Add(2 * time.Second)
-		for !p.IsRunning("worker") && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
+		select {
+		case <-p.workerStarted:
+		case <-time.After(hangBudget):
 		}
 	}
 	return running, err
