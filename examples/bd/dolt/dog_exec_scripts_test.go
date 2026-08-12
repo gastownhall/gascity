@@ -76,9 +76,11 @@ func TestDogExecScriptsAreBashSyntaxValid(t *testing.T) {
 	root := repoRoot(t)
 	for _, scriptName := range []string{
 		"_notify.sh",
+		"loadavg.sh",
 		"mol-dog-backup.sh",
 		"mol-dog-doctor.sh",
 		"mol-dog-phantom-db.sh",
+		"supervisor_signals.sh",
 	} {
 		t.Run(scriptName, func(t *testing.T) {
 			cmd := exec.Command("bash", "-n", filepath.Join(root, "assets", "scripts", scriptName))
@@ -5041,7 +5043,225 @@ exit 0
 	}
 }
 
+// writeDoctorHealthyDolt installs a fake dolt that answers the doctor's probe
+// queries as a healthy server (reachable, one connection, no user databases)
+// and logs every invocation to queryLogPath. Tests use that log to assert the
+// watchdog's SOFT contract: its load-average and supervisor signals add no dolt
+// query.
+func writeDoctorHealthyDolt(t *testing.T, binDir, queryLogPath string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    ;;
+  *"SELECT @@GLOBAL.max_connections"*)
+    printf '@@GLOBAL.max_connections\n256\n'
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    ;;
+esac
+exit 0
+`, shellQuote(queryLogPath)))
+}
+
+// writeDoctorFakeGCWithTrace installs a fake gc that, like writeDogFakeGC, logs
+// every invocation, and additionally emits traceJSON on stdout for
+// `gc trace show ...` so the doctor's dolt-free supervisor probe has canned
+// input. Every other subcommand stays silent and exits 0.
+func writeDoctorFakeGCWithTrace(t *testing.T, binDir, traceJSON string) string {
+	t.Helper()
+	logPath := filepath.Join(binDir, "gc.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf 'gc %%s\n' "$*" >> %s
+if [ "$1" = "trace" ] && [ "$2" = "show" ]; then
+  cat <<'GCTRACE_EOF'
+%s
+GCTRACE_EOF
+fi
+exit 0
+`, shellQuote(logPath), traceJSON))
+	return logPath
+}
+
+// TestDoctorScriptWarnsOnHighLoadAverage asserts the watchdog raises the
+// [MEDIUM] advisory when the host load average saturates the CPUs — an early,
+// dolt-free signal that the managed server is about to starve — and that
+// measuring it adds no dolt query (the SOFT contract).
+func TestDoctorScriptWarnsOnHighLoadAverage(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+	writeDoctorHealthyDolt(t, binDir, queryLogPath)
+
+	// 64 over 8 cores is 8.0/core, double the 4.0/core threshold, so the load
+	// signal must fire. Latency and connections are healthy, so the advisory is
+	// attributable to load alone.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LOADAVG_1MIN=64", "GC_DOCTOR_CPU_COUNT=8",
+		"GC_DOCTOR_LOADAVG_WARN_PER_CORE=4.0")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok, output:\n%s", out)
+	}
+	if !strings.Contains(out, "load: 64/8c") {
+		t.Fatalf("doctor summary should report load over cores, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
+		t.Fatalf("high load average should raise the [MEDIUM] advisory, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "load avg 1m 8.00/core >= threshold 4.00/core") {
+		t.Fatalf("advisory should quantify the per-core load breach, log:\n%s", gcLog)
+	}
+	// SOFT contract: the load read is local and the supervisor read goes through
+	// gc trace show — neither may reach dolt.
+	queryLog, err := os.ReadFile(queryLogPath)
+	if err != nil {
+		t.Fatalf("read dolt query log: %v", err)
+	}
+	for _, leaked := range []string{"loadavg", "load average", "cycle_input_snapshot", "trace"} {
+		if strings.Contains(string(queryLog), leaked) {
+			t.Fatalf("watchdog queried dolt for a soft signal (%q); it must stay dolt-free, query log:\n%s", leaked, queryLog)
+		}
+	}
+}
+
+// TestDoctorScriptWarnsOnSupervisorScaleCheckPartial asserts a scale-check
+// PARTIAL recorded in the controller's reconcile trace raises the advisory —
+// read via gc trace show, never dolt.
+func TestDoctorScriptWarnsOnSupervisorScaleCheckPartial(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := t.TempDir()
+	traceJSON := `[{"type":"cycle_input_snapshot","fields":{"scale_check_query_partial":true,"store_query_partial":false,"session_query_partial":false}}]`
+	gcLogPath := writeDoctorFakeGCWithTrace(t, binDir, traceJSON)
+	queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+	writeDoctorHealthyDolt(t, binDir, queryLogPath)
+
+	// Force load low so the supervisor scale-check PARTIAL is the sole warn.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LOADAVG_1MIN=0.10", "GC_DOCTOR_CPU_COUNT=8")
+	if !strings.Contains(out, "supervisor: PARTIAL (scalecheck)") {
+		t.Fatalf("doctor summary should mark supervisor scale-check PARTIAL, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
+		t.Fatalf("supervisor scale-check PARTIAL should raise the [MEDIUM] advisory, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "supervisor scale-check query PARTIAL") {
+		t.Fatalf("advisory should name the scale-check PARTIAL condition, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "trace show --since") {
+		t.Fatalf("supervisor signal must be read via gc trace show, log:\n%s", gcLog)
+	}
+	queryLog, err := os.ReadFile(queryLogPath)
+	if err != nil {
+		t.Fatalf("read dolt query log: %v", err)
+	}
+	if strings.Contains(string(queryLog), "cycle_input_snapshot") || strings.Contains(string(queryLog), "trace") {
+		t.Fatalf("supervisor probe must not touch dolt, query log:\n%s", queryLog)
+	}
+}
+
+// TestDoctorScriptWarnsOnSupervisorStorePartial asserts a store-read PARTIAL —
+// the supervisor-side shadow of a tripped "dolt circuit breaker is open" —
+// raises the advisory and is named as circuit-breaker / store instability.
+func TestDoctorScriptWarnsOnSupervisorStorePartial(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := t.TempDir()
+	traceJSON := `[{"type":"cycle_input_snapshot","fields":{"scale_check_query_partial":false,"store_query_partial":true,"session_query_partial":false}}]`
+	gcLogPath := writeDoctorFakeGCWithTrace(t, binDir, traceJSON)
+	queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+	writeDoctorHealthyDolt(t, binDir, queryLogPath)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LOADAVG_1MIN=0.10", "GC_DOCTOR_CPU_COUNT=8")
+	if !strings.Contains(out, "supervisor: PARTIAL (store)") {
+		t.Fatalf("doctor summary should mark supervisor store PARTIAL, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
+		t.Fatalf("supervisor store PARTIAL should raise the [MEDIUM] advisory, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "supervisor store read PARTIAL") {
+		t.Fatalf("advisory should name the store PARTIAL condition, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "circuit breaker") {
+		t.Fatalf("advisory should attribute store PARTIAL to circuit-breaker / store instability, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSendsRecoveredNoteAfterAdvisoryClears asserts the watchdog
+// emits a single [RECOVERED] note on the first healthy tick after a degraded
+// advisory. Reusing cityPath persists the recorded advisory state across ticks.
+func TestDoctorScriptSendsRecoveredNoteAfterAdvisoryClears(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+	writeDoctorHealthyDolt(t, binDir, queryLogPath)
+
+	// Tick 1: high load drives a [MEDIUM] advisory and records the state.
+	out1 := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LOADAVG_1MIN=64", "GC_DOCTOR_CPU_COUNT=8", "GC_DOCTOR_LOADAVG_WARN_PER_CORE=4.0")
+	if !strings.Contains(out1, "load: 64/8c") {
+		t.Fatalf("tick 1 should observe high load, output:\n%s", out1)
+	}
+	// Tick 2: load subsides; the persisted state makes this healthy tick emit
+	// exactly one [RECOVERED] note.
+	out2 := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LOADAVG_1MIN=0.50", "GC_DOCTOR_CPU_COUNT=8", "GC_DOCTOR_LOADAVG_WARN_PER_CORE=4.0")
+	if !strings.Contains(out2, "load: 0.50/8c") {
+		t.Fatalf("tick 2 should observe low load, output:\n%s", out2)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [RECOVERED]") {
+		t.Fatalf("healthy tick after a degraded advisory must send a [RECOVERED] note, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "returned to normal") {
+		t.Fatalf("[RECOVERED] note should state health returned to normal, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "Cleared conditions: load") {
+		t.Fatalf("[RECOVERED] note should name the cleared condition, log:\n%s", gcLog)
+	}
+}
+
 // TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
+
 // server-unreachable path goes through the generic escalation recipient.
 func TestDoctorScriptUnreachableEscalationUsesGenericEscalation(t *testing.T) {
 	cityPath := t.TempDir()
