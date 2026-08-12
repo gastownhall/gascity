@@ -46,6 +46,38 @@ func TestApplyPatchByteIdenticalToSetMetaBatch(t *testing.T) {
 	}
 }
 
+// TestApplyPatchRoutesLastWokeAtToLocalString proves ApplyPatch routes the
+// migrated last_woke_at key to the clone-local SetLocalString instead of the
+// durable SetMetadataBatch (ga-igcny0.1.2.1 Phase B), splitting a mixed patch
+// so the remaining keys still land in exactly one SetMetadataBatch call with
+// last_woke_at excluded.
+func TestApplyPatchRoutesLastWokeAtToLocalString(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	patch := MetadataPatch{"state": "asleep", "last_woke_at": "2026-08-12T00:00:00Z", "sleep_reason": "max-age"}
+	if err := is.ApplyPatch("s-1", patch); err != nil {
+		t.Fatalf("ApplyPatch: %v", err)
+	}
+
+	batches := rec.CallsForOp("SetMetadataBatch")
+	if len(batches) != 1 {
+		t.Fatalf("want 1 SetMetadataBatch, got %d", len(batches))
+	}
+	wantDurable := map[string]string{"state": "asleep", "sleep_reason": "max-age"}
+	if !reflect.DeepEqual(batches[0].Metadata, wantDurable) {
+		t.Errorf("durable batch = %#v, want %#v (last_woke_at excluded)", batches[0].Metadata, wantDurable)
+	}
+
+	locals := rec.CallsForOp("SetLocalString")
+	if len(locals) != 1 {
+		t.Fatalf("want 1 SetLocalString, got %d", len(locals))
+	}
+	if locals[0].ID != "s-1" || locals[0].Key != "last_woke_at" || locals[0].Value != "2026-08-12T00:00:00Z" {
+		t.Errorf("SetLocalString call = %#v, want (s-1,last_woke_at,2026-08-12T00:00:00Z)", locals[0])
+	}
+}
+
 // TestApplyPatchInfoPersistsAndFoldsEqualsReprojection proves ApplyPatchInfo
 // persists the patch byte-identically (one SetMetadataBatch) AND returns the
 // LOCAL fold — never a re-Get — and that the folded Info equals a full
@@ -329,6 +361,28 @@ func TestSetMarkerEmptyValueClears(t *testing.T) {
 	c := rec.CallsForOp("SetMetadata")
 	if len(c) != 1 || c[0].Key != "sleep_intent" || c[0].Value != "" {
 		t.Fatalf("SetMarker clear = %#v, want one SetMetadata(sleep_intent,\"\")", c)
+	}
+}
+
+// TestSetMarkerRoutesLastWokeAtToLocalString proves SetMarker routes the
+// migrated last_woke_at key to the clone-local SetLocalString instead of the
+// durable SetMetadata (ga-igcny0.1.2.1 Phase B) — the async-start rollback and
+// wake-time marker writes both go through SetMarker, so this pins the
+// production clear/set call sites onto the new local path.
+func TestSetMarkerRoutesLastWokeAtToLocalString(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	is, rec := recordingStore(t, b)
+
+	if err := is.SetMarker("s-1", "last_woke_at", ""); err != nil {
+		t.Fatalf("SetMarker: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetLocalString"}) {
+		t.Fatalf("SetMarker(last_woke_at) ops = %v, want [SetLocalString]", gotOps)
+	}
+	c := rec.CallsForOp("SetLocalString")[0]
+	if c.ID != "s-1" || c.Key != "last_woke_at" || c.Value != "" {
+		t.Errorf("SetLocalString call = (%q,%q,%q), want (s-1,last_woke_at,\"\")", c.ID, c.Key, c.Value)
 	}
 }
 

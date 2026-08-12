@@ -72,6 +72,29 @@ func TestStoreGetSpeaksInfo(t *testing.T) {
 	}
 }
 
+// TestStoreGetProjectsLastWokeAtFromLocalString proves Get reads
+// Info.LastWokeAt from clone-local storage, not durable Bead.Metadata — the
+// read-side half of the last_woke_at cutover (ga-igcny0.1.2.1 Phase B). The
+// fixture carries no durable last_woke_at at all (the post-migration steady
+// state); only a clone-local value is seeded, and the projection must still
+// surface it as the current value.
+func TestStoreGetProjectsLastWokeAtFromLocalString(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	if err := mem.SetLocalString("s-1", "last_woke_at", "2026-08-12T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString (seed): %v", err)
+	}
+	is := NewStore(beads.SessionStore{Store: mem})
+
+	got, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastWokeAt != "2026-08-12T00:00:00Z" {
+		t.Errorf("Get LastWokeAt = %q, want %q (from clone-local storage; durable Metadata never carried the key)", got.LastWokeAt, "2026-08-12T00:00:00Z")
+	}
+}
+
 // TestStoreGetNotFound asserts a missing session id surfaces a not-found error.
 func TestStoreGetNotFound(t *testing.T) {
 	store := seedSessionStore(t)
