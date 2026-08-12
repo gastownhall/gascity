@@ -21,6 +21,7 @@ var allRunNodeStatuses = []string{
 	"failed",
 	"blocked",
 	"skipped",
+	"canceled",
 }
 
 // TestRunNodeStatusTaxonomyIsExhaustive proves every RunNodeStatus is classified

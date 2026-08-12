@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -204,6 +205,8 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 type HistoryRequest struct {
 	TailCompactions int    `json:"tail_compactions,omitempty"`
 	LogicalID       string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID   string `json:"before_entry_id,omitempty"`
+	AfterEntryID    string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.
@@ -275,6 +278,13 @@ type SessionHandle struct {
 	// skip both the keyed-path resolve and the write once the sidecar is current.
 	sidecarMu     sync.Mutex
 	sidecarDoneID string
+	// sidecarRetrySchedule is nil in production, where the sidecar retry uses
+	// time.AfterFunc. Tests supply a channel-backed scheduler to drive retries
+	// deterministically.
+	sidecarRetrySchedule  func(time.Duration, func())
+	sidecarRetryID        string
+	sidecarRetryAttempts  int
+	sidecarRetryScheduled bool
 }
 
 var (

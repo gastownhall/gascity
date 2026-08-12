@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runproj"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // enrichmentCacheTestServer stands up a fake supervisor that counts sessions and
@@ -56,6 +57,80 @@ func newEnrichmentManager(t *testing.T, baseURL string) *runTailerManager {
 	t.Helper()
 	m := newRunTailerManager(Deps{SupervisorBaseURL: baseURL})
 	return m
+}
+
+func TestSingleFlightCacheDiscardMatching(t *testing.T) {
+	cache := newSingleFlightCache[string, int]()
+	calls := map[string]int{}
+	get := func(key string) int {
+		value, ok := cache.get(context.Background(), key, func(context.Context) (int, time.Duration, bool, bool) {
+			calls[key]++
+			return calls[key], time.Hour, true, true
+		})
+		if !ok {
+			t.Fatalf("get(%q) unavailable", key)
+		}
+		return value
+	}
+
+	if got := get("alpha"); got != 1 {
+		t.Fatalf("first alpha value = %d, want 1", got)
+	}
+	if got := get("beta"); got != 1 {
+		t.Fatalf("first beta value = %d, want 1", got)
+	}
+	cache.discardMatching(func(key string) bool { return key == "alpha" })
+	if got := get("alpha"); got != 2 {
+		t.Fatalf("invalidated alpha value = %d, want recomputed 2", got)
+	}
+	if got := get("beta"); got != 1 {
+		t.Fatalf("unmatched beta value = %d, want cached 1", got)
+	}
+}
+
+func TestRunTailerManagerRebindDiscardsInFlightEnrichment(t *testing.T) {
+	manager := newRunTailerManager(Deps{})
+	manager.ensure("alpha", "/city/first/.gc/events.jsonl")
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	oldDone := make(chan struct{})
+	go func() {
+		defer close(oldDone)
+		_, _ = manager.sessionsCache.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool, bool) {
+			close(started)
+			<-release
+			return cachedSessions{items: []runproj.DashboardSession{{ID: "old"}}}, time.Hour, true, true
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("old enrichment compute did not start")
+	}
+
+	manager.ensure("alpha", "/city/rebound/.gc/events.jsonl")
+	unblock()
+	select {
+	case <-oldDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("old enrichment compute did not finish")
+	}
+
+	newCalls := 0
+	got, ok := manager.sessionsCache.get(context.Background(), "alpha", func(context.Context) (cachedSessions, time.Duration, bool, bool) {
+		newCalls++
+		return cachedSessions{items: []runproj.DashboardSession{{ID: "new"}}}, time.Hour, true, true
+	})
+	if !ok || len(got.items) != 1 || got.items[0].ID != "new" {
+		t.Fatalf("post-rebind enrichment = %+v, available=%v; want freshly computed new value", got.items, ok)
+	}
+	if newCalls != 1 {
+		t.Fatalf("post-rebind compute calls = %d, want 1; old in-flight value was retained", newCalls)
+	}
 }
 
 // TestSingleFlightCacheRecoversAfterComputePanic proves a panic inside compute

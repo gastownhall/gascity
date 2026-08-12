@@ -62,6 +62,40 @@ func TestSemanticNodeIDForIterationStepRef(t *testing.T) {
 // TestIsPositiveIntegerStr pins the JS isPositiveInteger semantics, including the
 // float64 exact-representability boundary (parseInt yields a float64, so values
 // beyond 2^53 only pass when they happen to be exactly representable).
+// TestPresentationStatusCanceled pins that a bead closed with gc.outcome=canceled
+// surfaces the distinct "canceled" node status rather than the generic
+// "completed", so a canceled run's steps read as canceled in the run-detail graph.
+func TestPresentationStatusCanceled(t *testing.T) {
+	cases := []struct {
+		name string
+		bead runSnapshotBead
+		want string
+	}{
+		{
+			name: "closed canceled",
+			bead: runSnapshotBead{status: "closed", metadata: map[string]string{"gc.outcome": "canceled"}},
+			want: "canceled",
+		},
+		{
+			name: "raw canceled status",
+			bead: runSnapshotBead{status: "canceled"},
+			want: "canceled",
+		},
+		{
+			name: "closed without outcome stays completed",
+			bead: runSnapshotBead{status: "closed"},
+			want: "completed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := presentationStatus(tc.bead); got != tc.want {
+				t.Fatalf("presentationStatus(%+v) = %q, want %q", tc.bead, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsPositiveIntegerStr(t *testing.T) {
 	cases := []struct {
 		value string

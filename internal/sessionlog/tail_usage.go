@@ -27,10 +27,16 @@ type TailUsage struct {
 	InputTokens int
 	// OutputTokens is the completion token count.
 	OutputTokens int
+	// ReasoningTokens is the provider-reported reasoning token count when the
+	// provider exposes it separately from completion/output tokens.
+	ReasoningTokens int
 	// CacheReadTokens is the cached prompt tokens read for the invocation.
 	CacheReadTokens int
 	// CacheCreationTokens is the tokens written into the prompt cache.
 	CacheCreationTokens int
+	// ContextWindowTokens is the model context window reported by the
+	// provider for this invocation, when available.
+	ContextWindowTokens int
 }
 
 // ExtractTailUsage reads the tail of a session transcript and returns one

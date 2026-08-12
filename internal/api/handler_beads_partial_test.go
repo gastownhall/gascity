@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
@@ -44,6 +45,13 @@ func (f *failingBeadStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error
 		return nil, f.readyErr
 	}
 	return f.Store.Ready(query...)
+}
+
+func (f *failingBeadStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return f.Ready(query...)
 }
 
 func (f *failingBeadStore) Update(id string, opts beads.UpdateOpts) error {

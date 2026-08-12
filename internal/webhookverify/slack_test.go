@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -142,5 +143,59 @@ func TestSlackV0_ReplayWindowClampedToMax(t *testing.T) {
 	})
 	if res.OK {
 		t.Fatalf("a pack replay_window=1000h must be clamped to %s; a stale delivery past the max must be rejected", maxReplayWindow)
+	}
+}
+
+// The Slack event type is derived from the verified body so payload-carried
+// event rules (e.g. event = "message") actually match: the nested event.type
+// for an event_callback, else the top-level type.
+func TestSlackV0_EventTypeFromBody(t *testing.T) {
+	secret := slackTestSecret
+	now := time.Unix(1_700_000_000, 0)
+	ts := fmt.Sprintf("%d", now.Unix())
+	clock := func() time.Time { return now.Add(10 * time.Second) }
+	v, _ := New("slack-v0", config.WebhookVerify{}, Options{})
+
+	body := []byte(`{"type":"event_callback","event":{"type":"message"}}`)
+	res, err := v.Verify(context.Background(), VerifyRequest{Body: body, Secret: []byte(secret), Header: hdr(slackSignatureHeader, slackSign(ts, body), slackTimestampHeader, ts), Now: clock})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("expected OK, reason %q", res.Reason)
+	}
+	if res.EventType != "message" {
+		t.Errorf("EventType = %q, want the nested event.type %q", res.EventType, "message")
+	}
+
+	body2 := []byte(`{"type":"url_verification","challenge":"c"}`)
+	res2, _ := v.Verify(context.Background(), VerifyRequest{Body: body2, Secret: []byte(secret), Header: hdr(slackSignatureHeader, slackSign(ts, body2), slackTimestampHeader, ts), Now: clock})
+	if !res2.OK {
+		t.Fatalf("expected OK, reason %q", res2.Reason)
+	}
+	if res2.EventType != "url_verification" {
+		t.Errorf("EventType = %q, want the top-level type %q", res2.EventType, "url_verification")
+	}
+}
+
+// Regression: a far-future signed timestamp must be rejected. now.Sub(future)
+// clamps to math.MinInt64 and negating it stays negative, so a naive
+// abs(skew) > window check would silently PASS a maximally-future timestamp.
+func TestSlackV0_FarFutureTimestampRejected(t *testing.T) {
+	secret := slackTestSecret
+	body := []byte(`{"type":"event_callback"}`)
+	ts := fmt.Sprintf("%d", int64(math.MaxInt64))
+	sig := slackSign(ts, body)
+	v, _ := New("slack-v0", config.WebhookVerify{}, Options{})
+	res, err := v.Verify(context.Background(), VerifyRequest{
+		Body: body, Secret: []byte(secret),
+		Header: hdr(slackSignatureHeader, sig, slackTimestampHeader, ts),
+		Now:    func() time.Time { return time.Unix(1_700_000_000, 0) },
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.OK {
+		t.Fatal("a far-future signed timestamp must be rejected, not clamp-underflow past the replay window")
 	}
 }

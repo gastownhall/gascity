@@ -4,26 +4,35 @@ import "github.com/gastownhall/gascity/internal/events"
 
 // Webhook rejection reason enum. These are the stable strings carried on
 // WebhookRejectedPayload.Reason so operators can alert/aggregate on a rejection
-// class without parsing free text. The security-relevant classes the design and
-// red-team call out (perimeter_denied, read_only, verify_failed, operator_fault,
-// rate_limited, dispatch_refused) are here alongside the operational ones
-// (method_not_allowed, body_too_large, bad_body, bad_payload, match_error,
-// dispatch_unavailable/dispatch_error) that keep the receiver debuggable.
+// class without parsing free text. The evented classes are the ones that are
+// bounded and diagnostically useful: the verify decision (verify_failed), the
+// operator-misconfiguration signal (operator_fault), and the dispatch/payload
+// outcomes past the limiter (bad_body, body_too_large, bad_payload, match_error,
+// dispatch_refused, dispatch_unavailable, dispatch_error).
 //
-// Notes on two design decisions:
-//   - An unresolved route (unknown webhook name) is intentionally NOT evented:
-//     the route segment is chosen by an unauthenticated caller, so emitting there
-//     would be an event-log-flood amplification vector and a name-existence oracle
-//     (it would also violate R2's "never confirm which hooks exist"). The receiver
-//     404s such probes silently, so there is no unknown_webhook reason.
+// Notes on the deliberately NON-evented paths:
+//   - An unresolved route (unknown webhook name), a visibility-perimeter/read-only
+//     denial (webhookRequestAllowed), a non-POST method, an operator-owned source
+//     (allowed_cidrs) or bearer (bearer_env) denial, and a rate-limit 429 are all
+//     cheap, unauthenticated, attacker-fully-controlled rejects that run at or
+//     before the limiter. Eventing them would be an event-log-flood amplification
+//     vector and a name-existence oracle (and would violate R2's "never confirm
+//     which hooks exist"), so the receiver rejects them silently — there is no
+//     reason string for them. The source/bearer gates run BEFORE the limiter so a
+//     disallowed caller cannot consume the shared per-hook delivery bucket that
+//     legitimate deliveries draw from; staying non-evented keeps that pre-limiter
+//     position from re-introducing the amplification.
+//   - operator_fault as an EVENT fires only for the POST-limiter verifier fault
+//     (verifier unavailable / verify error): the limiter throttles that path, so
+//     its per-request 503 event is bounded and diagnostically useful. The
+//     PRE-limiter access gates (allowed_cidrs, bearer_env) can also raise a 503
+//     operator fault, but eventing those per request would re-introduce the flood
+//     amplifier, so they are non-evented and logged one-shot instead
+//     (rejectWebhookAccessOperatorFault); the 503 status is the caller-visible signal.
 //   - no-match is classified as webhook.received (an accepted, authentic 2xx
 //     delivery that no rule wanted), NOT as a rejection — so there is no
 //     no_match reason.
 const (
-	reasonMethodNotAllowed    = "method_not_allowed"
-	reasonPerimeterDenied     = "perimeter_denied"
-	reasonReadOnly            = "read_only"
-	reasonRateLimited         = "rate_limited"
 	reasonBodyTooLarge        = "body_too_large"
 	reasonBadBody             = "bad_body"
 	reasonOperatorFault       = "operator_fault"

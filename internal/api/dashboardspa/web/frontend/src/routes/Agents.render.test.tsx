@@ -89,7 +89,7 @@ function stubFetch(options: StubFetchOptions = {}) {
           options.agentsStatus === undefined ? undefined : { status: options.agentsStatus },
         );
       }
-      if (url === '/v0/city/test-city/sessions' && method === 'GET') {
+      if (url === '/v0/city/test-city/sessions?limit=1000' && method === 'GET') {
         return jsonResponse({
           items: [
             {
@@ -346,7 +346,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
       );
     });
     // Belt-and-suspenders: assert the buggy URL was NEVER attempted.
-    expect(fetchUrls()).toContain('/v0/city/test-city/sessions');
+    expect(fetchUrls()).toContain('/v0/city/test-city/sessions?limit=1000');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/peek');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/mayor/peek');

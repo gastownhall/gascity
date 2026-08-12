@@ -354,7 +354,6 @@ func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(
 }
 
 func TestSyncCityManagedPortArtifactsSkipsNonOwnedPostgresCity(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -363,7 +362,7 @@ func TestSyncCityManagedPortArtifactsSkipsNonOwnedPostgresCity(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, []config.Rig{{Name: "frontend", Path: inheritDir, Prefix: "fe"}})
-	writePGScopeFixture(t, cityDir, "")
+	writeOpaqueBindingScopeFixture(t, cityDir)
 	for _, dir := range []string{cityDir, inheritDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -741,6 +740,7 @@ func TestDoBeadsCityUseManagedPreservesCompatOnlyExplicitRigs(t *testing.T) {
 func TestSyncCityEndpointCompatConfigUsesAtomicWrite(t *testing.T) {
 	fs := fsys.NewFake()
 	cityDir := "/city"
+	fs.Dirs[cityDir] = true
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Dolt:      config.DoltConfig{Host: "old-city.example.com", Port: 3306},

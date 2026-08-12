@@ -108,6 +108,48 @@ func TestRouteOrderRefusesNonWebhookTrigger(t *testing.T) {
 	}
 }
 
+// A public webhook may not fire an exec (sh -c) order — the RCE sink the design
+// removed from public ingress. Public deliveries are limited to formula orders.
+func TestRouteOrderRefusesPublicExecOrder(t *testing.T) {
+	order := orders.Order{Name: "deploy-script", Trigger: "webhook", Exec: "deploy.sh", Params: map[string]orders.OrderParam{"ref": {}}}
+	disp := &fakeDispatcher{ret: orderdispatch.DispatchResult{Fired: true}}
+	deps := Deps{Dispatcher: disp, ResolveOrder: resolverFor(order)}
+
+	res, err := Route(context.Background(), deps,
+		WebhookScope{Name: "github", Scope: "city", Visibility: "public"},
+		webhookmatch.MatchResult{Target: "order", Order: "deploy-script"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if !res.Rejected || res.Dispatched {
+		t.Fatalf("expected refusal, got %+v", res)
+	}
+	if disp.calls != 0 {
+		t.Fatalf("dispatcher called %d times; a public webhook must never fire an exec order", disp.calls)
+	}
+	if !strings.Contains(res.Reason, "exec") || !strings.Contains(res.Reason, "formula") {
+		t.Fatalf("reason = %q, want it to explain the public-hook exec restriction", res.Reason)
+	}
+}
+
+// A NON-public (tenant/private) webhook may still fire an exec order: it is gated
+// by the receiver's internal-origin perimeter, so the exec sink stays available.
+func TestRouteOrderAllowsTenantExecOrder(t *testing.T) {
+	order := orders.Order{Name: "deploy-script", Trigger: "webhook", Exec: "deploy.sh"}
+	disp := &fakeDispatcher{ret: orderdispatch.DispatchResult{Fired: true}}
+	deps := Deps{Dispatcher: disp, ResolveOrder: resolverFor(order)}
+
+	res, err := Route(context.Background(), deps,
+		WebhookScope{Name: "plane", Scope: "city", Visibility: "tenant"},
+		webhookmatch.MatchResult{Target: "order", Order: "deploy-script"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if res.Rejected || !res.Dispatched {
+		t.Fatalf("a tenant webhook must be allowed to fire an exec order, got %+v", res)
+	}
+}
+
 // (c) A rig-scoped webhook targeting a foreign rig is refused before resolution.
 func TestRouteOrderRefusesForeignRig(t *testing.T) {
 	// Resolver would happily return an order for the foreign rig; the scope guard

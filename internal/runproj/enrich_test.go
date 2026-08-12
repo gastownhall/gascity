@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,33 @@ func TestEnrichRunSummaryGolden(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("enriched run summary does not match golden:\n%s", unifiedDiff(string(want), string(got)))
+	}
+}
+
+// TestEnrichRunSummaryWarmingPathMarshalsArraysNotNull is a regression guard
+// for #4142: the dashboard warming snapshot (cityRunTailer.enrichedSummary,
+// served while the run projection is still cold-replaying) enriches a
+// zero-value RunSummary. EnrichRunSummary sets Lanes/BlockedLanes/RunCounts/
+// Census but never touched HistoricalLanes/RecentChanges, so those two
+// stayed nil and marshaled as JSON null. The SPA's strict edge decoder
+// (decodeRunSummary) requires all four array fields to be actual arrays —
+// Array.isArray(null) is false — so a warming response threw
+// ApiResponseDecodeError on an HTTP 200, and AmbientHome permanently showed
+// "Run data is unavailable" for the life of the tab (only a manual reload
+// after warm-up recovered it).
+func TestEnrichRunSummaryWarmingPathMarshalsArraysNotNull(t *testing.T) {
+	enriched := EnrichRunSummary(RunSummary{}, nil, false, 0, nil)
+	enriched.LanesPartial = true
+
+	raw, err := json.Marshal(enriched)
+	if err != nil {
+		t.Fatalf("marshal warming summary: %v", err)
+	}
+	body := string(raw)
+	for _, field := range []string{"lanes", "historicalLanes", "blockedLanes", "recentChanges"} {
+		if strings.Contains(body, `"`+field+`":null`) {
+			t.Errorf("warming summary marshals %q as null (SPA decodeRunSummary requires an array): %s", field, body)
+		}
 	}
 }
 

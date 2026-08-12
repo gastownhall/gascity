@@ -55,13 +55,13 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-polecat-report requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-bd show "$WORK_BEAD_ID"
+gc bd show "$WORK_BEAD_ID"
 ```
 
 **2. Prime environment:**
 ```bash
 gc prime
-bd prime
+gc bd prime
 ```
 
 **Exit criteria:** Scope confirmed as investigation/analysis only."""
@@ -163,12 +163,12 @@ REPORT="$(cat <<'ENDREPORT'
 <unresolved items, caveats>
 ENDREPORT
 )"
-bd update "$WORK_BEAD_ID" --notes "$REPORT"
+gc bd update "$WORK_BEAD_ID" --notes "$REPORT"
 ```
 
 **2. Close the bead:**
 ```bash
-bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID"
 ```
 
 **3. Signal reconciler and exit.**

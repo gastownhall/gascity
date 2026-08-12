@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,9 +87,304 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 	}
 }
 
+func TestRecoverManagedDoltProcessWithOps(t *testing.T) {
+	queryErr := errors.New("query unavailable")
+	stopErr := errors.New("stop failed")
+	preflightErr := errors.New("preflight failed")
+	startErr := errors.New("start failed")
+	healthErr := errors.New("health failed")
+	publishErr := errors.New("publish failed")
+	cleanupErr := errors.New("cleanup failed")
+
+	type testCase struct {
+		name         string
+		stopReport   managedDoltStopReport
+		stopErr      error
+		preflightErr error
+		startReport  managedDoltStartReport
+		startErr     error
+		healthReport managedDoltSQLHealthReport
+		healthErr    error
+		publishErr   error
+		cleanupErr   error
+		wantReport   managedDoltRecoverReport
+		wantErrIs    error
+		wantErrText  string
+		wantOps      []string
+	}
+
+	const (
+		cityToken = "$CITY"
+		queryOp   = "query host=127.0.0.1 port=3306 user=root"
+		stopOp    = "stop city=$CITY port=3306"
+		preflight = "preflight city=$CITY"
+		startOp   = "start city=$CITY host=127.0.0.1 port=3306 user=root log=warning timeout=2s"
+		healthOp  = "health host=127.0.0.1 port=4407 user=root"
+		publishOp = "publish city=$CITY"
+	)
+	baseStop := managedDoltStopReport{HadPID: true, PID: 111}
+	baseStart := managedDoltStartReport{Ready: true, PID: 222, Port: 4407}
+	baseReport := managedDoltRecoverReport{
+		HadPID:    true,
+		Ready:     true,
+		PID:       222,
+		Port:      4407,
+		Healthy:   true,
+		Restarted: true,
+	}
+	tests := []testCase{
+		{
+			name:         "unknown no-user final health succeeds",
+			stopReport:   baseStop,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "unknown"},
+			wantReport:   baseReport,
+			wantOps:      []string{queryOp, stopOp, preflight, startOp, healthOp, publishOp},
+		},
+		{
+			name:         "writable final health succeeds",
+			stopReport:   baseStop,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"},
+			wantReport:   baseReport,
+			wantOps:      []string{queryOp, stopOp, preflight, startOp, healthOp, publishOp},
+		},
+		{
+			name:         "stop error is ignored and report is retained",
+			stopReport:   managedDoltStopReport{HadPID: true, PID: 111, Forced: true},
+			stopErr:      stopErr,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"},
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, Forced: true, Ready: true, PID: 222, Port: 4407, Healthy: true, Restarted: true,
+			},
+			wantOps: []string{queryOp, stopOp, preflight, startOp, healthOp, publishOp},
+		},
+		{
+			name:         "preflight failure cleans stopped process at requested port",
+			stopReport:   baseStop,
+			preflightErr: preflightErr,
+			cleanupErr:   cleanupErr,
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, PID: 111, Port: 3306,
+			},
+			wantErrIs:   cleanupErr,
+			wantErrText: cleanupErr.Error(),
+			wantOps: []string{
+				queryOp, stopOp, preflight,
+				"cleanup city=$CITY pid=111 port=3306 cause=preflight failed",
+			},
+		},
+		{
+			name:        "start failure returns start report without coordinator cleanup",
+			stopReport:  baseStop,
+			startReport: managedDoltStartReport{PID: 222, Port: 4407, AddressInUse: true, Attempts: 2},
+			startErr:    startErr,
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, PID: 222, Port: 4407, Restarted: true,
+			},
+			wantErrIs:   startErr,
+			wantErrText: startErr.Error(),
+			wantOps:     []string{queryOp, stopOp, preflight, startOp},
+		},
+		{
+			name:        "final health error cleans replacement at resolved port",
+			stopReport:  baseStop,
+			startReport: baseStart,
+			healthErr:   healthErr,
+			cleanupErr:  cleanupErr,
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, Ready: true, PID: 222, Port: 4407, Restarted: true,
+			},
+			wantErrIs:   cleanupErr,
+			wantErrText: cleanupErr.Error(),
+			wantOps: []string{
+				queryOp, stopOp, preflight, startOp, healthOp,
+				"cleanup city=$CITY pid=222 port=4407 cause=health failed",
+			},
+		},
+		{
+			name:         "still read-only cleans replacement",
+			stopReport:   baseStop,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"},
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, Ready: true, PID: 222, Port: 4407, Restarted: true,
+			},
+			wantErrText: "dolt server on 127.0.0.1:4407 is still read-only after recovery",
+			wantOps: []string{
+				queryOp, stopOp, preflight, startOp, healthOp,
+				"cleanup city=$CITY pid=222 port=4407 cause=dolt server on 127.0.0.1:4407 is still read-only after recovery",
+			},
+		},
+		{
+			name:         "query-not-ready cleans replacement",
+			stopReport:   baseStop,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{ReadOnly: "false"},
+			wantReport: managedDoltRecoverReport{
+				HadPID: true, Ready: true, PID: 222, Port: 4407, Restarted: true,
+			},
+			wantErrText: "dolt server on 127.0.0.1:4407 is not query-ready after recovery",
+			wantOps: []string{
+				queryOp, stopOp, preflight, startOp, healthOp,
+				"cleanup city=$CITY pid=222 port=4407 cause=dolt server on 127.0.0.1:4407 is not query-ready after recovery",
+			},
+		},
+		{
+			name:         "publication failure cleans replacement",
+			stopReport:   baseStop,
+			startReport:  baseStart,
+			healthReport: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"},
+			publishErr:   publishErr,
+			wantReport:   baseReport,
+			wantErrIs:    publishErr,
+			wantErrText:  "publish managed dolt runtime state: publish failed",
+			wantOps: []string{
+				queryOp, stopOp, preflight, startOp, healthOp, publishOp,
+				"cleanup city=$CITY pid=222 port=4407 cause=publish managed dolt runtime state: publish failed",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			var gotOps []string
+			ops := managedDoltRecoveryOps{
+				queryProbe: func(host, port, user string) error {
+					gotOps = append(gotOps, fmt.Sprintf("query host=%s port=%s user=%s", host, port, user))
+					return queryErr
+				},
+				healthCheck: func(host, port, user string) (managedDoltSQLHealthReport, error) {
+					gotOps = append(gotOps, fmt.Sprintf("health host=%s port=%s user=%s", host, port, user))
+					return tt.healthReport, tt.healthErr
+				},
+				stop: func(cityPath, port string) (managedDoltStopReport, error) {
+					gotOps = append(gotOps, fmt.Sprintf("stop city=%s port=%s", cityPath, port))
+					return tt.stopReport, tt.stopErr
+				},
+				preflightCleanup: func(cityPath string) error {
+					gotOps = append(gotOps, "preflight city="+cityPath)
+					return tt.preflightErr
+				},
+				start: func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
+					gotOps = append(gotOps, fmt.Sprintf("start city=%s host=%s port=%s user=%s log=%s timeout=%s", cityPath, host, port, user, logLevel, timeout))
+					return tt.startReport, tt.startErr
+				},
+				publish: func(cityPath string) error {
+					gotOps = append(gotOps, "publish city="+cityPath)
+					return tt.publishErr
+				},
+				failedCleanup: func(cityPath string, pid, port int, cause error) error {
+					gotOps = append(gotOps, fmt.Sprintf("cleanup city=%s pid=%d port=%d cause=%v", cityPath, pid, port, cause))
+					if tt.cleanupErr != nil {
+						return tt.cleanupErr
+					}
+					return cause
+				},
+			}
+
+			gotReport, gotErr := recoverManagedDoltProcessWithOps(
+				cityPath, "127.0.0.1", "3306", "root", "warning", 2*time.Second, ops,
+			)
+			if gotReport != tt.wantReport {
+				t.Errorf("report = %+v, want %+v", gotReport, tt.wantReport)
+			}
+			switch {
+			case tt.wantErrIs != nil && !errors.Is(gotErr, tt.wantErrIs):
+				t.Errorf("error = %v, want errors.Is(_, %v)", gotErr, tt.wantErrIs)
+			case tt.wantErrIs == nil && tt.wantErrText == "" && gotErr != nil:
+				t.Errorf("error = %v, want nil", gotErr)
+			}
+			if tt.wantErrText != "" && (gotErr == nil || gotErr.Error() != tt.wantErrText) {
+				t.Errorf("error = %v, want text %q", gotErr, tt.wantErrText)
+			}
+			wantOps := make([]string, len(tt.wantOps))
+			for i, op := range tt.wantOps {
+				wantOps[i] = strings.ReplaceAll(op, cityToken, cityPath)
+			}
+			if strings.Join(gotOps, "\n") != strings.Join(wantOps, "\n") {
+				t.Errorf("operations:\n%s\nwant:\n%s", strings.Join(gotOps, "\n"), strings.Join(wantOps, "\n"))
+			}
+		})
+	}
+}
+
 func TestCleanupFailedManagedDoltRecovery_NilCause(t *testing.T) {
 	if err := cleanupFailedManagedDoltRecovery("/nonexistent", 0, 0, nil); err != nil {
 		t.Errorf("cleanupFailedManagedDoltRecovery(nil cause) = %v, want nil", err)
+	}
+}
+
+func TestCleanupFailedManagedDoltRecovery_ClearsRuntimeAndPublishedState(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "cleanup-test"
+
+[beads]
+provider = "bd"
+backend = "dolt"
+`), 0o644); err != nil {
+		t.Fatalf("write city config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatalf("write beads config: %v", err)
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		t.Fatalf("managedDoltLifecycleOwned: %v", err)
+	}
+	if !owned {
+		t.Fatal("managedDoltLifecycleOwned = false, want true for managed bd city")
+	}
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	const (
+		pid  = 4242
+		port = 33123
+	)
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: "2026-07-21T00:00:00Z",
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("write provider runtime state: %v", err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte("4242\n"), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("write published runtime state: %v", err)
+	}
+
+	cause := errors.New("preflight cleanup failed")
+	err = cleanupFailedManagedDoltRecovery(cityPath, 0, port, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cleanupFailedManagedDoltRecovery error = %v, want sentinel cause", err)
+	}
+
+	got, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read provider runtime state: %v", err)
+	}
+	if got.Running || got.PID != 0 || got.Port != port {
+		t.Fatalf("provider runtime state = {Running:%v PID:%d Port:%d}, want {Running:false PID:0 Port:%d}", got.Running, got.PID, got.Port, port)
+	}
+	if _, err := os.Stat(layout.PIDFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pid file stat error = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published runtime state stat error = %v, want os.ErrNotExist", err)
 	}
 }
 
@@ -243,6 +540,7 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnly(t *testing.T) {
 
 func TestRecoverManagedDolt_ProceedsWhenProbeUnreachable(t *testing.T) {
 	cityPath := setupRecoveryTestCity(t)
+	preflightErr := errors.New("preflight cleanup failed")
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldPreflight := managedDoltPreflightCleanupFn
@@ -255,12 +553,12 @@ func TestRecoverManagedDolt_ProceedsWhenProbeUnreachable(t *testing.T) {
 		return fmt.Errorf("connection refused")
 	}
 	managedDoltPreflightCleanupFn = func(_ string) error {
-		return fmt.Errorf("stop: expected — no real dolt process")
+		return preflightErr
 	}
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
-	if err == nil {
-		t.Fatal("expected error when unreachable server recovery proceeds to stop/start")
+	if !errors.Is(err, preflightErr) {
+		t.Fatalf("recoverManagedDoltProcess error = %v, want preflight cleanup sentinel", err)
 	}
 	if report.Ready {
 		t.Error("expected Ready=false when probe fails")

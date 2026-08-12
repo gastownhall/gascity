@@ -31,18 +31,40 @@ const (
 	// an idempotent no-op rather than fanning out a second concurrent claim.
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
-	BeadClaimRejected  = "bead.claim_rejected"
-	MailSent           = "mail.sent"
-	MailRead           = "mail.read"
-	MailArchived       = "mail.archived"
-	MailMarkedRead     = "mail.marked_read"
-	MailMarkedUnread   = "mail.marked_unread"
-	MailReplied        = "mail.replied"
-	MailDeleted        = "mail.deleted"
-	SessionDraining    = "session.draining"
-	SessionUndrained   = "session.undrained"
-	SessionQuarantined = "session.quarantined"
-	SessionIdleKilled  = "session.idle_killed"
+	BeadClaimRejected = "bead.claim_rejected"
+	// ExecutionWorkAssociated records an authoritative association between a
+	// graph.v2 workflow run and one physical input work bead. Subject carries
+	// the work bead and RunID carries the workflow root.
+	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionStepDefined records one physical native execution-step
+	// occurrence. Subject carries the physical step bead, RunID the workflow
+	// root, and StepID/DependsOnStepIDs the semantic topology.
+	ExecutionStepDefined = "execution.step_defined"
+	// ExecutionStepStarted and ExecutionStepCompleted record the lifecycle of one
+	// physical graph.v2 native step attempt. Subject is the physical step bead;
+	// RunID, SessionID, StepID, and DependsOnStepIDs carry its durable identity.
+	ExecutionStepStarted   = "execution.step_started"
+	ExecutionStepCompleted = "execution.step_completed"
+	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
+	// bead whose assignee resolves to no open session bead — the owning session
+	// closed/retired while the bead stayed assigned, leaving it open+routed but
+	// invisible to every claim probe (pool tier and demand require --unassigned;
+	// the hook requires an empty assignee). releaseOrphanedPoolAssignments clears
+	// the dead assignee so the pool can reclaim it; this event turns that
+	// otherwise-silent repair into an observable signal (mirrors the
+	// bead.claim_rejected shape).
+	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
+	MailSent                 = "mail.sent"
+	MailRead                 = "mail.read"
+	MailArchived             = "mail.archived"
+	MailMarkedRead           = "mail.marked_read"
+	MailMarkedUnread         = "mail.marked_unread"
+	MailReplied              = "mail.replied"
+	MailDeleted              = "mail.deleted"
+	SessionDraining          = "session.draining"
+	SessionUndrained         = "session.undrained"
+	SessionQuarantined       = "session.quarantined"
+	SessionIdleKilled        = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -66,6 +88,15 @@ const (
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionUnknownState fires when the reconciler observes a session bead
+	// whose metadata state it does not recognize. The reconciler skips such
+	// beads (forward-compatible rollback: an older reconciler ignores a newer
+	// writer's state rather than crashing), so this is the only durable signal
+	// that a bead is stuck outside the state machine. Emitted on first sight
+	// (and again with escalated=true once the bead has sat unrecognized past a
+	// threshold), never as a recovery action — pack-level subscribers or
+	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
+	SessionUnknownState = "session.unknown_state"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
@@ -114,7 +145,13 @@ const (
 	RequestResultSessionCreate  = "request.result.session.create"
 	RequestResultSessionMessage = "request.result.session.message"
 	RequestResultSessionSubmit  = "request.result.session.submit"
+	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+
+	// RigProvisionProgress reports one provisioning step of a server-side
+	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
+	// the terminal outcome is RequestResultRigCreate or RequestFailed.
+	RigProvisionProgress = "rig.provision.progress"
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
@@ -186,12 +223,12 @@ const (
 	StoreDiskWarn     = "gc.store.disk_warn"
 	StoreDiskCritical = "gc.store.disk_critical"
 
-	// Postgres credential resolution. Emitted by the bd-env projection
-	// path on every successful pgauth resolve. The payload identifies
-	// the scope and the resolution tier that supplied the value; it
-	// MUST NOT carry the password value (asserted by
-	// TestPostgresEventOmitsPassword).
-	PostgresCredentialResolved = "pg.credential_resolved"
+	// BackendCredentialResolved records that a credential for a storage
+	// backend was resolved for one scope. The payload names the backend,
+	// the scope and the resolution tier that supplied the value; it MUST
+	// NOT carry the value itself (asserted by
+	// TestBackendCredentialResolvedPayloadOmitsTheCredential).
+	BackendCredentialResolved = "backend.credential_resolved"
 
 	// ProviderHealthGateAlert fires once per red episode when the provider-health
 	// gate parks respawns for a provider. Carries episode ID, onset time, and
@@ -203,6 +240,31 @@ const (
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
 	EmergencyAcked    = "emergency.acked"
+
+	// BeadsConditionalWritesDegraded fires when a store resolved under the
+	// beads.conditional_writes rollout gate at mode=auto is vetoed by runtime
+	// capability (bd lacks --if-revision, a runtime unsupported latch, or a
+	// revision-less read path) and loud-degrades to the legacy write path.
+	// Latched once per store instance by the emitter so log/event storms are
+	// structurally impossible (DESIGN §12.2). The name mirrors the FLAG key
+	// beads.conditional_writes (hence plural beads., unlike the per-bead
+	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
+	// emission is wired in stage 3 — nothing emits it yet.
+	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// Storage-class binding outcomes. Emitted once per controller boot by the
+	// storage gate, and once per run by `gc storage migrate`, for a city whose
+	// [storage.classes] relocate the infrastructure classes to a binding.
+	//
+	// Converged and Genesis are the two serving outcomes: the first opened a
+	// binding a proven copy already populated, the second created one for a
+	// city that had nothing to move. Unconverged and Uncheckable are the two
+	// refusals: config and data disagree, or the check that would decide could
+	// not run. A city with no [storage] section emits none of them.
+	StorageBindingConverged   = "storage.binding.converged"
+	StorageBindingGenesis     = "storage.binding.genesis"
+	StorageBindingUnconverged = "storage.binding.unconverged"
+	StorageBindingUncheckable = "storage.binding.uncheckable"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -215,12 +277,15 @@ var KnownEventTypes = []string{
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
+	SessionUnknownState,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
+	BeadDeadAssigneeReopened,
+	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -228,7 +293,8 @@ var KnownEventTypes = []string{
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
-	RequestResultSessionSubmit, RequestFailed,
+	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
+	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
@@ -242,8 +308,11 @@ var KnownEventTypes = []string{
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
-	PostgresCredentialResolved,
+	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
+	BeadsConditionalWritesDegraded,
+	StorageBindingConverged, StorageBindingGenesis,
+	StorageBindingUnconverged, StorageBindingUncheckable,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a
@@ -270,6 +339,9 @@ type Event struct {
 	RunID     string          `json:"run_id,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	StepID    string          `json:"step_id,omitempty"`
+	// DependsOnStepIDs is nil for unknown native topology; a present empty
+	// slice represents a known root.
+	DependsOnStepIDs *[]string `json:"depends_on_step_ids,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.
@@ -291,9 +363,15 @@ type Provider interface {
 	// LatestSeq returns the highest sequence number, or 0 if empty.
 	LatestSeq() (uint64, error)
 
-	// Watch returns a Watcher that yields events with Seq > afterSeq.
-	// The watcher blocks on Next() until an event arrives or ctx is
-	// canceled. Callers must call Close() when done.
+	// Watch returns a Watcher that yields every RETAINED event with
+	// Seq > afterSeq, in sequence order, exactly once per watcher —
+	// including events recorded before Watch was called and events that
+	// have since rotated into an archive. (Across separate watcher
+	// instances delivery is at-least-once; callers de-dupe by seq.) The
+	// watcher blocks on Next() until an event arrives or ctx is
+	// canceled. afterSeq=0 therefore requests the entire retained
+	// history; pass LatestSeq() to stream only from now. Callers must
+	// call Close() when done.
 	Watch(ctx context.Context, afterSeq uint64) (Watcher, error)
 
 	// Close releases any resources held by the provider.
@@ -304,6 +382,19 @@ type Provider interface {
 // trailing matching events without scanning or materializing the whole history.
 type TailProvider interface {
 	ListTail(filter Filter, limit int) ([]Event, error)
+}
+
+// InFlightProvider is an optional extension for providers whose plain List can
+// momentarily miss events stranded in an in-flight rotation file. When a
+// file-backed provider rotates, the just-rotated segment lives only in the
+// events.jsonl.rotating-* file until a background goroutine gzips it into the
+// canonical .gz archive; List reads archives + the active file, so during that
+// window it cannot see the segment. ListInFlight folds those events back in,
+// preserving seq order and de-duplicating by seq, so a keyset walk cannot skip
+// a whole seq range mid-rotation. Providers with no such window (in-memory
+// fakes, exec scripts) need not implement it.
+type InFlightProvider interface {
+	ListInFlight(filter Filter) ([]Event, error)
 }
 
 // Watcher yields events one at a time. Created by [Provider.Watch].

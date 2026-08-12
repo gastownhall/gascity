@@ -3,9 +3,29 @@
 package tmux
 
 import (
+	"errors"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 )
+
+// processIsAlive reports whether pid still names a live process. Permission
+// errors count as alive: cleanup must retain its SIGKILL fallback rather than
+// mistake an unobservable process for an exited one.
+func processIsAlive(pid string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(n)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 
 // getParentPID returns the parent process ID (PPID) for a given PID.
 // Returns empty string if the process doesn't exist or PPID can't be determined.

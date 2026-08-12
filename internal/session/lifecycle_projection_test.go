@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
@@ -732,6 +734,126 @@ func TestLifecycleDisplayReasonWithLivenessSuppressesTerminalResetPending(t *tes
 	}
 }
 
+// livenessInfoBead builds an open (or closed) session bead from a metadata map,
+// so the InfoFromPersistedBead projection the twin consumes carries the same
+// fields LifecycleDisplayReasonWithLiveness reads off the raw map.
+func livenessInfoBead(status string, meta map[string]string) beads.Bead {
+	return beads.Bead{ID: "gc-liveness", Type: "session", Status: status, Labels: []string{"gc:session"}, Metadata: meta}
+}
+
+// TestLifecycleDisplayReasonWithLivenessInfoEquivalence is the load-bearing
+// oracle for LifecycleDisplayReasonWithLivenessInfo. It (1) asserts the exact
+// reason for each non-trivial branch directly — so a mutation of the twin's
+// circuit-open or reset-pending branch fails without depending on the raw form —
+// and (2) sweeps the same corpus through the raw LifecycleDisplayReasonWithLiveness
+// to pin byte-identity (the display path feeds the twin Info.SessionName as the
+// sessionName the raw form would receive).
+func TestLifecycleDisplayReasonWithLivenessInfoEquivalence(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	isRunning := func(name string) bool { return name == "worker-live" }
+
+	cases := []struct {
+		name   string
+		status string
+		meta   map[string]string
+		want   string
+	}{
+		{
+			name:   "circuit open wins over sleep reason",
+			status: "open",
+			meta:   map[string]string{SessionCircuitStateMetadataKey: SessionCircuitStateOpen, "sleep_reason": "user-hold"},
+			want:   LifecycleReasonCircuitOpen,
+		},
+		{
+			name:   "reset-pending via restart_requested wins over circuit open",
+			status: "open",
+			meta: map[string]string{
+				"restart_requested":            "true",
+				"session_name":                 "worker-live",
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+			},
+			want: LifecycleReasonResetPending,
+		},
+		{
+			name:   "reset-pending via continuation_reset_pending",
+			status: "open",
+			meta:   map[string]string{"continuation_reset_pending": "true", "session_name": "worker-live", "sleep_reason": "user-hold"},
+			want:   LifecycleReasonResetPending,
+		},
+		{
+			name:   "restart requested but runtime dead falls through",
+			status: "open",
+			meta:   map[string]string{"restart_requested": "true", "session_name": "worker-dead", SessionCircuitStateMetadataKey: SessionCircuitStateOpen},
+			want:   LifecycleReasonCircuitOpen,
+		},
+		{
+			name:   "sleep reason visible",
+			status: "open",
+			meta:   map[string]string{"sleep_reason": "wait-hold", "quarantined_until": future, "held_until": future},
+			want:   "wait-hold",
+		},
+		{
+			name:   "future quarantine visible",
+			status: "open",
+			meta:   map[string]string{"quarantined_until": future},
+			want:   "quarantine",
+		},
+		{
+			name:   "expired quarantine not visible",
+			status: "open",
+			meta:   map[string]string{"quarantined_until": past},
+			want:   "",
+		},
+		{
+			name:   "wait hold visible",
+			status: "open",
+			meta:   map[string]string{"wait_hold": "true"},
+			want:   "wait-hold",
+		},
+		{
+			name:   "future user hold visible",
+			status: "open",
+			meta:   map[string]string{"held_until": future},
+			want:   "user-hold",
+		},
+		{
+			name:   "closed suppresses reset-pending and circuit open",
+			status: "closed",
+			meta: map[string]string{
+				"restart_requested":            "true",
+				"session_name":                 "worker-live",
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+			},
+			want: "",
+		},
+		{
+			name:   "empty",
+			status: "open",
+			meta:   map[string]string{},
+			want:   "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := livenessInfoBead(tc.status, tc.meta)
+			info := infoFromPersistedBead(bead)
+			got := LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning)
+			if got != tc.want {
+				t.Fatalf("LifecycleDisplayReasonWithLivenessInfo = %q, want %q", got, tc.want)
+			}
+			// Byte-identity against the raw form the display path replaces, fed the
+			// same sessionName (Info.SessionName) it supplies.
+			raw := LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now, info.SessionName, isRunning)
+			if got != raw {
+				t.Fatalf("twin %q diverged from raw LifecycleDisplayReasonWithLiveness %q", got, raw)
+			}
+		})
+	}
+}
+
 func TestLifecycleWakeConflictStateUsesProjectedTerminalStates(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -921,8 +1043,8 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
-				`sessionpkg.ClearExpiredHoldPatch(session.Metadata["sleep_reason"])`,
-				`sessionpkg.ClearExpiredQuarantinePatch(session.Metadata["sleep_reason"])`,
+				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
+				`sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)`,
 			},
 			forbidden: []string{
 				`batch := map[string]string{"held_until": ""}`,

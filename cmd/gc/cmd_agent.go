@@ -79,6 +79,17 @@ var loadCityConfigDefaultWarningWriter = func() io.Writer {
 	return os.Stderr
 }
 
+// configWarnWriter routes advisory config-load warnings to io.Discard in JSON
+// mode and to stderr otherwise, so `--json` output stays clean for scripting on
+// every command (extending c806e54a3's rig-list fix uniformly). Hard load errors
+// are unaffected — they always go to stderr with a non-zero exit.
+func configWarnWriter(jsonOut bool, stderr io.Writer) io.Writer {
+	if jsonOut {
+		return io.Discard
+	}
+	return stderr
+}
+
 func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 	for _, w := range warningWriter {
 		if w != nil {
@@ -110,10 +121,16 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // [agent_defaults]/[agents] config remains strict-fatal because overlapping
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
+	if config.IsRetiredKeyWarning(warning) {
+		return true
+	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
 	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
+	if config.IsAlwaysFreshWakeModeWarning(warning) {
 		return true
 	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
@@ -259,12 +276,16 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
 // 3-step resolution:
-//  1. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
-//  2. Contextual: if input has no "/" and currentRigDir is set, try
-//     "{currentRigDir}/{input}" to resolve rig-scoped agents from context.
+//  1. Contextual: if input has no "/" and currentRigDir is set, try
+//     "{currentRigDir}/{input}" first. This includes binding-qualified but
+//     scope-unqualified inputs such as "core.control-dispatcher".
+//  2. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
 //  3. Unambiguous bare name: scan all agents by Name (ignoring Dir).
 //     Succeeds only when exactly one configured agent matches. Pool
 //     members are synthesized when the input uses {name}-{N}.
+//
+// This context sensitivity is for interactive CLI input. Persisted routes such
+// as gc.routed_to must already be canonical and must not be re-resolved here.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
@@ -280,8 +301,13 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
-	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
-	if strings.Contains(input, "/") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
+	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
+	// matches the corresponding pool template. Mirrors the shared resolver
+	// helper (internal/agentutil/resolve.go), which gates on
+	// ContainsAny(input, "/.") so dot-qualified instances resolve too
+	// (#4843).
+	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
 			return a, true
 		}
@@ -476,7 +502,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg)
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -501,7 +527,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -517,7 +543,7 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
+			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,
@@ -771,7 +797,7 @@ func cmdAgentSuspend(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Suspended agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -849,7 +875,7 @@ func cmdAgentResume(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Resumed agent '%s'\n", args[0]) //nolint:errcheck // best-effort stdout
 			return 0
 		}
-		if !api.ShouldFallback(err) {
+		if !api.ShouldFallback(c, err) {
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

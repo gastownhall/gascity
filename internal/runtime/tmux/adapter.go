@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -64,8 +65,8 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // Start creates a new detached tmux session and performs a multi-step
 // startup sequence to ensure agent readiness. The sequence handles zombie
 // detection, command launch verification, permission warning dismissal,
-// and runtime readiness polling. Steps are conditional on Config fields
-// being set; an agent with no startup hints gets fire-and-forget.
+// and runtime readiness polling. Steps are conditional on Config fields;
+// an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
@@ -85,10 +86,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir}, name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm, runtimeDir: p.cfg.RuntimeDir, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
+	}
+	if errors.Is(err, ErrServerDegraded) {
+		return err
 	}
 	p.cleanupFailedStart(name, cfg)
 	return err
@@ -142,6 +146,12 @@ func ensureInstanceToken(env map[string]string) (map[string]string, error) {
 		}
 		cloned["GC_INSTANCE_TOKEN"] = token
 	}
+	// Keep BEADS_HOLDER_TOKEN aligned to GC_INSTANCE_TOKEN. Managed starts set
+	// both via session.RuntimeEnv, but this backstop is the unmanaged/legacy path
+	// where GC_INSTANCE_TOKEN can be minted (or arrive) without a matching holder
+	// token — a divergent or absent holder token is a silent actor-only downgrade
+	// the template-inspecting gate cannot see (ownership-fencing DESIGN §2.4).
+	cloned["BEADS_HOLDER_TOKEN"] = cloned["GC_INSTANCE_TOKEN"]
 	return cloned, nil
 }
 
@@ -211,7 +221,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), &tmuxStartOps{tm: p.tm}, name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -225,7 +235,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout); err != nil {
+	if err := doRelaunchSession(ctx, &tmuxStartOps{tm: p.tm, setupMaxTimeout: p.cfg.SetupMaxTimeout}, name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -324,9 +334,30 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 	found, scanErr := proctable.ScanBySessionID(id)
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
-		for i := range found {
-			found[i].IsTracked = true
-		}
+		// Fail CLOSED: without the live-session list we cannot prove which
+		// scanned roots are gc-tracked. Marking them all tracked (the previous
+		// behavior) told killExistingOrphans to skip every one, so an escaped
+		// old process for this exact session survived alongside its
+		// replacement. Leave IsTracked=false instead: the caller then targets
+		// the same-session, same-city roots the /proc scan surfaced, and only
+		// starts once they are confirmed dead.
+		//
+		// TRADE-OFF (gascity D1 / MEDIUM-2): when listErr is a *transient*
+		// tmux-list hiccup rather than a truly-gone server, a still-live
+		// session's root can land here untracked and be targeted for kill —
+		// the same tmux machinery backs ensureRunning's !IsRunning gate, so a
+		// blip flips both. We accept this over the alternative (a survivor
+		// racing the replacement for the same work bead, causing duplicate bd
+		// closes), because the survivor bug is silent and corrupts work state
+		// while a wrongful kill is loud and self-heals on the next reconcile.
+		// Two mitigations bound the blast radius: (1) KillByPID confirms death
+		// by PID + /proc start-time identity (pidutil.AliveWithStartTime), so a
+		// genuinely-live root is never misreported as dead — if it resists the
+		// kill it surfaces a real "not confirmed dead" error; and (2) that
+		// error propagates through killExistingOrphans to every gated Start,
+		// which then refuses rather than racing. Independently re-deriving
+		// "is this the current live session" here would require the very
+		// ListRunning that just failed, so it is intentionally not attempted.
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
@@ -592,9 +623,22 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // ListRunning returns all tmux session names matching the given prefix.
+//
+// A totally unreachable tmux server (ErrNoServer) is reported as a
+// [runtime.PartialListError] with a nil names slice rather than an empty
+// success: a single-tmux outage is a failed observation, not proof that zero
+// sessions exist. This activates the reconciler-facing IsPartialListError
+// guards (pool on_death, provider swap, shutdown listing, orphan cleanup) so a
+// brief server blip defers destructive action instead of tearing down healthy
+// sessions. It mirrors the multi-backend degraded-but-usable signal that
+// [runtime.MergeBackendListResults] produces for composite providers, and is
+// the ListRunning-side analog of the StateCache liveness fix in #4082.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	all, err := p.tm.ListSessions()
+	all, err := p.tm.listSessionNames()
 	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+		}
 		return nil, err
 	}
 	var matched []string
@@ -754,7 +798,7 @@ func (p *Provider) TeardownServer() error {
 // This enables unit testing without a real tmux server.
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
-	respawnAgent(name, workDir, command string) error
+	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) bool
 	killSession(name string) error
@@ -776,6 +820,11 @@ type startOps interface {
 type tmuxStartOps struct {
 	tm         *Tmux
 	runtimeDir string
+	// setupMaxTimeout enables the activity-aware setup budget
+	// ([session] setup_max_timeout, Config.SetupMaxTimeout): when > 0,
+	// runSetupCommand replaces its fixed wall-clock deadline with
+	// "no output for `timeout`" (idle) plus this absolute ceiling.
+	setupMaxTimeout time.Duration
 }
 
 const (
@@ -786,6 +835,10 @@ const (
 	startupPaneCaptureLines  = 80
 	setupCommandOutputLimit  = 4096
 	setupCommandWaitDelay    = 2 * time.Second
+	// setupCancelGrace is the rollback-trap budget when the activity-aware
+	// setup budget is enabled: after the group interrupt, the setup script
+	// gets this long to restore any staged state before the forced kill.
+	setupCancelGrace = 10 * time.Second
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -798,7 +851,20 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // respawnAgent relaunches the agent command in the session's existing pane
 // (respawn-pane -k), reusing the warm box and its session environment. The
 // launch-half of the un-weld relaunch path.
-func (o *tmuxStartOps) respawnAgent(name, workDir, command string) error {
+//
+// respawn-pane takes no env argument: the new process inherits the tmux server's
+// global environment as filtered by the SESSION environment, so a withheld
+// credential has to already be marked removed there. NewSessionWithCommandAndEnv
+// does that at provision time, and this re-asserts it because a warm box is
+// explicitly long-lived — one provisioned by an older gc, whose create path only
+// built the one-shot `env -u` prefix, would otherwise hand the respawned agent
+// the controller's real value for the rest of the box's life. Re-marking a key
+// already marked is a no-op, and only controller-scope keys are marked, so a
+// relaunch that withholds no credential costs no extra tmux call at all.
+func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+		return err
+	}
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
@@ -820,16 +886,6 @@ func (o *tmuxStartOps) waitForCommand(ctx context.Context, name string, timeout 
 
 func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) error {
 	return o.tm.AcceptStartupDialogs(ctx, name)
-}
-
-func shouldAcceptStartupDialogs(cfg runtime.Config) bool {
-	if cfg.AcceptStartupDialogs != nil {
-		return *cfg.AcceptStartupDialogs
-	}
-	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
-		return false
-	}
-	return true
 }
 
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
@@ -896,9 +952,25 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// Deadline shape: with setupMaxTimeout unset (the default) the command
+	// gets the historical fixed wall-clock deadline. With it set, the budget
+	// is activity-aware instead — timeout bounds output SILENCE and
+	// setupMaxTimeout bounds total runtime — so a slow-but-streaming setup
+	// command (e.g. a large worktree checkout) is no longer killed while
+	// visibly making progress, and a hung one still dies.
+	idle, grace := time.Duration(0), setupCommandWaitDelay
+	if o.setupMaxTimeout > 0 {
+		idle, grace = timeout, setupCancelGrace
+	}
+	mon := execgrace.NewMonitor(ctx, idle, o.setupMaxTimeout)
+	defer mon.Stop()
+	runCtx := mon.Context()
+	if !mon.Enabled() {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}
@@ -913,12 +985,16 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	}
 	stdout := newCommandOutputTail(setupCommandOutputLimit)
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
-	c.Stdout = stdout
-	c.Stderr = stderr
-	// WaitDelay ensures Go forcibly closes the capture pipes after the
-	// command exits or the timeout fires, even if background descendants
-	// spawned by the command still hold them open.
-	c.WaitDelay = setupCommandWaitDelay
+	c.Stdout = mon.Writer(stdout)
+	c.Stderr = mon.Writer(stderr)
+	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// the command's process group first so shell rollback traps — e.g.
+	// worktree-setup.sh restoring content it staged aside — run before the
+	// forced kill. Go's default context-cancel is SIGKILL, which is
+	// untrappable and stranded such staged state. The grace doubles as the
+	// WaitDelay that force-closes the capture pipes after the command exits
+	// or is canceled, even if background descendants still hold them open.
+	execgrace.Apply(c, grace)
 	if err := c.Run(); err != nil {
 		// ErrWaitDelay means the command itself exited successfully and
 		// only the force-closed pipes ended the wait: a setup command that
@@ -926,7 +1002,9 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		if errors.Is(err, exec.ErrWaitDelay) {
 			return nil
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		// context.Cause surfaces which budget fired (execgrace.ErrIdle,
+		// execgrace.ErrCeiling, or the fixed deadline's DeadlineExceeded).
+		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return setupCommandFailure(err, stdout, stderr)
@@ -1150,11 +1228,22 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: %w: %s (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
+	// Run pre_start before respawning: relaunch re-homes the agent into a
+	// possibly different (or not-yet-prepared) WorkDir, and launching into an
+	// unprepared workDir can point agents at the wrong repo — the same
+	// rationale that makes pre_start failures fatal in doStartSession.
+	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
+		return fmt.Errorf("relaunch: running pre_start: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
 		return err
 	}
-	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand); err != nil {
+	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
 	}
 	if err := ctx.Err(); err != nil {
@@ -1183,7 +1272,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Step 3: Accept startup dialogs (workspace trust + bypass permissions).
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
-	if shouldAcceptStartupDialogs(cfg) {
+	if runtime.ShouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1210,7 +1299,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
-	if shouldAcceptStartupDialogs(cfg) {
+	if runtime.ShouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
@@ -1241,7 +1330,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 	if cfg.Nudge != "" {
 		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			return fmt.Errorf("sending startup nudge: %w", err)
+			// The startup nudge has no retry-capable caller: the keystrokes
+			// reached tmux and the session is verified alive above, so an
+			// unconfirmed submit is a warning, not a start failure. Any other
+			// error still fails the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+				return fmt.Errorf("sending startup nudge: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
 		}
 	}
 
@@ -1338,6 +1434,26 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // (~2KB) so large prompts cause "command too long" errors.
 const maxInlinePromptLen = 1024
 
+func shouldUnsetInteractiveColorEnv(command string) bool {
+	args := shellquote.Split(command)
+	if len(args) == 0 {
+		return false
+	}
+	switch filepath.Base(args[0]) {
+	case "claude", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func wrapInteractiveColorEnv(command string, unset bool) string {
+	if command == "" || !unset {
+		return command
+	}
+	return "env -u CI -u NO_COLOR " + command
+}
+
 // buildLaunchCommand computes the full agent command line for a session, writing
 // a prompt temp file when the inline prompt would overflow the exec command line.
 // Returns the command, the prompt file path (empty when none was written), and
@@ -1345,10 +1461,10 @@ const maxInlinePromptLen = 1024
 // (relaunch into a warm box) so both produce an identical agent command.
 func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFile string, err error) {
 	fullCommand = cfg.Command
-	if cfg.PromptSuffix == "" {
-		return fullCommand, "", nil
-	}
-	if len(cfg.PromptSuffix) > maxInlinePromptLen {
+	unsetColorEnv := shouldUnsetInteractiveColorEnv(cfg.Command)
+	switch {
+	case cfg.PromptSuffix == "":
+	case len(cfg.PromptSuffix) > maxInlinePromptLen:
 		// Large prompt — write to temp file and use $(cat ...) expansion inside
 		// the tmux session's shell to avoid the protocol limit and prevent the
 		// quoted prompt from leaking into the exec command line (which triggers
@@ -1356,18 +1472,15 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 		// argv/exec buffers).
 		promptFile, err = writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
 		if err != nil {
-			// No silent fallback: the inline path would produce the "File name
-			// too long" tmux pane death that this helper exists to prevent.
-			// Surface the failure so the reconciler records it and the operator
-			// can diagnose the cause.
 			return "", "", fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
 		}
-		return longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile), promptFile, nil
+		fullCommand = longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile)
+	case cfg.PromptFlag != "":
+		fullCommand += " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+	default:
+		fullCommand += " " + cfg.PromptSuffix
 	}
-	if cfg.PromptFlag != "" {
-		return fullCommand + " " + cfg.PromptFlag + " " + cfg.PromptSuffix, "", nil
-	}
-	return fullCommand + " " + cfg.PromptSuffix, "", nil
+	return wrapInteractiveColorEnv(fullCommand, unsetColorEnv), promptFile, nil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {

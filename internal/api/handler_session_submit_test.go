@@ -19,7 +19,7 @@ func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -56,8 +56,8 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "helper", "Codex Submit", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex Submit", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -165,8 +165,8 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "helper", "Codex", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

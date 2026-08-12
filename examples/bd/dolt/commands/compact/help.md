@@ -16,7 +16,8 @@ row preservation, and runs `CALL DOLT_GC('--full')`.
   GC was deferred or never ran, so scheduled compaction skips it forever and the
   disk space is never reclaimed. Unlike a bare working-set GC, `--full` rewrites
   `oldgen`, so the orphaned history is actually freed. Refuses any database that
-  carries an integrity-quarantine marker.
+  carries an integrity-quarantine marker and prints the marker evidence plus the
+  safe clear/retry requirements.
 
 - `--only-db <name>` — Restrict the run to the named database. Repeatable, and
   augments `GC_DOLT_COMPACT_ONLY_DBS`. Use this to reclaim a single stranded
@@ -45,4 +46,5 @@ gc dolt compact --gc-only --dry-run
 ```
 
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
-runbook, including when to stop writers and take a safety backup first.
+runbook, including quarantine marker evidence, the safe marker-clear procedure,
+and when to stop writers and take a safety backup first.

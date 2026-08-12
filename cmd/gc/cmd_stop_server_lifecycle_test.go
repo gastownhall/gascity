@@ -20,12 +20,17 @@ type lifecycleOrderProvider struct {
 	mu          sync.Mutex
 	events      []string
 	teardownErr error
+	listErr     error // when set, ListRunning returns it (empty slice), modeling a failed enumeration
 }
 
 func (p *lifecycleOrderProvider) ListRunning(prefix string) ([]string, error) {
 	p.mu.Lock()
 	p.events = append(p.events, "ListRunning")
+	listErr := p.listErr
 	p.mu.Unlock()
+	if listErr != nil {
+		return nil, listErr
+	}
 	return p.Fake.ListRunning(prefix)
 }
 
@@ -84,7 +89,7 @@ func TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown(t *testing.T
 
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 
 	var stdout, stderr lockedBuffer
 	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
@@ -173,8 +178,8 @@ func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
 
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
-		return runtime.NewFake()
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
 	}
 
 	var stdout, stderr lockedBuffer
@@ -215,7 +220,7 @@ func TestCmdStopBodyReportsTeardownErrorWithoutFailing(t *testing.T) {
 
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
-	sessionProviderForStopCity = func(*config.City, string) runtime.Provider { return sp }
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 
 	var stdout, stderr lockedBuffer
 	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)

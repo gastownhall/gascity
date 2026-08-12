@@ -11,6 +11,77 @@ import (
 
 func intPtr(n int) *int { return &n }
 
+// TestNestedCapUsageRejectionTyped verifies that the retyped rejection producer
+// returns the typed site/reason constants for each cap kind, and that the
+// underlying string values are byte-identical to the pre-S26b literals.
+func TestNestedCapUsageRejectionTyped(t *testing.T) {
+	cases := []struct {
+		name       string
+		cfg        *config.City
+		wantSite   TraceSiteCode
+		wantReason TraceReasonCode
+		wantSiteS  string
+		wantRsnS   string
+	}{
+		{
+			name:       "agent_cap",
+			cfg:        &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)}},
+			wantSite:   TraceSitePoolAgentCap,
+			wantReason: TraceReasonAgentCap,
+			wantSiteS:  "reconciler.pool.agent_cap",
+			wantRsnS:   "agent_cap",
+		},
+		{
+			name: "rig_cap",
+			cfg: &config.City{
+				Rigs:   []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: intPtr(1)}},
+				Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolRigCap,
+			wantReason: TraceReasonRigCap,
+			wantSiteS:  "reconciler.pool.rig_cap",
+			wantRsnS:   "rig_cap",
+		},
+		{
+			name: "workspace_cap",
+			cfg: &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: intPtr(1)},
+				Agents:    []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+			},
+			wantSite:   TraceSitePoolWorkspaceCap,
+			wantReason: TraceReasonWorkspaceCap,
+			wantSiteS:  "reconciler.pool.workspace_cap",
+			wantRsnS:   "workspace_cap",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := newNestedCapLimits(tc.cfg)
+			usage := newNestedCapUsage()
+			template := tc.cfg.Agents[0].QualifiedName()
+			// Fill to the cap so the next request is rejected.
+			usage.accept(SessionRequest{Template: template, Tier: "new"}, limits)
+
+			site, reason, _, rejected := usage.rejection(SessionRequest{Template: template, Tier: "new"}, limits)
+			if !rejected {
+				t.Fatalf("expected rejection at cap")
+			}
+			if site != tc.wantSite {
+				t.Errorf("site = %q, want %q", site, tc.wantSite)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if string(site) != tc.wantSiteS {
+				t.Errorf("string(site) = %q, want legacy literal %q", string(site), tc.wantSiteS)
+			}
+			if string(reason) != tc.wantRsnS {
+				t.Errorf("string(reason) = %q, want legacy literal %q", string(reason), tc.wantRsnS)
+			}
+		})
+	}
+}
+
 func workBead(id, routedTo, assignee, status string, priority int) beads.Bead {
 	p := priority
 	return beads.Bead{
@@ -228,6 +299,59 @@ func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T
 	}
 	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
 		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_ResumesInstanceSuffixedRouteTarget(t *testing.T) {
+	// A writer that stamps gc.routed_to with a live instance suffix directly
+	// (e.g. `bd update --set-metadata gc.routed_to=rig/claude-1`), bypassing gc
+	// sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+	// applied in doSling), must not strand the resume-tier match: the raw
+	// instance name has to resolve back to the base template before comparing
+	// against `template`, or the live session backing this work looks
+	// unrouted and never resumes.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-1", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume for instance-suffixed route target", len(reqs))
+	}
+	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
+		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_LeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	// Guard against over-normalization: an instance number outside the
+	// agent's configured capacity is not a pool instance identity and must
+	// not be rewritten or matched against the base template.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude-99", "sess-1", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (out-of-range instance suffix must not resolve to the base template)", total)
 	}
 }
 
@@ -794,6 +918,81 @@ func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) 
 	}
 	if resumeCount != 0 {
 		t.Errorf("resume count = %d, want 0 (named-session beads are materialized by the named-session loop, not pool resume)", resumeCount)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession is
+// the ga-p0u752 fix: the wake-known-identity tier (no live session bead
+// resolves the assignee) must NOT treat a bare assignee as generic pool demand
+// when that identity is structurally a configured [[named_session]] — even
+// though the resume-tier guard (namedSessionBeadIDs, lines 194-196) never
+// fires here because there is no session bead at all. Without this fix,
+// isKnownPoolTemplate has zero awareness of cfg.NamedSessions and wakes a
+// competing pool worker for a named session's own orphaned bare self-claim
+// (ga-i1d0tr Candidate B).
+func TestComputePoolDesiredStates_WakeKnownIdentitySkipsConfiguredNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("builder", "gascity", intPtr(3), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+	// No live session bead at all: the named session's canonical bead is
+	// reaped/closed, but the bare-identity in-progress claim survives.
+	work := []beads.Bead{
+		workBead("w1", "gascity/builder", "gascity/builder", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	total := 0
+	for _, ds := range result {
+		total += len(ds.Requests)
+	}
+	if total != 0 {
+		t.Errorf("total pool requests = %d, want 0 (bare identity belongs to a configured named session; pool must not compete for it)", total)
+	}
+}
+
+// TestComputePoolDesiredStates_WakeKnownIdentityFiresForSuspendedNamedSession
+// covers the suspension-awareness risk the architecture review flagged
+// (ga-wfcfoe): a suspended named session must not be silently exempted from
+// pool demand, or the bead would orphan with neither side picking it up.
+// isConfiguredNamedSessionIdentity is unit-tested directly below
+// (TestIsConfiguredNamedSessionIdentity) because computePoolDesiredStates'
+// own outer loop already skips a suspended agent's entire per-template pass
+// (line ~151), so this exact scenario can't be reconstructed end-to-end
+// through ComputePoolDesiredStates for the overlapping bare-identity shape
+// this bug family targets — suspending the shared agent suspends both tiers
+// uniformly by design, which is correct (not orphaning), not a gap.
+func TestIsConfiguredNamedSessionIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("builder", "gascity", intPtr(3), 0),
+			{Name: "reviewer", Dir: "gascity", Suspended: true, MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "builder", Dir: "gascity", Mode: "on_demand"},
+			{Template: "reviewer", Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		assignee string
+		want     bool
+	}{
+		{"matches active named session", "gascity/builder", true},
+		{"matches named session with suspended backing agent", "gascity/reviewer", false},
+		{"no matching named session", "gascity/other", false},
+		{"empty assignee", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isConfiguredNamedSessionIdentity(cfg, tt.assignee); got != tt.want {
+				t.Errorf("isConfiguredNamedSessionIdentity(%q) = %v, want %v", tt.assignee, got, tt.want)
+			}
+		})
 	}
 }
 

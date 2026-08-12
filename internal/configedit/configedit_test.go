@@ -1929,39 +1929,6 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 	}
 }
 
-func TestCreateRig(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, minimalCity())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "new-rig", Path: "/tmp/new-rig"})
-	if err != nil {
-		t.Fatalf("CreateRig: %v", err)
-	}
-
-	cfg := readTOML(t, path)
-	found := false
-	for _, r := range cfg.Rigs {
-		if r.Name == "new-rig" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("rig 'new-rig' not found after create")
-	}
-}
-
-func TestCreateRig_Duplicate(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTOML(t, dir, cityWithRig())
-	ed := configedit.NewEditor(fsys.OSFS{}, path)
-
-	err := ed.CreateRig(config.Rig{Name: "my-rig", Path: "/tmp/x"})
-	if err == nil {
-		t.Error("expected error for duplicate rig")
-	}
-}
-
 func TestUpdateRig(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithRig())
@@ -2854,6 +2821,37 @@ func TestMergeOrderOverrideMergesIdempotent(t *testing.T) {
 	cfg = readTOML(t, path)
 	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || *got {
 		t.Fatalf("idempotent=false should be applied through merge, got %v", got)
+	}
+}
+
+func TestMergeOrderOverrideMergesCheckTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	sixty := "60s"
+	if err := ed.SetOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &sixty}); err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	// A partial merge that does not mention check_timeout must PRESERVE it.
+	trig := "cooldown"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Trigger: &trig}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "60s" {
+		t.Fatalf("check_timeout should be preserved through a partial merge, got %v", got)
+	}
+
+	// An explicit check_timeout must be APPLIED through the merge.
+	ninety := "90s"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", CheckTimeout: &ninety}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].CheckTimeout; got == nil || *got != "90s" {
+		t.Fatalf("check_timeout=90s should be applied through merge, got %v", got)
 	}
 }
 

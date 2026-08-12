@@ -420,6 +420,7 @@ func defaultNudgeGitHubPRRepairWorker(cityPath, assignee string, bead beads.Bead
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gc", "--city", cityPath, "session", "nudge", assignee, msg)
+	disableProductMetricsForChild(cmd)
 	_ = cmd.Run() //nolint:errcheck // best-effort; the bead update is the durable record
 }
 

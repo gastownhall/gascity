@@ -26,11 +26,11 @@ func TestNormalizeDiscoveryPathResolvesExistingSymlink(t *testing.T) {
 		t.Skipf("symlinks unsupported on this platform: %v", err)
 	}
 
-	resolved, err := filepath.EvalSymlinks(realDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Clean(resolved)
+	// Expectation derived with the production normalizer rather than bare
+	// EvalSymlinks, which on darwin returns the /private alias of a path
+	// already canonical as /var. Comparison stays exact: if resolution stopped
+	// happening, got would still be the .../link path and fail.
+	want := canonicalTestPath(realDir)
 
 	if got := normalizeDiscoveryPath(link); got != want {
 		t.Errorf("normalizeDiscoveryPath(%q) = %q, want resolved real path %q", link, got, want)
@@ -59,11 +59,8 @@ func TestNormalizeDiscoveryPathFallsBackToLongestExistingAncestor(t *testing.T) 
 	// comparison because EvalSymlinks failed on the leaf.
 	missing := filepath.Join(link, "not", "yet", "created")
 
-	resolved, err := filepath.EvalSymlinks(realDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(filepath.Clean(resolved), "not", "yet", "created")
+	// See the sibling test: normalizer-derived expectation, exact comparison.
+	want := filepath.Join(canonicalTestPath(realDir), "not", "yet", "created")
 
 	if got := normalizeDiscoveryPath(missing); got != want {
 		t.Errorf("normalizeDiscoveryPath(%q) = %q, want %q", missing, got, want)
@@ -73,6 +70,40 @@ func TestNormalizeDiscoveryPathFallsBackToLongestExistingAncestor(t *testing.T) 
 	viaReal := normalizeDiscoveryPath(filepath.Join(realDir, "not", "yet", "created"))
 	if got := normalizeDiscoveryPath(missing); got != viaReal {
 		t.Errorf("symlinked vs real missing path normalize differently: %q vs %q", got, viaReal)
+	}
+}
+
+// A city reached through a symlinked directory (e.g. ~/gc -> /real/city) must be
+// identified by its EvalSymlinks-resolved real path. Otherwise cityPath-derived
+// store scopes fail the native-store identity gate ("database project_id could
+// not be confirmed") and every command degrades to the bd-subprocess fallback.
+func TestFindCityResolvesSymlinkedCityDir(t *testing.T) {
+	realCity := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	// Derive the expectation with the same normalizer production uses, not bare
+	// EvalSymlinks: on darwin EvalSymlinks alone yields the /private alias of a
+	// path already canonical as /var, so a correct resolution would still be
+	// reported as a mismatch.
+	//
+	// Deliberately compared with exact equality rather than assertSameTestPath.
+	// Canonicalizing both sides would also resolve the link itself, so the
+	// assertion would hold even if findCity returned the unresolved link path —
+	// which is the exact regression this test exists to catch.
+	want := canonicalTestPath(realCity)
+
+	got, err := findCity(link)
+	if err != nil {
+		t.Fatalf("findCity(%q) returned error: %v", link, err)
+	}
+	if got != want {
+		t.Errorf("findCity(%q) = %q, want resolved real path %q", link, got, want)
 	}
 }
 

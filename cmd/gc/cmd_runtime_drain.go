@@ -95,7 +95,7 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
-	return errors.Join(
+	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
@@ -150,6 +150,21 @@ func (o *providerDrainOps) clearDriftRestart(sessionName string) error {
 	return o.sp.RemoveMeta(sessionName, "GC_DRIFT_RESTART")
 }
 
+func joinDrainAckMutationErrors(errs ...error) error {
+	var joined []error
+	for _, err := range errs {
+		if err == nil || drainAckMissingSessionBeadError(err) {
+			continue
+		}
+		joined = append(joined, err)
+	}
+	return errors.Join(joined...)
+}
+
+func drainAckMissingSessionBeadError(err error) bool {
+	return runtime.IsSessionGone(err) || errors.Is(err, beads.ErrNotFound)
+}
+
 // newDrainOps creates a drainOps from a runtime.Provider.
 func newDrainOps(sp runtime.Provider) drainOps {
 	return &providerDrainOps{sp: sp}
@@ -192,7 +207,11 @@ func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
 	return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
@@ -274,7 +293,11 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
 	return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
@@ -354,7 +377,11 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1                                                 // silent — same as current "not draining" behavior
 		}
-		sp := newSessionProvider()
+		sp, err := newSessionProvider()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		dops := newDrainOps(sp)
 		return doRuntimeDrainCheck(dops, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
@@ -363,7 +390,11 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 	if err != nil {
 		return 1 // not in agent context → not draining
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	return doRuntimeDrainCheck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
@@ -441,7 +472,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		sp := newSessionProvider()
+		sp, err := newSessionProvider()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		dops := newDrainOps(sp)
 		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
@@ -451,7 +486,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
@@ -478,11 +517,6 @@ exits 0 cleanly. If the controller has not acted within a bounded
 timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
 1 with a diagnostic pointing at controller health.
 
-For on-demand configured named sessions, the controller cannot restart
-the user-attended process. In that case this command reports that
-restart was skipped and returns immediately. No session.draining event
-is emitted when restart is skipped.
-
 This command is designed to be called from within a session context.
 It emits a session.draining event before waiting.`,
 		Args: cobra.NoArgs,
@@ -502,37 +536,25 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	dops := newDrainOps(sp)
 	store, storeErr := openCityStoreAt(current.cityPath)
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
 	}
-	// Route the SESSION-class access (restartability check, restart-request
-	// clear, restart persist through the worker boundary) to the session
-	// coordination-class store so a [beads.classes.sessions] relocation reaches
-	// gc runtime request-restart. The routing cfg is loaded refresh-free (the
-	// full cfg loads later, for timeout/template resolution). Identity today, so
-	// byte-identical.
+	// Route the SESSION-class access (restart persist through the worker
+	// boundary) to the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches gc runtime request-restart.
+	// The routing cfg is loaded refresh-free (the full cfg loads later, for
+	// timeout/template resolution). Identity today, so byte-identical.
 	var sessStore beads.Store
 	if store != nil {
 		routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
 		sessStore = cliSessionStore(store, routeCfg, current.cityPath)
-	}
-	if store != nil {
-		restartable, err := sessionRestartableByController(sessStore, current.sessionName)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if !restartable {
-			if err := clearRestartRequest(sessStore, dops, current.sessionName); err != nil {
-				fmt.Fprintf(stderr, "gc runtime request-restart: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			fmt.Fprintln(stdout, "Restart skipped for named session; controller cannot restart on-demand named sessions.") //nolint:errcheck // best-effort stdout
-			return 0
-		}
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
@@ -546,9 +568,14 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 			return handle.Reset(context.Background())
 		}
 	}
+	_, pinned, err := sessionRestartableByController(sessStore, current.sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return doRuntimeRequestRestart(sigCtx, dops, persistRestart, rec, current.display, current.sessionName,
+	return doRuntimeRequestRestart(sigCtx, dops, sp, persistRestart, pinned, rec, current.display, current.sessionName,
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stdout, stderr)
 }
 
@@ -576,16 +603,31 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 // doRuntimeRequestRestart sets the restart-requested flag then polls until the
 // controller accepts the stop handoff (exit 0), the context is canceled by a
 // signal (exit 0), or the bounded timeout expires (exit 1 with diagnostic).
-func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
+//
+// pinned marks a kill-protected named session (pin_awake == "true"): the
+// reconciler refuses to collaterally kill such a session on a bare runtime
+// restart-requested flag, so for pinned sessions persistRestart (which lands
+// continuation_reset_pending, the explicit-reset escape hatch) is mandatory
+// rather than best-effort. See sessionRestartableByController.
+func doRuntimeRequestRestart(ctx context.Context, dops drainOps, sp runtime.Provider, persistRestart func() error, pinned bool, rec events.Recorder,
 	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Also persist the request through the worker boundary so it survives
-	// tmux session death. Non-fatal: the runtime flag above is primary.
-	if persistRestart != nil {
+	if pinned {
+		if persistRestart == nil {
+			fmt.Fprintf(stderr, "gc runtime request-restart: pinned session %q has no restart persistence available; not requesting restart\n", sn) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := persistRestart(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for pinned session %q; not requesting restart: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else if persistRestart != nil {
+		// Also persist the request through the worker boundary so it survives
+		// tmux session death. Non-fatal here: the runtime flag above is primary.
 		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -598,10 +640,20 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 	})
 	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
 
-	return waitForControllerRestart(ctx, dops, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
+	return waitForControllerRestart(ctx, dops, sp, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
 }
 
-func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
+// waitForControllerRestart polls until the controller accepts the stop
+// handoff (exit 0), the context is canceled by a signal (exit 0), or the
+// bounded timeout expires (exit 1 with diagnostic).
+//
+// A cleared GC_RESTART_REQUESTED flag alone is not proof the controller acted:
+// the reconciler's pinned-session collateral-skip clears the very same flag
+// without killing the session (see pinnedConfiguredNamedSessionKillProtected
+// in session_reconciler.go). sp confirms the session actually stopped before
+// this reports success; while the flag is clear but the session is still
+// running, polling continues until the deadline instead of returning early.
+func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Provider, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -618,7 +670,7 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 			switch {
 			case err != nil:
 				lastPollErr = err
-			case !requested:
+			case !requested && !sp.IsRunning(sn):
 				// The controller accepted the stop handoff or the runtime is already gone.
 				return 0
 			default:

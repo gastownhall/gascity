@@ -25,23 +25,34 @@ var allProjectedMetadataKeys = []string{
 	"resume_style", "resume_command", "continuation_epoch", "sleep_reason",
 	NamedSessionIdentityMetadata, NamedSessionMetadataKey, NamedSessionModeMetadata,
 	"common_name", "pool_slot", "pool_managed", "session_origin",
-	"dependency_only", "manual_session", MCPIdentityMetadataKey,
+	"dependency_only", "manual_session",
+	"pool_alias_conflict", "pool_alias_conflict_count", "pool_alias_conflict_at",
+	MCPIdentityMetadataKey,
 	MCPServersSnapshotMetadataKey, "provider_terminal_error", "session_health",
 	"session_health_reason", "session_drainable", beadmeta.TriggerBeadIDMetadataKey,
 	beadmeta.TriggerBeadStoreRefMetadataKey, beadmeta.BrainParentSIDMetadataKey,
-	beadmeta.PackMetadataKey,
+	beadmeta.PackMetadataKey, beadmeta.PackWorkspaceMetadataKey, beadmeta.WorkDirMetadataKey,
+	beadmeta.WorkerDirMetadataKey,
 	"pending_create_claim", "pending_create_started_at", "quarantined_until",
-	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "state_reason",
-	"creation_complete_at", "continuation_reset_pending", ResetCommittedAtKey,
+	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
+	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
+	ResetCommittedAtKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
 	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
-	"started_launch_hash", "started_live_hash", "config_drift_deferred_at",
+	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
+	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
+	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
 	"session_name_explicit", "wake_request", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
-	MetadataLastNudgeDeliveredAt, "provider_kind",
+	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
+	"sleep_policy_fingerprint", "requested_sleep_after_idle",
+	"effective_sleep_after_idle", "sleep_policy_source", "sleep_capability",
+	"sleep_policy_adjustment_reason", "config_wake_suppressed",
+	CanonicalInstanceNameMetadata, CanonicalPoolSlotMetadata,
+	PrimedAtMetadataKey, PrimingAttemptedAtMetadataKey, PromptHashMetadataKey,
 }
 
 // oracleBaseBeads returns diverse session beads: a fully-populated open bead, the
@@ -63,24 +74,45 @@ func oracleBaseBeads() []beads.Bead {
 		"provider_terminal_error": "", "session_health": "healthy", "session_health_reason": "",
 		"session_drainable": "true", beadmeta.TriggerBeadIDMetadataKey: "tb",
 		beadmeta.TriggerBeadStoreRefMetadataKey: "ref", beadmeta.BrainParentSIDMetadataKey: "bp",
-		beadmeta.PackMetadataKey: "pk",
-		"pending_create_claim":   "true", "pending_create_started_at": "2026-01-01T00:00:00Z",
+		beadmeta.PackMetadataKey: "pk", beadmeta.PackWorkspaceMetadataKey: "ws", beadmeta.WorkDirMetadataKey: "/gc/w",
+		beadmeta.WorkerDirMetadataKey: "/worker/w",
+		"pending_create_claim":        "true", "pending_create_started_at": "2026-01-01T00:00:00Z",
 		"quarantined_until": "2026-01-05T00:00:00Z", aliasHistoryMetadataKey: "old-a,old-b",
 		"continuity_eligible": "true", "last_woke_at": "2026-01-02T00:00:00Z",
+		"awake_started_at": "2026-01-02T00:30:00Z", "usage_compute_emitted_at": "2026-01-02T00:30:00Z",
 		"state_reason": "creation_complete", "creation_complete_at": "2026-01-02T01:00:00Z",
-		"continuation_reset_pending": "true", ResetCommittedAtKey: "2026-01-02T02:00:00Z",
-		"generation": "4", "started_config_hash": "cfg", "pin_awake": "true",
+		"continuation_reset_pending": "true", SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+		ResetCommittedAtKey: "2026-01-02T02:00:00Z",
+		"generation":        "4", "started_config_hash": "cfg", "pin_awake": "true",
 		"held_until": "2026-01-03T00:00:00Z", "wait_hold": "op", "churn_count": "2",
 		"wake_mode": "fresh", "sleep_intent": "idle-stop-pending", "instance_token": "it",
 		"detached_at": "2026-01-04T00:00:00Z", CurrentBeadIDKey: "bead-9",
 		"core_hash_breakdown": `{"a":1}`, "started_provision_hash": "ph",
 		"started_launch_hash": "lh", "started_live_hash": "lvh",
+		"live_hash": "lvh-current", "startup_dialog_verified": "true",
 		"config_drift_deferred_at": "2026-01-06T00:00:00Z", "config_drift_deferred_key": "k",
 		"attached_config_drift_deferred_at":  "2026-01-07T00:00:00Z",
 		"attached_config_drift_deferred_key": "ak", "stranded_event_emitted_at": "2026-01-08T00:00:00Z",
 		"session_name_explicit": "true", "wake_request": "explicit", "restart_requested": "true",
 		"session_id_flag": "--session-id", "template_overrides": `{"x":"y"}`, "wake_attempts": "3",
 		MetadataLastNudgeDeliveredAt: "2026-01-09T00:00:00Z", "provider_kind": "claude",
+		"builtin_ancestor":         "codex",
+		"sleep_policy_fingerprint": "fp-1", "requested_sleep_after_idle": "30m",
+		"effective_sleep_after_idle": "15m", "sleep_policy_source": "config",
+		"sleep_capability": "full", "sleep_policy_adjustment_reason": "capped",
+		"config_wake_suppressed": "true",
+	}
+	// Backfill: every projected key carries a UNIQUE non-empty value so the
+	// frozen-reference parity oracle (TestInfoCodecProjectionParity) can
+	// distinguish every single-field setter — a same-shape setter swap between
+	// two keys fails DeepEqual instead of comparing zero-vs-zero. Keys with
+	// typed semantics above keep their explicit values; only absent keys are
+	// filled. (S09b port red-team finding: pool_alias_conflict trio et al were
+	// never populated, leaving the table blind to a future swap.)
+	for _, k := range allProjectedMetadataKeys {
+		if _, ok := populated[k]; !ok {
+			populated[k] = "v-" + k
+		}
 	}
 	clone := func(m map[string]string) map[string]string {
 		out := make(map[string]string, len(m))
@@ -147,8 +179,8 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"live_hash": "ignored"},         // unknown key: must not change Info
-		{"startup_dialog_verified": "z"}, // unknown key
+		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
+		{"env.GC_FOO": "bar"},                         // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}
 	return append(patches, edge...)
@@ -169,10 +201,10 @@ func reprojectBead(base beads.Bead, patch MetadataPatch) beads.Bead {
 // Step-6d snapshot refresh depends on.
 func TestInfoApplyPatchMatchesReprojection(t *testing.T) {
 	for _, base := range oracleBaseBeads() {
-		baseInfo := InfoFromPersistedBead(base)
+		baseInfo := infoFromPersistedBead(base)
 		for _, patch := range oraclePatches() {
 			got := baseInfo.ApplyPatch(patch)
-			want := InfoFromPersistedBead(reprojectBead(base, patch))
+			want := infoFromPersistedBead(reprojectBead(base, patch))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("base=%s patch=%v: ApplyPatch diverged from full reprojection\n got=%+v\nwant=%+v", base.ID, patch, got, want)
 			}
@@ -198,8 +230,8 @@ func TestPendingCreateClaimMetadataIsVerbatim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{"pending_create_claim": tc.raw}}
-		fromBead := InfoFromPersistedBead(b)
-		fromPatch := InfoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
+		fromBead := infoFromPersistedBead(b)
+		fromPatch := infoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
 			ApplyPatch(MetadataPatch{"pending_create_claim": tc.raw})
 		for name, got := range map[string]Info{"InfoFromPersistedBead": fromBead, "ApplyPatch": fromPatch} {
 			if got.PendingCreateClaimMetadata != tc.wantMeta {
@@ -231,8 +263,8 @@ func TestDependencyOnlyMetadataIsVerbatim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		b := beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{"dependency_only": tc.raw}}
-		fromBead := InfoFromPersistedBead(b)
-		fromPatch := InfoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
+		fromBead := infoFromPersistedBead(b)
+		fromPatch := infoFromPersistedBead(beads.Bead{ID: "s", Type: "gc:session", Status: "open", Labels: []string{"gc:session"}, Metadata: map[string]string{}}).
 			ApplyPatch(MetadataPatch{"dependency_only": tc.raw})
 		for name, got := range map[string]Info{"InfoFromPersistedBead": fromBead, "ApplyPatch": fromPatch} {
 			if got.DependencyOnlyMetadata != tc.wantMeta {
@@ -260,8 +292,8 @@ func TestInfoMarkClosedMatchesReprojection(t *testing.T) {
 		closed := open
 		closed.Status = "closed"
 
-		got := InfoFromPersistedBead(open).MarkClosed()
-		want := InfoFromPersistedBead(closed)
+		got := infoFromPersistedBead(open).MarkClosed()
+		want := infoFromPersistedBead(closed)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("base=%s: MarkClosed diverged from full reprojection of the closed bead\n got=%+v\nwant=%+v", base.ID, got, want)
 		}
@@ -280,8 +312,8 @@ func TestInfoMarkClosedMatchesReprojection(t *testing.T) {
 // reconciler reuses the snapshot Info across reads within a tick.
 func TestInfoApplyPatchDoesNotMutateReceiver(t *testing.T) {
 	base := oracleBaseBeads()[0]
-	before := InfoFromPersistedBead(base)
-	snapshot := InfoFromPersistedBead(base) // independent copy to compare against
+	before := infoFromPersistedBead(base)
+	snapshot := infoFromPersistedBead(base) // independent copy to compare against
 	_ = before.ApplyPatch(MetadataPatch{
 		aliasHistoryMetadataKey: "brand,new,history",
 		"state":                 "idle",
@@ -295,7 +327,7 @@ func TestInfoApplyPatchDoesNotMutateReceiver(t *testing.T) {
 // TestInfoApplyPatchEmptyIsIdentity guards the no-op fast path shape: an empty
 // patch returns the Info unchanged.
 func TestInfoApplyPatchEmptyIsIdentity(t *testing.T) {
-	info := InfoFromPersistedBead(oracleBaseBeads()[0])
+	info := infoFromPersistedBead(oracleBaseBeads()[0])
 	if got := info.ApplyPatch(MetadataPatch{}); !reflect.DeepEqual(got, info) {
 		t.Fatalf("empty patch changed Info\n got=%+v\nwant=%+v", got, info)
 	}

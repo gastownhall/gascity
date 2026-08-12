@@ -212,6 +212,47 @@ func TestResolveAgentNotFound(t *testing.T) {
 	}
 }
 
+func TestRoutedToIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *config.Agent
+		want  string
+	}{
+		{
+			name:  "pool instance collapses to PoolName",
+			agent: &config.Agent{Name: "polecat-2", Dir: "myrig", PoolName: "myrig/polecat"},
+			want:  "myrig/polecat",
+		},
+		{
+			name:  "bound agent with no PoolName uses QualifiedName",
+			agent: &config.Agent{Name: "dog", BindingName: "gastown"},
+			want:  "gastown.dog",
+		},
+		{
+			name:  "doubled qualified name is unaffected when PoolName unset",
+			agent: &config.Agent{Name: "dog", BindingName: "dog"},
+			want:  "dog.dog",
+		},
+		{
+			name:  "unbound agent uses bare QualifiedName",
+			agent: &config.Agent{Name: "mayor"},
+			want:  "mayor",
+		},
+		{
+			name:  "nil agent returns empty string",
+			agent: nil,
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RoutedToIdentity(tt.agent); got != tt.want {
+				t.Errorf("RoutedToIdentity(%+v) = %q, want %q", tt.agent, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizePoolRouteTarget(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

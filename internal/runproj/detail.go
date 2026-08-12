@@ -1,13 +1,21 @@
 package runproj
 
 import (
+	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// ErrRunNotFound is the sentinel wrapped by SnapshotForRun (and everything
+// built on it) when the requested run root is absent from the folded beads —
+// the run is truly unknown to the projection, as opposed to present but
+// unprojectable (UnsupportedRunError). Callers branch on it with errors.Is;
+// the dashboard BFF uses it to grant a just-slung run's deep link a warming
+// grace window instead of a terminal 404.
+var ErrRunNotFound = errors.New("run not found")
 
 // snapshotScanCount counts every snapshotForRun invocation. It exists so a test
 // can prove the single-scan entry points fold a run exactly once (the detail
@@ -30,7 +38,7 @@ type RunSnapshot struct {
 // BuildRunDetailFromSnapshot consume. version and eventSeq parameterize the
 // snapshot identity (the golden passes 1/100; the live tailer passes a real
 // version and its LastSeq cursor). It returns an error only when the run root is
-// absent from beadList.
+// absent from beadList; that error wraps ErrRunNotFound.
 func SnapshotForRun(beadList []beads.Bead, runID string, version int, eventSeq int64) (RunSnapshot, error) {
 	raw, err := snapshotForRun(beadList, runID, version, eventSeq)
 	if err != nil {
@@ -218,20 +226,11 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 		}
 	}
 	if rootIdx < 0 {
-		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q not found", rootID)
+		return runSnapshot{}, fmt.Errorf("runproj: detail run root %q: %w", rootID, ErrRunNotFound)
 	}
 	root := beadList[rootIdx]
 
-	var members []beads.Bead
-	for i := range beadList {
-		b := beadList[i]
-		if b.ID == rootID ||
-			b.ParentID == rootID ||
-			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
-			strings.HasPrefix(b.ID, rootID+".") {
-			members = append(members, b)
-		}
-	}
+	members := RunMembers(beadList, rootID)
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
 	for i := range members {
@@ -458,6 +457,12 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	sessionIndex := buildRunSessionIndex(input.sessions)
 	sessionContext := runSessionLinkContext{sessionIndex: &sessionIndex, scopeRef: input.scopeRef}
 
+	// A terminal run root forces its steps' presentation statuses terminal: once
+	// the root folds terminal, a step still reading non-terminal lost its close
+	// event, so it can no longer be "Running". Inactive for every non-terminal or
+	// root-less run.
+	clamp := rootClampFor(input.root)
+
 	rawNodes := make([]RunDisplayNode, 0, len(groups))
 	for _, group := range groups {
 		latest, hasLatest := latestIterationByLoop[group.loopControlNodeID]
@@ -467,6 +472,7 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 			latest,
 			hasLatest,
 			sessionContext,
+			clamp,
 		))
 	}
 	edges := buildRunDisplayEdges(input.raw, bg.physicalToSemantic, rawNodes)
@@ -482,7 +488,11 @@ func buildRunningFormulaRun(input runningFormulaRunInput) runningFormulaRun {
 	for i := range input.beads {
 		issues = append(issues, fromRunSnapshotBead(input.beads[i]))
 	}
-	phase := mapRunPhase(issues)
+	// The run id feeds mapRunPhase's terminal-fail lookup, but the detail view
+	// carries run failure through node statuses in the DAG rather than a
+	// run-header label: only phase.phase is projected below, so the honest
+	// "failed" label stays a summary/lane-level signal (RunLane.PhaseLabel).
+	phase := mapRunPhase(input.runID, issues)
 	formulaName, hasFormulaName := "", false
 	if formula.Kind == "known" {
 		formulaName, hasFormulaName = formula.Name, true
@@ -638,7 +648,7 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 // duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
 // newly-added status must be explicitly classified here (or the test fails).
 var (
-	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped", "canceled"}
 	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
 )
 

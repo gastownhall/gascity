@@ -3,6 +3,7 @@ package formula
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -101,6 +102,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.StepRefMetadataKey:     iterationID,
+		// gc.control_for is the durable lineage pointer to the ralph control
+		// (step.ID here, which the control carries as gc.step_id).
+		beadmeta.ControlForMetadataKey: step.ID,
 	})
 	delete(iteration.Metadata, beadmeta.ScopeRefMetadataKey)
 	delete(iteration.Metadata, beadmeta.ScopeRoleMetadataKey)
@@ -142,6 +146,9 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
 		beadmeta.StepRefMetadataKey:     iterationID,
+		// gc.control_for on the scope root only (body children hang off it via
+		// gc.scope_ref and are not attempt roots — they must not be stamped).
+		beadmeta.ControlForMetadataKey: step.ID,
 	})
 	if step.OnComplete != nil {
 		iteration.Metadata[beadmeta.OutputJSONRequiredMetadataKey] = "true"
@@ -193,7 +200,7 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 			if childStepID == "" {
 				childStepID = node.ID
 			}
-			clone.Metadata = withMetadata(clone.Metadata, map[string]string{
+			childMeta := map[string]string{
 				beadmeta.ScopeRefMetadataKey:    iterationID,
 				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
 				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
@@ -201,7 +208,22 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 				beadmeta.RalphStepIDMetadataKey: owner.ID,
 				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
 				beadmeta.StepRefMetadataKey:     clone.ID,
-			})
+			}
+			// A nested control's attempt/iteration root carries gc.control_for as
+			// the bare inner-control step id (stamped by expandRetry/expandRalph
+			// before this body was namespaced). Rewrite it to the namespaced
+			// control ref (iterationID-prefixed, matching the cloned inner
+			// control's gc.step_ref above) so findLatestAttempt scopes it to THIS
+			// outer iteration's inner control instead of matching every sibling
+			// outer iteration through the shared bare step id. This mirrors the
+			// runtime buildNestedControlSeed stamp for outer iterations 2+ (both
+			// yield the inner control's namespaced ref); the bare value only
+			// remains on top-level attempt roots, where the step id is unique per
+			// workflow root so no cross-iteration collision exists (S38).
+			if cf := strings.TrimSpace(node.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
+				childMeta[beadmeta.ControlForMetadataKey] = iterationID + "." + cf
+			}
+			clone.Metadata = withMetadata(clone.Metadata, childMeta)
 			if top {
 				topLevel = append(topLevel, clone.ID)
 				clone.DependsOn = append(clone.DependsOn, owner.DependsOn...)

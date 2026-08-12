@@ -7,8 +7,20 @@ import (
 )
 
 // sessionIDRe gates a value before it is fed to the supervisor session routes.
-// Port of TS SESSION_ID_RE (session-id.ts) — lowercase-only, case-sensitive.
+// Port of TS SESSION_ID_RE (session-id.ts) — lowercase-only, case-sensitive. It
+// stays strict (gc/td/th or exactly-four-letter prefixes) on the NAME/assignee
+// fallback path, where an id derived from an ambiguous match must not leak.
 var sessionIDRe = regexp.MustCompile(`^(gc|td|th|[a-z]{4})-[a-z0-9-]{1,32}$`)
+
+// sessionBeadIDRe validates a DURABLE session bead id — the value gc hook --claim
+// stamps from GC_SESSION_ID (a real session bead id by provenance) and the value
+// direct routing stamps as gc.session_id. It accepts a short lowercase store prefix
+// (2-4 letters, covering city stores like mc-, ga-, gcy- that sessionIDRe rejects)
+// followed by '-' and a lowercase-alnum/'-' body, while still rejecting empties,
+// whitespace, uppercase, prefixless handles, and over-long pool-name prefixes
+// (e.g. "polecat-…", "mystery-…"). It is applied ONLY to the provenance-trusted
+// durable id, never to a name/assignee-derived value.
+var sessionBeadIDRe = regexp.MustCompile(`^[a-z]{2,4}-[a-z0-9-]{1,40}$`)
 
 // supervisorSessionIDSuffixRe extracts a trailing supervisor id from a
 // pool-qualified handle. Port of the TS suffix match in supervisorSessionIdFrom.
@@ -49,11 +61,37 @@ func buildRunSessionIndex(sessions []DashboardSession) runSessionIndex {
 	return idx
 }
 
-// runSessionLinkFor resolves a bead to a streamable session link, or (zero,
-// false) when none is usable. Port of TS runSessionLinkFor.
+// runSessionLinkFor resolves a bead to a session link, or (zero, false) when none
+// is usable. Port of TS runSessionLinkFor, hardened for durable pool-step
+// attribution.
+//
+// Resolution precedence:
+//
+//  1. Durable stamp (authoritative, INDEX-INDEPENDENT): when the step carries a
+//     gc.session_id stamped by gc hook --claim (or direct routing), that value is
+//     a real session BEAD id by provenance — it identifies the session that ran
+//     the step even after that session CLOSES and drops out of the active-only
+//     session index. It is trusted directly and never overridden by a name/assignee
+//     index match, because pool slot names are deterministic and REUSED: a byName
+//     hit on a recycled slot would mis-resolve a closed step to a DIFFERENT live
+//     session (a wrong transcript/diff link — worse than no link). The id is
+//     format-validated (sessionBeadIDRe) so garbage cannot leak.
+//
+//  2. Legacy / direct fallback (no durable stamp): resolve via the index and keep
+//     the STRICT sessionIDRe gate on the result. Only an exact byID match on the
+//     durable stamp is trusted unconditionally; a name/assignee/template match must
+//     still pass the gate, so a recycled-slot byName collision yields no link rather
+//     than a wrong one.
+//
+// Streamability is decided downstream from the step's own status
+// (detail_instances.go), so a closed step's link is inherently non-streamable
+// regardless of index membership.
 func runSessionLinkFor(bead runSnapshotBead, status string, ctx runSessionLinkContext) (RunSessionLink, bool) {
 	if status == "pending" || status == "ready" {
 		return RunSessionLink{}, false
+	}
+	if stamped := stampedSessionID(bead); stamped != "" && sessionBeadIDRe.MatchString(stamped) {
+		return linkForStampedSessionID(stamped, bead, ctx), true
 	}
 	assignee := nonEmpty(bead.assignee)
 	sessionID := sessionIDFromBead(bead, assignee)
@@ -67,6 +105,48 @@ func runSessionLinkFor(bead runSnapshotBead, status string, ctx runSessionLinkCo
 		return RunSessionLink{}, false
 	}
 	return link, true
+}
+
+// stampedSessionID returns the durable session bead id a step carries in metadata
+// (gc.session_id / its legacy and camelCase aliases), stamped at claim time or by
+// direct routing. Unlike sessionIDFromBead it does NOT fall back to the transient
+// assignee, so an empty result cleanly means "no durable stamp" — the signal that
+// the resolver must use the ambiguous, gated name fallback instead.
+func stampedSessionID(bead runSnapshotBead) string {
+	for _, key := range []string{"session_id", beadmeta.SessionIDMetadataKey, beadmeta.SessionIDCamelMetadataKey} {
+		if v := beadMeta(bead, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stampedSessionName returns the durable session display name a step carries in
+// metadata (gc.session_name / aliases), or "" when absent.
+func stampedSessionName(bead runSnapshotBead) string {
+	for _, key := range []string{"session_name", beadmeta.SessionNameMetadataKey, beadmeta.SessionNameCamelMetadataKey} {
+		if v := beadMeta(bead, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// linkForStampedSessionID builds a session link straight from a durable stamped
+// session bead id, independent of the active session index. When that exact id is
+// still live in the index we adopt its display fields; otherwise (the session has
+// closed and left the active-only index) we keep the correct id and fall back to
+// the step's own stamped display fields — so a closed step still resolves to the
+// CORRECT session it ran on.
+func linkForStampedSessionID(sessionID string, bead runSnapshotBead, ctx runSessionLinkContext) RunSessionLink {
+	name := stampedSessionName(bead)
+	assignee := nonEmpty(bead.assignee)
+	if ctx.sessionIndex != nil {
+		if session, ok := ctx.sessionIndex.byID[sessionID]; ok {
+			return linkForSession(session, RunSessionLink{SessionID: sessionID, SessionName: name, Assignee: assignee})
+		}
+	}
+	return rawLinkFrom(sessionID, name, assignee)
 }
 
 // sessionIDFromBead resolves the supervisor session id from a bead. Port of TS
@@ -143,6 +223,10 @@ func supervisorSessionIDFrom(value string) string {
 	return suffix
 }
 
+// resolveRunSessionLink resolves rawLink against the session index for the
+// name/assignee fallback path, returning the enriched link on a match or rawLink
+// unchanged (nil index / no match). The caller always re-applies the strict
+// sessionIDRe gate, so an ambiguous match cannot leak an untrusted id.
 func resolveRunSessionLink(rawLink RunSessionLink, sessionIndex *runSessionIndex) RunSessionLink {
 	if sessionIndex == nil {
 		return rawLink

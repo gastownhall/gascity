@@ -61,7 +61,7 @@ func loadEffectiveMCPForAgent(
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir, config.QueryTopology{})
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -384,12 +384,12 @@ func resolveSessionMCPProjection(
 	if err != nil {
 		return resolvedMCPProjection{}, err
 	}
-	bead, err := store.Get(id)
+	info, err := sessFront.Get(id)
 	if err != nil {
+		// Name the user-supplied identifier, not the resolved bead id.
 		return resolvedMCPProjection{}, fmt.Errorf("loading session %q: %w", sessionID, err)
 	}
-	info := session.InfoFromPersistedBead(bead)
-	template := normalizedSessionTemplate(bead, cfg)
+	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = strings.TrimSpace(info.AgentName)
 	}

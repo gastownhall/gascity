@@ -42,7 +42,7 @@ Two things hold for every recipe:
 | Pi | `pi` | login | yes |
 | Auggie | `auggie` | login | — |
 | Oh My Pi | `omp` | login | — |
-| Antigravity | `antigravity` | login | — |
+| Antigravity | `antigravity` | login | yes |
 
 "—" under base URL means the harness has no standard base-URL env var: for a
 custom endpoint, supply it through the upstream's raw [`env`](/guides/configuring-an-agent#axis-3-upstream-who-serves-the-model)
@@ -89,7 +89,7 @@ Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 ```toml
 # Direct
 provider        = "codex"
-option_defaults = { model = "gpt-5.5" }    # gpt-5.5 · gpt-5.3-codex-spark · o3 · o4-mini
+option_defaults = { model = "gpt-5.5" }    # gpt-5.6-sol · gpt-5.6-terra · gpt-5.6-luna · gpt-5.5 · gpt-5.3-codex · o3 · o4-mini
 ```
 
 ```toml
@@ -266,8 +266,26 @@ upstream env. Set `provider` and run their normal `login` once on the box; no
 provider = "pi"          # Pi Coding Agent     — has a model option (ollama-cloud-gpt-oss-20b)
 # provider = "auggie"    # Augment Auggie CLI
 # provider = "omp"       # Oh My Pi
-# provider = "antigravity"   # Antigravity (agy)
+# provider = "antigravity"   # Antigravity (agy) — effort + plan/accept-edits modes
 ```
+
+Antigravity also takes `model` and `effort` options (`low` · `medium` ·
+`high`) and `plan` / `accept-edits` permission modes, mapped to agy's
+`--model`, `--effort`, and `--mode` flags. Model values are agy's stable
+slugs (`agy models` lists them):
+
+```toml
+provider        = "antigravity"
+option_defaults = { model = "gemini-3.1-pro-high" }
+# also: gemini-3.6-flash-high/-medium/-low · gemini-3.5-flash-high/-medium/-low
+#       gemini-3.1-pro-low · claude-sonnet-4-6 · claude-opus-4-6-thinking
+#       gpt-oss-120b-medium
+```
+
+<Note>
+`model` and `effort` need agy **1.1.10 or newer** — older versions silently
+ignore both flags at launch and run on the persisted default model.
+</Note>
 
 If one of these later needs a custom endpoint, give it a raw upstream `env` block
 with whatever vars its CLI documents — the same escape hatch shown for Grok

@@ -24,27 +24,33 @@ func TestParseOrdersFeedLimitCapsLargeValues(t *testing.T) {
 }
 
 func TestOrderTrackingStatusTreatsWispFailedAsFailed(t *testing.T) {
-	bead := beads.Bead{
+	run, ok := orders.RunFromTrackingBead(beads.Bead{
 		Status: "closed",
-		Labels: []string{"order-tracking", "wisp", "wisp-failed"},
+		Labels: []string{"order-tracking", "order-run:nightly", "wisp", "wisp-failed"},
+	})
+	if !ok {
+		t.Fatal("RunFromTrackingBead ok = false")
 	}
-	if got := orderTrackingStatus(bead); got != "failed" {
-		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	if got := run.State(); got != "failed" {
+		t.Fatalf("run.State() = %q, want failed", got)
 	}
 }
 
 func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
-	bead := beads.Bead{
+	run, ok := orders.RunFromTrackingBead(beads.Bead{
 		Status: "closed",
 		Labels: []string{"order-tracking", "order-run:nightly", "exec-env-failed"},
+	})
+	if !ok {
+		t.Fatal("RunFromTrackingBead ok = false")
 	}
-	if got := orderTrackingStatus(bead); got != "failed" {
-		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	if got := run.State(); got != "failed" {
+		t.Fatalf("run.State() = %q, want failed", got)
 	}
-	if got := orderTrackingTarget(orders.Order{}, false, bead); got != "exec" {
+	if got := orderTrackingTarget(orders.Order{}, false, run); got != "exec" {
 		t.Fatalf("orderTrackingTarget = %q, want exec", got)
 	}
-	if got := orderTrackingType(orders.Order{}, false, bead); got != "exec" {
+	if got := orderTrackingType(orders.Order{}, false, run); got != "exec" {
 		t.Fatalf("orderTrackingType = %q, want exec", got)
 	}
 }
@@ -61,12 +67,15 @@ func TestWorkflowProjectionTargetKeepsRunTargetMigrationFallback(t *testing.T) {
 func TestOrderTrackingTriggerEnvFailedClassifiesOpenAndClosedAsFailed(t *testing.T) {
 	for _, status := range []string{"open", "closed"} {
 		t.Run(status, func(t *testing.T) {
-			bead := beads.Bead{
+			run, ok := orders.RunFromTrackingBead(beads.Bead{
 				Status: status,
 				Labels: []string{"order-tracking", "order-run:nightly", "trigger-env-failed"},
+			})
+			if !ok {
+				t.Fatal("RunFromTrackingBead ok = false")
 			}
-			if got := orderTrackingStatus(bead); got != "failed" {
-				t.Fatalf("orderTrackingStatus(%s) = %q, want failed", status, got)
+			if got := run.State(); got != "failed" {
+				t.Fatalf("run.State(%s) = %q, want failed", status, got)
 			}
 		})
 	}
@@ -175,11 +184,12 @@ func TestBuildOrderRunFeedItemsUsesAllOrdersForDisabledExecMetadata(t *testing.T
 }
 
 func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
-	store := labelFailListStore{
+	front := orders.NewStore(beads.OrdersStore{Store: labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:digest",
-	}
-	tracking := beads.Bead{
+	}})
+	run := orders.OrderRun{
+		Scoped:    "digest",
 		CreatedAt: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
 	}
 
@@ -191,9 +201,9 @@ func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
 	}
 	defer func() { orderFeedLogf = origLogf }()
 
-	got := orderTrackingUpdatedAt(store, tracking, "digest")
-	if !got.Equal(tracking.CreatedAt) {
-		t.Fatalf("updatedAt = %s, want %s", got, tracking.CreatedAt)
+	got := orderTrackingUpdatedAt(front, run)
+	if !got.Equal(run.CreatedAt) {
+		t.Fatalf("updatedAt = %s, want %s", got, run.CreatedAt)
 	}
 	if !strings.Contains(logs.String(), "order feed update lookup failed") {
 		t.Fatalf("logs = %q, want update lookup failure warning", logs.String())
@@ -221,4 +231,100 @@ func (s *workflowProjectionStore) List(query beads.ListQuery) ([]beads.Bead, err
 		return nil, errors.New("history unavailable")
 	}
 	return s.MemStore.List(query)
+}
+
+// collapsedStatusProjectionStore models the production read path for the
+// workflow projection. A non-Live read (the raw scan, or any cached read)
+// returns blocked and deferred beads indistinguishable from ready work:
+// mapBdStatus folds bd's blocked/deferred/review/testing into Gas City's
+// "open", and CachingStore.List matches on that already-collapsed status. Only
+// the backing store filters on the raw status, by passing --status to bd, and
+// only a Live query reaches it.
+type collapsedStatusProjectionStore struct {
+	beads.Store
+	rawScan      []beads.Bead            // non-Live: blocked rows present, collapsed to "open"
+	liveByStatus map[string][]beads.Bead // Live: bd filtered on the raw status
+	liveStatuses []string
+}
+
+func (s *collapsedStatusProjectionStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if !q.Live {
+		return append([]beads.Bead(nil), s.rawScan...), nil
+	}
+	s.liveStatuses = append(s.liveStatuses, q.Status)
+	return append([]beads.Bead(nil), s.liveByStatus[q.Status]...), nil
+}
+
+// TestListActiveWorkflowProjectionBeadsExcludesBlocked covers the read side of
+// gc-4zb. The workflow-root spawn path selects on gc.routed_to without
+// re-checking status, so a blocked root that reaches this projection while
+// still carrying a route is spawned against and burns a polecat slot on a no-op
+// drain.
+//
+// Live reproduction (gc-nz5i, root gc-27xf, step mol-do-work.do-work):
+// dolt_history_issues shows status=blocked while gc.routed_to stayed
+// /home/ds/gascity/polecat from 04:00:21 to 04:08:17, and the bead's own
+// reroute_observed records a second slot burned against it while blocked. It
+// carries no gc.run_target, so the writer-side restore cannot re-stamp it —
+// this is the reader, not the writer.
+//
+// Filtering the scan on b.Status cannot fix it: the blocked bead's Status is
+// already the collapsed "open", so it satisfies an {open, in_progress}
+// allowlist. The gate has to be a status-scoped Live read that lets bd filter
+// on the raw status.
+func TestListActiveWorkflowProjectionBeadsExcludesBlocked(t *testing.T) {
+	const route = "/home/ds/gascity/polecat"
+	// Blocked in bd, but every non-Live read decodes it as "open".
+	blocked := beads.Bead{
+		ID: "gc-nz5i", Title: "do-work", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": route},
+	}
+	ready := beads.Bead{
+		ID: "gc-ready", Title: "ready", Type: "task", Status: "open",
+		Metadata: map[string]string{"gc.routed_to": route},
+	}
+	claimed := beads.Bead{
+		ID: "gc-claimed", Title: "claimed", Type: "task", Status: "in_progress",
+		Assignee: route + "/th-abc", Metadata: map[string]string{"gc.run_target": route},
+	}
+
+	store := &collapsedStatusProjectionStore{
+		Store:   beads.NewMemStoreFrom(0, nil, nil),
+		rawScan: []beads.Bead{blocked, ready, claimed},
+		liveByStatus: map[string][]beads.Bead{
+			// bd's --status filter sees the raw status; gc-nz5i is blocked and absent.
+			"open":        {ready},
+			"in_progress": {claimed},
+		},
+	}
+
+	got, err := listActiveWorkflowProjectionBeads(store)
+	if err != nil {
+		t.Fatalf("listActiveWorkflowProjectionBeads: %v", err)
+	}
+	ids := make(map[string]bool, len(got))
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if ids["gc-nz5i"] {
+		t.Errorf("blocked bead gc-nz5i reached the workflow projection; the spawn path routes on its gc.routed_to and burns a slot")
+	}
+	// The gate must not shrink the projection to open-only: in_progress work is
+	// active and drives the running-run view.
+	if !ids["gc-ready"] {
+		t.Errorf("open routed bead gc-ready missing from projection")
+	}
+	if !ids["gc-claimed"] {
+		t.Errorf("in_progress bead gc-claimed missing from projection")
+	}
+	if len(got) != 2 {
+		t.Errorf("projection size = %d, want 2 (gc-ready, gc-claimed); got %v", len(got), ids)
+	}
+	// Every read must be Live and status-scoped, and in_progress must be read
+	// before open: the two reads are not one snapshot, so this order confines
+	// the missable flip to open->in_progress (a bead just claimed, which must
+	// not be spawned against anyway).
+	if want := strings.Join([]string{"in_progress", "open"}, ","); strings.Join(store.liveStatuses, ",") != want {
+		t.Errorf("live status reads = %v, want [in_progress open] (status-scoped, in_progress first)", store.liveStatuses)
+	}
 }

@@ -187,6 +187,55 @@ func TestHandleOrderGet_ExposesTriggerAndLegacyGateAlias(t *testing.T) {
 	}
 }
 
+func TestToOrderResponseSurfacesCheckTimeout(t *testing.T) {
+	// Regression (PR #4190 iter-4): check_timeout is honored by dispatch but was
+	// invisible on the typed HTTP/dashboard projection, so an operator could not
+	// confirm the effective condition deadline they configured. Pin the raw
+	// value, the effective millisecond deadline, and the on-the-wire keys.
+	cond := toOrderResponse(orders.Order{
+		Name: "slow", Trigger: "condition", Check: "true", Exec: "true", CheckTimeout: "120s",
+	})
+	if cond.CheckTimeout != "120s" {
+		t.Errorf("CheckTimeout = %q, want %q", cond.CheckTimeout, "120s")
+	}
+	if cond.CheckTimeoutMs != 120000 {
+		t.Errorf("CheckTimeoutMs = %d, want 120000", cond.CheckTimeoutMs)
+	}
+	wire := map[string]any{}
+	b, err := json.Marshal(cond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["check_timeout"] != "120s" {
+		t.Errorf("wire check_timeout = %#v, want %q", wire["check_timeout"], "120s")
+	}
+	if wire["check_timeout_ms"] != float64(120000) {
+		t.Errorf("wire check_timeout_ms = %#v, want 120000", wire["check_timeout_ms"])
+	}
+
+	// A condition order without an explicit check_timeout still reports the
+	// effective 10s default deadline while leaving the raw string empty.
+	def := toOrderResponse(orders.Order{Name: "d", Trigger: "condition", Check: "true", Exec: "true"})
+	if def.CheckTimeout != "" {
+		t.Errorf("default CheckTimeout = %q, want empty", def.CheckTimeout)
+	}
+	if def.CheckTimeoutMs != 10000 {
+		t.Errorf("default CheckTimeoutMs = %d, want 10000", def.CheckTimeoutMs)
+	}
+
+	// Non-condition triggers have no check command, so the effective ms deadline
+	// must not be projected even if check_timeout was mistakenly configured.
+	noncond := toOrderResponse(orders.Order{
+		Name: "c", Trigger: "cooldown", Interval: "5m", Exec: "true", CheckTimeout: "120s",
+	})
+	if noncond.CheckTimeoutMs != 0 {
+		t.Errorf("non-condition CheckTimeoutMs = %d, want 0 (gated to condition orders)", noncond.CheckTimeoutMs)
+	}
+}
+
 func TestHandleOrderGet_ScopedName(t *testing.T) {
 	fs := newFakeState(t)
 	fs.autos = []orders.Order{
@@ -514,31 +563,6 @@ func TestHandleOrderCheckRunsConditionByDefault(t *testing.T) {
 	}
 	if string(got) != "xxx" {
 		t.Fatalf("condition marker = %q, want one execution per request", got)
-	}
-}
-
-func TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels(t *testing.T) {
-	tests := []struct {
-		name   string
-		labels []string
-		want   string
-	}{
-		{name: "wisp failed dominates success", labels: []string{"wisp", "wisp-failed"}, want: "failed"},
-		{name: "failed alone", labels: []string{"wisp-failed"}, want: "failed"},
-		{name: "exec failed dominates success", labels: []string{"exec", "exec-failed"}, want: "failed"},
-		{name: "exec env failed is failed", labels: []string{"exec-env-failed"}, want: "failed"},
-		{name: "trigger env failed is failed", labels: []string{"trigger-env-failed"}, want: "failed"},
-		{name: "canceled dominates success", labels: []string{"wisp", "wisp-canceled"}, want: "canceled"},
-		{name: "success fallback", labels: []string{"exec"}, want: "success"},
-		{name: "unknown", labels: []string{"order-tracking"}, want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := lastRunOutcomeFromLabels(tc.labels); got != tc.want {
-				t.Fatalf("lastRunOutcomeFromLabels(%v) = %q, want %q", tc.labels, got, tc.want)
-			}
-		})
 	}
 }
 

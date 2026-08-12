@@ -405,6 +405,49 @@ func TestRouteBeadsShow_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient locks the ordering that a
+// Fable red-team caught (2026-07-08): the missing-id guard must fire BEFORE the
+// local beadsShowAPIClient seam. That seam's apiClient() call has observable
+// side effects — a GC_NO_API-unrecognized warning to os.Stderr, a
+// controller-liveness probe, and a config.Load — none of which the old
+// hand-written cmdBeadsShow performed on the no-id path. Folding the guard into
+// routeReadCmd's route closure ran the seam first (routeReadCmd calls localSeam
+// before the closure), reintroducing a warning line ahead of the missing-id
+// error. This asserts the structural invariant directly: no bead id => the seam
+// is never consulted, and stderr is exactly the missing-id line.
+func TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"beads-show-order\"\n")
+
+	prev := beadsShowAPIClient
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+	seamConsulted := false
+	beadsShowAPIClient = func(string) (*api.Client, string) {
+		seamConsulted = true
+		return nil, "seam-should-not-run"
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdBeadsShow("", "text", &stdout, &stderr) // no bead id
+
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if seamConsulted {
+		t.Fatal("beadsShowAPIClient ran before the missing-id guard — ordering regression: " +
+			"the guard must precede the local seam so its side effects stay off the no-id path")
+	}
+	if got := stderr.String(); got != "gc beads show: missing bead id\n" {
+		t.Fatalf("stderr = %q, want exactly \"gc beads show: missing bead id\\n\"", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)
@@ -547,5 +590,173 @@ func TestDoBeadsHealth_BdSkip(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Beads provider: healthy") {
 		t.Errorf("GC_DOLT=skip should pass: %s", stdout.String())
+	}
+}
+
+// The tests below drive the REAL cobra entry point via run() with argv flags,
+// exercising the flag-PARSING path. The earlier remote test
+// (TestCmdBeadsList_RemoteRoutesToServerNoFallback) sets contextFlag/cityURLFlag
+// package vars directly, so it never proved cobra parses --city-url on a beads
+// command — which it did NOT, because `beads list`/`show` set
+// DisableFlagParsing: the persistent remote flags were silently dropped and the
+// command fell back to a LOCAL read. These lock the fix (real cobra flags): the
+// persistent remote flags now reach the resolver AND the bead-specific flags
+// still parse.
+
+// TestRun_BeadsListCityURLFlagRoutesRemote proves `gc --city-url <loopback>
+// --city-name mc beads list --status open --label X --all` parses the persistent
+// --city-url (routing REMOTE, not the silent local fallback of the
+// DisableFlagParsing era) AND parses every bead filter flag, each of which must
+// land on the request query. Asserting all three (label/status/all) — not just
+// one — catches a wiring drop or a label<->status swap in the RunE beadFilters
+// literal that a single-flag assertion would miss.
+func TestRun_BeadsListCityURLFlagRoutesRemote(t *testing.T) {
+	clearGCEnv(t)
+
+	var gotPath, gotStatus, gotLabel, gotAll string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotStatus = r.URL.Query().Get("status")
+		gotLabel = r.URL.Query().Get("label")
+		gotAll = r.URL.Query().Get("all")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	prev := beadsListAPIClient
+	beadsListAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("local beadsListAPIClient must not run under --city-url — the flag was unparsed and it fell back to local")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsListAPIClient = prev })
+
+	var out, errb bytes.Buffer
+	code := run([]string{
+		"--city-url", srv.URL, "--city-name", "mc", "beads", "list",
+		"--status", "open", "--label", "ready-to-build", "--all",
+	}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(gotPath, "/v0/city/mc/beads") {
+		t.Fatalf("remote path = %q, want it to include /v0/city/mc/beads", gotPath)
+	}
+	if gotStatus != "open" {
+		t.Fatalf("--status did not reach the request query: status = %q, want open", gotStatus)
+	}
+	if gotLabel != "ready-to-build" {
+		t.Fatalf("--label did not reach the request query: label = %q, want ready-to-build", gotLabel)
+	}
+	if gotAll != "true" {
+		t.Fatalf("--all did not reach the request query: all = %q, want true", gotAll)
+	}
+}
+
+// TestRun_BeadsShowCityURLFlagRoutesRemote is the show-side sibling: the bead-id
+// positional and the persistent --city-url both parse, routing the single-bead
+// read to the remote city (never the local seam).
+func TestRun_BeadsShowCityURLFlagRoutesRemote(t *testing.T) {
+	clearGCEnv(t)
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	prev := beadsShowAPIClient
+	beadsShowAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("local beadsShowAPIClient must not run under --city-url")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsShowAPIClient = prev })
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--city-url", srv.URL, "--city-name", "mc", "beads", "show", "ga-abc"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(gotPath, "ga-abc") {
+		t.Fatalf("remote path = %q, want it to include the bead id ga-abc", gotPath)
+	}
+}
+
+// TestRun_BeadsListRejectsUnknownFlag locks the fail-loud upgrade: with real
+// cobra parsing an unknown flag is a hard error routed through the root
+// FlagErrorFunc (the DisableFlagParsing era silently swallowed it).
+func TestRun_BeadsListRejectsUnknownFlag(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "list", "--no-such-flag"}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero for an unknown flag; stderr = %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "unknown flag") {
+		t.Fatalf("stderr = %q, want it to mention 'unknown flag'", errb.String())
+	}
+}
+
+// TestRun_BeadsListHelpNotSwallowed locks that `gc beads list --help` now prints
+// help. DisableFlagParsing used to swallow --help (and `beads show --help` even
+// tried to resolve a bead literally named "--help").
+func TestRun_BeadsListHelpNotSwallowed(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "list", "--help"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	if combined := out.String() + errb.String(); !strings.Contains(combined, "--status") {
+		t.Fatalf("help output missing the --status flag listing; got %q", combined)
+	}
+}
+
+// TestRun_BeadsShowMissingIDReachesGuard pins Args:MaximumNArgs(1) (not
+// ExactArgs(1)) together with the resolve-before-guard ordering: with a RESOLVED
+// remote target, a zero-arg `beads show` must reach the internal missing-id guard
+// (printing "missing bead id") and NEVER dispatch to the server. ExactArgs(1)
+// would make cobra reject the zero-arg case before the resolver, changing the
+// message and inverting the documented ordering — this test would then fail.
+func TestRun_BeadsShowMissingIDReachesGuard(t *testing.T) {
+	clearGCEnv(t)
+
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--city-url", srv.URL, "--city-name", "mc", "beads", "show"}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (missing-id guard); stderr = %q", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "missing bead id") {
+		t.Fatalf("stderr = %q, want the missing-id guard message", errb.String())
+	}
+	if hit {
+		t.Fatal("server was dispatched despite a missing bead id — guard did not fire before dispatch")
+	}
+}
+
+// TestRun_BeadsShowRejectsExtraArgs locks that a second positional is a loud
+// error (MaximumNArgs(1)); the DisableFlagParsing era silently ignored extras
+// and showed the first.
+func TestRun_BeadsShowRejectsExtraArgs(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"beads", "show", "ga-abc", "ga-def"}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero for two positionals; stderr = %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "accepts at most 1 arg") {
+		t.Fatalf("stderr = %q, want an at-most-1-arg error", errb.String())
 	}
 }

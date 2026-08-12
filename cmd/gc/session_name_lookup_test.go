@@ -20,10 +20,10 @@ func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 		t.Fatalf("createPoolSessionBead: %v", err)
 	}
 
-	if got := bead.Metadata["pending_create_claim"]; got != "true" {
+	if got := bead.PendingCreateClaimMetadata; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
-	if got, want := bead.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(now); got != want {
+	if got, want := bead.PendingCreateStartedAt, pendingCreateStartedAtNow(now); got != want {
 		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
 	}
 
@@ -86,7 +86,7 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
 	}
 	wantSessionName := PoolSessionName("gascity/claude", bead.ID)
-	if got := bead.Metadata["session_name"]; got != wantSessionName {
+	if got := bead.SessionNameMetadata; got != wantSessionName {
 		t.Fatalf("session_name = %q, want %q", got, wantSessionName)
 	}
 
@@ -163,7 +163,7 @@ func TestCreatePoolSessionBeadWithAlias_UpdatesExplicitIDBeadToResolvedAlias(t *
 	if updatedMetadata != "session_name=crew--gastown" {
 		t.Fatalf("updated metadata = %q, want session_name=crew--gastown", updatedMetadata)
 	}
-	if got := bead.Metadata["session_name"]; got != "crew--gastown" {
+	if got := bead.SessionNameMetadata; got != "crew--gastown" {
 		t.Fatalf("session_name = %q, want resolved alias", got)
 	}
 
@@ -317,7 +317,7 @@ func TestCreatePoolSessionBeadWithAlias_FallsBackToPoolNameWhenAliasEmpty(t *tes
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
 	want := PoolSessionName("claude", bead.ID)
-	if got := bead.Metadata["session_name"]; got != want {
+	if got := bead.SessionNameMetadata; got != want {
 		t.Fatalf("session_name = %q, want %q (universal fallback)", got, want)
 	}
 }
@@ -329,7 +329,7 @@ func TestCreatePoolSessionBeadWithAlias_UsesResolvedAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
-	if got := bead.Metadata["session_name"]; got != "crew--gastown" {
+	if got := bead.SessionNameMetadata; got != "crew--gastown" {
 		t.Fatalf("session_name = %q, want %q (resolved alias wins)", got, "crew--gastown")
 	}
 	stored, err := store.Get(bead.ID)
@@ -349,7 +349,7 @@ func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDOnCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first createPoolSessionBeadWithAlias: %v", err)
 	}
-	if got := first.Metadata["session_name"]; got != "crew--gastown" {
+	if got := first.SessionNameMetadata; got != "crew--gastown" {
 		t.Fatalf("first session_name = %q, want %q", got, "crew--gastown")
 	}
 
@@ -358,7 +358,7 @@ func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDOnCollision(t *testing.T) {
 		t.Fatalf("second createPoolSessionBeadWithAlias: %v", err)
 	}
 	want := "crew--gastown-" + second.ID
-	if got := second.Metadata["session_name"]; got != want {
+	if got := second.SessionNameMetadata; got != want {
 		t.Fatalf("second session_name = %q, want %q (collision suffix)", got, want)
 	}
 }
@@ -382,7 +382,7 @@ func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDForOutOfSnapshotLiveCollisi
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
 	want := "crew--gastown-" + bead.ID
-	if got := bead.Metadata["session_name"]; got != want {
+	if got := bead.SessionNameMetadata; got != want {
 		t.Fatalf("session_name = %q, want %q for live out-of-snapshot collision", got, want)
 	}
 }
@@ -409,7 +409,7 @@ func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDForClosedSessionNameCollisi
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
 	want := "crew--gastown-" + bead.ID
-	if got := bead.Metadata["session_name"]; got != want {
+	if got := bead.SessionNameMetadata; got != want {
 		t.Fatalf("session_name = %q, want %q for closed session-name collision", got, want)
 	}
 }
@@ -430,7 +430,7 @@ func TestCreatePoolSessionBeadWithAlias_AppendsBeadIDForConfiguredNamedSessionRe
 		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
 	}
 	want := reserved + "-" + bead.ID
-	if got := bead.Metadata["session_name"]; got != want {
+	if got := bead.SessionNameMetadata; got != want {
 		t.Fatalf("session_name = %q, want %q for configured named-session reservation", got, want)
 	}
 }

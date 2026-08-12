@@ -4,7 +4,7 @@ import type { FormulaRunDetail } from 'gas-city-dashboard-shared';
 import { invalidate } from '../api/cache';
 import { ApiClientError } from '../api/client';
 import { reportClientError } from '../lib/clientErrorReporting';
-import { loadSupervisorFormulaRunDetail } from '../supervisor/runDetail';
+import { loadSupervisorFormulaRunDetail, type LoadRunDetailOptions } from '../supervisor/runDetail';
 import { formulaRunDetailCacheKey, useFormulaRunDetail } from './useFormulaRunDetail';
 
 vi.mock('../api/cityBase', () => ({
@@ -114,7 +114,8 @@ describe('useFormulaRunDetail', () => {
     expect('diff' in result.current).toBe(false);
     // The loader is scope-independent now (the projection derives scope from the
     // run's own root bead); the route's scope still drives only the cache key.
-    expect(mockLoadDetail).toHaveBeenCalledWith('wf-1');
+    // The second argument is the warming-poll wiring (onWarming/keepPolling).
+    expect(mockLoadDetail).toHaveBeenCalledWith('wf-1', expect.anything());
     expect(mockReportClientError).not.toHaveBeenCalled();
   });
 
@@ -190,6 +191,94 @@ describe('useFormulaRunDetail', () => {
     expect(result.current.kind).not.toBe('unsupported');
     expect(result.current.kind).not.toBe('failed');
     expect(mockReportClientError).not.toHaveBeenCalled();
+  });
+});
+
+describe('useFormulaRunDetail warming poll (F4)', () => {
+  // The loader polls warming 503s for up to ~180s (covered in runDetail.test.ts)
+  // and signals each one via onWarming. The hook's job: surface that signal on
+  // the loading state (so the route can render honest "may still be being
+  // recorded" copy), clear it when the poll settles, and supersede a stale poll
+  // (unmount/refresh) so it stops issuing GETs and cannot write stale state.
+
+  it('surfaces the loader warming signal (unknown_run) on the loading state', async () => {
+    mockLoadDetail.mockImplementation((_runId: string, options?: LoadRunDetailOptions) => {
+      options?.onWarming?.({ reason: 'unknown_run' });
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() =>
+      expect(result.current).toMatchObject({
+        kind: 'loading',
+        warming: { reason: 'unknown_run' },
+      }),
+    );
+  });
+
+  it('carries no warming signal while a plain first GET is pending', async () => {
+    mockLoadDetail.mockImplementation(() => new Promise<FormulaRunDetail>(() => {}));
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+
+    await waitFor(() => expect(result.current).toMatchObject({ kind: 'loading', warming: null }));
+  });
+
+  it('does not leak a stale warming signal into a later load', async () => {
+    // First load: warming unknown_run, then the budget-exhausted 503 → failed.
+    mockLoadDetail.mockImplementationOnce((_runId: string, options?: LoadRunDetailOptions) => {
+      options?.onWarming?.({ reason: 'unknown_run' });
+      return Promise.reject(new ApiClientError(503, 'run view is warming'));
+    });
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(result.current.kind).toBe('failed'));
+
+    // A later refresh starts a new load that hangs on its FIRST GET (no 503
+    // seen yet): its loading state must carry NO warming left over from the
+    // dead poll.
+    mockLoadDetail.mockImplementation(() => new Promise<FormulaRunDetail>(() => {}));
+    act(() => {
+      void result.current.refresh();
+    });
+    await waitFor(() => expect(result.current).toMatchObject({ kind: 'loading', warming: null }));
+  });
+
+  it('supersedes the warming poll on unmount so it stops issuing GETs', async () => {
+    let captured: LoadRunDetailOptions | undefined;
+    mockLoadDetail.mockImplementation((_runId: string, options?: LoadRunDetailOptions) => {
+      captured = options;
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { unmount } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(captured).toBeDefined());
+    expect(captured?.keepPolling?.()).toBe(true);
+
+    unmount();
+
+    expect(captured?.keepPolling?.()).toBe(false);
+  });
+
+  it('supersedes an in-flight warming poll when a refresh starts a newer load', async () => {
+    const options: LoadRunDetailOptions[] = [];
+    mockLoadDetail.mockImplementation((_runId: string, opts?: LoadRunDetailOptions) => {
+      if (opts) options.push(opts);
+      return new Promise<FormulaRunDetail>(() => {});
+    });
+
+    const { result } = renderHook(() => useFormulaRunDetail('wf-1', 'city', 'test-city'));
+    await waitFor(() => expect(options).toHaveLength(1));
+    expect(options[0]?.keepPolling?.()).toBe(true);
+
+    act(() => {
+      void result.current.refresh();
+    });
+
+    await waitFor(() => expect(options).toHaveLength(2));
+    // The older poll is dead; the newest owns the warming state.
+    expect(options[0]?.keepPolling?.()).toBe(false);
+    expect(options[1]?.keepPolling?.()).toBe(true);
   });
 });
 

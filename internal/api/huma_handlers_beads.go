@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -27,15 +27,20 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
+	// The cursor is a versioned keyset token carrying the (created_at, id)
+	// boundary of the last row served — stable under the concurrent writes an
+	// active work ledger guarantees, where the old integer offsets skipped or
+	// duplicated rows.
+	seek, err := beadListSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	// all=true reads bypass the CachingStore (closed history lives only in
@@ -71,32 +76,47 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	} else {
 		rigNames = sortedRigNames(stores)
 	}
+	legs := beadListFanOut(s.state, stores, rigNames, input.Rig != "")
 
 	var all []beads.Bead
-	dedupe := len(assigneeTerms) > 1
 
 	// all=true reads materialize closed history per rig, so the build is
 	// O(history) even though the caller only wants a recency-bounded page
-	// (gascity#3253). When every store can Count the query exactly, push the
-	// page bound down so each store returns only the rows this page needs and
-	// source Total from a hydration-free Count instead of len(full history) —
-	// the build collapses to O(limit) at the store boundary while the response
-	// shape (a created_at-desc prefix plus an accurate Total and next_cursor)
-	// is unchanged. Scoped to the single-assignee all=true hot path; if any
-	// store cannot Count the query, keep the full-scan path so Total and
-	// ordering stay correct (the Count fallback contract from #3211).
+	// (gascity#3253). When a store can Count the query exactly, push the page
+	// bound down so it returns only the rows this page needs and source its
+	// share of Total from a hydration-free Count instead of len(full history).
+	// This collapses the FIRST page (no seek boundary) to O(limit) at the store
+	// boundary via each backend's native LIMIT; a seeked cursor page disables
+	// that native limit and hydrates matching history before the Go-side seek
+	// filter (see query.SeekAfter), trading O(limit) fetches for exactness on a
+	// deep walk. The response shape (a created_at-desc prefix plus an accurate
+	// Total and next_cursor) is unchanged. Scoped to the single-assignee all=true
+	// hot path; a WORK store that cannot Count the query keeps the whole request
+	// on the full-scan path so Total and ordering stay correct (the Count
+	// fallback contract from #3211), while a Counter-less GRAPH leg hydrates
+	// alone — see beadListBounding.
 	boundedMode := false
 	boundedFetch := 0
-	var boundedCounts map[string]int
-	if input.All && !dedupe && len(assigneeTerms) == 1 {
-		boundedFetch = pp.Offset + pp.Limit
-		boundedMode, boundedCounts = beadListBoundedTotal(ctx, stores, rigNames, assigneeTerms[0], input)
+	var boundedCounts map[int]int
+	var hydrateLegs map[int]bool
+	if input.All && len(assigneeTerms) == 1 {
+		// limit+1: the seek boundary rides on each store query and is enforced
+		// Go-side, so a store returns only rows after the boundary — one extra
+		// row is the has-more signal (Counts are un-seeked totals and cannot tell).
+		boundedFetch = limit + 1
+		boundedMode, boundedCounts, hydrateLegs = beadListBounding(ctx, legs, assigneeTerms[0], input)
 	}
 
+	// Bead ids are globally unique, so an id is one bead no matter how many legs
+	// hold a row for it. A migrated split city really does hold both: `gc storage
+	// migrate` copies infrastructure rows into the binding with their ids
+	// preserved (CreateWithForeignID) and never deletes them back, so the work
+	// store keeps its copy — convergence is DEFINED as that full overlap. First
+	// leg wins, and the graph leg is federated last, so the work store's row is
+	// the one served — byte-identical to the rule humaHandleBeadReady applies.
 	seen := map[string]bool{}
 	var pa partialAggregator
-	for _, rigName := range rigNames {
-		store := stores[rigName]
+	for i, leg := range legs {
 		for _, assignee := range assigneeTerms {
 			query := beads.ListQuery{
 				Status:        input.Status,
@@ -109,18 +129,44 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				// map-iteration order, so a bounded read truncated an
 				// arbitrary, per-call-different subset (#3208).
 				Sort: beads.SortCreatedDesc,
+				// Explicit tier, for the same reason as the sort and with the
+				// same failure shape: the zero value is not neutral across these
+				// legs. The work legs' bead-policy layer rewrites it to TierBoth
+				// and the unwrapped graph leg does not, so the relocated store's
+				// ephemeral rows dropped out of an authoritative-looking 200
+				// (ga-8lyxc). See beads.FederatedReadTier.
+				TierMode: beads.FederatedReadTier,
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
 			}
-			if boundedMode {
+			legBounded := boundedMode && !hydrateLegs[i]
+			if legBounded {
 				// Each store need only return enough rows to cover this page;
-				// the cross-rig merge below cuts the exact global prefix.
+				// the cross-rig merge below cuts the exact global prefix. On the
+				// first page (seek == nil) the native LIMIT makes the per-store
+				// fetch O(limit). On a seeked cursor page the boundary is enforced
+				// Go-side (backends disable their native limit — see SeekAfter in
+				// query.go), so the store hydrates matching history and the fetch
+				// is O(matching history), not O(limit); the Go-side filter+sort+
+				// limit then cut the exact page. That is the deliberate price of a
+				// tie-break identical to the in-memory sort.
 				query.Limit = boundedFetch
+				query.SeekAfter = seek
 			}
 			pa.attempt()
-			list, err := store.List(query)
+			list, err := leg.store.List(query)
 			if err != nil {
+				if leg.graph {
+					// The graph leg is the execution DAG, not a rig: any degraded
+					// read there — hard failure or partial — leaves an unnamed hole
+					// in a dependency graph, so it fails LOUD instead of degrading
+					// to a work-only 200 (the authoritative-failure contract, same
+					// as the ready arm). Work-leg failures recorded so far ride
+					// along: without them "the graph plane is down" and "the whole
+					// city is down" are the same response.
+					return nil, graphPlaneUnavailable("list", err, pa.messages()...)
+				}
 				if beads.IsPartialResult(err) && len(list) > 0 {
 					// Partial result: the rig returned rows (appended to `all`
 					// below) but flagged a degraded read. Keep its bounded count
@@ -129,10 +175,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 					// loss), strictly worse than the count's slight possible
 					// over-advertisement. Only a hard List failure (zero
 					// reachable rows, below) drops its count (gascity#3253).
-					pa.record("rig "+rigName, err)
+					pa.record(leg.label, err)
 					pa.success()
 				} else {
-					pa.record("rig "+rigName, err)
+					pa.record(leg.label, err)
 					if boundedMode {
 						// This rig's exact Count was baked into boundedCounts
 						// upfront, but its List failed so its rows never reach
@@ -140,21 +186,31 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 						// rows — matching the full-scan accounting under the same
 						// partial failure (where total == rows returned) and
 						// keeping next_cursor from overshooting (gascity#3253).
-						delete(boundedCounts, rigName)
+						delete(boundedCounts, i)
 					}
 					continue
 				}
 			} else {
 				pa.success()
 			}
+			if boundedMode && !legBounded {
+				// This leg hydrated because it cannot Count, so the rows it just
+				// returned ARE its exact un-seeked total — which is what Total
+				// needs, and what keeps Total constant across a cursor walk.
+				boundedCounts[i] = len(list)
+			}
 			for _, b := range list {
-				dedupeKey := rigName + "\x00" + b.ID
-				if dedupe && seen[dedupeKey] {
+				if boundedMode && !legBounded && seek != nil && !seek.After(b, beads.SortCreatedDesc) {
+					// A hydrated leg carries no store-side seek boundary (that is
+					// what made its row count the un-seeked total), so the page
+					// boundary is applied here instead. resolveBeadListPage's
+					// bounded branch assumes every row it receives is past it.
 					continue
 				}
-				if dedupe {
-					seen[dedupeKey] = true
+				if seen[b.ID] {
+					continue
 				}
+				seen[b.ID] = true
 				all = append(all, b)
 			}
 		}
@@ -169,42 +225,20 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// Per-store results are each (created_at, id)-ordered, but the
 	// concatenation across rigs and assignee terms is not: re-sort so the
 	// merged set has one global total order and a bounded read is a
-	// deterministic prefix of it (#3208). A single (rig, assignee) source is
+	// deterministic prefix of it (#3208). A single (leg, assignee) source is
 	// already in canonical order — skip the redundant hot-path sort.
-	if len(rigNames)*len(assigneeTerms) > 1 {
+	if len(legs)*len(assigneeTerms) > 1 {
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	// A non-cursor request is offset-0 paging: a truncated first page carries
-	// the continuation cursor too, otherwise the remainder of a limit-bounded
-	// read is unfetchable by design (#3208).
-	var page []beads.Bead
-	var total int
-	var nextCursor string
-	if boundedMode {
-		// Total is the exact Count summed over the rigs whose List actually
-		// returned rows, not len(all) (which holds only the bounded prefix) and
-		// not the upfront count of every rig: a rig counted then dropped at List
-		// time is removed from boundedCounts above, so Total tracks reachable
-		// rows and next_cursor still points at the real remainder (gascity#3253).
-		for _, n := range boundedCounts {
-			total += n
-		}
-		if pp.Offset < len(all) {
-			end := pp.Offset + pp.Limit
-			if end > len(all) {
-				end = len(all)
-			}
-			page = all[pp.Offset:end]
-		}
-		if pp.Offset+pp.Limit < total {
-			nextCursor = encodeCursor(pp.Offset + pp.Limit)
-		}
-	} else {
-		page, total, nextCursor = paginate(all, pp)
-	}
+	// A non-cursor request is first-page paging: a truncated first page
+	// carries the continuation cursor too, otherwise the remainder of a
+	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
+	// keyset boundary of the last row served.
+	page, total, hasMore := resolveBeadListPage(all, seek, limit, boundedMode, boundedCounts, pa.partial())
+	nextCursor := mintNextCursor(page, hasMore)
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -225,36 +259,204 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}, nil
 }
 
-// beadListBoundedTotal returns the exact per-rig bead counts for the all=true
-// list query across rigNames, sourced from each store's hydration-free Count.
-// The first return value reports whether bounding is safe: it is false (and
-// the caller keeps the full-scan path) if any store does not implement Counter
-// or cannot count the query exactly (ErrCountUnsupported), so Total and the
-// recency-ordered prefix stay correct on backends without a cheap count.
-//
-// Counts are returned keyed by rig (not pre-summed) so the caller can drop the
-// count of any rig whose subsequent List fails: Total must reflect only the
-// rows actually reachable, matching the full-scan path under partial failure
-// (gascity#3253).
-func beadListBoundedTotal(ctx context.Context, stores map[string]beads.Store, rigNames []string, assignee string, input *BeadListInput) (bool, map[string]int) {
-	counts := make(map[string]int, len(rigNames))
-	for _, rigName := range rigNames {
-		counter, ok := stores[rigName].(beads.Counter)
-		if !ok {
-			return false, nil
-		}
-		n, err := counter.Count(ctx, beadListCountQuery(assignee, input))
-		if err != nil {
-			return false, nil
-		}
-		counts[rigName] = n
+// beadListSeek decodes the GET /v0/beads pagination cursor into a keyset seek
+// boundary. An empty cursor is first-page paging (nil boundary, no error). Any
+// other non-empty value — garbage, a legacy offset cursor, or a wrong-kind
+// token — is a typed 400 rather than a silent restart at page 1, which
+// duplicated rows under the old integer-offset scheme.
+func beadListSeek(cursor string) (*beads.SeekBoundary, error) {
+	if cursor == "" {
+		return nil, nil
 	}
-	return true, counts
+	c, err := decodeKeysetCursor(cursor)
+	if err != nil || c.Kind != cursorKindCreatedID {
+		return nil, apierr.InvalidCursor.Msg("cursor is not a valid pagination token; re-fetch the first page")
+	}
+	return &beads.SeekBoundary{CreatedAt: c.CreatedAt, ID: c.ID}, nil
+}
+
+// resolveBeadListPage cuts the response page, Total, and has-more flag from the
+// merged result set, which is already in the global (created_at DESC, id DESC)
+// order the store fan-out produced. It performs no I/O.
+//
+// In boundedMode `all` is the limit+1 overfetch prefix and boundedCounts holds
+// the exact per-leg un-seeked totals, so Total is their sum (constant across a
+// walk) and the extra overfetched row is the has-more signal. A degraded
+// (partial) rig can fall short of that signal, so a non-empty partial page
+// force-mints a resume cursor to keep the walk going past the degradation
+// (gascity#3253). Otherwise `all` is the complete un-seeked set: Total is its
+// length and the page is the contiguous suffix strictly after the Go-side seek
+// boundary.
+//
+// One honest limit on the bounded Total: per-leg counts are summed, and a leg
+// counted (rather than hydrated) reports its own rows without knowing which of
+// them another leg also holds. On a migrated split city whose graph binding CAN
+// Count, an id co-resident in the work store and the binding is therefore
+// counted twice even though it is served once. Every page and the has-more
+// signal are still exact — they come from the deduped row set — so a cursor walk
+// terminates on the real end of the set; only the advertised Total runs high,
+// the same direction the partial-failure rule already accepts.
+func resolveBeadListPage(all []beads.Bead, seek *beads.SeekBoundary, limit int, boundedMode bool, boundedCounts map[int]int, partial bool) (page []beads.Bead, total int, hasMore bool) {
+	if boundedMode {
+		for _, n := range boundedCounts {
+			total += n
+		}
+		if len(all) > limit {
+			hasMore = true
+			all = all[:limit]
+		}
+		page = all
+		if partial && len(page) > 0 {
+			hasMore = true
+		}
+		return page, total, hasMore
+	}
+	// Full-scan path: `all` is the COMPLETE un-seeked set read in one shot, so
+	// `end < len(all)` is the honest has-more. The bounded branch's
+	// partial→force-resume is intentionally NOT mirrored here: a full-scan
+	// request re-reads every rig un-seeked, so a degraded rig reproduces the
+	// same withheld rows on the next request and a resume cursor cannot recover
+	// them — unlike bounded mode, where each page is an independent per-rig
+	// bounded read that can recover on a later page (gascity#3253).
+	total = len(all)
+	start := 0
+	if seek != nil {
+		for start < len(all) && !seek.After(all[start], beads.SortCreatedDesc) {
+			start++
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], total, end < len(all)
+}
+
+// mintNextCursor returns the keyset continuation cursor for a truncated page:
+// the (created_at, id) boundary of the last row served. An exhausted or empty
+// page mints nothing, which the client reads as walk-complete.
+//
+// The resume key is (created_at, id), which assumes (created_at, id) is
+// globally unique across the merged legs. The fan-out's identity key is the
+// bead id alone, so the two ways a leg pair can hold the same id — legacy
+// file-mode aliasing of the city and rig stores, and the work/binding
+// co-residence a migrated split city keeps — are collapsed before the page is
+// cut, and no twin can reach a page boundary. A future globally-non-unique ID
+// scheme would need a wider resume key here.
+func mintNextCursor(page []beads.Bead, hasMore bool) string {
+	if !hasMore || len(page) == 0 {
+		return ""
+	}
+	last := page[len(page)-1]
+	return encodeKeysetCursor(keysetCursor{
+		Kind:      cursorKindCreatedID,
+		CreatedAt: last.CreatedAt,
+		ID:        last.ID,
+	})
+}
+
+// beadListLeg is one source in the bead-list fan-out.
+//
+// Legs are a SLICE, not a map keyed by rig name: the relocated graph store has
+// no rig name, and giving it a synthetic one put it in the same namespace as
+// real rigs — a rig that happened to carry that name was silently overwritten
+// and vanished from the response — while sorting it into the middle of the rig
+// order made the merged sequence depend on the city's name.
+type beadListLeg struct {
+	// label is what a degraded read is reported under in partial_errors.
+	label string
+	store beads.Store
+	// graph marks the relocated graph plane, which does not degrade: it either
+	// answers or the request fails loud (see graphPlaneUnavailable).
+	graph bool
+}
+
+// beadListFanOut builds the ordered leg list for a bead-list request: the work
+// stores in rigNames order, then the relocated graph store last.
+//
+// Graph-class beads (gcg- molecule roots, steps, control beads) live in the
+// relocated graph store on a split city, and BeadStores() does not include it —
+// without this leg the whole execution DAG is invisible behind an authoritative
+// 200. It goes LAST so first-leg-wins id dedupe resolves a bead co-resident in
+// both planes to the work store's row, exactly as humaHandleBeadReady does, and
+// so the merged order stays a leg concatenation whose prefix is what a legacy
+// city already serves.
+//
+// A rig-scoped request gets no graph leg: it is asking for one rig, and the
+// graph plane is not a rig.
+func beadListFanOut(state State, stores map[string]beads.Store, rigNames []string, rigScoped bool) []beadListLeg {
+	legs := make([]beadListLeg, 0, len(rigNames)+1)
+	for _, rigName := range rigNames {
+		legs = append(legs, beadListLeg{label: "rig " + rigName, store: stores[rigName]})
+	}
+	if rigScoped {
+		return legs
+	}
+	if graph := relocatedGraphStore(state); graph != nil {
+		legs = append(legs, beadListLeg{label: "graph", store: graph, graph: true})
+	}
+	return legs
+}
+
+// beadListBounding plans, per leg, how the all=true page is bounded.
+//
+// It returns whether bounding is on at all, the exact un-seeked count of every
+// leg it could count (keyed by leg index, not pre-summed, so the caller can drop
+// the count of a leg whose subsequent List fails — Total must reflect only rows
+// actually reachable, matching the full-scan path under partial failure,
+// gascity#3253), and the legs that must hydrate instead.
+//
+// The WORK legs are all-or-nothing, which is the #3211 Count-fallback contract:
+// one work store that cannot Count the query exactly means Total and the
+// recency-ordered prefix have to come from the full scan.
+//
+// The GRAPH leg is deliberately outside that gate. It is one more source, not a
+// capability veto: the canonical compiled-in binding hands the API a raw
+// *beads.SQLiteStore (internal/storebinding/sqlite/beads_engine.go OpenEngine),
+// which implements no Count at all, so letting it into the all-or-nothing gate
+// would switch bounded paging off for every leg on precisely the split city this
+// federation exists for. When it can Count it is bounded like the rest; when it
+// cannot, only that leg hydrates and the caller takes its exact total from the
+// rows it returned.
+func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, input *BeadListInput) (on bool, counts map[int]int, hydrate map[int]bool) {
+	counts = make(map[int]int, len(legs))
+	for i, leg := range legs {
+		n, ok := beadListLegCount(ctx, leg.store, assignee, input)
+		if ok {
+			counts[i] = n
+			continue
+		}
+		if !leg.graph {
+			return false, nil, nil
+		}
+		if hydrate == nil {
+			hydrate = make(map[int]bool, 1)
+		}
+		hydrate[i] = true
+	}
+	return true, counts, hydrate
+}
+
+// beadListLegCount returns one leg's exact un-seeked count, reporting false when
+// the store implements no Counter or cannot count this query shape exactly
+// (ErrCountUnsupported).
+func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		return 0, false
+	}
+	n, err := counter.Count(ctx, beadListCountQuery(assignee, input))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // beadListCountQuery builds the count query for the all=true list path. It
 // carries the same filters as the list query so the count matches exactly;
-// Sort and Limit are omitted because they do not affect a count.
+// Sort and Limit are omitted because they do not affect a count. The tier is
+// NOT omitted for the same reason: a count taken over a narrower tier than the
+// list it bounds advertises a Total the walk can never reach.
 func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	q := beads.ListQuery{
 		Status:        input.Status,
@@ -263,6 +465,7 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		Assignee:      assignee,
 		IncludeClosed: input.All,
 		Live:          input.Status == "in_progress",
+		TierMode:      beads.FederatedReadTier,
 	}
 	if !q.HasFilter() {
 		q.AllowScan = true
@@ -270,7 +473,50 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	return q
 }
 
+// readyFederationQuery is the ready query every leg of the ready federation is
+// read with. It exists so the work legs and the graph leg cannot be given
+// different ones: they are read from two places in the handler below, and the
+// defect this closes was exactly the two places disagreeing about the tier
+// without either of them naming it. See beads.FederatedReadTier.
+func readyFederationQuery() beads.ReadyQuery {
+	return beads.ReadyQuery{TierMode: beads.FederatedReadTier}
+}
+
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
+//
+// FEDERATION CONTRACT — the follow-on CLI federation (`gc ready`, ga-oxsyu) is
+// specified against this handler, so its conformance test can assert CLI == API
+// instead of inventing an oracle. The rules it has to match:
+//
+//   - Legs, in order: the city store, then the rigs by name ascending, then the
+//     relocated graph store. The CLI composite's legs are work-then-infra, the
+//     same relative order, so on a rig-less city the two sequences agree.
+//     GET /v0/beads federates the same legs in the same order.
+//   - Within a leg: whatever order that leg's own Ready reader emits. That is
+//     the canonical (priority ASC, created_at ASC, id ASC) for a work store —
+//     CachingStore.Ready sorts with sortBeadsReadyOrder — but NOT for the graph
+//     leg: the canonical relocated binding is beads.SQLiteStore, whose
+//     sqliteReadySQL orders by (created_at ASC, id ASC) with no priority term at
+//     all. Per-leg order is therefore deterministic, not canonical.
+//   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
+//     co-resident in the work store and the binding — the documented steady
+//     state of a migrated city, where the migration preserves ids and never
+//     deletes back — resolves to the work store's row on both endpoints.
+//   - Merged order: leg concatenation, deliberately NOT re-sorted. A global
+//     re-sort would change the bytes a multi-rig single-store city already
+//     serves, and the graph leg must be free for such a city. Both sides are
+//     therefore compared after normalizing with beads.SortBeadsReadyOrder. That
+//     normalization is load-bearing rather than cosmetic, precisely because the
+//     graph leg is not priority-ordered; it is well-defined because
+//     SortBeadsReadyOrder is a total order over the merged set.
+//   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
+//     does not (503, carrying any work-leg errors recorded before it). See
+//     graphPlaneUnavailable.
+//   - Tier: every leg is read at beads.FederatedReadTier, stated explicitly.
+//     A no-argument Ready() left TierMode at its zero value, which the work
+//     legs' bead-policy layer rewrote to TierBoth while the unwrapped graph leg
+//     took literally — so the relocated store's whole ephemeral tier fell out of
+//     a 200 that named no failure (ga-8lyxc).
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -287,7 +533,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		ready, err := beads.HandlesFor(store).Live.Ready(readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -301,7 +547,10 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		}
 		for _, b := range ready {
 			if seen[b.ID] {
-				continue // legacy file mode can alias the city and rig stores
+				// An id is one bead: legacy file mode can alias the city and rig
+				// stores, and a migrated split city holds the same infrastructure
+				// row in both the work store and the binding.
+				continue
 			}
 			seen[b.ID] = true
 			all = append(all, b)
@@ -320,6 +569,27 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
 		}
 		federate("rig "+rigName, stores[rigName])
+	}
+	// Split city: graph-class ready work (gcg- steps, control beads, molecule
+	// roots) lives in the relocated graph store, which BeadStores() does not
+	// include — federate it or the whole execution DAG is invisible behind an
+	// authoritative-looking 200. It runs LAST so the merged order stays a leg
+	// concatenation whose prefix is exactly what a legacy city serves, and it
+	// does NOT go through federate(): the graph leg has no partial tier.
+	if graph := relocatedGraphStore(s.state); graph != nil {
+		pa.attempt()
+		ready, err := beads.HandlesFor(graph).Live.Ready(readyFederationQuery())
+		if err != nil {
+			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
+		}
+		pa.success()
+		for _, b := range ready {
+			if seen[b.ID] {
+				continue
+			}
+			seen[b.ID] = true
+			all = append(all, b)
+		}
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
@@ -345,7 +615,10 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
 	rootID := input.RootID
 	if rootID == "" {
-		return nil, huma.Error400BadRequest("rootID is required")
+		// Defensive: the {rootID} path segment is required, so the router never
+		// dispatches here with an empty id. Unreachable in practice, hence the op
+		// does not declare a 400 in its error contract.
+		return nil, apierr.InvalidRequest.Msg("rootID is required")
 	}
 
 	var root beads.Bead
@@ -356,19 +629,19 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		root = b
 		foundStore = store
 		break
 	}
 	if foundStore == nil {
-		return nil, huma.Error404NotFound("bead " + rootID + " not found")
+		return nil, apierr.BeadNotFound.Msg("bead " + rootID + " not found")
 	}
 
-	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
+	graphBeads, parentEdges, membership, err := collectBeadGraph(foundStore, root)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	beadIndex := make(map[string]beads.Bead, len(graphBeads))
 	for _, b := range graphBeads {
@@ -377,16 +650,17 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
 	if depPartial {
-		return nil, huma.Error500InternalServerError("listing bead graph dependencies failed")
+		return nil, apierr.Internal.Msg("listing bead graph dependencies failed")
 	}
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),
 		Body: BeadGraphResponse{
-			Root:  root,
-			Beads: graphBeads,
-			Deps:  deps,
+			Root:       root,
+			Beads:      graphBeads,
+			Deps:       deps,
+			Membership: membership,
 		},
 	}, nil
 }
@@ -406,7 +680,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[beads.Bead]{
 			Index:     s.latestIndex(),
@@ -414,7 +688,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 			Body:      b,
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
@@ -426,14 +700,14 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children, err := store.List(beads.ListQuery{
 			ParentID: id,
 			Sort:     beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
@@ -444,7 +718,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 			Body:  BeadDepsResponse{Children: children},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // BeadDepsResponse is the response shape for GET /v0/bead/{id}/deps.
@@ -455,63 +729,43 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/beads:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, huma.Error422UnprocessableEntity("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: run the create at most once per Idempotency-Key. The helper
+	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
+	// released on any error, so every fallible step lives in the closure.
+	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			if existing.pending {
-				return nil, huma.Error409Conflict("in_flight: request with this Idempotency-Key is already in progress")
+			assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			if err != nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
 			}
-			// Replay cached typed response (Fix 3l).
-			if b, ok := replayAs[beads.Bead](existing); ok {
-				return &IndexOutput[beads.Bead]{
-					Index: s.latestIndex(),
-					Body:  b,
-				}, nil
+			created, err := store.Create(beads.Bead{
+				Title:       input.Body.Title,
+				Type:        input.Body.Type,
+				Priority:    input.Body.Priority,
+				Assignee:    assignee,
+				Description: input.Body.Description,
+				Labels:      input.Body.Labels,
+				ParentID:    input.Body.Parent,
+				Metadata:    input.Body.Metadata,
+				DeferUntil:  input.Body.DeferUntil,
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
 			}
-		}
-	}
-
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest("rig is required when multiple rigs are configured")
-	}
-	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
+			// Some stores return a minimal create envelope and require a
+			// follow-up read for the canonical persisted bead state.
+			if persisted, getErr := store.Get(created.ID); getErr == nil {
+				created = persisted
+			}
+			return created, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, err
 	}
-
-	b, err := store.Create(beads.Bead{
-		Title:       input.Body.Title,
-		Type:        input.Body.Type,
-		Priority:    input.Body.Priority,
-		Assignee:    assignee,
-		Description: input.Body.Description,
-		Labels:      input.Body.Labels,
-		ParentID:    input.Body.Parent,
-		Metadata:    input.Body.Metadata,
-		DeferUntil:  input.Body.DeferUntil,
-	})
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-
-	// Some stores return a minimal create envelope and require a follow-up
-	// read for the canonical persisted bead state.
-	if persisted, getErr := store.Get(b.ID); getErr == nil {
-		b = persisted
-	}
-	s.idem.storeResponse(idemKey, bodyHash, b)
 
 	return &IndexOutput[beads.Bead]{
 		Index: s.latestIndex(),
@@ -527,19 +781,19 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadReopen is the Huma-typed handler for POST /v0/bead/{id}/reopen.
@@ -552,19 +806,19 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if b.Status != "closed" {
-			return nil, huma.Error409Conflict("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+			return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 		}
 		if err := store.Reopen(id); err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "reopened"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
@@ -575,11 +829,11 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 		if err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		// Once Get succeeded in this store, treat Update-ErrNotFound as a
 		// concurrent-delete race rather than "try the next store" — the bead
@@ -587,16 +841,16 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		// that happens to share the ID prefix.
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": assignee},
 		}, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadUpdate is the Huma-typed handler for POST /v0/bead/{id}/update
@@ -638,12 +892,12 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if body.Assignee != nil {
 			assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 			if err != nil {
-				return nil, huma.Error400BadRequest(err.Error())
+				return nil, apierr.InvalidRequest.Msg(err.Error())
 			}
 			opts.Assignee = &assignee
 		}
@@ -657,17 +911,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		// the mutation to a different store that happens to share the ID.
 		if err := store.Update(id, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
 			if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 				if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
 					if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-						return nil, huma.Error409Conflict("conflict: bead " + id + " was reparented concurrently")
+						return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
 					}
-					return nil, huma.Error500InternalServerError(err.Error())
+					return nil, apierr.Internal.Msg(err.Error())
 				}
 			}
 		}
@@ -675,7 +929,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		resp.Body.Status = "updated"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -689,17 +943,17 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 			}
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, apierr.Internal.Msg(err.Error())
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "closed"
 		return resp, nil
 	}
-	return nil, huma.Error404NotFound("bead " + id + " not found")
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
 }

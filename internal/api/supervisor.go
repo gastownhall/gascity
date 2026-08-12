@@ -106,17 +106,20 @@ type cachedCityServer struct {
 // dashboard is attached — the embedded SPA at "/" and the host-side dashboard
 // plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver       CityResolver
-	initializer    cityInitializer
-	readOnly       bool
-	version        string
-	buildID        string
-	startedAt      time.Time
-	allowedOrigins []string
-	allowedHosts   []string
-	allowAnyHost   bool
-	writeAuth      *citywriteauth.Verifier
-	server         *http.Server
+	resolver        CityResolver
+	initializer     cityInitializer
+	readOnly        bool
+	version         string
+	buildID         string
+	startedAt       time.Time
+	allowedOrigins  []string
+	allowedHosts    []string
+	allowAnyHost    bool
+	writeAuth       *citywriteauth.Verifier
+	readAuth        *citywriteauth.Verifier
+	dashboardBase   func() string
+	runCensusSource RunCensusSource
+	server          *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -132,6 +135,11 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+
+	// idem caches responses for Idempotency-Key replay on supervisor-scope
+	// create endpoints (POST /v0/city). Per-city creates use the per-city
+	// Server's own cache instead.
+	idem *idempotencyCache
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
@@ -154,6 +162,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
+		idem:        newIdempotencyCache(30 * time.Minute),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
@@ -231,6 +240,13 @@ func (sm *SupervisorMux) Handler() http.Handler {
 	if sm.writeAuth != nil {
 		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
 	}
+	// When a verifying key is configured, gate city-scoped reads on a signed
+	// grant. Disjoint from the write gate by method (GET/HEAD vs mutations), so
+	// the relative wrap order is correctness-irrelevant; both stay innermost
+	// (after host/CORS) so preflight and host rejection never need a grant.
+	if sm.readAuth != nil {
+		root = readAuthMiddleware(sm.readAuth, root)
+	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),
 		allowedOrigins: sm.allowedOrigins,
@@ -286,11 +302,60 @@ func (sm *SupervisorMux) WithAPIPlane(h http.Handler) *SupervisorMux {
 	return sm
 }
 
+// WithRunCensusSource supplies the incremental projection used by typed run
+// reads. The required contract serves the row-free census; a source that also
+// implements RunProjectionSource and RunProjectionGraceSource supplies the
+// warm list/detail/steps snapshots and point-read warming grace. It must be
+// called before Serve.
+func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *SupervisorMux {
+	sm.runCensusSource = source
+	return sm
+}
+
+// WithDashboardBase records where the embedded dashboard is served so
+// per-city handlers can mint dashboard deep links (e.g. the sling response's
+// dashboard_url). The provider returns the browser-reachable base URL of THIS
+// listener (scheme://host:port; a trailing slash is tolerated), or "" when no
+// link should be emitted. Leave unset on API-only processes — the standalone
+// controller's [api] port serves /v0 without the SPA — so responses omit
+// dashboard links. Callers must also leave it unset on wildcard binds
+// (0.0.0.0, ::): there is no single static origin that is browser-reachable
+// for every /v0 caller, and deriving one from request Host headers would
+// trust a spoofable value, so responses omit dashboard_url instead. Must be
+// called before Serve. Passing nil is a no-op.
+func (sm *SupervisorMux) WithDashboardBase(provider func() string) *SupervisorMux {
+	if provider == nil {
+		return sm
+	}
+	sm.dashboardBase = provider
+	return sm
+}
+
+// DashboardBaseURL returns the dashboard base URL installed via
+// WithDashboardBase, or "" when none is set. Exposed so wiring tests can
+// assert the dashboard-attach path installed a link base without reaching
+// into unexported state.
+func (sm *SupervisorMux) DashboardBaseURL() string {
+	if sm.dashboardBase == nil {
+		return ""
+	}
+	return sm.dashboardBase()
+}
+
 // WithWriteAuth installs the write-auth verifier so city-scoped mutations are
 // gated on a signed grant, and rebuilds the internal http.Server handler. A nil
 // verifier leaves write-auth disabled. Must be called before Serve.
 func (sm *SupervisorMux) WithWriteAuth(v *citywriteauth.Verifier) *SupervisorMux {
 	sm.writeAuth = v
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithReadAuth installs the read-auth verifier so city-scoped reads (GET/HEAD)
+// are gated on a signed grant, and rebuilds the internal http.Server handler. A
+// nil verifier leaves read-auth disabled. Must be called before Serve.
+func (sm *SupervisorMux) WithReadAuth(v *citywriteauth.Verifier) *SupervisorMux {
+	sm.readAuth = v
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
 }
@@ -407,11 +472,22 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	if sm.readOnly {
 		srv = NewReadOnly(state)
 	}
+	// Thread the dashboard link base (if the dashboard is mounted on this
+	// process) into the per-city handler host. WithDashboardBase runs before
+	// Serve, and per-city servers are built lazily per request, so every
+	// cached server observes the final provider.
+	srv.dashboardBase = sm.dashboardBase
+	srv.runCensusSource = sm.runCensusSource
 
 	sm.cacheMu.Lock()
+	defer sm.cacheMu.Unlock()
+	// A concurrent miss may have installed a Server for this State while this
+	// candidate was being built. Return the published instance so per-city
+	// caches and refresh coalescing remain process-unique.
+	if cached, ok := sm.cache[name]; ok && cached.state == state {
+		return cached.srv
+	}
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}
-	sm.cacheMu.Unlock()
-
 	return srv
 }
 

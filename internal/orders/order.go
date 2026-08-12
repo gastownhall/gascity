@@ -41,6 +41,12 @@ type Order struct {
 	Interval string `toml:"interval,omitempty"`
 	// Schedule is a cron-like expression (for cron triggers).
 	Schedule string `toml:"schedule,omitempty"`
+	// TZ is the IANA time zone (e.g. "America/New_York") in which cron
+	// schedule fields are evaluated. Empty inherits the city-wide
+	// [workspace] timezone default (stamped at scan time), then falls back
+	// to the process-local zone. Invalid names are rejected at order
+	// validation — never silently ignored.
+	TZ string `toml:"tz,omitempty"`
 	// Check is a shell command that returns exit 0 when the formula should run (for condition triggers).
 	Check string `toml:"check,omitempty"`
 	// On is the event type to match (for event triggers). E.g., "bead.closed".
@@ -50,6 +56,13 @@ type Order struct {
 	// Timeout is the per-order timeout. Go duration string (e.g., "90s").
 	// Defaults to 60s for exec, 30s for formula.
 	Timeout string `toml:"timeout,omitempty"`
+	// CheckTimeout is the deadline for a condition trigger's `check` command
+	// (distinct from Timeout, which bounds the dispatched exec/formula). Go
+	// duration string. Defaults to 10s when unset. Raise it for checks that
+	// must query a slow backing store (e.g. a managed-Dolt work store at
+	// 1-2s per read): a check killed before it can prove its condition holds
+	// makes the order silently never fire (gastownhall/gascity ga-ocypq2).
+	CheckTimeout string `toml:"check_timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
 	// Idempotent marks an order whose dispatch is safe to repeat (a sweep/
@@ -60,6 +73,18 @@ type Order struct {
 	// (gastownhall/gascity#2893). Non-idempotent orders (the
 	// default, false) keep failing CLOSED on gate timeout.
 	Idempotent bool `toml:"idempotent,omitempty"`
+	// NoWorkGate opts an order out of the dispatcher's open-work gates
+	// entirely. It is for pure probes/sweeps that track NO bead work —
+	// e.g. provider-health-probe, a cooldown probe that only refreshes a
+	// cache. The open-work gates issue bd list/query reads against the
+	// store, bounded by orderGateTimeout; on store slowness they time out
+	// and the order is skipped every cycle (gastownhall/gascity#2893
+	// dispatch starvation), so the probe never runs and its cache goes
+	// stale. Setting NoWorkGate skips both gates so the order dispatches
+	// on its trigger schedule regardless of store health. Single-flight
+	// is the author's responsibility: the order must be self-idempotent
+	// or interval-bounded, since no gate prevents an overlapping re-run.
+	NoWorkGate bool `toml:"no_work_gate,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -100,23 +125,26 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string                `toml:"description,omitempty"`
-	Formula     string                `toml:"formula,omitempty"`
-	Exec        string                `toml:"exec,omitempty"`
-	Scope       string                `toml:"scope,omitempty"`
-	Trigger     string                `toml:"trigger,omitempty"`
-	Gate        string                `toml:"gate,omitempty"`
-	Interval    string                `toml:"interval,omitempty"`
-	Schedule    string                `toml:"schedule,omitempty"`
-	Check       string                `toml:"check,omitempty"`
-	On          string                `toml:"on,omitempty"`
-	Pool        string                `toml:"pool,omitempty"`
-	Timeout     string                `toml:"timeout,omitempty"`
-	Enabled     *bool                 `toml:"enabled,omitempty"`
-	Idempotent  bool                  `toml:"idempotent,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	Params      map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases []string              `toml:"skip_aliases,omitempty"`
+	Description  string                `toml:"description,omitempty"`
+	Formula      string                `toml:"formula,omitempty"`
+	Exec         string                `toml:"exec,omitempty"`
+	Scope        string                `toml:"scope,omitempty"`
+	Trigger      string                `toml:"trigger,omitempty"`
+	Gate         string                `toml:"gate,omitempty"`
+	Interval     string                `toml:"interval,omitempty"`
+	Schedule     string                `toml:"schedule,omitempty"`
+	TZ           string                `toml:"tz,omitempty"`
+	Check        string                `toml:"check,omitempty"`
+	On           string                `toml:"on,omitempty"`
+	Pool         string                `toml:"pool,omitempty"`
+	Timeout      string                `toml:"timeout,omitempty"`
+	CheckTimeout string                `toml:"check_timeout,omitempty"`
+	Enabled      *bool                 `toml:"enabled,omitempty"`
+	Idempotent   bool                  `toml:"idempotent,omitempty"`
+	NoWorkGate   bool                  `toml:"no_work_gate,omitempty"`
+	Env          map[string]string     `toml:"env,omitempty"`
+	Params       map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases  []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -125,22 +153,25 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description: d.Description,
-		Formula:     d.Formula,
-		Exec:        d.Exec,
-		Scope:       d.Scope,
-		Trigger:     trigger,
-		Interval:    d.Interval,
-		Schedule:    d.Schedule,
-		Check:       d.Check,
-		On:          d.On,
-		Pool:        d.Pool,
-		Timeout:     d.Timeout,
-		Enabled:     d.Enabled,
-		Idempotent:  d.Idempotent,
-		Env:         d.Env,
-		Params:      d.Params,
-		skipAliases: d.SkipAliases,
+		Description:  d.Description,
+		Formula:      d.Formula,
+		Exec:         d.Exec,
+		Scope:        d.Scope,
+		Trigger:      trigger,
+		Interval:     d.Interval,
+		Schedule:     d.Schedule,
+		TZ:           d.TZ,
+		Check:        d.Check,
+		On:           d.On,
+		Pool:         d.Pool,
+		Timeout:      d.Timeout,
+		CheckTimeout: d.CheckTimeout,
+		Enabled:      d.Enabled,
+		Idempotent:   d.Idempotent,
+		NoWorkGate:   d.NoWorkGate,
+		Env:          d.Env,
+		Params:       d.Params,
+		skipAliases:  d.SkipAliases,
 	}
 }
 
@@ -182,6 +213,25 @@ func (a *Order) TimeoutOrDefault() time.Duration {
 		return 300 * time.Second
 	}
 	return 30 * time.Second
+}
+
+// defaultConditionCheckTimeout is the condition trigger's check-command
+// deadline when the order does not set check_timeout. It is the single source
+// for that fallback: checkCondition uses it when ConditionTimeout is unset and
+// CheckTimeoutOrDefault returns it for an unset or invalid check_timeout.
+const defaultConditionCheckTimeout = 10 * time.Second
+
+// CheckTimeoutOrDefault returns the condition trigger's check-command
+// deadline: the parsed check_timeout, or defaultConditionCheckTimeout when
+// unset or unparseable. Used to populate TriggerOptions.ConditionTimeout so
+// a store-backed check gets enough time to prove its condition holds.
+func (a *Order) CheckTimeoutOrDefault() time.Duration {
+	if a.CheckTimeout != "" {
+		if d, err := time.ParseDuration(a.CheckTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultConditionCheckTimeout
 }
 
 // Parse decodes TOML data into an Order.
@@ -234,6 +284,28 @@ func Validate(a Order) error {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
 		}
 	}
+	// Validate check_timeout if set. Unlike timeout, a non-positive value is
+	// also rejected: CheckTimeoutOrDefault silently reverts a zero or negative
+	// check_timeout to defaultConditionCheckTimeout, which would re-create the
+	// fixed-deadline condition starvation this field exists to prevent, so a
+	// typo like "60" (missing unit) or "0s" must fail at load instead of
+	// passing silently.
+	if a.CheckTimeout != "" {
+		d, err := time.ParseDuration(a.CheckTimeout)
+		if err != nil {
+			return fmt.Errorf("order %q: invalid check_timeout %q: %w", a.Name, a.CheckTimeout, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("order %q: check_timeout %q must be a positive duration", a.Name, a.CheckTimeout)
+		}
+	}
+	// Validate tz if set. A bad zone must fail loudly at load time; a silent
+	// fallback would move the order's schedule to a different wall clock.
+	if a.TZ != "" {
+		if _, err := time.LoadLocation(a.TZ); err != nil {
+			return fmt.Errorf("order %q: invalid tz %q: %w", a.Name, a.TZ, err)
+		}
+	}
 	switch a.Trigger {
 	case "cooldown":
 		if a.Interval == "" {
@@ -273,13 +345,20 @@ func Validate(a Order) error {
 
 // MissingRequiredParams returns the names of declared-required params that are
 // absent from vars, sorted. It returns nil when every required param is present.
+//
+// A required param is "missing" when its key is absent OR its value is empty:
+// webhook arg extraction renders a template whose payload path does not resolve
+// to the empty string and still inserts the key, so a presence-only check would
+// fire an order with an empty required value. Treating empty-as-absent makes
+// `required = true` mean required-and-non-empty for both webhook dispatch and
+// `gc order run --var key=` (an explicitly-empty value is not a supplied value).
 func (a *Order) MissingRequiredParams(vars map[string]string) []string {
 	var missing []string
 	for name, p := range a.Params {
 		if !p.Required {
 			continue
 		}
-		if _, ok := vars[name]; !ok {
+		if strings.TrimSpace(vars[name]) == "" {
 			missing = append(missing, name)
 		}
 	}

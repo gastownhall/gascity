@@ -1,6 +1,7 @@
 package convoy
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -8,24 +9,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-func testConvoyDeps(store beads.Store) ConvoyDeps {
+func testConvoyDeps() ConvoyDeps {
 	return ConvoyDeps{
-		Cfg: &config.City{},
-		GetStore: func(_ string) (beads.Store, error) {
-			return store, nil
-		},
-		FindStore: func(_ string) (beads.Store, error) {
-			return store, nil
-		},
+		Cfg:      &config.City{},
 		Recorder: events.NewFake(),
 	}
 }
 
 func TestConvoyCreateOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
-	result, err := ConvoyCreate(deps, store, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: store}, ConvoyCreateInput{
 		Title: "my convoy",
 		Fields: ConvoyFields{
 			Owner:  "mayor",
@@ -59,14 +54,14 @@ func TestConvoyCreateOps(t *testing.T) {
 
 func TestConvoyCreateWithItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	// Create child beads first.
 	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 	b2, _ := store.Create(beads.Bead{Title: "task 2"})
 
-	result, err := ConvoyCreate(deps, store, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: store}, ConvoyCreateInput{
 		Title: "linked convoy",
 		Items: []string{b1.ID, b2.ID},
 	})
@@ -88,7 +83,7 @@ func TestConvoyCreateWithItemsOps(t *testing.T) {
 
 func TestConvoyProgressOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
@@ -99,7 +94,7 @@ func TestConvoyProgressOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +111,7 @@ func TestConvoyProgressOps(t *testing.T) {
 
 func TestConvoyProgressCompleteOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
@@ -124,7 +119,7 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +130,7 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 
 func TestConvoyProgressTracksDepsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1"})
@@ -150,7 +145,7 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +162,7 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 
 func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1"})
@@ -179,7 +174,7 @@ func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: store}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,15 +212,39 @@ func TestConvoyMembersKeepsDanglingTracksUnknownOps(t *testing.T) {
 	}
 }
 
+func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
+	backing := beads.NewMemStore()
+	convoy, _ := backing.Create(beads.Bead{Title: "test", Type: "convoy"})
+	item, _ := backing.Create(beads.Bead{Title: "task"})
+	if err := backing.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	store := metadataParseErrorStore{Store: backing, corruptID: item.ID}
+
+	members, err := Members(store, convoy.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("members = %d, want 1", len(members))
+	}
+	if members[0].ID != item.ID {
+		t.Errorf("member ID = %q, want %s", members[0].ID, item.ID)
+	}
+	if members[0].Status != "unknown" {
+		t.Errorf("member status = %q, want unknown", members[0].Status)
+	}
+}
+
 func TestConvoyAddItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 
-	err := ConvoyAddItems(deps, store, convoy.ID, []string{b1.ID})
+	err := ConvoyAddItems(deps, MemberClasses{Convoy: store}, convoy.ID, []string{b1.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +275,7 @@ func TestUntrackItemFailsOnAmbiguousMixedDependencyTypes(t *testing.T) {
 
 func TestConvoyCloseOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 
@@ -285,7 +304,7 @@ func TestConvoyCloseOps(t *testing.T) {
 
 func TestConvoyCloseNotFoundOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	err := ConvoyClose(deps, store, "nonexistent")
 	if err == nil {
@@ -305,4 +324,16 @@ func requireTracksDep(t *testing.T, store beads.Store, convoyID, itemID string) 
 		}
 	}
 	t.Fatalf("missing tracks dep %s -> %s; deps=%v", convoyID, itemID, deps)
+}
+
+type metadataParseErrorStore struct {
+	beads.Store
+	corruptID string
+}
+
+func (s metadataParseErrorStore) Get(id string) (beads.Bead, error) {
+	if id == s.corruptID {
+		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
+	}
+	return s.Store.Get(id)
 }

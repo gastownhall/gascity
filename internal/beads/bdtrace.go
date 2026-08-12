@@ -86,17 +86,18 @@ func classifyTraceScope(callers []string) string {
 			return "init"
 
 		// Order dispatch — includes the gating helpers that decide
-		// whether to fire (hasOpenWork, LastRunFuncForStore, cursor
-		// lookup, etc.). Without these the order-dispatch scope
-		// shows up as "unknown" because the dispatch frame is
-		// already deeper than the chokepoint sees.
+		// whether to fire (hasOpenWork, the mixed orders+graph LastRun /
+		// Cursor reads, cursor lookup, etc.). Without these the
+		// order-dispatch scope shows up as "unknown" because the dispatch
+		// frame is already deeper than the chokepoint sees.
 		case strings.Contains(fn, "memoryOrderDispatcher).dispatch"),
 			strings.Contains(fn, "memoryOrderDispatcher).hasOpenWork"),
 			strings.Contains(fn, "memoryOrderDispatcher).cachedLastRun"),
 			strings.Contains(fn, "dispatchOrders"),
-			strings.Contains(fn, "orders.LastRunFuncForStore"),
-			strings.Contains(fn, "orders.LastRunAcrossStores"),
-			strings.Contains(fn, "orders.CursorAcrossStores"),
+			strings.Contains(fn, "orders.(*Store).LastRun"),
+			strings.Contains(fn, "orders.(*Store).Cursor"),
+			strings.Contains(fn, "orders.LastRunAcross"),
+			strings.Contains(fn, "orders.CursorAcross"),
 			strings.Contains(fn, "bdCursorAcrossStores"),
 			strings.Contains(fn, "doOrderCheck"):
 			return "order-dispatch"

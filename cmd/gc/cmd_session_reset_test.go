@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -77,6 +78,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
@@ -111,6 +113,68 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	}
 	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
 		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+}
+
+func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "broken")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-provider-error-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	writeBuiltinImportsFixture(t, cityDir, "core")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:session-a"},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"template":     "session-a",
+			"session_name": "s-gc-reset-provider-error",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		controllerHostingStandalone,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+	if got, want := stderr.String(), "gc session reset: constructing session provider: injected provider failure\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
@@ -179,6 +243,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
@@ -274,6 +339,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
@@ -356,6 +422,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,

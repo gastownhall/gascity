@@ -1,13 +1,5 @@
 package session
 
-import (
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
-)
-
 // ApplyPatch returns a copy of info with a MetadataPatch applied to its
 // metadata-derived fields. It is the typed "write-returns-Info" half of the
 // session front door (front-door migration Step 6d): the reconciler applies a
@@ -17,10 +9,10 @@ import (
 //
 // It is byte-identical to a full re-projection of the patched metadata:
 //
-//	info.ApplyPatch(p)  ==  InfoFromPersistedBead(bead{Status, Type, Title, ...,
+//	info.ApplyPatch(p)  ==  infoFromPersistedBead(bead{Status, Type, Title, ...,
 //	                            Metadata: p.Apply(meta)})
 //
-// for the metadata-derived fields, where info == InfoFromPersistedBead(bead).
+// for the metadata-derived fields, where info == infoFromPersistedBead(bead).
 // Only fields whose source key appears in the patch are re-derived, from that
 // key's raw patch value, using the same per-key logic as InfoFromPersistedBead;
 // every other field carries forward unchanged. Bead-level fields (ID, Type,
@@ -30,187 +22,21 @@ import (
 // a metadata patch — a status close is a separate refresh case (Store.Get) —
 // so ApplyPatch reads the carried-forward Closed and never flips it.
 //
-// The mapping is deliberately parallel to InfoFromPersistedBead;
-// TestInfoApplyPatchMatchesReprojection is the equivalence oracle that guards
-// the two against drift, exactly as TestSessionClassifierInfoEquivalence guards
-// the classifier siblings.
+// The fold shares one codec table with infoFromPersistedBead (info_codec.go):
+// each key's setter is the SAME closure both directions run, so fold ==
+// re-projection by construction. TestInfoApplyPatchMatchesReprojection is kept
+// as the equivalence oracle that gates the two against drift, exactly as
+// TestSessionClassifierInfoEquivalence guards the classifier siblings.
 func (info Info) ApplyPatch(patch MetadataPatch) Info {
 	for key, v := range patch {
-		switch key {
-		case "session_name":
-			info.SessionNameMetadata = v
-			if v == "" {
-				info.SessionName = sessionNameFor(info.ID)
-			} else {
-				info.SessionName = v
-			}
-		case "state":
-			info.MetadataState = v
-			if info.Closed {
-				info.State = "" // closed beads have no runtime state
-			} else {
-				info.State = normalizeInfoState(State(v))
-			}
-		case "template":
-			info.Template = v
-		case "alias":
-			info.Alias = v
-		case "agent_name":
-			info.AgentName = v
-		case "provider":
-			info.Provider = v
-			info.Transport = normalizeTransport(v, info.TransportMetadata)
-		case "transport":
-			info.TransportMetadata = v
-			info.Transport = normalizeTransport(info.Provider, v)
-		case "command":
-			info.Command = v
-		case "work_dir":
-			info.WorkDir = v
-		case "session_key":
-			info.SessionKey = v
-		case "resume_flag":
-			info.ResumeFlag = v
-		case "resume_style":
-			info.ResumeStyle = v
-		case "resume_command":
-			info.ResumeCommand = v
-		case "continuation_epoch":
-			info.ContinuationEpoch = v
-		case "sleep_reason":
-			info.SleepReason = v
-		case NamedSessionIdentityMetadata:
-			info.ConfiguredNamedIdentity = v
-		case NamedSessionMetadataKey:
-			info.ConfiguredNamedSession = strings.TrimSpace(v) == "true"
-		case NamedSessionModeMetadata:
-			info.ConfiguredNamedMode = v
-		case "common_name":
-			info.CommonName = v
-		case "pool_slot":
-			info.PoolSlot = v
-		case "pool_managed":
-			info.PoolManaged = strings.TrimSpace(v) == "true"
-		case "session_origin":
-			info.SessionOrigin = v
-		case "dependency_only":
-			info.DependencyOnly = strings.TrimSpace(v) == "true"
-			info.DependencyOnlyMetadata = v
-		case "manual_session":
-			info.ManualSession = strings.TrimSpace(v) == "true"
-			info.ManualSessionMetadata = v
-		case MCPIdentityMetadataKey:
-			info.MCPIdentity = v
-		case MCPServersSnapshotMetadataKey:
-			info.MCPServersSnapshot = v
-		case "provider_terminal_error":
-			info.ProviderTerminalError = v
-		case "session_health":
-			info.HealthState = v
-		case "session_health_reason":
-			info.HealthReason = v
-		case "session_drainable":
-			info.Drainable = strings.TrimSpace(v) == "true"
-		case beadmeta.TriggerBeadIDMetadataKey:
-			info.TriggerBeadID = v
-		case beadmeta.TriggerBeadStoreRefMetadataKey:
-			info.TriggerBeadStoreRef = v
-		case beadmeta.BrainParentSIDMetadataKey:
-			info.BrainParentSID = v
-		case beadmeta.PackMetadataKey:
-			info.Pack = v
-		case "pending_create_claim":
-			info.PendingCreateClaim = strings.TrimSpace(v) == "true"
-			info.PendingCreateClaimMetadata = v
-		case "pending_create_started_at":
-			info.PendingCreateStartedAt = v
-		case "quarantined_until":
-			info.QuarantinedUntil = v
-		case aliasHistoryMetadataKey:
-			info.AliasHistory = normalizeAliasList(strings.Split(v, ","), "")
-		case "continuity_eligible":
-			info.ContinuityEligible = v
-		case "last_woke_at":
-			info.LastWokeAt = v
-		case "state_reason":
-			info.StateReason = v
-		case "creation_complete_at":
-			info.CreationCompleteAt = v
-		case "continuation_reset_pending":
-			info.ContinuationResetPending = v
-		case ResetCommittedAtKey:
-			info.ResetCommittedAt = v
-		case "generation":
-			info.Generation = v
-		case "started_config_hash":
-			info.StartedConfigHash = v
-		case "pin_awake":
-			info.PinAwake = v
-		case "held_until":
-			info.HeldUntil = v
-		case "wait_hold":
-			info.WaitHold = v
-		case "churn_count":
-			info.ChurnCount = v
-		case "wake_mode":
-			info.WakeMode = v
-		case "sleep_intent":
-			info.SleepIntent = v
-		case "instance_token":
-			info.InstanceToken = v
-		case "detached_at":
-			info.DetachedAt = v
-		case CurrentBeadIDKey:
-			info.CurrentlyProcessingBeadID = v
-		case "core_hash_breakdown":
-			info.CoreHashBreakdown = v
-		case "started_provision_hash":
-			info.StartedProvisionHash = v
-		case "started_launch_hash":
-			info.StartedLaunchHash = v
-		case "started_live_hash":
-			info.StartedLiveHash = v
-		case "config_drift_deferred_at":
-			info.ConfigDriftDeferredAt = v
-		case "config_drift_deferred_key":
-			info.ConfigDriftDeferredKey = v
-		case "attached_config_drift_deferred_at":
-			info.AttachedConfigDriftDeferredAt = v
-		case "attached_config_drift_deferred_key":
-			info.AttachedConfigDriftDeferredKey = v
-		case "stranded_event_emitted_at":
-			info.StrandedEventEmittedAt = v
-		case "session_name_explicit":
-			info.SessionNameExplicit = v
-		case "wake_request":
-			info.WakeRequest = v
-		case "restart_requested":
-			info.RestartRequested = v
-		case "session_id_flag":
-			info.SessionIDFlag = v
-		case "template_overrides":
-			info.TemplateOverrides = v
-		case "wake_attempts":
-			info.WakeAttemptsMetadata = v
-			if n, err := strconv.Atoi(v); err == nil {
-				info.WakeAttempts = n
-			} else {
-				info.WakeAttempts = 0
-			}
-		case "provider_kind":
-			info.ProviderKind = v
-		case MetadataLastNudgeDeliveredAt:
-			info.LastNudgeDeliveredAt = time.Time{}
-			if raw := strings.TrimSpace(v); raw != "" {
-				if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
-					info.LastNudgeDeliveredAt = parsed
-				}
-			}
-		default:
-			// Keys InfoFromPersistedBead does not project (e.g. live_hash,
-			// startup_dialog_verified, env.*) have no Info field, so a patch to
-			// them changes no Info fact. Ignoring them keeps ApplyPatch
-			// byte-identical to a full re-projection.
+		// A key infoFromPersistedBead projects folds through its shared codec
+		// setter — the SAME closure the projection runs — so the fold is a
+		// re-projection of that one key by construction. Keys the projection
+		// does not read (e.g. env.*, wake_requested_at) miss the index and carry
+		// no Info field, keeping ApplyPatch byte-identical to a full
+		// re-projection.
+		if spec, ok := infoKeyIndex[key]; ok {
+			spec.set(&info, v)
 		}
 	}
 	return info
@@ -234,8 +60,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 // re-projecting the raw working bead or issuing a store Get.
 //
 // TestInfoMarkClosedMatchesReprojection is the equivalence oracle: for any open
-// bead b, InfoFromPersistedBead(b).MarkClosed() equals
-// InfoFromPersistedBead(b with Status "closed").
+// bead b, infoFromPersistedBead(b).MarkClosed() equals
+// infoFromPersistedBead(b with Status "closed").
 func (info Info) MarkClosed() Info {
 	info.Closed = true
 	info.State = "" // closed beads have no runtime state

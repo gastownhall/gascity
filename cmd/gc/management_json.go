@@ -9,23 +9,30 @@ import (
 )
 
 type managementActionResult struct {
-	SchemaVersion string           `json:"schema_version"`
-	OK            bool             `json:"ok"`
-	Command       string           `json:"command"`
-	Action        string           `json:"action"`
-	Name          string           `json:"name,omitempty"`
-	QualifiedName string           `json:"qualified_name,omitempty"`
-	Rig           string           `json:"rig,omitempty"`
-	Path          string           `json:"path,omitempty"`
-	Prefix        string           `json:"prefix,omitempty"`
-	DefaultBranch string           `json:"default_branch,omitempty"`
-	Suspended     *bool            `json:"suspended,omitempty"`
-	State         string           `json:"state,omitempty"`
-	Retried       *bool            `json:"retried,omitempty"`
-	RetriedFrom   string           `json:"retried_from_wait,omitempty"`
-	ReadyWaitID   string           `json:"ready_wait_id,omitempty"`
-	DryRun        *bool            `json:"dry_run,omitempty"`
-	Endpoint      *rigEndpointJSON `json:"endpoint,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Command       string `json:"command"`
+	Action        string `json:"action"`
+	Name          string `json:"name,omitempty"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Rig           string `json:"rig,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Prefix        string `json:"prefix,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	Suspended     *bool  `json:"suspended,omitempty"`
+	State         string `json:"state,omitempty"`
+	// Status and RequestID are additive fields the remote `rig add` path emits so
+	// a script repointed at a remote city keeps the automation-critical keys plus
+	// the async outcome (provisioned/exists) and its idempotency id. Local
+	// management actions leave them empty (omitempty), preserving byte-identical
+	// local JSON.
+	Status      string           `json:"status,omitempty"`
+	RequestID   string           `json:"request_id,omitempty"`
+	Retried     *bool            `json:"retried,omitempty"`
+	RetriedFrom string           `json:"retried_from_wait,omitempty"`
+	ReadyWaitID string           `json:"ready_wait_id,omitempty"`
+	DryRun      *bool            `json:"dry_run,omitempty"`
+	Endpoint    *rigEndpointJSON `json:"endpoint,omitempty"`
 }
 
 type rigEndpointJSON struct {

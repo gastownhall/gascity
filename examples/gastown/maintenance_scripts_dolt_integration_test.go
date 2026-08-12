@@ -66,7 +66,7 @@ case "$1" in
 esac
 exit 0
 `)
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
     printf '{"count":0}\n'

@@ -95,6 +95,53 @@ func TestMailboxAddressesCodec(t *testing.T) {
 	}
 }
 
+// TestMailboxAddressesIncludingRuntimeNameCodec pins the API-dup semantics that
+// MailboxAddressesIncludingRuntimeName preserves: unlike MailboxAddresses (the
+// CLI fork, tested above), it appends session_name UNCONDITIONALLY (last),
+// keeping runtime session mailboxes reachable via API reads (bf576b04a).
+func TestMailboxAddressesIncludingRuntimeNameCodec(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want []string
+	}{
+		{
+			name: "session_name appended last even when other addresses resolve",
+			bead: beads.Bead{
+				ID: "sess-1",
+				Metadata: map[string]string{
+					"alias":         "mayor",
+					"alias_history": "deacon,mayor,polecat",
+					"session_name":  "sn-1",
+				},
+			},
+			want: []string{"mayor", "sess-1", "deacon", "polecat", "sn-1"},
+		},
+		{
+			name: "session_name deduped against primary",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "sn-1"}},
+			want: []string{"sn-1"},
+		},
+		{
+			name: "id only",
+			bead: beads.Bead{ID: "sess-1"},
+			want: []string{"sess-1"},
+		},
+		{
+			name: "empty everything",
+			bead: beads.Bead{},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MailboxAddressesIncludingRuntimeName(tt.bead); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("MailboxAddressesIncludingRuntimeName = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtmsgHandleSourceCodec(t *testing.T) {
 	tests := []struct {
 		name string

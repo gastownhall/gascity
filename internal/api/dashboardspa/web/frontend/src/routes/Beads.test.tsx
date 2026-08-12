@@ -75,16 +75,8 @@ beforeEach(() => {
         return jsonResponse({ status: 'ok' });
       }
       if (url.pathname === '/v0/city/test-city/bead/gascity-0001/close' && method === 'POST') {
-        supervisorWrites.push({
-          method,
-          path: url.pathname,
-          body: await requestJson(input, init),
-        });
-        return jsonResponse({ status: 'closed' });
-      }
-      if (url.pathname === '/v0/city/test-city/agent/mayor/nudge' && method === 'POST') {
         supervisorWrites.push({ method, path: url.pathname });
-        return jsonResponse({ status: 'ok' });
+        return jsonResponse({ status: 'closed' });
       }
       if (url.pathname === '/v0/city/test-city/sessions') {
         return jsonResponse({ items: [], total: 0 });
@@ -267,16 +259,13 @@ describe('BeadsPage', () => {
     ]);
   });
 
-  it('closes and nudges beads directly through the supervisor API', async () => {
+  it('closes beads directly through the supervisor API', async () => {
     renderPage('/beads?bead=gascity-0001');
 
     const detailDialog = await screen.findByRole('dialog');
     // No operator Claim affordance: the human is never a bead assignee
     // (gascity-dashboard-2j8e.8).
     expect(within(detailDialog).queryByRole('button', { name: /^claim$/i })).toBeNull();
-
-    fireEvent.click(within(detailDialog).getByRole('button', { name: /^nudge$/i }));
-    await screen.findByText(/nudged mayor/i);
 
     const closeButton = within(detailDialog)
       .getAllByRole('button', { name: /^close$/i })
@@ -287,9 +276,6 @@ describe('BeadsPage', () => {
     const closeDialog = await screen.findByRole('heading', { name: /close gascity-0001/i });
     const modal = closeDialog.closest('[role="dialog"]');
     expect(modal).toBeTruthy();
-    fireEvent.change(within(modal as HTMLElement).getByLabelText(/reason/i), {
-      target: { value: '  verified done  ' },
-    });
     fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: /close bead/i }));
 
     await screen.findByText(/closed gascity-0001/i);
@@ -297,14 +283,7 @@ describe('BeadsPage', () => {
       expect(supervisorWrites).toEqual([
         {
           method: 'POST',
-          path: '/v0/city/test-city/agent/mayor/nudge',
-        },
-        {
-          method: 'POST',
           path: '/v0/city/test-city/bead/gascity-0001/close',
-          body: {
-            reason: 'verified done',
-          },
         },
       ]);
     });

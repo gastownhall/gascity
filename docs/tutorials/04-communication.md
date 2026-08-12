@@ -36,7 +36,7 @@ with nudge from Tutorial 03:
 | Carrier | A bead in the store | Terminal input |
 | Survives a crash | Yes | No |
 | Subject line | Yes | No |
-| Wakes the recipient | No | Yes |
+| Wakes the recipient | No by itself; `--notify` can request a managed wake | Yes |
 | State | Stays unread until processed | Fire-and-forget |
 
 Send mail to the mayor:
@@ -49,6 +49,11 @@ Sent message mc-msg-8t8 to mayor
 
 `gc mail send` takes the recipient as a positional argument and the subject/body
 via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
+
+Mail does not create wake demand by itself. Add `--notify` to request a turn for
+the recipient even when earlier mail is still unread. In a managed city, that
+request can wake a non-running recipient; an unmanaged city queues the nudge for
+later delivery; without a city store the nudge is skipped.
 
 Check for unread mail:
 

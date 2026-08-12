@@ -76,7 +76,7 @@ func TestParseTemplateOverridesFromInfoMatchesRaw(t *testing.T) {
 		{"template_overrides": `{"model":"sonnet","initial_message":"hi"}`},
 	}
 	for _, meta := range metas {
-		info := InfoFromPersistedBead(beads.Bead{Metadata: meta})
+		info := infoFromPersistedBead(beads.Bead{Metadata: meta})
 		rawOut, rawErr := ParseTemplateOverrides(meta)
 		infoOut, infoErr := ParseTemplateOverridesFromInfo(info)
 		if (rawErr == nil) != (infoErr == nil) {

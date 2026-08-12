@@ -1483,6 +1483,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			}
 		}
 	}
+	inheritedWarnings = appendUnique(inheritedWarnings, warnUnusedPackAgentDefaultsForImports(includedAgents, tc.AgentDefaults)...)
 
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
@@ -1727,29 +1728,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 func deepCopyAgents(in []Agent) []Agent {
 	out := make([]Agent, len(in))
 	for i := range in {
-		out[i] = in[i]
-		out[i].Args = append([]string(nil), in[i].Args...)
-		out[i].PreStart = append([]string(nil), in[i].PreStart...)
-		out[i].ProcessNames = append([]string(nil), in[i].ProcessNames...)
-		out[i].Env = deepCopyStringMap(in[i].Env)
-		out[i].OptionDefaults = deepCopyStringMap(in[i].OptionDefaults)
-		out[i].NamepoolNames = append([]string(nil), in[i].NamepoolNames...)
-		out[i].InstallAgentHooks = append([]string(nil), in[i].InstallAgentHooks...)
-		out[i].SessionSetup = append([]string(nil), in[i].SessionSetup...)
-		out[i].SessionLive = append([]string(nil), in[i].SessionLive...)
-		out[i].InjectFragments = append([]string(nil), in[i].InjectFragments...)
-		out[i].AppendFragments = append([]string(nil), in[i].AppendFragments...)
-		out[i].DependsOn = append([]string(nil), in[i].DependsOn...)
-		out[i].MaxActiveSessions = copyIntPtr(in[i].MaxActiveSessions)
-		out[i].MinActiveSessions = copyIntPtr(in[i].MinActiveSessions)
-		out[i].ReadyDelayMs = copyIntPtr(in[i].ReadyDelayMs)
-		out[i].EmitsPermissionWarning = copyBoolPtr(in[i].EmitsPermissionWarning)
-		out[i].HooksInstalled = copyBoolPtr(in[i].HooksInstalled)
-		out[i].InjectAssignedSkills = copyBoolPtr(in[i].InjectAssignedSkills)
-		out[i].DefaultSlingFormula = copyStringPtr(in[i].DefaultSlingFormula)
-		out[i].InheritedDefaultSlingFormula = copyStringPtr(in[i].InheritedDefaultSlingFormula)
-		out[i].InheritedAppendFragments = append([]string(nil), in[i].InheritedAppendFragments...)
-		out[i].Attach = copyBoolPtr(in[i].Attach)
+		out[i] = in[i].Clone()
 	}
 	return out
 }
@@ -1893,6 +1872,50 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 			agents[i].InheritedAppendFragments = appendUnique(agents[i].InheritedAppendFragments, defaults.AppendFragments...)
 		}
 	}
+}
+
+// warnUnusedPackAgentDefaultsForImports returns a warning when a pack's
+// [agent_defaults] configures a field that never reaches any of its
+// [imports.*] agents. applyInheritedPackAgentDefaults deliberately skips
+// any agent with a non-empty BindingName -- imports keep binding-scoped
+// identity rather than inheriting a pack's local defaults -- but that
+// scoping was silent (gastownhall/gascity#4524): a pack author configuring
+// agent_defaults.provider expecting it to cover imported roles got no
+// error, and every imported agent quietly ran on whatever provider it
+// would have used anyway. An imported agent that already sets its own
+// value for a field is not counted -- agent_defaults not applying there is
+// expected, not a bug.
+func warnUnusedPackAgentDefaultsForImports(agents []Agent, defaults AgentDefaults) []string {
+	var skippedProvider, skippedFormula, skippedFragments int
+	for i := range agents {
+		if agents[i].BindingName == "" {
+			continue
+		}
+		if defaults.Provider != "" && agents[i].Provider == "" {
+			skippedProvider++
+		}
+		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil {
+			skippedFormula++
+		}
+		if len(defaults.AppendFragments) > 0 && len(agents[i].AppendFragments) == 0 {
+			skippedFragments++
+		}
+	}
+
+	var fields []string
+	if skippedProvider > 0 {
+		fields = append(fields, fmt.Sprintf("provider unused by %d imported agent(s)", skippedProvider))
+	}
+	if skippedFormula > 0 {
+		fields = append(fields, fmt.Sprintf("default_sling_formula unused by %d imported agent(s)", skippedFormula))
+	}
+	if skippedFragments > 0 {
+		fields = append(fields, fmt.Sprintf("append_fragments unused by %d imported agent(s)", skippedFragments))
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("agent_defaults currently does not apply to a pack's own [imports.*] agents (the loader scopes it to the pack's own agents/ and [[agent]] blocks; see pack-spec §2.7); %s", strings.Join(fields, ", "))}
 }
 
 // cachedPackField resolves topoDir to an absolute cache key, looks up its
@@ -2383,6 +2406,13 @@ func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 			}
 		}
 		if !found {
+			if p.Dir == "" {
+				for j := range agents {
+					if agents[j].BindingQualifiedName() == p.Name {
+						return fmt.Errorf("patches.agent[%d]: agent %q not found in pack (patches match local names — did you mean %q?)", i, target, agents[j].Name)
+					}
+				}
+			}
 			return fmt.Errorf("patches.agent[%d]: agent %q not found in pack", i, target)
 		}
 	}
@@ -2734,156 +2764,76 @@ func applyOverrides(agents []Agent, overrides []AgentOverride, _ string) error {
 	return nil
 }
 
-// applyAgentOverride applies a single override to an agent.
+// applyAgentOverride applies a single rig-scoped override to an agent. The
+// override's Dir is the only field unique to the rig-override surface; every
+// other overridable field is copied into an AgentPatch by toAgentPatch and
+// merged through the shared applyAgentMutation body, so patch and override can
+// never diverge field-by-field. See applyAgentMutation for the enforcement
+// tests.
 func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Dir != nil {
 		a.Dir = *ov.Dir
 	}
-	if ov.WorkDir != nil {
-		a.WorkDir = *ov.WorkDir
-	}
-	if ov.TmuxAlias != nil {
-		a.TmuxAlias = *ov.TmuxAlias
-	}
-	if ov.Scope != nil {
-		a.Scope = *ov.Scope
-	}
-	if ov.Suspended != nil {
-		a.Suspended = *ov.Suspended
-	}
-	if len(ov.PreStart) > 0 {
-		a.PreStart = append([]string(nil), ov.PreStart...)
-	}
-	if len(ov.PreStartAppend) > 0 {
-		a.PreStart = append(a.PreStart, ov.PreStartAppend...)
-	}
-	if ov.PromptTemplate != nil {
-		a.PromptTemplate = *ov.PromptTemplate
-	}
-	if ov.Session != nil {
-		a.Session = *ov.Session
-	}
-	if ov.Provider != nil {
-		a.Provider = *ov.Provider
-	}
-	if ov.Upstream != nil {
-		a.Upstream = *ov.Upstream
-	}
-	if ov.Args != nil {
-		a.Args = append([]string(nil), (*ov.Args)...)
-	}
-	if ov.StartCommand != nil {
-		a.StartCommand = *ov.StartCommand
-	}
-	if ov.Lifecycle != nil {
-		a.Lifecycle = *ov.Lifecycle
-	}
-	if ov.Nudge != nil {
-		a.Nudge = *ov.Nudge
-	}
-	if ov.IdleTimeout != nil {
-		a.IdleTimeout = *ov.IdleTimeout
-	}
-	if ov.MaxSessionAge != nil {
-		a.MaxSessionAge = *ov.MaxSessionAge
-	}
-	if ov.MaxSessionAgeJitter != nil {
-		a.MaxSessionAgeJitter = *ov.MaxSessionAgeJitter
-	}
-	if ov.SleepAfterIdle != nil {
-		a.SleepAfterIdle = NormalizeSleepAfterIdle(*ov.SleepAfterIdle)
-		a.SleepAfterIdleSource = "rig_override"
-	}
-	if len(ov.InstallAgentHooks) > 0 {
-		a.InstallAgentHooks = append([]string(nil), ov.InstallAgentHooks...)
-	}
-	if len(ov.InstallAgentHooksAppend) > 0 {
-		a.InstallAgentHooks = append(a.InstallAgentHooks, ov.InstallAgentHooksAppend...)
-	}
-	if ov.HooksInstalled != nil {
-		a.HooksInstalled = ov.HooksInstalled
-	}
-	if ov.InjectAssignedSkills != nil {
-		a.InjectAssignedSkills = ov.InjectAssignedSkills
-	}
-	if len(ov.SessionSetup) > 0 {
-		a.SessionSetup = append([]string(nil), ov.SessionSetup...)
-	}
-	if len(ov.SessionSetupAppend) > 0 {
-		a.SessionSetup = append(a.SessionSetup, ov.SessionSetupAppend...)
-	}
-	if ov.SessionSetupScript != nil {
-		a.SessionSetupScript = *ov.SessionSetupScript
-	}
-	if len(ov.SessionLive) > 0 {
-		a.SessionLive = append([]string(nil), ov.SessionLive...)
-	}
-	if len(ov.SessionLiveAppend) > 0 {
-		a.SessionLive = append(a.SessionLive, ov.SessionLiveAppend...)
-	}
-	if ov.OverlayDir != nil {
-		a.OverlayDir = *ov.OverlayDir
-	}
-	if ov.DefaultSlingFormula != nil {
-		a.DefaultSlingFormula = ov.DefaultSlingFormula
-	}
-	if ov.Attach != nil {
-		a.Attach = ov.Attach
-	}
-	if len(ov.DependsOn) > 0 {
-		a.DependsOn = append([]string(nil), ov.DependsOn...)
-	}
-	if ov.ResumeCommand != nil {
-		a.ResumeCommand = *ov.ResumeCommand
-	}
-	if ov.WakeMode != nil {
-		a.WakeMode = *ov.WakeMode
-	}
-	if ov.MouseMode != nil {
-		a.MouseMode = *ov.MouseMode
-	}
-	if ov.InjectFragments != nil {
-		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
-	}
-	if len(ov.AppendFragments) > 0 {
-		a.AppendFragments = append([]string(nil), ov.AppendFragments...)
-	}
-	if len(ov.InjectFragmentsAppend) > 0 {
-		a.InjectFragments = append(a.InjectFragments, ov.InjectFragmentsAppend...)
-	}
-	if ov.MaxActiveSessions != nil {
-		a.MaxActiveSessions = ov.MaxActiveSessions
-	}
-	if ov.MinActiveSessions != nil {
-		a.MinActiveSessions = ov.MinActiveSessions
-	}
-	if ov.ScaleCheck != nil {
-		a.ScaleCheck = *ov.ScaleCheck
-	}
-	// Env: additive merge.
-	if len(ov.Env) > 0 {
-		if a.Env == nil {
-			a.Env = make(map[string]string, len(ov.Env))
-		}
-		for k, v := range ov.Env {
-			a.Env[k] = v
-		}
-	}
-	for _, k := range ov.EnvRemove {
-		delete(a.Env, k)
-	}
-	// OptionDefaults: additive merge (override keys win).
-	if len(ov.OptionDefaults) > 0 {
-		if a.OptionDefaults == nil {
-			a.OptionDefaults = make(map[string]string, len(ov.OptionDefaults))
-		}
-		for k, v := range ov.OptionDefaults {
-			a.OptionDefaults[k] = v
-		}
-	}
-	// Pool: sub-field patching.
-	if ov.Pool != nil {
-		applyPoolOverride(a, ov.Pool)
+	applyAgentMutation(a, ov.toAgentPatch(), SessionSleepSourceRigOverride)
+}
+
+// toAgentPatch adapts a rig-scoped AgentOverride into the equivalent
+// AgentPatch so both override surfaces share applyAgentMutation. Only the
+// overridable fields are copied; the targeting keys (Agent, Dir) are handled
+// by the caller. TestAgentFieldSync keeps the two field sets aligned, and
+// TestApplyAgentOverrideCoversAllFields proves every field copied here reaches
+// the agent — a missed field fails the build.
+func (ov *AgentOverride) toAgentPatch() *AgentPatch {
+	return &AgentPatch{
+		WorkDir:                 ov.WorkDir,
+		TmuxAlias:               ov.TmuxAlias,
+		Scope:                   ov.Scope,
+		Suspended:               ov.Suspended,
+		Pool:                    ov.Pool,
+		Env:                     ov.Env,
+		EnvRemove:               ov.EnvRemove,
+		PreStart:                ov.PreStart,
+		PromptTemplate:          ov.PromptTemplate,
+		Session:                 ov.Session,
+		Provider:                ov.Provider,
+		Upstream:                ov.Upstream,
+		Args:                    ov.Args,
+		StartCommand:            ov.StartCommand,
+		Lifecycle:               ov.Lifecycle,
+		Nudge:                   ov.Nudge,
+		IdleTimeout:             ov.IdleTimeout,
+		MaxSessionAge:           ov.MaxSessionAge,
+		MaxSessionAgeJitter:     ov.MaxSessionAgeJitter,
+		AssignedWorkDeferLimit:  ov.AssignedWorkDeferLimit,
+		SleepAfterIdle:          ov.SleepAfterIdle,
+		InstallAgentHooks:       ov.InstallAgentHooks,
+		Skills:                  ov.Skills,
+		MCP:                     ov.MCP,
+		SkillsAppend:            ov.SkillsAppend,
+		MCPAppend:               ov.MCPAppend,
+		HooksInstalled:          ov.HooksInstalled,
+		InjectAssignedSkills:    ov.InjectAssignedSkills,
+		SessionSetup:            ov.SessionSetup,
+		SessionSetupScript:      ov.SessionSetupScript,
+		SessionLive:             ov.SessionLive,
+		OverlayDir:              ov.OverlayDir,
+		DefaultSlingFormula:     ov.DefaultSlingFormula,
+		InjectFragments:         ov.InjectFragments,
+		AppendFragments:         ov.AppendFragments,
+		Attach:                  ov.Attach,
+		DependsOn:               ov.DependsOn,
+		ResumeCommand:           ov.ResumeCommand,
+		WakeMode:                ov.WakeMode,
+		MouseMode:               ov.MouseMode,
+		PreStartAppend:          ov.PreStartAppend,
+		SessionSetupAppend:      ov.SessionSetupAppend,
+		SessionLiveAppend:       ov.SessionLiveAppend,
+		InstallAgentHooksAppend: ov.InstallAgentHooksAppend,
+		InjectFragmentsAppend:   ov.InjectFragmentsAppend,
+		MaxActiveSessions:       ov.MaxActiveSessions,
+		MinActiveSessions:       ov.MinActiveSessions,
+		ScaleCheck:              ov.ScaleCheck,
+		OptionDefaults:          ov.OptionDefaults,
 	}
 }
 

@@ -3,6 +3,7 @@ package orders
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -228,5 +229,215 @@ func TestRecentRunsReadsHistory(t *testing.T) {
 		if r.Scoped != "rig/agent" || r.CreatedAt.IsZero() {
 			t.Errorf("run = %+v, want scoped rig/agent with cooldown clock", r)
 		}
+	}
+}
+
+// TestRunFromTrackingBeadDecodesScopedOutcomeOpenCursor proves the exported
+// tracking-bead decode extracts the scoped name from the first non-empty
+// order-run label and folds outcome / open / cursor exactly like decodeRun, and
+// rejects beads that carry no order-run label (ok=false).
+func TestRunFromTrackingBeadDecodesScopedOutcomeOpenCursor(t *testing.T) {
+	b := beads.Bead{
+		ID:     "gc-42",
+		Status: "open",
+		Labels: []string{
+			"order-tracking",
+			"order-run:digest:rig:demo",
+			"wisp",
+			"wisp-failed",
+			"order:digest:rig:demo",
+			"seq:7",
+		},
+	}
+	run, ok := RunFromTrackingBead(b)
+	if !ok {
+		t.Fatal("RunFromTrackingBead ok = false, want true")
+	}
+	want := OrderRun{
+		ID:        "gc-42",
+		Scoped:    "digest:rig:demo",
+		Outcome:   RunOutcomeWispFailed,
+		CreatedAt: b.CreatedAt,
+		Open:      true,
+		Cursor:    EventCursor(7),
+	}
+	if !reflect.DeepEqual(run, want) {
+		t.Fatalf("run = %+v, want %+v", run, want)
+	}
+
+	if _, ok := RunFromTrackingBead(beads.Bead{Labels: []string{"order-tracking"}}); ok {
+		t.Errorf("RunFromTrackingBead(order-tracking only) ok = true, want false")
+	}
+	if _, ok := RunFromTrackingBead(beads.Bead{Labels: []string{"order-tracking", "order-run:"}}); ok {
+		t.Errorf("RunFromTrackingBead(empty order-run suffix) ok = true, want false")
+	}
+	if _, ok := RunFromTrackingBead(beads.Bead{Labels: []string{"order-run:   "}}); ok {
+		t.Errorf("RunFromTrackingBead(whitespace order-run suffix) ok = true, want false")
+	}
+}
+
+// TestRunOutcomeDisplayAndIsExec pins the display/exec vocabulary that replaces
+// the API's inline label cracks. The label sub-table is ported verbatim from the
+// deleted API test TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels so the
+// pre-refactor outcome truth table survives through outcomeFromLabels + Display.
+func TestRunOutcomeDisplayAndIsExec(t *testing.T) {
+	cases := []struct {
+		outcome     RunOutcome
+		wantDisplay string
+		wantIsExec  bool
+	}{
+		{RunOutcomeNone, "", false},
+		{RunOutcomeExec, "success", true},
+		{RunOutcomeExecFailed, "failed", true},
+		{RunOutcomeExecEnvFailed, "failed", true},
+		{RunOutcomeWisp, "success", false},
+		{RunOutcomeWispFailed, "failed", false},
+		{RunOutcomeWispCanceled, "canceled", false},
+		{RunOutcomeTriggerEnvFailed, "failed", false},
+	}
+	for _, tc := range cases {
+		if got := tc.outcome.Display(); got != tc.wantDisplay {
+			t.Errorf("Display(%v) = %q, want %q", tc.outcome, got, tc.wantDisplay)
+		}
+		if got := tc.outcome.IsExec(); got != tc.wantIsExec {
+			t.Errorf("IsExec(%v) = %v, want %v", tc.outcome, got, tc.wantIsExec)
+		}
+	}
+
+	labelCases := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"wisp failed dominates success", []string{"wisp", "wisp-failed"}, "failed"},
+		{"failed alone", []string{"wisp-failed"}, "failed"},
+		{"exec failed dominates success", []string{"exec", "exec-failed"}, "failed"},
+		{"exec env failed is failed", []string{"exec-env-failed"}, "failed"},
+		{"trigger env failed is failed", []string{"trigger-env-failed"}, "failed"},
+		{"canceled dominates success", []string{"wisp", "wisp-canceled"}, "canceled"},
+		{"success fallback", []string{"exec"}, "success"},
+		{"unknown", []string{"order-tracking"}, ""},
+	}
+	for _, tc := range labelCases {
+		if got := outcomeFromLabels(tc.labels).Display(); got != tc.want {
+			t.Errorf("%s: outcomeFromLabels(%v).Display() = %q, want %q", tc.name, tc.labels, got, tc.want)
+		}
+	}
+}
+
+// TestOrderRunStateMatchesLegacyFeedStatus is the equivalence tripwire for the
+// deleted orderTrackingStatus: each single-outcome-family bead decodes and its
+// State() must match the pre-refactor active/failed/completed classification.
+func TestOrderRunStateMatchesLegacyFeedStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		labels []string
+		want   string
+	}{
+		{"open exec-failed", "open", []string{"order-run:s", "exec-failed"}, "failed"},
+		{"open exec-env-failed", "open", []string{"order-run:s", "exec-env-failed"}, "failed"},
+		{"open trigger-env-failed", "open", []string{"order-run:s", "trigger-env-failed"}, "failed"},
+		{"open wisp-canceled", "open", []string{"order-run:s", "wisp", "wisp-canceled"}, "failed"},
+		{"open wisp-failed", "open", []string{"order-run:s", "wisp", "wisp-failed"}, "failed"},
+		{"open no-outcome", "open", []string{"order-run:s"}, "active"},
+		{"closed wisp", "closed", []string{"order-run:s", "wisp"}, "completed"},
+		{"closed exec", "closed", []string{"order-run:s", "exec"}, "completed"},
+		{"closed no-outcome", "closed", []string{"order-run:s"}, "completed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run, ok := RunFromTrackingBead(beads.Bead{Status: tc.status, Labels: tc.labels})
+			if !ok {
+				t.Fatalf("RunFromTrackingBead ok = false")
+			}
+			if got := run.State(); got != tc.want {
+				t.Fatalf("State() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListTrackingDecodesTrackingBeadsNewestFirst proves ListTracking mirrors
+// the /v0/orders/feed order-tracking scan: newest-first, fully decoded, skipping
+// beads without an order-run label, and returning (nil, nil) for a nil store.
+func TestListTrackingDecodesTrackingBeadsNewestFirst(t *testing.T) {
+	now := time.Now()
+	older := beads.Bead{
+		ID:        "gc-1",
+		Status:    "open",
+		CreatedAt: now.Add(-time.Hour),
+		Labels:    []string{"order-tracking", "order-run:rig/a"},
+	}
+	newer := beads.Bead{
+		ID:        "gc-2",
+		Status:    "open",
+		CreatedAt: now,
+		Labels:    []string{"order-tracking", "order-run:rig/b"},
+	}
+	unlabeled := beads.Bead{
+		ID:        "gc-3",
+		Status:    "open",
+		CreatedAt: now.Add(-30 * time.Minute),
+	}
+	mem := beads.NewMemStoreFrom(3, []beads.Bead{older, newer, unlabeled}, nil)
+	front := NewStore(beads.OrdersStore{Store: mem})
+
+	runs, err := front.ListTracking()
+	if err != nil {
+		t.Fatalf("ListTracking: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	if runs[0].Scoped != "rig/b" || runs[1].Scoped != "rig/a" {
+		t.Fatalf("order = [%s %s], want [rig/b rig/a] (newest first)", runs[0].Scoped, runs[1].Scoped)
+	}
+
+	got, err := NewStore(beads.OrdersStore{}).ListTracking()
+	if err != nil || got != nil {
+		t.Fatalf("nil-store ListTracking = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestLatestOpenRunIgnoresClosedRuns pins the deliberate IncludeClosed omission
+// (adjustment B): the freshness signal is the newest OPEN run, so a newer closed
+// run must not win, and an all-closed scoped name reports found=false.
+func TestLatestOpenRunIgnoresClosedRuns(t *testing.T) {
+	now := time.Now()
+	olderOpen := beads.Bead{
+		ID:        "gc-1",
+		Status:    "open",
+		CreatedAt: now.Add(-time.Hour),
+		Labels:    []string{"order-tracking", "order-run:rig/agent"},
+	}
+	newerClosed := beads.Bead{
+		ID:        "gc-2",
+		Status:    "closed",
+		CreatedAt: now,
+		Labels:    []string{"order-tracking", "order-run:rig/agent", "wisp"},
+	}
+	mem := beads.NewMemStoreFrom(2, []beads.Bead{olderOpen, newerClosed}, nil)
+	front := NewStore(beads.OrdersStore{Store: mem})
+
+	run, found, err := front.LatestOpenRun("rig/agent")
+	if err != nil {
+		t.Fatalf("LatestOpenRun: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true (older open run)")
+	}
+	if run.ID != "gc-1" {
+		t.Errorf("run.ID = %q, want gc-1 (open run, not the newer closed run)", run.ID)
+	}
+
+	allClosed := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:        "gc-9",
+		Status:    "closed",
+		CreatedAt: now,
+		Labels:    []string{"order-tracking", "order-run:rig/agent"},
+	}}, nil)
+	if _, found, err := NewStore(beads.OrdersStore{Store: allClosed}).LatestOpenRun("rig/agent"); err != nil || found {
+		t.Fatalf("all-closed LatestOpenRun = (found=%v, err=%v), want (false, nil)", found, err)
 	}
 }

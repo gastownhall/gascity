@@ -12,10 +12,11 @@ import (
 
 func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightChecker {
 	return contract.PreflightChecker{
-		FS:                fsys.OSFS{},
-		Provider:          provider,
-		BDContext:         preflightBDContextReader(cityPath),
-		DatabaseProjectID: preflightDatabaseProjectIDReader(cityPath),
+		FS:                        fsys.OSFS{},
+		Provider:                  provider,
+		BDContext:                 preflightBDContextReader(cityPath),
+		DatabaseProjectID:         preflightDatabaseProjectIDReader(cityPath),
+		DeferIdentityToNativeOpen: preflightIdentityDeferredReader(cityPath),
 	}
 }
 
@@ -40,6 +41,22 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 			BDVersion:     raw.BDVersion,
 			SchemaVersion: raw.SchemaVersion,
 		}, nil
+	}
+}
+
+// preflightIdentityDeferredReader reports whether a scope resolves to an
+// external Dolt endpoint (e.g. a hosted beads-gateway). The direct root/plaintext
+// project_id probe cannot authenticate such endpoints, so when it comes back
+// unconfirmed the identity check defers to beadslib's native-open verification
+// (which authenticates via the credential command and refuses to connect on a
+// _project_id mismatch) instead of degrading the scope off the native store.
+func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
+	return func(scope string) bool {
+		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		if err != nil || !ok {
+			return false
+		}
+		return target.External
 	}
 }
 

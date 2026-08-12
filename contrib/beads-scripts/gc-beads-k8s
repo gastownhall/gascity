@@ -27,7 +27,9 @@
 #   GC_K8S_CUSTOM_TYPES      - custom bead types CSV (optional, e.g. "session,molecule")
 #
 # Label conventions:
-#   parent:<id>  — tracks parent-child relationships
+#   parent:<id>  — legacy parent-child encoding, read-only. The parent is
+#                  written natively via bd --parent; this label is only still
+#                  read as a fallback for beads created before that.
 #   needs:<id>   — tracks step dependencies
 #
 # Metadata is stored natively via bd --metadata (JSON). Legacy meta:<k>=<v>
@@ -127,16 +129,21 @@ run_bd() {
 #   - native .metadata field (bd >= 0.62 stores metadata natively)
 #   - meta:<key>=<value> labels (legacy storage, backward compatible)
 # Native metadata takes precedence over label-derived metadata for the same key.
+# The parent is read the same way: native .parent first, parent:<id> label only
+# as a fallback for beads written before the native flag was used.
 bd_to_gc() {
   jq '{
     id: .id,
     title: .title,
     status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
     type: (.issue_type // .type // "task"),
+    priority: .priority,
     created_at: .created_at,
     assignee: (.assignee // ""),
     parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
+      if (.parent // "") != "" then .parent
+      else ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // "")
+      end
     ),
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
@@ -157,10 +164,13 @@ bd_list_to_gc() {
     title: .title,
     status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
     type: (.issue_type // .type // "task"),
+    priority: .priority,
     created_at: .created_at,
     assignee: (.assignee // ""),
     parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
+      if (.parent // "") != "" then .parent
+      else ([.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // "")
+      end
     ),
     ref: (.ref // ""),
     needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
@@ -359,17 +369,33 @@ case "$op" in
     input=$(cat)
     cmd_args=(update --json "$id")
 
-    description=$(echo "$input" | jq -r '.description // empty')
-    [ -n "$description" ] && cmd_args+=(--description "$description")
+    # Forward every scalar field the update request may carry (see
+    # docs/reference/exec-beads-provider.md). Dropping any of them makes the
+    # write silently succeed while the change is lost -- dropping .type, for
+    # example, leaves a graph.v2 step at type=gate forever (ready-excluded, so
+    # never dispatched) even though activation reported success.
+    for field in title status type description assignee; do
+      value=$(echo "$input" | jq -r --arg f "$field" '.[$f] // empty')
+      [ -n "$value" ] && cmd_args+=("--$field" "$value")
+    done
+
+    priority=$(echo "$input" | jq -r '.priority // empty')
+    [ -n "$priority" ] && cmd_args+=(--priority "$priority")
 
     # Append labels via --add-label (one per flag).
     while IFS= read -r label; do
       [ -n "$label" ] && cmd_args+=(--add-label "$label")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
-    # Handle parent_id change.
+    # Remove labels via --remove-label (one per flag).
+    while IFS= read -r label; do
+      [ -n "$label" ] && cmd_args+=(--remove-label "$label")
+    done < <(echo "$input" | jq -r '.remove_labels // [] | .[]')
+
+    # Handle parent_id change. bd models the parent natively, so pass --parent
+    # rather than encoding it as a label the way label-only backends must.
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
-    [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
+    [ -n "$parent_id" ] && cmd_args+=(--parent "$parent_id")
 
     # Handle metadata via --metadata (avoids CSV quoting issues with --add-label).
     # bd --metadata uses merge semantics: new keys are added, existing keys are

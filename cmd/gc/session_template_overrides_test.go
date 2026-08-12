@@ -8,6 +8,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -55,9 +57,8 @@ func TestApplyTemplateOverridesToConfig_ParseSeam(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			agentCfg := runtime.Config{Command: baseCommand}
-			session := beads.Bead{Metadata: tt.metadata}
 			tp := TemplateParams{Command: baseCommand, ResolvedProvider: tt.provider}
-			applyTemplateOverridesToConfig(&agentCfg, session, tp)
+			applyTemplateOverridesToConfigInfo(&agentCfg, sessionpkg.Info{TemplateOverrides: tt.metadata["template_overrides"]}, tp)
 			if agentCfg.Command != tt.wantCommand {
 				t.Fatalf("Command = %q, want %q", agentCfg.Command, tt.wantCommand)
 			}
@@ -69,9 +70,8 @@ func TestApplyTemplateOverridesToConfig_DefaultsPreservedAlongsideOverride(t *te
 	provider := optionSchemaProvider()
 	provider.EffectiveDefaults = map[string]string{"effort": "low"}
 	agentCfg := runtime.Config{Command: "claude"}
-	session := beads.Bead{Metadata: map[string]string{"template_overrides": `{"model":"sonnet"}`}}
 	tp := TemplateParams{Command: "claude", ResolvedProvider: provider}
-	applyTemplateOverridesToConfig(&agentCfg, session, tp)
+	applyTemplateOverridesToConfigInfo(&agentCfg, sessionpkg.Info{TemplateOverrides: `{"model":"sonnet"}`}, tp)
 	want := "claude --model claude-sonnet-4-6 --effort low"
 	if agentCfg.Command != want {
 		t.Fatalf("Command = %q, want %q", agentCfg.Command, want)
@@ -104,7 +104,11 @@ func TestParseSessionTemplateOverridesForLaunch_ParseSeam(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseSessionTemplateOverridesForLaunch(tt.session)
+			var info sessionpkg.Info
+			if tt.session != nil {
+				info = seedSessionInfo(*tt.session)
+			}
+			got := parseSessionTemplateOverridesForLaunch(info)
 			if tt.wantNone {
 				if len(got) != 0 {
 					t.Fatalf("parseSessionTemplateOverridesForLaunch() = %v, want no overrides", got)
@@ -154,7 +158,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 			t.Fatalf("Create(session): %v", err)
 		}
 		return startCandidate{
-			session: &session,
+			info: sessiontest.SeedBead(t, session),
 			tp: TemplateParams{
 				TemplateName:     "worker",
 				SessionName:      "worker",
@@ -167,7 +171,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 
 	t.Run("invalid json ignored without failing start", func(t *testing.T) {
 		store := beads.NewMemStore()
-		prepared, err := buildPreparedStart(newCandidate(t, store, "{not json"), &config.City{}, store)
+		prepared, _, err := buildPreparedStart(newCandidate(t, store, "{not json"), &config.City{}, store)
 		if err != nil {
 			t.Fatalf("buildPreparedStart: %v", err)
 		}
@@ -181,7 +185,7 @@ func TestBuildPreparedStart_InitialMessageParseSeam(t *testing.T) {
 
 	t.Run("valid overrides apply schema flag and initial message", func(t *testing.T) {
 		store := beads.NewMemStore()
-		prepared, err := buildPreparedStart(newCandidate(t, store, `{"model":"sonnet","initial_message":"hello from the user"}`), &config.City{}, store)
+		prepared, _, err := buildPreparedStart(newCandidate(t, store, `{"model":"sonnet","initial_message":"hello from the user"}`), &config.City{}, store)
 		if err != nil {
 			t.Fatalf("buildPreparedStart: %v", err)
 		}

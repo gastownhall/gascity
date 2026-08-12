@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -165,6 +166,13 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
 		}
 
+		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store)
+		if memberErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated members for terminal workflow roots: %w", memberErr))
+		} else if closedMembers > 0 {
+			log.Printf("wisp gc: closed %d generated members for terminal workflow roots", closedMembers)
+		}
+
 		// Close abandoned OPEN roots BEFORE the closed-root purge below so a
 		// root the sweep closes this tick can be collected by the purge in the
 		// same tick when it has already aged past m.ttl (the purge gates on
@@ -196,20 +204,44 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	}
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
-		mailEntries, mailErr := beadmail.ReadMessageWispEntries(mailStore.Store)
-		if mailErr == nil {
-			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(mailStore.Store, mailEntries, now.Add(-m.mailRetentionTTL))
-			purged += mailPurged
-			deleteErr = errors.Join(deleteErr, mailDeleteErr)
-			if mailPurged > 0 {
-				log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
-			}
-		} else {
-			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing read message wisps: %w", mailErr))
+		// The read-message retention arm is messaging-class: its candidate query
+		// and wisp-tier delete loop live inside the messaging edge (beadmail),
+		// against the messaging store — disjoint from the graph-class purge above.
+		mailPurged, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL))
+		purged += mailPurged
+		if mailErr != nil {
+			deleteErr = errors.Join(deleteErr, mailErr)
+		}
+		if mailPurged > 0 {
+			log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
 		}
 	}
 
 	return purged, deleteErr
+}
+
+// closeGeneratedMembersForClosedRoots repairs terminal workflow roots whose
+// finalizer, supersession, or partial materialization left generated members
+// open. Closed roots are the authority boundary: live roots are never listed
+// and therefore never touched. Each subtree close is ordered and idempotent.
+func closeGeneratedMembersForClosedRoots(store beads.Store) (int, error) {
+	roots, err := closedWispGCEntries(store)
+	if err != nil {
+		return 0, err
+	}
+	closed := 0
+	var closeErr error
+	for _, root := range roots {
+		n, err := molecule.CloseSubtreeWithMetadata(store, root.ID, map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+		})
+		closed += n
+		if err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("closing terminal workflow subtree %s: %w", root.ID, err))
+		}
+	}
+	return closed, closeErr
 }
 
 // wispGCRootSelector pairs a List selector with a short label used for error
@@ -550,14 +582,6 @@ func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff ti
 	return purgeExpiredBeads(store, entries, cutoff, batchCap, deleteExpiredBeadClosure)
 }
 
-// purgeExpiredBeadRoots purges aged single-row roots (the read-message mail
-// retention sweep). It is intentionally unbounded (batchCap=0): it predates the
-// wisp-GC reaper caps and its candidate set is not the first-deploy backlog the
-// closure-purge cap guards against.
-func purgeExpiredBeadRoots(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
-	return purgeExpiredBeads(store, entries, cutoff, 0, deleteWorkflowBead)
-}
-
 // purgeExpiredBeads deletes each entry older than cutoff via deleteFn and
 // returns the count successfully purged. When batchCap > 0 it bounds the number
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
@@ -586,19 +610,19 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
-	// deleteWorkflowBead removes every dependency attached to each closure
-	// member before deleting the bead. Only use the closure deleter for roots
-	// whose full ownership tree is safe to collect.
+	// The closure is deleted as one batch: a store that supports
+	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
+	// ownership tree with a single `bd delete … --force`, which deletes exactly
+	// those ids and lets ON DELETE CASCADE drop their edges while orphaning any
+	// external dependents; other stores fall back to per-bead deletion. Because
+	// the delete is not dependent-recursive, collectExpiredBeadClosure must (and
+	// does) gather only the ownership closure so live work outside it is never
+	// reached.
 	ids, err := collectExpiredBeadClosure(store, rootID)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if err := deleteWorkflowBead(store, id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return deleteWorkflowBeadsBatch(store, ids)
 }
 
 func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, error) {

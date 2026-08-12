@@ -3,12 +3,28 @@ package runproj
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// TestSnapshotForRunMissingRootIsErrRunNotFound proves the missing-root failure
+// carries the ErrRunNotFound sentinel, so the dashboard BFF can distinguish a
+// truly-unknown run (eligible for its unknown-run warming grace) from every
+// other projection failure.
+func TestSnapshotForRunMissingRootIsErrRunNotFound(t *testing.T) {
+	beadList := loadDetailFixture(t)
+	_, err := SnapshotForRun(beadList, "no-such-run", detailGoldenSnapshotVersion, detailGoldenSnapshotEventSeq)
+	if err == nil {
+		t.Fatal("SnapshotForRun with an absent root returned nil error")
+	}
+	if !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrRunNotFound)", err)
+	}
+}
 
 // loadDetailFixture reads the shared bead fixture used by the golden tests.
 func loadDetailFixture(t *testing.T) []beads.Bead {

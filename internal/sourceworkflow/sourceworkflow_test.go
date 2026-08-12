@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -447,6 +448,91 @@ func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
 	}
 }
 
+// rootLastStrictStore rejects closing the run root while any of its members are
+// still open, mirroring a store with parent/child close constraints. It proves
+// CloseWorkflowSubtreeAs closes descendants before the root even when the
+// root-only metadata forces the root into its own (final) close batch.
+type rootLastStrictStore struct {
+	*beads.MemStore
+	rootID string
+}
+
+func (s *rootLastStrictStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if id != s.rootID {
+			continue
+		}
+		members, err := s.List(beads.ListQuery{
+			IncludeClosed: true,
+			Metadata:      map[string]string{"gc.root_bead_id": s.rootID},
+		})
+		if err != nil {
+			return 0, err
+		}
+		for _, m := range members {
+			if m.ID != s.rootID && m.Status != "closed" {
+				return 0, fmt.Errorf("root %s closed while member %s still open", s.rootID, m.ID)
+			}
+		}
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+// TestCloseWorkflowSubtreeAsClosesDescendantsBeforeRootWithRootOnlyMetadata pins
+// the run-cancel close contract: descendants close before the root (a strict
+// store accepts the batch), every bead gets the caller's outcome, and the
+// root-only marker (cancel intent) lands atomically on the root without smearing
+// onto members.
+func TestCloseWorkflowSubtreeAsClosesDescendantsBeforeRootWithRootOnlyMetadata(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "root", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	store := &rootLastStrictStore{MemStore: base, rootID: root.ID}
+
+	closed, err := CloseWorkflowSubtreeAs(store, root.ID, "canceled",
+		"run canceled via POST /runs/{id}/cancel",
+		map[string]string{"gc.cancel_requested": "true"})
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtreeAs: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed %d beads, want 2 (root + child)", closed)
+	}
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("root outcome = %q, want canceled", rootAfter.Metadata["gc.outcome"])
+	}
+	if rootAfter.Metadata["gc.cancel_requested"] != "true" {
+		t.Fatalf("root cancel_requested = %q, want true", rootAfter.Metadata["gc.cancel_requested"])
+	}
+
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if childAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Fatalf("child outcome = %q, want canceled", childAfter.Metadata["gc.outcome"])
+	}
+	if got := childAfter.Metadata["gc.cancel_requested"]; got != "" {
+		t.Fatalf("child cancel_requested = %q, want empty (root-only marker)", got)
+	}
+}
+
 func TestCloseWorkflowSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
 	store := &blockValidatingWorkflowStore{MemStore: beads.NewMemStore()}
 
@@ -867,5 +953,93 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 	}
 	if got := childAfter.Metadata["unrelated_metadata"]; got != "keep" {
 		t.Fatalf("child unrelated metadata = %q, want keep", got)
+	}
+}
+
+// TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalScopeRef must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the full path and
+// falls back to the unresolved input on failure, with no walk-up.
+func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got := canonicalScopeRef(missing)
+
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: the two pick different spellings of the macOS
+	// temp root (/var/... vs /private/var/...). The comparison stays exact,
+	// so an unresolved alias still fails.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalScopeRef(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput pins
+// that canonicalScopeRef always yields an absolute path for reliable
+// cross-process lock-key comparison, even when EvalSymlinks cannot resolve
+// anything at all. Today a relative input that cannot be resolved is
+// returned unchanged (still relative).
+func TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput(t *testing.T) {
+	const relative = "does-not-exist-anywhere/leaf"
+	got := canonicalScopeRef(relative)
+	if !filepath.IsAbs(got) {
+		t.Errorf("canonicalScopeRef(%q) = %q, want an absolute path", relative, got)
+	}
+}
+
+// TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalCityPath must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the absolute path and
+// falls back to the unresolved abs path on failure, with no walk-up.
+func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got, err := canonicalCityPath(missing)
+	if err != nil {
+		t.Fatalf("canonicalCityPath(%q): %v", missing, err)
+	}
+
+	// Same canonical-form alignment as canonicalScopeRef above.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs pins that a
+// logical store sentinel is not absolutized. LockScopeForStoreRef returns the
+// literal "rig:<name>" when the rig cannot be resolved to a path; if that were
+// made cwd-relative, two gc processes started from different directories would
+// derive different lock keys and lock files for the same logical scope.
+func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T) {
+	for _, ref := range []string{"rig:alpha", "city:main"} {
+		a := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		b := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		if a != ref || b != ref {
+			t.Errorf("canonicalScopeRef(%q) = %q / %q, want %q verbatim from both dirs", ref, a, b, ref)
+		}
 	}
 }

@@ -27,7 +27,9 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -221,9 +223,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	scriptsDir := citylayout.ScriptsPath(p.cityPath)
 	if info, sErr := os.Stat(scriptsDir); sErr == nil && info.IsDir() {
+		// Operational/host-tooling scripts (city-*.sh, update-*.sh) are not part
+		// of any agent's runtime behavior, so they are excluded from the content
+		// hash: editing one must not flip every agent's ContentHash and cascade a
+		// fleet-wide config-drift restart (#3840). This mirrors the path-only
+		// treatment .gc/settings.json already gets above. Agent-relevant scripts
+		// (pack-served helpers, etc.) stay content-hashed so their edits still
+		// propagate.
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: scriptsDir, RelDst: path.Join(".gc", "scripts"),
-			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
+			Probed:      true,
+			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
 	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
@@ -271,7 +281,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_ORIGIN":   "ephemeral",
 		"GC_AGENT":            sessName,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
@@ -336,10 +345,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
-	beadsCfg := config.BeadsConfig{}
+	topo := config.QueryTopology{}
 	if p.city != nil {
-		beadsCfg = p.city.Beads
+		topo.Beads = p.city.Beads
 	}
+	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
+	// cityQueryTopology. Resolving the federation fact means asking the
+	// storage routes, and the one-shot funnel that answers for a CLI command
+	// (cliStorageRoutes) is explicitly for the half of the program that
+	// "never builds a CityRuntime" — a controller reaching it would open the
+	// city's binding a second time in a process that already holds it open.
+	// The controller's own routes are the right source; threading them into
+	// this plumbing is a change to controller wiring, not part of swapping
+	// the reader, so it stays with the claim-routing slice (ga-601v2).
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -351,10 +369,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(topo), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
@@ -429,12 +447,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
-	prependGCBinDirToPATH(env, env["GC_BIN"])
+	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
-	// ScrubTokenEnv so its credential refs survive. The env-ref values ($VAR)
+	// ScrubTokenEnv so its credential refs survive — which is exactly why the
+	// controller-only re-pin below has to come after this block. The env-ref
+	// values ($VAR)
 	// resolve from the controller environment via expandEnvMap; the resolved
 	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
 	// them), only the selected NAME — carried to runtime.Config.Upstream
@@ -475,7 +495,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				if envName == "" {
 					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
 				}
-				env[envName] = os.ExpandEnv(r.value)
+				env[envName] = processenv.ExpandSessionEnvValue(r.value)
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
@@ -483,6 +503,22 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		for k, v := range expandEnvMap(spec.Env) {
 			env[k] = v
 		}
+	}
+	// Managed agents are Gas City-owned recursive execution environments. Set
+	// the GC-only opt-out after configurable layers so child gc commands cannot
+	// re-enable product metrics; Beads telemetry remains independent.
+	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+
+	// Same placement, same reason, for the controller-only keys: every layer
+	// above is config-authored, so a literal [workspace.env] GC_CONTROLLER_TOKEN
+	// — or an upstream whose api_key_env names it — would otherwise overwrite the
+	// empty value passthroughEnv() pinned, and the upstream block writes after
+	// the ScrubTokenEnv call. Re-pinning after the last writer makes the merge
+	// order irrelevant. Empty, not deleted: the session inherits an environment
+	// that already carries the controller's value, so only an explicit empty
+	// assignment overrides it.
+	for key, val := range processenv.ControllerOnlyEnvOverlay() {
+		env[key] = val
 	}
 
 	// Step 11: Expand session setup templates.
@@ -679,6 +715,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	return params, nil
 }
 
+// isOperationalScript reports whether rel (a slash-separated path relative to
+// the .gc/scripts directory) names an operational/host-tooling script that is
+// not part of any agent's runtime behavior — city lifecycle (city-*.sh) and
+// updaters (update-*.sh). Such scripts are excluded from the .gc/scripts content
+// hash so editing one does not cascade a fleet-wide config-drift restart (#3840).
+// Conservative by design: only these unambiguous host-tooling name patterns are
+// excluded; any other script stays content-hashed (keep-probing is the safe
+// default so legit pack-served / agent-relevant script edits still propagate).
+func isOperationalScript(rel string) bool {
+	base := path.Base(rel)
+	for _, pat := range []string{"city-*.sh", "update-*.sh"} {
+		if ok, _ := path.Match(pat, base); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
 	family = strings.TrimSpace(family)
 	if family == "" {
@@ -730,46 +784,39 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
-	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
-				// On PG projection errors, keep explicit empty keys so tmux
+			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
-				clearProjectedPostgresEnv(env)
 				mirrorBeadsDoltEnv(env)
 				ensureProjectedDoltEnvExplicit(env)
-				ensureProjectedPostgresEnvExplicit(env)
 				return env, err
-			} else if usedPostgres {
+			} else if bound {
 				ensureProjectedDoltEnvExplicit(env)
 				return env, nil
 			}
 		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
-			ensureProjectedPostgresEnvExplicit(env)
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
 		}
-		ensureProjectedPostgresEnvExplicit(env)
 		return env, nil
 	}
 
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
-		ensureProjectedPostgresEnvExplicit(env)
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
 	}
-	ensureProjectedPostgresEnvExplicit(env)
 	return env, nil
 }
 
@@ -778,6 +825,19 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
+	cfg, _ := templateParamsToConfigWithDelivery(tp)
+	return cfg
+}
+
+// templateParamsToConfigWithDelivery is templateParamsToConfig plus the pure
+// promptDelivery result it computed. The launch path (buildPreparedStart) needs
+// the Delivered decision to stamp the S19 priming markers, but it must NOT infer
+// delivery from cfg.Env[GC_STARTUP_PROMPT_DELIVERED]: the resume override in
+// buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
+// consumption even when nothing is delivered that incarnation. Threading the
+// result avoids that trap. templateParamsToConfig is the wrapper that discards
+// the second value; all other call sites are unchanged.
+func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult) {
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
@@ -824,7 +884,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg
+	return cfg, delivery
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

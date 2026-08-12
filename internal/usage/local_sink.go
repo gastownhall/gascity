@@ -33,6 +33,14 @@ type LocalSink struct {
 // directory is created on first write.
 func NewLocalSink(path string) *LocalSink { return &LocalSink{path: path} }
 
+// IsLocalSink reports whether sink records into the supervisor-local JSONL
+// file. Read APIs use this to avoid presenting an old file as live telemetry
+// after the configured provider changes to exec or discard.
+func IsLocalSink(sink Sink) bool {
+	_, ok := sink.(*LocalSink)
+	return ok
+}
+
 // Record appends f to the underlying file and fsyncs before returning.
 func (s *LocalSink) Record(_ context.Context, f Fact) error {
 	line, err := json.Marshal(f)

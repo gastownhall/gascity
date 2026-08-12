@@ -81,7 +81,7 @@ heavy write load.
 Install from Homebrew:
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 gc version
 ```
 

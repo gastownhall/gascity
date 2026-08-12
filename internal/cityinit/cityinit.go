@@ -118,10 +118,12 @@ type InitRequest struct {
 	// users see auth-needed errors immediately.
 	SkipProviderReadiness bool
 
-	// ConfigName selects the scaffold template. One of "tutorial"
-	// (default), "gastown", or "custom". Empty is treated as
-	// "tutorial". The CLI wizard resolves this; the HTTP API
-	// always leaves it empty.
+	// ConfigName selects the scaffold template: one of "minimal",
+	// "gastown", "gascity", "custom", or "empty" (a bare, providerless
+	// city a controller boots with only the core infra pack, for the
+	// front-door pack API to populate later). An empty value is
+	// normalized to "tutorial". The CLI wizard resolves this; the HTTP
+	// API always leaves it empty.
 	ConfigName string
 }
 

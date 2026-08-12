@@ -191,7 +191,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 			}
 
 			fromMeta := LifecycleInputFromMetadata(b.Status, b.Metadata)
-			fromInfo := LifecycleInputFromInfo(InfoFromPersistedBead(b))
+			fromInfo := LifecycleInputFromInfo(infoFromPersistedBead(b))
 
 			// The caller supplies external facts identically to both inputs;
 			// only the thirteen metadata-derived fields and the Status may

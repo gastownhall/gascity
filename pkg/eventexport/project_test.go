@@ -2,6 +2,8 @@ package eventexport
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -124,9 +126,8 @@ func TestProjectEvent_RunSessionGating(t *testing.T) {
 	}
 }
 
-// step_id (the acting work bead) is gated exactly like run/session: EmitCorrelation
-// fail-closed, safeRef-opaque-only, never on mail-reduced types, empty when the
-// subject bead carries no gc.step_id.
+// step_id is native execution identity: it uses its established nonblank,
+// 256-byte domain rather than the 64-byte lowercase correlation-slug gate.
 func TestProjectEvent_StepIDGating(t *testing.T) {
 	te := func(step string) TaggedEvent {
 		return TaggedEvent{Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: step}
@@ -136,12 +137,12 @@ func TestProjectEvent_StepIDGating(t *testing.T) {
 		t.Fatalf("EmitCorrelation=false must drop step_id, got %q", g.StepID)
 	}
 	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
-	if g, ok := ProjectEvent(te("mc-step-7"), on); !ok || g.StepID != "mc-step-7" {
-		t.Fatalf("opaque step_id must round-trip when emitted, got %q ok=%v", g.StepID, ok)
+	if g, ok := ProjectEvent(te("Step A / provider:value"), on); !ok || g.StepID != "Step A / provider:value" {
+		t.Fatalf("native step_id must retain its established domain, got %q ok=%v", g.StepID, ok)
 	}
-	for _, bad := range []string{"gascity/codex", "user@host", "Up Per", "a b"} {
+	for _, bad := range []string{"", "   ", strings.Repeat("x", 257)} {
 		if g, _ := ProjectEvent(te(bad), on); g.StepID != "" {
-			t.Fatalf("non-opaque step_id %q must drop to empty, got %q", bad, g.StepID)
+			t.Fatalf("invalid execution step_id %q must drop to empty, got %q", bad, g.StepID)
 		}
 	}
 	mail := te("mc-step-7")
@@ -152,6 +153,147 @@ func TestProjectEvent_StepIDGating(t *testing.T) {
 	// A non-work bead carries no gc.step_id → empty, omitted cleanly (no error).
 	if g, ok := ProjectEvent(te(""), on); !ok || g.StepID != "" {
 		t.Fatalf("empty step_id must be omitted cleanly, got %q ok=%v", g.StepID, ok)
+	}
+}
+
+func TestProjectEventNormalizesNativeStepDependencies(t *testing.T) {
+	deps := []string{"step-c", "step-a"}
+	env, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "step-b", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil {
+		t.Fatalf("ProjectEvent() = %+v, %v; want emitted topology", env, ok)
+	}
+	if got, want := *env.DependsOnStepIDs, []string{"step-a", "step-c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("depends_on_step_ids = %v, want %v", got, want)
+	}
+	if env.DependsOnStepIDs == &deps {
+		t.Fatal("ProjectEvent retained caller-owned dependency slice")
+	}
+
+	root := []string{}
+	env, ok = ProjectEvent(TaggedEvent{
+		Seq: 2, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-2",
+		StepID: "step-root", DependsOnStepIDs: &root,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil || len(*env.DependsOnStepIDs) != 0 {
+		t.Fatalf("explicit root = %+v, %v; want present empty dependency list", env, ok)
+	}
+	wire, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"depends_on_step_ids":[]`) {
+		t.Fatalf("explicit root wire = %s; want empty dependency array", wire)
+	}
+}
+
+func TestProjectEventExecutionFactsFailClosed(t *testing.T) {
+	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
+	work := TaggedEvent{
+		Seq: 1, Type: "execution.work_associated", Ts: fixedTS, Actor: "graph", Subject: "mc-work", RunID: "gcg-root",
+	}
+	if got, ok := ProjectEvent(work, on); !ok || got.Ref != "mc-work" || got.RunID != "gcg-root" || got.SessionID != "" || got.StepID != "" || got.DependsOnStepIDs != nil {
+		t.Fatalf("work association = %#v, %v; want exact envelope-only association", got, ok)
+	}
+
+	for _, tc := range []struct {
+		name string
+		deps *[]string
+	}{
+		{name: "unknown"},
+		{name: "root", deps: &[]string{}},
+		{name: "dependencies", deps: &[]string{"root"}},
+	} {
+		t.Run("step "+tc.name, func(t *testing.T) {
+			step := TaggedEvent{
+				Seq: 2, Type: "execution.step_defined", Ts: fixedTS, Actor: "graph", Subject: "gcg-step", RunID: "gcg-root", StepID: "build", DependsOnStepIDs: tc.deps,
+			}
+			got, ok := ProjectEvent(step, on)
+			if !ok || got.Ref != "gcg-step" || got.RunID != "gcg-root" || got.StepID != "build" || !reflect.DeepEqual(got.DependsOnStepIDs, tc.deps) {
+				t.Fatalf("step definition = %#v, %v; want topology %#v", got, ok, tc.deps)
+			}
+			if tc.deps != nil && got.DependsOnStepIDs == tc.deps {
+				t.Fatal("step definition retained caller-owned topology")
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		event TaggedEvent
+		opt   Options
+	}{
+		{name: "correlation disabled", event: work, opt: Options{Salt: testSalt, ExportRef: true}},
+		{name: "ref disabled", event: work, opt: Options{Salt: testSalt, EmitCorrelation: true}},
+		{name: "work missing subject", event: TaggedEvent{Seq: 3, Type: "execution.work_associated", Ts: fixedTS, RunID: "gcg-root"}, opt: on},
+		{name: "work missing run", event: TaggedEvent{Seq: 4, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work"}, opt: on},
+		{name: "work includes session", event: TaggedEvent{Seq: 5, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", SessionID: "gcs-1"}, opt: on},
+		{name: "work includes step", event: TaggedEvent{Seq: 6, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", StepID: "step"}, opt: on},
+		{name: "work includes topology", event: TaggedEvent{Seq: 7, Type: "execution.work_associated", Ts: fixedTS, Subject: "mc-work", RunID: "gcg-root", DependsOnStepIDs: &[]string{}}, opt: on},
+		{name: "step missing subject", event: TaggedEvent{Seq: 8, Type: "execution.step_defined", Ts: fixedTS, RunID: "gcg-root", StepID: "root"}, opt: on},
+		{name: "step missing run", event: TaggedEvent{Seq: 9, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", StepID: "root"}, opt: on},
+		{name: "step missing semantic id", event: TaggedEvent{Seq: 10, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root"}, opt: on},
+		{name: "step includes session", event: TaggedEvent{Seq: 11, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root", SessionID: "gcs-1", StepID: "root"}, opt: on},
+		{name: "step includes content", event: TaggedEvent{Seq: 12, Type: "execution.step_defined", Ts: fixedTS, Subject: "gcg-step", RunID: "gcg-root", StepID: "root", Title: "free form"}, opt: on},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := ProjectEvent(tc.event, tc.opt); ok {
+				t.Fatalf("ProjectEvent() = %#v, true; want drop", got)
+			}
+		})
+	}
+}
+
+func TestProjectEventExecutionLifecycleFactsRequireDurableIdentity(t *testing.T) {
+	on := Options{Salt: testSalt, ExportRef: true, EmitCorrelation: true}
+	deps := []string{"prepare"}
+	for _, typ := range []string{"execution.step_started", "execution.step_completed"} {
+		t.Run(typ, func(t *testing.T) {
+			event := TaggedEvent{Seq: 1, Type: typ, Ts: fixedTS, Actor: "worker", Subject: "gcg-attempt", RunID: "gcg-run", SessionID: "gcs-session", StepID: "build", DependsOnStepIDs: &deps}
+			got, ok := ProjectEvent(event, on)
+			if !ok || got.Ref != event.Subject || got.RunID != event.RunID || got.SessionID != event.SessionID || got.StepID != event.StepID || !reflect.DeepEqual(got.DependsOnStepIDs, &deps) {
+				t.Fatalf("ProjectEvent() = %#v, %v; want lifecycle fact", got, ok)
+			}
+			for _, remove := range []func(*TaggedEvent){
+				func(e *TaggedEvent) { e.Subject = "" }, func(e *TaggedEvent) { e.RunID = "" },
+				func(e *TaggedEvent) { e.SessionID = "" }, func(e *TaggedEvent) { e.StepID = "" },
+			} {
+				bad := event
+				remove(&bad)
+				if _, ok := ProjectEvent(bad, on); ok {
+					t.Fatalf("ProjectEvent accepted incomplete lifecycle event %#v", bad)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectEventRejectsInvalidPresentNativeTopology(t *testing.T) {
+	deps := []string{"step-a", "step-a"}
+	if _, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "step-b", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true}); ok {
+		t.Fatal("ProjectEvent emitted invalid present topology")
+	}
+}
+
+func TestProjectEventAcceptsMoreThanSixtyFourNativeDependencies(t *testing.T) {
+	deps := make([]string, 65)
+	for i := range deps {
+		deps[i] = fmt.Sprintf("dependency-%03d", i)
+	}
+	env, ok := ProjectEvent(TaggedEvent{
+		Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "gc", Subject: "mc-1",
+		StepID: "target", DependsOnStepIDs: &deps,
+	}, Options{Salt: testSalt, EmitCorrelation: true})
+	if !ok || env.DependsOnStepIDs == nil || len(*env.DependsOnStepIDs) != len(deps) {
+		t.Fatalf("ProjectEvent() = %+v, %v; want all %d dependencies", env, ok, len(deps))
+	}
+	if err := ValidateEnvelope(env); err != nil {
+		t.Fatalf("ValidateEnvelope() = %v, want accepted unbounded topology", err)
 	}
 }
 

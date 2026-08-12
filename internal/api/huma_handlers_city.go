@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -35,7 +35,7 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 	}
 
 	if input.Body.Suspended == nil {
-		return nil, huma.Error400BadRequest("no fields to update")
+		return nil, apierr.InvalidRequest.Msg("no fields to update")
 	}
 
 	var err error
@@ -62,12 +62,12 @@ func (s *Server) humaHandleProviderReadiness(ctx context.Context, input *Provide
 		supportedProviderReadiness,
 	)
 	if err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
 	resp, err := buildReadinessResponse(ctx, providers, input.Fresh)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	providerResp := providerReadinessResponse{
@@ -94,12 +94,12 @@ func (s *Server) humaHandleReadiness(ctx context.Context, input *ReadinessInput)
 		supportedReadiness,
 	)
 	if err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
+		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
 	resp, err := buildReadinessResponse(ctx, items, input.Fresh)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 
 	return &ReadinessOutput{Body: resp}, nil

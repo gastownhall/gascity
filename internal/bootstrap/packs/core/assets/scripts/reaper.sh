@@ -2,7 +2,7 @@
 # reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale and TTL-expired issues.
 #
 # Core exec order. All operations are deterministic: SQL queries with age
-# thresholds, bd close/update commands, count comparisons against alert
+# thresholds, gc bd close/update commands, count comparisons against alert
 # thresholds.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
@@ -182,7 +182,13 @@ SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
-    printf '%s' "$1" | tr '\n' ' ' | cut -c1-4000
+    local flattened
+    flattened=$(printf '%s' "$1" | tr '\n' ' ')
+    if [ "${#flattened}" -le 4000 ]; then
+        printf '%s' "$flattened"
+    else
+        printf '%s...[truncated]...%s' "${flattened:0:2000}" "${flattened: -1900}"
+    fi
 }
 
 record_anomaly() {
@@ -715,9 +721,9 @@ close_city_issue() {
     (
         cd "$CITY_ABS"
         if [ -n "$force" ]; then
-            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --force --reason "$reason"
+            gc bd --city "$CITY_ABS" close "$issue_id" --force --reason "$reason"
         else
-            BEADS_DIR="$CITY_BEADS_DIR" bd close "$issue_id" --reason "$reason"
+            gc bd --city "$CITY_ABS" close "$issue_id" --reason "$reason"
         fi
     )
 }
@@ -869,7 +875,7 @@ while IFS= read -r DB; do
     # stamped with gc.root_store_ref for another store are skipped; cross-store
     # subtrees require cross-store traversal before reaping can be safe.
     # Wisp roots can be closed in every bead store. Issue roots are city issues,
-    # so their city-store close path uses bd close below.
+    # so their city-store close path uses gc bd close below.
     get_sql_count "$DB" "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
     TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
 
@@ -1150,21 +1156,72 @@ EOF
 if [ -d "$CITY_BEADS_DIR" ]; then
     SESSION_PRUNE_ATTEMPTED=1
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
-        # ── bd prune path (existing behaviour, now pattern-configurable) ──────
+        # ── gc bd prune path (existing behaviour, now pattern-configurable) ──────
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
+
+        # Backup-age gate: skip bulk prune when no recent backup exists.
+        # Which state file decides freshness mirrors doctor's
+        # scanBackupFreshness: a scope with a registered Dolt destination is
+        # judged on its Dolt sync state, and only a scope that never migrated is
+        # judged on the legacy embedded-store state. `bd backup sync` writes
+        # only dolt-backup-state.json, so reading the legacy file on a migrated
+        # scope would latch this gate closed with no backup action able to clear it.
+        _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
+        case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+        if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+            _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
+            _BACKUP_FIELD="last_sync"
+        else
+            _BACKUP_STATE="$CITY_BEADS_DIR/backup/backup_state.json"
+            _BACKUP_FIELD="timestamp"
+        fi
+        _PRUNE_SKIP=0
+        if [ ! -f "$_BACKUP_STATE" ]; then
+            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=absent threshold=${_PRUNE_MAX_AGE}s)"
+            _PRUNE_SKIP=1
+        else
+            _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
+            if [ -z "$_BACKUP_TS" ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                _PRUNE_SKIP=1
+            else
+                # Real on-disk timestamps are RFC3339Nano. Truncate to whole
+                # seconds, the same normalization Step 4's SQL does with
+                # SUBSTRING_INDEX(..., '.', 1).
+                case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
+                _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || python3 -c 'import datetime,calendar,sys; print(calendar.timegm(datetime.datetime.strptime(sys.argv[1],"%Y-%m-%dT%H:%M:%SZ").timetuple()))' "$_BACKUP_TS" 2>/dev/null \
+                    || echo "")
+                _NOW_EPOCH=$(date -u '+%s')
+                if [ -z "$_BACKUP_EPOCH" ]; then
+                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                    _PRUNE_SKIP=1
+                else
+                    _BACKUP_AGE=$(( _NOW_EPOCH - _BACKUP_EPOCH ))
+                    if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
+                        record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=${_BACKUP_AGE}s threshold=${_PRUNE_MAX_AGE}s)"
+                        _PRUNE_SKIP=1
+                    fi
+                fi
+            fi
+        fi
+
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")
         if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); fi
         BD_PRUNE_ARGS+=(--json)
-        if PRUNE_JSON=$( ( cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}" ) 2>/dev/null ); then :
-        else PRUNE_JSON='{"pruned_count":0}'; fi
-        PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
-        [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
-        TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
-        if [ "$PRUNE_COUNT" -gt 1000 ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "$PRUNE_COUNT closed session beads pruned (pattern=$SESSION_BEAD_PATTERN threshold: 1000)"
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
+            if PRUNE_JSON=$( ( cd "$CITY_ABS" && gc bd --city "$CITY_ABS" "${BD_PRUNE_ARGS[@]}" ) 2>/dev/null ); then :
+            else PRUNE_JSON='{"pruned_count":0}'; fi
+            PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+            [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
+            TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
+            if [ "$PRUNE_COUNT" -gt 1000 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "$PRUNE_COUNT closed session beads pruned (pattern=$SESSION_BEAD_PATTERN threshold: 1000)"
+            fi
         fi
     else
         # ── type-safe SQL path (issue_type=session only) ──────────────────────

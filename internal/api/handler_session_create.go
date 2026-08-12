@@ -179,7 +179,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -221,9 +221,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Persist kind, option metadata, and project_id on the bead.
 	// NOTE: template_overrides (options + initial_message) is already set via
-	// extraMeta in CreateAliasedBeadOnlyNamedWithMetadata above. Do NOT
-	// overwrite it here — the old code clobbered initial_message by writing
-	// only the options portion.
+	// extraMeta on the deferred handle.Create (Manager.CreateSession) above.
+	// Do NOT overwrite it here — the old code clobbered initial_message by
+	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	s.state.Poke() // wake reconciler to start the agent
 
@@ -366,7 +366,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)

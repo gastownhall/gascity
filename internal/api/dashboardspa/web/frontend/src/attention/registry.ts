@@ -72,6 +72,8 @@ export interface AgentsAttentionFacts {
 
 export interface BeadsAttentionFacts {
   items?: readonly Bead[];
+  /** Internal marker: the shared city-readiness boundary rejected this cohort. */
+  cityUnavailable?: boolean;
   /**
    * The label marking a bead as a mayor-decision (DASHBOARD_DECISION_LABEL,
    * gascity-dashboard-bhvn). Carried in the facts so the registry derives the
@@ -735,20 +737,23 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
     );
   }
 
-  if (admin.rss_bytes >= DASHBOARD_PROCESS_RSS_HIGH_BYTES) {
+  if (admin.rss.status === 'available' && admin.rss.value >= DASHBOARD_PROCESS_RSS_HIGH_BYTES) {
     items.push(
       healthAttention({
         id: 'health:dashboard-process-rss-high',
         title: 'Dashboard RSS high',
-        summary: formatBytes(admin.rss_bytes),
+        summary: formatBytes(admin.rss.value),
       }),
     );
-  } else if (admin.rss_bytes >= DASHBOARD_PROCESS_RSS_ELEVATED_BYTES) {
+  } else if (
+    admin.rss.status === 'available' &&
+    admin.rss.value >= DASHBOARD_PROCESS_RSS_ELEVATED_BYTES
+  ) {
     items.push(
       healthWatch({
         id: 'health:dashboard-process-rss-elevated',
         title: 'Dashboard RSS elevated',
-        summary: formatBytes(admin.rss_bytes),
+        summary: formatBytes(admin.rss.value),
       }),
     );
   }
@@ -773,7 +778,10 @@ function appendDashboardProcessAttention(items: AttentionItem[], health: SystemH
 }
 
 function appendHostAttention(items: AttentionItem[], health: SystemHealth): void {
-  const memoryRatio = safeRatio(health.host.free_mem_bytes, health.host.total_mem_bytes);
+  const memoryRatio =
+    health.host.memory.status === 'available'
+      ? safeRatio(health.host.memory.value.free_mem_bytes, health.host.memory.value.total_mem_bytes)
+      : null;
   if (memoryRatio !== null && memoryRatio < 0.05) {
     items.push(
       healthAttention({
@@ -792,13 +800,16 @@ function appendHostAttention(items: AttentionItem[], health: SystemHealth): void
     );
   }
 
-  const loadRatio = safeRatio(health.host.load_avg_1, health.host.cpu_count);
+  const loadAverage =
+    health.host.load.status === 'available' ? health.host.load.value.load_avg_1 : null;
+  if (loadAverage === null) return;
+  const loadRatio = safeRatio(loadAverage, health.host.cpu_count);
   if (loadRatio !== null && loadRatio > 1.5) {
     items.push(
       healthAttention({
         id: 'health:load-high',
         title: 'Host load high',
-        summary: `${health.host.load_avg_1.toFixed(2)} load across ${health.host.cpu_count} CPUs`,
+        summary: `${loadAverage.toFixed(2)} load across ${health.host.cpu_count} CPUs`,
       }),
     );
   } else if (loadRatio !== null && loadRatio > 1) {
@@ -806,7 +817,7 @@ function appendHostAttention(items: AttentionItem[], health: SystemHealth): void
       healthWatch({
         id: 'health:load-elevated',
         title: 'Host load elevated',
-        summary: `${health.host.load_avg_1.toFixed(2)} load across ${health.host.cpu_count} CPUs`,
+        summary: `${loadAverage.toFixed(2)} load across ${health.host.cpu_count} CPUs`,
       }),
     );
   }

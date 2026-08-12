@@ -16,18 +16,18 @@ type Fake struct {
 	Events []Event
 	seq    uint64
 	broken bool
-	notify chan struct{} // signaled on Record for watchers
+	notify chan struct{} // closed and replaced on Record to wake every watcher
 }
 
 // NewFake returns a ready-to-use in-memory event provider.
 func NewFake() *Fake {
-	return &Fake{notify: make(chan struct{}, 1)}
+	return &Fake{notify: make(chan struct{})}
 }
 
 // NewFailFake returns an event provider where all operations return errors.
 // Useful for testing error paths.
 func NewFailFake() *Fake {
-	return &Fake{broken: true, notify: make(chan struct{}, 1)}
+	return &Fake{broken: true, notify: make(chan struct{})}
 }
 
 // Record appends the event to the Events slice. Auto-fills Seq and Ts.
@@ -40,11 +40,10 @@ func (f *Fake) Record(e Event) {
 		e.Ts = time.Now()
 	}
 	f.Events = append(f.Events, e)
-	// Non-blocking notify for watchers.
-	select {
-	case f.notify <- struct{}{}:
-	default:
+	if f.notify != nil {
+		close(f.notify)
 	}
+	f.notify = make(chan struct{})
 }
 
 // List returns events matching the filter from the in-memory store.
@@ -131,21 +130,21 @@ func (w *fakeWatcher) Next() (Event, error) {
 				return e, nil
 			}
 		}
+		if w.fake.notify == nil {
+			w.fake.notify = make(chan struct{})
+		}
+		notify := w.fake.notify
 		w.fake.mu.Unlock()
 
-		// Wait for notification, close, or context cancel.
-		// Use a short timeout to re-check even if the notify signal
-		// was consumed by another concurrent watcher.
+		// Record closes the current generation channel, broadcasting the
+		// state change to every watcher that observed this generation.
 		select {
 		case <-w.done:
 			return Event{}, fmt.Errorf("watcher closed")
 		case <-w.ctx.Done():
 			return Event{}, w.ctx.Err()
-		case <-w.fake.notify:
+		case <-notify:
 			// New event recorded — check again.
-		case <-time.After(50 * time.Millisecond):
-			// Guard against missed notifications when multiple watchers
-			// compete for the same buffered channel signal.
 		}
 	}
 }

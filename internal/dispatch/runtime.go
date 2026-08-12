@@ -7,11 +7,13 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -71,6 +73,40 @@ type ProcessOptions struct {
 	// the primary store, exactly matching the pre-seam single-store behavior.
 	MemberStores []beads.Store
 	Tracef       func(format string, args ...any)
+
+	// routeCfg lazily caches the city.toml used for attempt-time routing
+	// decisions so a single ProcessControl invocation parses it at most once
+	// (previously it was re-parsed per processed bead via loadAttemptRouteConfig,
+	// beadUsesMetadataPoolRoute, and retryPreservedAssignee). It is a pointer so
+	// the cache is shared across the by-value opts copies handed to sub-steps.
+	routeCfg *routeConfigCache
+}
+
+// routeConfigCache memoizes a single attempt-route config load (and its error)
+// for the lifetime of one ProcessControl invocation.
+type routeConfigCache struct {
+	once sync.Once
+	cfg  *config.City
+	err  error
+}
+
+// routeConfig returns the attempt-route config for this invocation, loading it
+// at most once. The load error is no longer swallowed: it is memoized, traced
+// once, and returned to callers so routing decisions can observe it. Callers
+// that bypass ProcessControl (direct-called sub-steps in tests) get a fresh
+// uncached load, preserving their prior behavior.
+func (opts ProcessOptions) routeConfig() (*config.City, error) {
+	cache := opts.routeCfg
+	if cache == nil {
+		return loadAttemptRouteConfigE(opts.CityPath)
+	}
+	cache.once.Do(func() {
+		cache.cfg, cache.err = loadAttemptRouteConfigE(opts.CityPath)
+		if cache.err != nil {
+			opts.tracef("process-control route-config load failed city_path=%q err=%v (routing falls back to metadata-only)", opts.CityPath, cache.err)
+		}
+	})
+	return cache.cfg, cache.err
 }
 
 var (
@@ -108,6 +144,12 @@ var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
 func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if store == nil {
 		return ControlResult{}, fmt.Errorf("store is nil")
+	}
+	// Resolve the attempt-route config once per invocation. opts is copied by
+	// value into every sub-step, so a shared pointer cache collapses the former
+	// up-to-N-per-cycle city.toml parses to one lazy load.
+	if opts.routeCfg == nil {
+		opts.routeCfg = &routeConfigCache{}
 	}
 	if bead.Status != "open" {
 		// A control bead that is not open — typically stuck at in_progress
@@ -149,6 +191,11 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	}
 }
 
+// controlRootCanceledCloseReason is stamped on a control bead closed because its
+// workflow root was canceled, distinguishing the cancellation gate from a skip
+// teardown or a missing-root orphan close.
+const controlRootCanceledCloseReason = "control closed: workflow root canceled via run cancel"
+
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
 	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 		return ControlResult{}, false, nil
@@ -158,7 +205,18 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 	if rootID == "" || rootStoreRef == "" || rootID == bead.ID {
 		return ControlResult{}, false, nil
 	}
-	if _, err := store.Get(rootID); err == nil {
+	root, err := store.Get(rootID)
+	if err == nil {
+		// Root present. A canceled root is a durable stop signal: close this
+		// control bead as canceled instead of letting it spawn or continue work
+		// (fanout child beads, retry attempts, drain expansion) under a run the
+		// operator canceled. This is the authoritative gate that makes
+		// POST /runs/{id}/cancel converge to stopped rather than merely racing
+		// the dispatcher, and is the consumer that gives gc.cancel_requested
+		// teeth.
+		if rootCanceled(root) {
+			return closeCanceledControl(store, bead, opts, rootID, rootStoreRef)
+		}
 		return ControlResult{}, false, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return ControlResult{}, false, fmt.Errorf("%s: loading workflow root %s: %w", bead.ID, rootID, err)
@@ -178,6 +236,35 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		return ControlResult{}, true, fmt.Errorf("%s: closing orphaned control: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "orphaned-workflow"}, true, nil
+}
+
+// rootCanceled reports whether a workflow root is a durable cancellation stop
+// signal: either closed with gc.outcome=canceled, or carrying the
+// gc.cancel_requested intent marker (which run cancel stamps atomically with the
+// root's own close). Control beads under such a root must not spawn or continue
+// work.
+func rootCanceled(root beads.Bead) bool {
+	if strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeCanceled {
+		return true
+	}
+	return strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != ""
+}
+
+// closeCanceledControl closes a control bead whose workflow root was canceled,
+// stamping gc.outcome=canceled so scope/outcome aggregation treats it as a
+// cancellation rather than a failure.
+func closeCanceledControl(store beads.Store, bead beads.Bead, opts ProcessOptions, rootID, rootStoreRef string) (ControlResult, bool, error) {
+	opts.tracef("process-control bead=%s kind=%s close reason=root_canceled root=%s store_ref=%s",
+		bead.ID, bead.Metadata[beadmeta.KindMetadataKey], rootID, rootStoreRef)
+	closeMetadata := map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+		"close_reason":              controlRootCanceledCloseReason,
+	}
+	clearControllerSpawnErrorMetadata(closeMetadata)
+	if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		return ControlResult{}, true, fmt.Errorf("%s: closing canceled control: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "canceled-workflow"}, true, nil
 }
 
 func (opts ProcessOptions) tracef(format string, args ...any) {
@@ -444,6 +531,10 @@ func loadScopeSnapshotWithBody(store beads.Store, rootID, scopeRef string, body 
 	return snapshot, nil
 }
 
+// listByWorkflowRootAndScope narrows beads.MembershipDirectRootID to one scope:
+// every bead carrying both gc.root_bead_id == rootID and gc.scope_ref ==
+// scopeRef, closed included. The root itself carries neither key, so unlike
+// beads.DirectMembers this returns members only.
 func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
@@ -574,7 +665,7 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID string) (int, error) {
 	all := s.all
 	if !s.allComplete {
-		loaded, err := listByWorkflowRoot(store, s.rootID)
+		loaded, err := beads.DirectMembers(store, s.rootID)
 		if err != nil {
 			return 0, err
 		}
@@ -679,8 +770,11 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 // worker-result contract is fail-closed (mirroring the retry metadata
 // firewall in classifyRetryAttempt): a bare close with no gc.outcome, or an
 // unknown gc.outcome value, is treated as a failure rather than as success.
-// Retry-managed attempt subjects are exempt — their contract violations are
-// classified by retry-eval as transient retries, not scope aborts.
+// gc.outcome=canceled (a run canceled via POST /runs/{id}/cancel) is an
+// explicit terminal non-failure, so a canceled scope member does not drive the
+// abort-scope failure path. Retry-managed attempt subjects are exempt — their
+// contract violations are classified by retry-eval as transient retries, not
+// scope aborts.
 func beadOutcomeFailed(subject beads.Bead) bool {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
 	if outcome == beadmeta.OutcomeFail {
@@ -690,7 +784,7 @@ func beadOutcomeFailed(subject beads.Bead) bool {
 		return false
 	}
 	switch outcome {
-	case beadmeta.OutcomePass, beadmeta.OutcomeSkipped:
+	case beadmeta.OutcomePass, beadmeta.OutcomeSkipped, beadmeta.OutcomeCanceled:
 		return false
 	default:
 		return true
@@ -751,8 +845,21 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
+	// Generated spec sidecars are topology records rather than executable
+	// members; preserve their established successful cleanup outcome before the
+	// remaining subtree is skipped.
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
+	}
+	// A terminal root makes every still-open generated member non-executable.
+	// Close the remainder as one ordered, idempotent batch before completing
+	// the finalizer. This also repairs partially materialized workflows whose
+	// unused steps were never reached by ordinary dependency progression.
+	if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	}); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
@@ -1232,7 +1339,7 @@ func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bea
 	} else if ok {
 		return bead, nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1337,33 +1444,6 @@ func sortedPendingIDs(pending map[string]beads.Bead) []string {
 	}
 	sort.Strings(ids)
 	return ids
-}
-
-func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]beads.Bead, 0, len(all)+1)
-	seen := make(map[string]bool, len(all)+1)
-	if root, err := store.Get(rootID); err == nil {
-		result = append(result, root)
-		seen[root.ID] = true
-	} else if !errors.Is(err, beads.ErrNotFound) {
-		return nil, err
-	}
-	for _, bead := range all {
-		if seen[bead.ID] {
-			continue
-		}
-		result = append(result, bead)
-		seen[bead.ID] = true
-	}
-	return result, nil
 }
 
 func isLogicalDescendant(logical, candidate beads.Bead) bool {
@@ -1499,7 +1579,7 @@ func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {
 }
 
 func workflowRootHasTerminalAbortScopeFailure(store beads.Store, rootID, finalizerID string) (bool, error) {
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return false, err
 	}
@@ -1524,12 +1604,15 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	if !beadOutcomeFailed(bead) {
 		return false
 	}
-	switch strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) {
-	case beadmeta.FailureClassTransient:
+	if strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassTransient {
 		return false
-	case beadmeta.FailureClassHard:
-		return true
-	default:
-		return !isRetryAttemptSubject(bead)
 	}
+	// The hard and absent/unknown classes are terminal only when the bead is
+	// NOT a superseded attempt. A superseded attempt carries gc.attempt +
+	// gc.logical_bead_id, meaning a later attempt/iteration of the same logical
+	// bead ran; its own failure must not outvote a passing later iteration at
+	// finalize (#4008). The logical bead's own final disposition is the
+	// authoritative signal. A genuinely terminal, non-superseded hard failure
+	// still returns true.
+	return !isRetryAttemptSubject(bead)
 }

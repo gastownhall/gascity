@@ -23,7 +23,6 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -382,7 +381,18 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 
 func newRepoWithOriginHead(t *testing.T, branch string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return newRepoWithOriginHeadAt(t, t.TempDir(), branch)
+}
+
+// newRepoWithOriginHeadAt git-inits a repo at dir (created if absent) with
+// origin/HEAD pointing at branch. Use it when the repo must live under a
+// specific parent — e.g. inside the city dir, since the API rig-create now
+// contains rig paths to the city root.
+func newRepoWithOriginHeadAt(t *testing.T, dir, branch string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch)
 	return dir
@@ -1310,6 +1320,63 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	}
 }
 
+// TestDoSlingNudgePoolMemberBindingQualifiedCityScope is a regression for
+// #4843: doSlingNudge must deliver a nudge to a running, city-scoped,
+// binding-qualified pool instance (testpack.worker-1). Before the
+// resolveAgentIdentity Step 2b guard fix, doSlingNudge's identity lookup on the
+// dot-qualified ref (cmd_sling.go:1521) failed, so it logged
+// `agent "testpack.worker-1" not found in config` and returned handled
+// without delivering the nudge or poking the controller, leaving routed pool
+// work unclaimed.
+func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	sessionName := "testpack__worker-session-test"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Calls = nil
+	a := config.Agent{
+		Name:              "worker",
+		BindingName:       "testpack",
+		Dir:               "",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2),
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+	if _, err := deps.Store.Create(beads.Bead{
+		Title:  "testpack.worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "testpack.worker",
+			"session_name": sessionName,
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	if strings.Contains(stderr.String(), "not found in config") {
+		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
+		t.Fatalf("sling nudge missed live binding-qualified pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "testpack.worker-1") {
+		t.Fatalf("stdout = %q, want nudge delivered to binding-qualified pool instance testpack.worker-1", stdout.String())
+	}
+}
+
 func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1633,6 +1700,7 @@ dir = "frontend"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
@@ -1704,6 +1772,7 @@ mode = "on_demand"
 	}
 	writeBuiltinImportsLock(t, cityDir, "core")
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling([]string{"worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
@@ -1828,6 +1897,7 @@ dir = "frontend"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	return cityDir
 }
 
@@ -1948,6 +2018,7 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 	calls := installCaptureBdRunner(t)
 
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
@@ -1978,10 +2049,11 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
-	_, rigDir := setupRigScopedBdCity(t)
+	cityDir, rigDir := setupRigScopedBdCity(t)
 	calls := installCaptureBdRunner(t)
 
 	t.Chdir(rigDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling([]string{"worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
@@ -2349,6 +2421,73 @@ func TestResolveInlineBeadActionMultiDashStoreErrorSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "lookup failed") {
 		t.Fatalf("resolveInlineBeadAction error = %q, want lookup failure", err)
+	}
+}
+
+func TestResolveInlineBeadActionMultilineTextErrors(t *testing.T) {
+	// Reproduces ga-thcr5n: a newline-joined list of bead IDs passed as a
+	// single sling argument (e.g. by the always-on deacon script) must not
+	// be silently fabricated into one contentless junk bead. Fail loud.
+	blob := strings.Join([]string{
+		"ga-kn8yy6.1", "ga-zogqc1.2.5", "ga-zogqc1.2.4", "ga-zogqc1.2.3",
+		"ga-a700wu", "ga-rzdqvl", "ga-7sy2ac", "ga-cd1895", "ga-fxudqs",
+		"ga-9feee3", "ga-e3zcqv", "ga-gzmzej", "ga-uslskt",
+	}, "\n")
+
+	create, previewInlineText, err := resolveInlineBeadAction(&config.City{}, blob, false, nil)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want error for multi-line inline text")
+	}
+	if !strings.Contains(err.Error(), "13") {
+		t.Fatalf("resolveInlineBeadAction error = %q, want line count 13", err)
+	}
+	if create {
+		t.Fatal("create = true, want false for multi-line inline text")
+	}
+	if previewInlineText {
+		t.Fatal("previewInlineText = true, want false for multi-line inline text")
+	}
+}
+
+func TestResolveInlineBeadActionMultilineTextErrorsDuringDryRun(t *testing.T) {
+	// The dry-run path must fail the same way — a dry-run preview of a junk
+	// bead is still a lie about what gc sling would do.
+	blob := "ga-abc12\nga-def34\nga-ghi56"
+
+	create, previewInlineText, err := resolveInlineBeadAction(&config.City{}, blob, true, nil)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want error for multi-line inline text during dry-run")
+	}
+	if create {
+		t.Fatal("create = true, want false for multi-line inline text during dry-run")
+	}
+	if previewInlineText {
+		t.Fatal("previewInlineText = true, want false — must not preview a junk bead")
+	}
+}
+
+func TestResolveInlineBeadActionSingleLineWithSpacesStillCreates(t *testing.T) {
+	// Regression/over-correction guard: the newline guard must key ONLY on
+	// "\n", not general whitespace. Ordinary space-separated inline text
+	// must still create a bead.
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write a README", false, nil)
+	if !create {
+		t.Fatal("create = false, want true for single-line inline text with spaces")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionSingleBeadIDNoNewlineDoesNotError(t *testing.T) {
+	// Regression guard: a single bead ID (the common case) must not trip the
+	// newline guard or any other new logic.
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "ga-abc12", false, nil)
+	if create {
+		t.Fatal("create = true, want false for a single bead ID")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false for a single bead ID")
 	}
 }
 
@@ -2884,6 +3023,7 @@ sling_query = "true"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
 	code := cmdSling(
@@ -3381,8 +3521,7 @@ dolt.auto-start: false
 	}
 }
 
-func TestSlingStoreEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestSlingStoreEnvWithError_RefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -3397,7 +3536,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "")
+	writeUnregisteredBackendMetadata(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -3408,12 +3547,7 @@ dolt.auto-start: false
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: rigDir}}}
 
 	_, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
-	if err == nil {
-		t.Fatal("slingStoreEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
 func TestTargetType(t *testing.T) {
@@ -4808,6 +4942,123 @@ func TestResolveSlingStoreRootUsesCityRootForHQPrefix(t *testing.T) {
 	}
 }
 
+// TestResolveSlingStoreRootHQPrefixUsesBdProviderFromCityRootMetadata
+// reproduces dr-h6ze end to end at the sling layer: an HQ-prefixed bead
+// (e.g. "dr-h6ze") correctly resolves its store root to the city root, but
+// the city's own root is a Dolt-backed HQ store even though [beads]
+// provider declares "file" as the default for rigs. Source validation,
+// gc.routed_to mutation, and convoy/nudge all open the store via this same
+// (storeDir, cityPath) pair, so the provider resolved here is what every
+// downstream sling step actually talks to -- it must be "bd", not the
+// configured file default, or the bead is silently unroutable.
+func TestResolveSlingStoreRootHQPrefixUsesBdProviderFromCityRootMetadata(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "bright-lights"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setScopedBeadsProviderForTest(t, "", "file")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights", Prefix: "hq"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha"), Prefix: "al"},
+		},
+	}
+
+	storeDir := resolveSlingStoreRoot(cfg, cityPath, "hq-123", config.Agent{Dir: "alpha"})
+	if storeDir != cityPath {
+		t.Fatalf("resolveSlingStoreRoot() = %q, want city root %q", storeDir, cityPath)
+	}
+	if got := authoritativeBeadsProviderForScope(storeDir, cityPath); got != "bd" {
+		t.Fatalf("authoritativeBeadsProviderForScope(HQ store root) = %q, want bd (on-disk store identity, not ambient GC_BEADS=file)", got)
+	}
+
+	// Regression guard: a normal rig store with no Dolt marker of its own
+	// still resolves through its declared file/bd contract unaffected by
+	// the city-root fix above.
+	rigStoreDir := resolveSlingStoreRoot(cfg, cityPath, "al-1", config.Agent{Dir: "alpha"})
+	wantRigDir := filepath.Join(cityPath, "rigs", "alpha")
+	if rigStoreDir != wantRigDir {
+		t.Fatalf("resolveSlingStoreRoot(rig bead) = %q, want %q", rigStoreDir, wantRigDir)
+	}
+	if got := authoritativeBeadsProviderForScope(rigStoreDir, cityPath); got != "file" {
+		t.Fatalf("authoritativeBeadsProviderForScope(rig store root) = %q, want file (no on-disk marker, city default preserved)", got)
+	}
+}
+
+func TestSlingSourceWorkflowStoreCandidatesUseAuthoritativeProviders(t *testing.T) {
+	setScopedBeadsProviderForTest(t, "", "file")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "local")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"local"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "local", Path: rigPath}}}
+	providers := make(map[string]string)
+	stores, _, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+		return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
+	}, func(dir string) (beads.Store, error) {
+		providers[dir] = authoritativeBeadsProviderForScope(dir, cityPath)
+		return beads.NewMemStore(), nil
+	})
+	if err != nil {
+		t.Fatalf("openSourceWorkflowStoresWith: %v", err)
+	}
+	if len(stores) != 2 {
+		t.Fatalf("stores = %d, want city and rig candidates", len(stores))
+	}
+	if got := providers[cityPath]; got != "bd" {
+		t.Fatalf("city candidate provider = %q, want bd despite ambient GC_BEADS=file", got)
+	}
+	if got := providers[rigPath]; got != "bd" {
+		t.Fatalf("rig candidate provider = %q, want bd despite ambient GC_BEADS=file", got)
+	}
+
+	setScopedBeadsProviderForTest(t, "", "")
+	remoteCity := t.TempDir()
+	if err := os.WriteFile(filepath.Join(remoteCity, "city.toml"), []byte(`[workspace]
+name = "remote"
+
+[beads]
+provider = "exec:/tmp/remote-beads"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteProviders := make(map[string]string)
+	_, _, err = openSourceWorkflowStoresWith(&config.City{}, remoteCity, "", func(dir string) (beads.Store, error) {
+		remoteProviders[dir] = authoritativeBeadsProviderForScope(dir, remoteCity)
+		return beads.NewMemStore(), nil
+	})
+	if err != nil {
+		t.Fatalf("openSourceWorkflowStoresWith(remote): %v", err)
+	}
+	if got := remoteProviders[remoteCity]; got != "exec:/tmp/remote-beads" {
+		t.Fatalf("remote candidate provider = %q, want custom exec provider unchanged", got)
+	}
+}
+
 func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city")
 	deps := slingDeps{
@@ -6182,6 +6433,73 @@ func TestDryRunOnFormula(t *testing.T) {
 	}
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
 		t.Errorf("stdout missing route command: %s", out)
+	}
+	// code-review (sharedTestFormulaDir) is version=1, not graph.v2: legacy
+	// attach deliberately leaves the wisp root unrouted (see the
+	// design-intent comment on the finalize() call in slingFormula,
+	// internal/sling/sling_core.go, citing #2848 and
+	// TestOnFormulaAttachesAndRoutes), so the preview must not claim a
+	// second routed bead here. See TestDryRunOnFormulaGraphV2 for the
+	// graph.v2 case where the line is expected.
+	if strings.Contains(out, "A wisp/workflow root is also cooked and routed to the agent.") {
+		t.Errorf("stdout has wisp-root disclosure for a legacy (non-graph.v2) formula attach: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// writeGraphV2FormulaForDryRunTest writes a minimal graph.v2-contract
+// formula file, mirroring internal/sling's writeNamedGraphV2ConvoyFormula
+// (unexported there, so duplicated here rather than reused across packages).
+func writeGraphV2FormulaForDryRunTest(t *testing.T, dir, name string) {
+	t.Helper()
+	content := fmt.Sprintf(`
+formula = %q
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`, name)
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDryRunOnFormulaGraphV2(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir, "graph-work")
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Attach formula:") {
+		t.Errorf("stdout missing attach section: %s", out)
+	}
+	if !strings.Contains(out, "A wisp/workflow root is also cooked and routed to the agent.") {
+		t.Errorf("stdout missing wisp-root disclosure for a graph.v2 formula attach: %s", out)
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)

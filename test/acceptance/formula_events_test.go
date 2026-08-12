@@ -36,8 +36,9 @@ func TestFormulaCommands(t *testing.T) {
 	})
 
 	t.Run("Show_GastownFormula_DisplaysSteps", func(t *testing.T) {
-		// List formulas first to get a real name.
-		listOut, err := c.GC("formula", "list")
+		// List formulas first to get a real name. Parse stdout only: config
+		// advisories on stderr would otherwise land in lines[0].
+		listOut, err := c.GCStdout("formula", "list")
 		if err != nil {
 			t.Fatalf("gc formula list failed: %v\n%s", err, listOut)
 		}

@@ -14,10 +14,11 @@ import (
 // Carrier out of Peek/SendKeys, not added to it.
 //
 // Every op returns the underlying transport error verbatim. Whether a failure
-// is fatal or best-effort is the PROVIDER facade's policy: a provider that is
-// best-effort today (e.g. Kubernetes swallows a missing pod and ignores exec
-// failures) must keep discarding the error when it delegates here — the Carrier
-// itself never swallows.
+// is fatal or best-effort is the PROVIDER facade's policy: a provider decides
+// per verb which errors to discard when it delegates here (e.g. Kubernetes
+// treats a missing pod as a no-op for SendKeys but propagates a genuine
+// transport failure to a live pod, and propagates both for Nudge) — the
+// Carrier itself never swallows.
 //
 // The tmux carrier ([NewTmuxCarrier]) realizes these verbs by issuing tmux
 // commands over an [ExecProvider]. It is the shared driver for tmux-in-a-box
@@ -50,8 +51,8 @@ type Carrier interface {
 // multiplexes sessions on distinct targets. The mapping mirrors the tmux
 // commands the Kubernetes provider issues over execInPod today, so once k8s
 // exposes an [ExecProvider], delegating its driving methods here is
-// argv-for-argv behavior-preserving (the provider keeps its own best-effort
-// error swallowing; see [Carrier]).
+// argv-for-argv behavior-preserving (the provider keeps its own per-verb
+// error policy; see [Carrier]).
 type tmuxCarrier struct {
 	conn   ExecProvider
 	target string

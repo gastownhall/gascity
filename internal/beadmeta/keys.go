@@ -44,6 +44,8 @@ const (
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
 	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
+	CancelRequestedMetadataKey           = "gc.cancel_requested"
+	CheckInfraRetryMetadataKey           = "gc.check_infra_retry"
 	CheckModeMetadataKey                 = "gc.check_mode"
 	CheckPathMetadataKey                 = "gc.check_path"
 	CheckTimeoutMetadataKey              = "gc.check_timeout"
@@ -59,14 +61,17 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
-	CurrentRunIDMetadataKey              = "gc.current_run_id"
-	CwdMetadataKey                       = "gc.cwd"
-	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
-	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
-	// stamped at the claim hook and read at the usage record site to populate
-	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
-	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
-	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
+	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
+	// envelope written by gc-outcome-close.
+	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
+	CurrentRunIDMetadataKey                          = "gc.current_run_id"
+	CwdMetadataKey                                   = "gc.cwd"
+	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
+	// between speculative (deferred, non-runnable) creation and the CAS-last
+	// epoch fence committing. Cleared on activation; a root still carrying it
+	// is a pre-fence candidate that idempotency recovery either activates
+	// (deterministically, when it is the surviving candidate) or neutralizes.
+	AttachFencePendingMetadataKey        = "gc.attach_fence_pending"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -88,6 +93,14 @@ const (
 	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
 	DrainStateMetadataKey                = "gc.drain_state"
 	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
+	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
+	// out-of-convoy blockers of its source member that the item workflow could
+	// not depend on because they live in another class store. The item workflow
+	// runs without those constraints: a dependency row can only reference an id
+	// its own store resolves, and writing one anyway removes the dependent from
+	// Ready forever. Only OPEN blockers are recorded — a terminal one constrains
+	// nothing, so omitting its edge loses no meaning. Comma-separated bead ids.
+	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
@@ -123,6 +136,7 @@ const (
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
 	ModelMetadataKey                     = "gc.model"
+	NativeStepDependenciesMetadataKey    = "gc.native_step_dependencies.v1"
 	NextAttemptMetadataKey               = "gc.next_attempt"
 	OnExhaustedMetadataKey               = "gc.on_exhausted"
 	OnFailMetadataKey                    = "gc.on_fail"
@@ -143,6 +157,7 @@ const (
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
 	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
+	ReviewGateMetadataKey                = "gc.review_gate"
 	RetryCountMetadataKey                = "gc.retry_count"
 	RetryFromMetadataKey                 = "gc.retry_from"
 	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
@@ -166,23 +181,28 @@ const (
 	SessionNameMetadataKey    = "gc.session_name"
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
-	SessionNameCamelMetadataKey    = "gc.sessionName"
-	SourceBeadIDMetadataKey        = "gc.source_bead_id"
-	SourceStepSpecMetadataKey      = "gc.source_step_spec"
-	SourceStoreRefMetadataKey      = "gc.source_store_ref"
-	SpawnedCountMetadataKey        = "gc.spawned_count"
-	SpecForMetadataKey             = "gc.spec_for"
-	SpecForRefMetadataKey          = "gc.spec_for_ref"
-	StderrMetadataKey              = "gc.stderr"
-	StdoutMetadataKey              = "gc.stdout"
-	StepIDMetadataKey              = "gc.step_id"
-	StepRefMetadataKey             = "gc.step_ref"
-	StepTimeoutMetadataKey         = "gc.step_timeout"
-	SyntheticKindMetadataKey       = "gc.synthetic_kind"
-	SyntheticMetadataKey           = "gc.synthetic"
-	TemplateMetadataKey            = "gc.template"
-	TerminalMetadataKey            = "gc.terminal"
-	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
+	SessionNameCamelMetadataKey = "gc.sessionName"
+	SourceBeadIDMetadataKey     = "gc.source_bead_id"
+	SourceStepSpecMetadataKey   = "gc.source_step_spec"
+	SourceStoreRefMetadataKey   = "gc.source_store_ref"
+	SpawnedCountMetadataKey     = "gc.spawned_count"
+	SpecForMetadataKey          = "gc.spec_for"
+	SpecForRefMetadataKey       = "gc.spec_for_ref"
+	StderrMetadataKey           = "gc.stderr"
+	StdoutMetadataKey           = "gc.stdout"
+	StepIDMetadataKey           = "gc.step_id"
+	StepRefMetadataKey          = "gc.step_ref"
+	StepTimeoutMetadataKey      = "gc.step_timeout"
+	SyntheticKindMetadataKey    = "gc.synthetic_kind"
+	SyntheticMetadataKey        = "gc.synthetic"
+	TemplateMetadataKey         = "gc.template"
+	TerminalMetadataKey         = "gc.terminal"
+	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
+	// copied into a binding with the name of the binding it came from, so a
+	// resumed attempt can tell a row it wrote from content the destination
+	// already owned.
+	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -220,6 +240,14 @@ const (
 // user-authored variable name), so it is declared as a prefix, not enumerated.
 const FormulaVarPrefix = Namespace + "var."
 
+// IdemPrefix is the key prefix for the remote rig-create idempotency record's
+// metadata (gc.idem.kind/city/request_id/digest/state/event_cursor/rig_name,
+// the open-world gc.idem.result.* success fields, and gc.idem.created_dir/dolt_db
+// rollback manifest). This is an internal-to-internal/api namespace whose keys
+// are defined once as local constants next to their reader/writer (rigidem.go),
+// so it is declared as a prefix here rather than re-enumerated in this file.
+const IdemPrefix = Namespace + "idem."
+
 // Directory keys: a deliberate non-"gc."-prefixed sibling family on bead
 // metadata, declared here so the vocabulary has one home. Their read/write
 // fallback semantics (canonical-then-legacy) live with their owner in
@@ -253,6 +281,12 @@ const (
 	// MoleculeIDMetadataKey links a poured/wisp work bead to its molecule root.
 	MoleculeIDMetadataKey = "molecule_id"
 
+	// MoleculeFailedMetadataKey marks the beads of a partially-instantiated
+	// molecule as failed (value "true"). Written best-effort by
+	// internal/molecule markFailed on instantiation error paths; read by
+	// dispatch/sling/cmd/gc to skip or close failed roots.
+	MoleculeFailedMetadataKey = "molecule_failed"
+
 	// MergeStrategyMetadataKey records the merge strategy chosen for a slung bead.
 	MergeStrategyMetadataKey = "merge_strategy"
 )
@@ -275,6 +309,8 @@ var KnownMetadataKeys = []string{
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BrainParentSIDMetadataKey,
+	CancelRequestedMetadataKey,
+	CheckInfraRetryMetadataKey,
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,
@@ -289,9 +325,10 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
-	ActiveWorkBeadMetadataKey,
 	CwdMetadataKey,
+	AttachFencePendingMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -313,6 +350,7 @@ var KnownMetadataKeys = []string{
 	DrainParentConvoyIDMetadataKey,
 	DrainStateMetadataKey,
 	DrainUnitKeyMetadataKey,
+	DrainUnprojectedBlockersMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
 	ExclusiveDrainReservationMetadataKey,
@@ -348,6 +386,7 @@ var KnownMetadataKeys = []string{
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
 	ModelMetadataKey,
+	NativeStepDependenciesMetadataKey,
 	NextAttemptMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
@@ -368,6 +407,7 @@ var KnownMetadataKeys = []string{
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
+	ReviewGateMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,
@@ -403,6 +443,7 @@ var KnownMetadataKeys = []string{
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
+	InfraMigratedFromMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,
@@ -418,6 +459,7 @@ var KnownMetadataKeys = []string{
 // not enumerable.
 var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
+	IdemPrefix,
 }
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
@@ -39,6 +41,17 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
+type sessionWakeDeps struct {
+	store                     beads.Store
+	cfg                       *config.City
+	cityPath                  string
+	cityResolved              bool
+	now                       func() time.Time
+	withdrawQueuedWaitNudges  func(string, []string) error
+	cityUsesManagedReconciler func(string) bool
+	pokeController            func(string) error
+}
+
 // cmdSessionWake is the CLI entry point for "gc session wake".
 func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
@@ -52,35 +65,47 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0])
+	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		store:                     store,
+		cfg:                       cfg,
+		cityPath:                  cityPath,
+		cityResolved:              cityErr == nil,
+		now:                       time.Now,
+		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
+		cityUsesManagedReconciler: cityUsesManagedReconciler,
+		pokeController:            pokeController,
+	})
+}
+
+func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
+	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
+	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	b, err := sessStore.Get(id)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
-		return 1
-	}
-	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(session.InfoFromPersistedBead(b), cfg)
-	session.RepairEmptyType(sessStore, &b)
-	nudgeIDs, err := session.WakeSession(sessStore, b, time.Now().UTC())
+	sessFront := sessionFrontDoor(sessStore)
+	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+		switch {
+		case errors.Is(err, session.ErrNotSessionBead):
+			fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
+		case errors.Is(err, beads.ErrNotFound):
+			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+		default:
+			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+		}
 		return 1
 	}
-	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(session.InfoFromPersistedBead(b)) {
-		if err := sessionFrontDoor(sessStore).ApplyPatch(id, map[string]string{
+	nudgeIDs := res.NudgeIDs
+	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
+	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info) {
+		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",
@@ -92,12 +117,12 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 			return 1
 		}
 	}
-	if cityErr == nil {
-		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
+	if deps.cityResolved {
+		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
-		if cityUsesManagedReconciler(cityPath) {
-			if err := pokeController(cityPath); err != nil {
+		if deps.cityUsesManagedReconciler(deps.cityPath) {
+			if err := deps.pokeController(deps.cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}

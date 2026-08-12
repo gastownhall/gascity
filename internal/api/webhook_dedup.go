@@ -17,7 +17,12 @@ const defaultWebhookDedupTTL = 30 * time.Minute
 
 // webhookDedupCacheMaxEntries caps live entries so a flood of unique delivery ids
 // cannot grow the map unbounded between TTL sweeps. Over cap, seen evicts expired
-// entries first and then the soonest-expiring, mirroring idempotencyCache.
+// entries first and then the soonest-expiring OTHER entry of the hook whose
+// insertion overflowed the cap, so a flood only ever shrinks its own replay
+// window. The just-claimed key is never evicted, so the cap is soft by at most
+// one retained claim per co-resident hook — bounded, because hook names are
+// configured and entries expire — rather than ever dropping a delivery seen just
+// promised to track.
 const webhookDedupCacheMaxEntries = 8192
 
 // webhookDedupCache is the E8 delivery-idempotency store: a bounded, TTL'd set of
@@ -57,7 +62,9 @@ func (c *webhookDedupCache) clock() time.Time {
 // seen atomically reports whether key was already recorded within the TTL. On a
 // first sighting it records key (claiming the delivery) and returns false; on a
 // live duplicate it returns true without extending the entry. An expired entry is
-// treated as unseen and re-recorded.
+// treated as unseen and re-recorded. A false return guarantees key stays retained
+// even when the shared cap is already saturated by other hooks, so the caller can
+// dispatch knowing a replay of the same delivery will dedup rather than re-fire.
 func (c *webhookDedupCache) seen(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -69,7 +76,7 @@ func (c *webhookDedupCache) seen(key string) bool {
 		delete(c.entries, key) // expired; fall through and re-record
 	}
 	c.entries[key] = now.Add(c.ttl)
-	c.enforceCapLocked(now)
+	c.enforceCapLocked(now, key)
 	return false
 }
 
@@ -89,9 +96,25 @@ func (c *webhookDedupCache) clear() {
 	c.entries = make(map[string]time.Time)
 }
 
-// enforceCapLocked keeps the map under c.max: expired entries first, then the
-// soonest-expiring, until at or below the cap. Must hold c.mu.
-func (c *webhookDedupCache) enforceCapLocked(now time.Time) {
+// enforceCapLocked keeps the map near c.max: it drops expired entries first,
+// then — while still over cap — evicts the soonest-expiring entry belonging to
+// insertedHook OTHER THAN insertedKey, the hook whose just-recorded delivery
+// pushed the map over the cap. Charging the overflow to the inserting hook means
+// a high-volume webhook can only shrink ITS OWN replay window under pressure; a
+// flood on one hook can never evict a quieter co-resident hook's entry — not even
+// one that currently holds the most entries. The shared per-city cap must not let
+// one hook erode another's replay protection (the schemes without a signed
+// timestamp rely on this window).
+//
+// insertedKey itself is never evicted here: seen has already returned false and
+// the webhook handler dispatches on that promise, so dropping the fresh key would
+// dispatch an untracked delivery and let its replay re-fire. When the inserting
+// hook holds only that fresh key while other hooks fill the cap, the map is left
+// one entry over cap rather than breaking either the retention or the
+// neighbor-protection invariant — a bounded soft overshoot (at most one retained
+// claim per live co-resident hook; hook names are configured and entries expire),
+// never unbounded growth. Must hold c.mu.
+func (c *webhookDedupCache) enforceCapLocked(now time.Time, insertedKey string) {
 	if len(c.entries) <= c.max {
 		return
 	}
@@ -100,20 +123,45 @@ func (c *webhookDedupCache) enforceCapLocked(now time.Time) {
 			delete(c.entries, k)
 		}
 	}
+	insertedHook := webhookDedupHookOf(insertedKey)
 	for len(c.entries) > c.max {
-		var oldestKey string
-		var oldest time.Time
-		for k, exp := range c.entries {
-			if oldestKey == "" || exp.Before(oldest) {
-				oldestKey = k
-				oldest = exp
-			}
-		}
-		if oldestKey == "" {
+		if !c.evictFromHookLocked(insertedHook, insertedKey) {
 			return
 		}
-		delete(c.entries, oldestKey)
 	}
+}
+
+// evictFromHookLocked deletes the soonest-expiring entry belonging to hook,
+// skipping protectKey so the just-claimed delivery is never the victim. It
+// returns false when hook has no other entry left to evict, so the caller stops
+// rather than spinning (leaving the map a bounded amount over cap). Must hold
+// c.mu. Eviction runs only on a cap overflow, so the O(n) scan is bounded and
+// rare.
+func (c *webhookDedupCache) evictFromHookLocked(hook, protectKey string) bool {
+	var victimKey string
+	var victimExp time.Time
+	for k, exp := range c.entries {
+		if k == protectKey || webhookDedupHookOf(k) != hook {
+			continue
+		}
+		if victimKey == "" || exp.Before(victimExp) {
+			victimKey, victimExp = k, exp
+		}
+	}
+	if victimKey == "" {
+		return false
+	}
+	delete(c.entries, victimKey)
+	return true
+}
+
+// webhookDedupHookOf returns the hook-name prefix of a dedup key (the segment
+// before the NUL separator written by webhookDedupKey).
+func webhookDedupHookOf(key string) string {
+	if i := strings.IndexByte(key, 0); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // webhookDedupKey namespaces a delivery id under its webhook so two webhooks that
