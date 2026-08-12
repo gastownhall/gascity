@@ -1012,7 +1012,8 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // scoped steps of a re-spawned attempt recipe, mirroring the compile-time
 // shape injected by formula.ApplyGraphControls: each scope-check blocks on
 // its subject step, and deps that waited on the subject are rewritten to
-// wait on the scope-check instead.
+// wait on the scope-check instead — except the one edge that would leave a
+// node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
@@ -1064,11 +1065,7 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 		return
 	}
 
-	for i := range recipe.Deps {
-		if replacement, ok := replacements[recipe.Deps[i].DependsOnID]; ok {
-			recipe.Deps[i].DependsOnID = replacement
-		}
-	}
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, controls, replacements)
 	recipe.Steps = append(recipe.Steps, controls...)
 	recipe.Deps = append(recipe.Deps, controlDeps...)
 }

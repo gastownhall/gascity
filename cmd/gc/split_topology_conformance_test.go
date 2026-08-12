@@ -1346,11 +1346,13 @@ func conformanceReadPathConsistency(t *testing.T, e splitEnv) {
 
 // conformanceGraphRecipe is the durable graph.v2 workflow shape a compiled v2
 // formula actually produces: a root plus one finalize step, wired with the ONE
-// root -> finalize `blocks` edge and no parent-child edge at all.
+// root -> finalize `tracks` edge and no parent-child edge at all. The edge is
+// informational because the finalizer is what closes the root; a blocking edge
+// there is the ga-a6zy9 deadlock.
 //
 // The missing parent-child edge is the point. internal/formula/compile.go gates
 // both of its parent-child emitters on `!graphWorkflow`, and addWorkflowRootDeps
-// emits only the blocks edge, so a graph.v2 recipe carries zero parent-child
+// emits only that one edge, so a graph.v2 recipe carries zero parent-child
 // deps — measured over the core pack's v2 formulas. This recipe used to add one
 // by hand, which is the only reason materializing it on the real SQLite backend
 // tripped sqlite_store_graph_apply.go's reverse-of-a-parent-child guard: that
@@ -1380,7 +1382,7 @@ func conformanceGraphRecipe() *formula.Recipe {
 			},
 		},
 		Deps: []formula.RecipeDep{
-			{StepID: "conformance-graph", DependsOnID: "conformance-graph.workflow-finalize", Type: "blocks"},
+			{StepID: "conformance-graph", DependsOnID: "conformance-graph.workflow-finalize", Type: "tracks"},
 		},
 	}
 }
