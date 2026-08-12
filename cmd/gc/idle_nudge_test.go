@@ -90,45 +90,49 @@ func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 	}
 }
 
-func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsEmpty(t *testing.T) {
-	sp := runningIdleClaimFake(t, "session-a")
-	cfg := idleClaimTestCfg()
-	cfg.Agents[0].Nudge = ""
-	session := idleClaimPoolSession()
-	work := []beads.Bead{{ID: "work-a", Status: "open"}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	var out bytes.Buffer
+func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) {
+	for _, configuredNudge := range []string{"", " \t "} {
+		t.Run("blank", func(t *testing.T) {
+			sp := runningIdleClaimFake(t, "session-a")
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = configuredNudge
+			session := idleClaimPoolSession()
+			work := []beads.Bead{{ID: "work-a", Status: "open"}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var out bytes.Buffer
 
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base, &out)
-	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), &out)
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base, &out)
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), &out)
 
-	for _, call := range sp.SnapshotCalls() {
-		if call.Method == "Nudge" && call.Name == "session-a" {
-			if got, want := call.Message, defaultPoolClaimNudge; got != want {
-				t.Fatalf("fallback nudge = %q, want %q", got, want)
+			for _, call := range sp.SnapshotCalls() {
+				if call.Method == "Nudge" && call.Name == "session-a" {
+					if got, want := call.Message, defaultPoolClaimNudge; got != want {
+						t.Fatalf("fallback nudge = %q, want %q", got, want)
+					}
+					return
+				}
 			}
-			return
-		}
+			t.Fatal("fallback nudge was not delivered")
+		})
 	}
-	t.Fatal("fallback nudge was not delivered")
 }
 
-func TestClaimNudgeFor_PreservesExplicitNudge(t *testing.T) {
+func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
 
-	if got, want := claimNudgeFor(cfg, idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
 		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
 	}
 }
 
-func TestClaimNudgeFor_FailsClosedForUnknownTemplate(t *testing.T) {
+func TestPoolClaimBackstopContent_FailsClosedForUnknownTemplate(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	session := idleClaimPoolSession()
 	session.Metadata["template"] = "unknown-agent"
 
-	if got := claimNudgeFor(cfg, session); got != "" {
+	if got := (poolClaimBackstop{cfg: cfg}).content(session); got != "" {
 		t.Fatalf("claim nudge for unknown template = %q, want empty", got)
 	}
 }
