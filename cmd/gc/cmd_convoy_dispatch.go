@@ -20,10 +20,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -293,11 +295,41 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		if errors.Is(err, dispatch.ErrControlPending) {
 			return err
 		}
-		if dispatch.IsTransientControllerError(err) {
+		var stalled *dispatch.SemanticRetryState
+		switch dispatch.ClassifyControllerError(err) {
+		case dispatch.TierAvailability:
+			// The store never answered. Retry unbounded and write nothing:
+			// recording a budget needs the very store that is unavailable.
 			return err
+		case dispatch.TierSemantic:
+			retry, recordErr := dispatch.RecordSemanticControlRetry(
+				graphStore, beadID, err, workflowTraceNow().UTC(), semanticControlRetryBudget())
+			if recordErr != nil {
+				// Losing the budget write is itself a store problem: keep the
+				// pre-tier behavior (retry) rather than escalating on it.
+				workflowTracef("control-retry-budget bead=%s recording semantic refusal failed err=%v", beadID, recordErr)
+				return err
+			}
+			workflowTracef("control-retry-budget bead=%s attempts=%d first_seen=%s expired=%t repeat=%t err=%v",
+				beadID, retry.Attempts, retry.FirstSeen.UTC().Format(time.RFC3339), retry.Expired, retry.Repeat, err)
+			if !retry.Expired {
+				if retry.Repeat {
+					return dispatch.MarkQuietControllerRetry(err)
+				}
+				return err
+			}
+			stalled = &retry
 		}
 		if quarantineErr := quarantineControlFailureBead(graphStore, beadID, err); quarantineErr != nil {
 			return errors.Join(err, quarantineErr)
+		}
+		if stalled != nil {
+			emitControlStalled(cityPath, storePath, graphStore, bead, err, *stalled, stderr)
+			_, _ = fmt.Fprintf(stderr,
+				"control dispatch: stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
+				beadID, stalled.Attempts, stalled.FirstSeen.UTC().Format(time.RFC3339),
+				semanticControlRetryBudget(), err)
+			return nil
 		}
 		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
 		return nil
@@ -325,6 +357,78 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	return nil
+}
+
+// semanticControlRetryBudget returns how long the control dispatcher keeps
+// retrying a store refusal before quarantining the control bead.
+//
+// GC_CONTROL_SEMANTIC_RETRY_BUDGET overrides the default as a Go duration. It
+// is an incident knob, not a tuning parameter: "0s" restores quarantine-on-
+// first-refusal (the pre-#5020 behavior) to clear a wedged fleet immediately,
+// and a negative value restores unbounded retry if a bad classification ever
+// starts quarantining healthy work. An unparseable value falls back to the
+// default rather than failing the dispatcher.
+func semanticControlRetryBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET"))
+	if raw == "" {
+		return dispatch.DefaultSemanticRetryBudget
+	}
+	budget, err := time.ParseDuration(raw)
+	if err != nil {
+		return dispatch.DefaultSemanticRetryBudget
+	}
+	return budget
+}
+
+// emitControlStalled publishes the control.stalled record for a control bead
+// whose semantic-refusal budget expired, plus order.failed when the workflow
+// root belongs to a scheduled order — so the existing order-health surfaces
+// light up instead of needing a new dashboard to notice a dead control plane.
+func emitControlStalled(cityPath, storePath string, store beads.Store, bead beads.Bead, cause error, state dispatch.SemanticRetryState, stderr io.Writer) {
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	orderName := ""
+	if rootID != "" {
+		if root, err := store.Get(rootID); err == nil {
+			orderName, _ = orders.NameFromOrderRunLabel(root)
+		}
+	}
+
+	payload := events.ControlStalledPayload{
+		BeadID:     bead.ID,
+		Kind:       strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
+		RootBeadID: rootID,
+		StorePath:  storePath,
+		ErrorClass: dispatch.TierSemantic.String(),
+		FirstSeen:  state.FirstSeen.UTC().Format(time.RFC3339),
+		Attempts:   state.Attempts,
+		Error:      controlQuarantineReason(cause, "control_dispatch_error"),
+		OrderName:  orderName,
+	}
+
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:    events.ControlStalled,
+		Actor:   "controller",
+		Subject: bead.ID,
+		Message: fmt.Sprintf("control bead %s stalled after %d semantic retries since %s: %s",
+			bead.ID, state.Attempts, payload.FirstSeen, payload.Error),
+		Payload: events.ControlStalledPayloadJSON(payload),
+		RunID:   rootID,
+	})
+	if orderName != "" {
+		rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: orderName,
+			Message: fmt.Sprintf("control bead %s stalled: %s", bead.ID, payload.Error),
+			RunID:   rootID,
+		})
+	}
+	if closer, ok := rec.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", bead.ID, err) //nolint:errcheck // the quarantine already succeeded
+		}
+	}
 }
 
 func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
