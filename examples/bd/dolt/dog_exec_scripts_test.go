@@ -5360,6 +5360,174 @@ exit 0
 	}
 }
 
+// writeDogHealthyFakeDolt writes a fake dolt whose probes all succeed with
+// no-warning values: probe ok, one connection, no databases (so no orphans and
+// no backup-eligible DBs).
+func writeDogHealthyFakeDolt(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+}
+
+// readDogGCLog returns the fake-gc invocation log, or "" when the script never
+// invoked gc at all (the log file is only created on first invocation).
+func readDogGCLog(t *testing.T, gcLogPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read gc log: %v", err)
+	}
+	return string(data)
+}
+
+const dogAdvisorySweepInvocation = "mail archive --to human --subject-prefix Dolt health advisory --limit 100"
+
+// TestDoctorScriptAdvisorySweepPrecedesFreshSend asserts that a fresh advisory
+// send is preceded by a superseded-advisory sweep, so the mailbox converges to
+// one standing advisory bead (and any pre-dedup backlog is archived) the
+// moment a new snapshot lands.
+func TestDoctorScriptAdvisorySweepPrecedesFreshSend(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	// LATENCY_WARN_S=0 forces the advisory path on every run.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_LATENCY_WARN_S=0")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	sweepAt := strings.Index(gcLog, dogAdvisorySweepInvocation)
+	sendAt := strings.Index(gcLog, "mail send human -s Dolt health advisory [MEDIUM]")
+	if sweepAt < 0 {
+		t.Fatalf("advisory send did not sweep superseded advisories, log:\n%s", gcLog)
+	}
+	if sendAt < 0 {
+		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
+	}
+	if sweepAt > sendAt {
+		t.Fatalf("sweep must precede the fresh send (or it would archive the new advisory), log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptHealthySweepsRecordedAdvisory asserts the healthy transition
+// archives the standing advisory recorded by an earlier tick and clears the
+// dedup state so a future condition re-alerts.
+func TestDoctorScriptHealthySweepsRecordedAdvisory(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
+		t.Fatalf("seed advisory state: %v", err)
+	}
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	if !strings.Contains(gcLog, dogAdvisorySweepInvocation) {
+		t.Fatalf("healthy transition with a recorded advisory must sweep it, log:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "mail send") {
+		t.Fatalf("healthy run must not send mail, log:\n%s", gcLog)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("healthy run must clear the advisory state file, stat err = %v", err)
+	}
+}
+
+// TestDoctorScriptSteadyHealthySkipsSweep asserts a healthy tick with no
+// recorded advisory (the steady state) makes no gc calls at all — the sweep
+// only fires on the advisory->healthy transition.
+func TestDoctorScriptSteadyHealthySkipsSweep(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	if gcLog := readDogGCLog(t, gcLogPath); strings.Contains(gcLog, "mail archive") {
+		t.Fatalf("steady healthy tick must not invoke the sweep, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSuppressedTickSkipsSweepAndSend asserts a tick whose
+// condition set matches the recorded signature (the #3409 dedup suppression)
+// neither re-sends nor re-sweeps — the standing advisory bead stays put.
+func TestDoctorScriptSuppressedTickSkipsSweepAndSend(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDogHealthyFakeDolt(t, binDir)
+
+	statePath := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	// "latency " (trailing space) is the exact signature a latency-only warning
+	// run records; seeding it makes the LATENCY_WARN_S=0 run below a suppressed
+	// repeat tick.
+	if err := os.WriteFile(statePath, []byte("latency \n"), 0o600); err != nil {
+		t.Fatalf("seed advisory state: %v", err)
+	}
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LATENCY_WARN_S=0",
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog := readDogGCLog(t, gcLogPath)
+	if strings.Contains(gcLog, "mail archive") || strings.Contains(gcLog, "mail send") {
+		t.Fatalf("suppressed tick must neither sweep nor send, log:\n%s", gcLog)
+	}
+}
+
 // TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
 // server-unreachable path goes through the generic escalation recipient.
 func TestDoctorScriptUnreachableEscalationUsesGenericEscalation(t *testing.T) {
