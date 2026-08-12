@@ -15,8 +15,8 @@ func writeArchiveWithEvents(t *testing.T, dir string, stamp string, firstSeq, la
 	t.Helper()
 	var b strings.Builder
 	for _, e := range evs {
-		b.WriteString(fmt.Sprintf(`{"seq":%d,"type":%q,"ts":%q,"actor":"test"}`+"\n",
-			e.Seq, e.Type, e.Ts.UTC().Format(time.RFC3339Nano)))
+		fmt.Fprintf(&b, `{"seq":%d,"type":%q,"ts":%q,"actor":"test"}`+"\n",
+			e.Seq, e.Type, e.Ts.UTC().Format(time.RFC3339Nano))
 	}
 	base := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz", stamp, firstSeq, lastSeq)
 	writeGzipFile(t, filepath.Join(dir, base), b.String())
