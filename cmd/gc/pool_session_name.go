@@ -96,6 +96,7 @@ func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[strin
 // unless both the assigned-work and open-session snapshots are complete.
 func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	store beads.Store,
+	sessionStore beads.SessionStore,
 	cfg *config.City,
 	cityPath string,
 	openSessionInfos []session.Info,
@@ -108,15 +109,26 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
 // assignee no longer maps to any open session bead. This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
 // again until it is moved back to open.
+//
+// store and sessionStore are deliberately separate parameters because the two
+// reads here are different storage classes: sessionStore backs the
+// liveOpenSessionAssignmentExists liveness check (session class), while store
+// is only the work-class fallback owner for storeForPoolAssignment. On a city
+// whose [storage.classes] relocates sessions away from the work store, passing
+// the work store for both makes the liveness query run against a store that
+// serves zero session beads — an empty-success List that reads as "assignee is
+// dead" and releases live work every tick (ga-g3pf0). They are the same store
+// value on a single-store city.
 func releaseOrphanedPoolAssignments(
 	store beads.Store,
+	sessionStore beads.SessionStore,
 	cfg *config.City,
 	cityPath string,
 	openSessionInfos []session.Info,
@@ -127,6 +139,13 @@ func releaseOrphanedPoolAssignments(
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
+	}
+	// A missing session store must not read as "every assignee is dead":
+	// liveOpenSessionAssignmentExists returns false for a nil store, and false
+	// means release. Fall back to the work store, which is what the session
+	// class resolves to on a single-store city anyway.
+	if sessionStore.Store == nil {
+		sessionStore = beads.SessionStore{Store: store}
 	}
 	storeAware := len(assignedWorkStores) > 0
 	if storeAware && len(assignedWorkStores) != len(assignedWorkBeads) {
@@ -184,7 +203,7 @@ func releaseOrphanedPoolAssignments(
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(store, assignee) {
+			if liveOpenSessionAssignmentExists(sessionStore.Store, assignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session

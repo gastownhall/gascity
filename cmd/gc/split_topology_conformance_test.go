@@ -322,8 +322,14 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		t.Errorf("dead-claimed HQ work bead %s captured under store-ref %q, want \"\" (the work leg)", hqDead.ID, refs[hqIndex])
 	}
 
+	// Wired the way the controller wires it: the WORK store as the owner
+	// fallback, the SESSIONS store for the liveness read. Passing the sessions
+	// store for both — which this leg used to do — hid ga-g3pf0, because the
+	// liveness query happened to land on the one store that serves session
+	// beads. Production passed the work store, whose session-label List returns
+	// empty-success, and every live claim read as dead.
 	released := releaseOrphanedPoolAssignments(
-		e.sessionsStore(), e.cfg, e.cityPath,
+		e.work, beads.SessionStore{Store: e.sessionsStore()}, e.cfg, e.cityPath,
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,

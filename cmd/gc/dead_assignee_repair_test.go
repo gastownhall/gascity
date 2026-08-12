@@ -182,6 +182,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 
 	released := releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
 		sessionInfosFromBeads([]beads.Bead{live}),
