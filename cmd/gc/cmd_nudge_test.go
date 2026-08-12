@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -2462,6 +2463,119 @@ func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
 	}
 }
 
+// TestTryDeliverQueuedNudgesByPollerTerminalizesReadMailReminders is the
+// falsifier for the mail-nudge echo storm (dip-lvsq3c): a source:mail
+// reminder whose recipient has NO unread mail is purpose-extinct — the mail
+// store is the truth, tmux delivery confirmation is a proxy that fails
+// exactly on busy sessions. The poller must terminalize it as superseded
+// WITHOUT a delivery attempt, across any number of boundaries, instead of
+// re-injecting "You have mail" until the 24h expiry.
+func TestTryDeliverQueuedNudgesByPollerTerminalizesReadMailReminders(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", now, queuedNudgeOptions{})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	prevUnread := mailReminderUnreadCount
+	t.Cleanup(func() { mailReminderUnreadCount = prevUnread })
+	mailReminderUnreadCount = func(nudgeTarget, beads.Store) (int, error) { return 0, nil }
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	// Three boundaries: no delivery may happen on any of them.
+	for i := 0; i < 3; i++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+		if err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller(pass %d): %v", i+1, err)
+		}
+		if delivered {
+			t.Fatalf("pass %d delivered a purpose-extinct mail reminder", i+1)
+		}
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want zero injections for a read-mail reminder", fake.Calls)
+		}
+	}
+	// "superseded" retires the item to a terminal bead close — it must leave
+	// every queue list (Dead is only for dead-lettered failures).
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want the reminder fully retired as superseded", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerKeepsUnreadMailReminders pins the other
+// half of the mail-state gate: while the recipient still HAS unread mail, the
+// reminder is live and must deliver normally.
+func TestTryDeliverQueuedNudgesByPollerKeepsUnreadMailReminders(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", now, queuedNudgeOptions{})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	prevUnread := mailReminderUnreadCount
+	t.Cleanup(func() { mailReminderUnreadCount = prevUnread })
+	mailReminderUnreadCount = func(nudgeTarget, beads.Store) (int, error) { return 2, nil }
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true while mail is unread")
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -4226,7 +4340,7 @@ start_command = "echo"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, true, &stdout, &stderr)
+	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -5161,4 +5275,379 @@ func TestResolveNudgePollInterval(t *testing.T) {
 			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
 		}
 	})
+}
+
+// unconfirmedSubmitNudgeProvider reproduces the tmux "submit Enter delivered
+// but busy state never observed" outcome: the keystrokes reached the runtime,
+// but the provider cannot confirm the agent consumed them.
+type unconfirmedSubmitNudgeProvider struct {
+	*runtime.Fake
+}
+
+func (p *unconfirmedSubmitNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	_ = p.Fake.Nudge(name, content)
+	return fmt.Errorf("%w: session %q", sessiontmux.ErrNudgeSubmitUnconfirmed, name)
+}
+
+// plainFailureNudgeProvider fails delivery with an ordinary (confirmable)
+// error: nothing reached the runtime, so the item keeps the full 5-attempt
+// budget.
+type plainFailureNudgeProvider struct {
+	*runtime.Fake
+}
+
+func (p *plainFailureNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	_ = p.Fake.Nudge(name, content)
+	return fmt.Errorf("paste buffer write failed for %q", name)
+}
+
+// startNudgePollTargetSession is the shared harness for the poller delivery
+// tests below: it starts a fake session, marks it idle, and returns the
+// target/observation pair tryDeliverQueuedNudgesByPoller expects.
+func startNudgePollTargetSession(t *testing.T, dir string, store beads.NudgesStore, sp runtime.Provider) (nudgeTarget, worker.LiveObservation) {
+	t.Helper()
+	mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	switch fake := sp.(type) {
+	case *runtime.Fake:
+		fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	case *unconfirmedSubmitNudgeProvider:
+		fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	case *plainFailureNudgeProvider:
+		fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	default:
+		t.Fatalf("unsupported provider %T", sp)
+	}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	return target, worker.LiveObservation{Running: true, LastActivity: &idleSince}
+}
+
+// makeQueuedNudgesDueNow drags every pending item's retry delay into the past
+// so the next delivery pass claims it without a real 15s sleep.
+func makeQueuedNudgesDueNow(t *testing.T, dir string) {
+	t.Helper()
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		for i := range state.Pending {
+			state.Pending[i].DeliverAfter = time.Now().Add(-time.Minute).UTC()
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("withNudgeQueueState: %v", err)
+	}
+}
+
+func countNudgeInjections(calls []runtime.Call) int {
+	n := 0
+	for _, call := range calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTryDeliverQueuedNudgesByPollerRetriesFirstUnconfirmedSubmit pins the
+// forgiving half of the could-not-confirm cap: the FIRST unconfirmed submit
+// may genuinely have left the message drafted-but-unsubmitted, so it records
+// as an ordinary failure and earns one retry.
+func TestTryDeliverQueuedNudgesByPollerRetriesFirstUnconfirmedSubmit(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := &unconfirmedSubmitNudgeProvider{Fake: runtime.NewFake()}
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false for an unconfirmed submit")
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0 (one retry allowed)", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1", pending[0].Attempts)
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerTerminalizesSecondUnconfirmedSubmit is the
+// falsifier for the re-injection storm (sc-lx6q5t): once TWO submit Enters have
+// reached the runtime for one reminder, the overwhelmingly likely truth is that
+// both landed in a busy session. The item must retire as accepted-for-injection
+// instead of burning the remaining attempts on more echoes.
+func TestTryDeliverQueuedNudgesByPollerTerminalizesSecondUnconfirmedSubmit(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := &unconfirmedSubmitNudgeProvider{Fake: runtime.NewFake()}
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	for i := 0; i < 4; i++ {
+		if _, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs); err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller(pass %d): %v", i+1, err)
+		}
+		makeQueuedNudgesDueNow(t, dir)
+	}
+
+	if got := countNudgeInjections(fake.Calls); got != queuedNudgeUnconfirmedSubmitCeiling {
+		t.Fatalf("submit attempts = %d, want %d", got, queuedNudgeUnconfirmedSubmitCeiling)
+	}
+	// "accepted_for_injection" retires the item to a terminal bead close, so it
+	// leaves every queue bucket (Dead is only for dead-lettered failures).
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want the reminder fully retired", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerKeepsFullBudgetForConfirmableFailures pins
+// the untouched half: an ordinary delivery error never reached the agent, so it
+// keeps the full defaultQueuedNudgeMaxAttempts budget.
+func TestTryDeliverQueuedNudgesByPollerKeepsFullBudgetForConfirmableFailures(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := &plainFailureNudgeProvider{Fake: runtime.NewFake()}
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	for i := 0; i < 3; i++ {
+		if _, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs); err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller(pass %d): %v", i+1, err)
+		}
+		makeQueuedNudgesDueNow(t, dir)
+	}
+
+	if got := countNudgeInjections(fake.Calls); got != 3 {
+		t.Fatalf("submit attempts = %d, want 3 (confirmable failures keep retrying)", got)
+	}
+	pending, _, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(dead) != 0 {
+		t.Fatalf("pending/dead = %d/%d, want 1/0 below the %d-attempt cap", len(pending), len(dead), defaultQueuedNudgeMaxAttempts)
+	}
+	if pending[0].Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3", pending[0].Attempts)
+	}
+}
+
+func TestSplitUnconfirmedSubmitNudges(t *testing.T) {
+	unconfirmed := fmt.Errorf("%w: session %q", sessiontmux.ErrNudgeSubmitUnconfirmed, "sess")
+	items := []queuedNudge{
+		{ID: "fresh", Attempts: 0},
+		{ID: "second", Attempts: 1},
+		{ID: "later", Attempts: 3},
+	}
+
+	retry, presumed := splitUnconfirmedSubmitNudges(unconfirmed, items)
+	if len(retry) != 1 || retry[0].ID != "fresh" {
+		t.Fatalf("retry = %+v, want only the first-attempt item", retry)
+	}
+	if len(presumed) != 2 || presumed[0].ID != "second" || presumed[1].ID != "later" {
+		t.Fatalf("presumed = %+v, want the items whose submit already reached the runtime", presumed)
+	}
+
+	retry, presumed = splitUnconfirmedSubmitNudges(errors.New("paste failed"), items)
+	if len(retry) != len(items) || len(presumed) != 0 {
+		t.Fatalf("retry/presumed = %d/%d, want every item retried for a confirmable failure", len(retry), len(presumed))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerRetiresReminderForClosedBead is the
+// falsifier for purpose-extinct session reminders: a cascade/route reminder
+// about a bead that has since CLOSED has nothing left to say, so it must retire
+// as superseded without ever being injected.
+func TestTryDeliverQueuedNudgesByPollerRetiresReminderForClosedBead(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	subject, err := store.Create(beads.Bead{Title: "blocked work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create subject bead: %v", err)
+	}
+	if err := store.Close(subject.ID); err != nil {
+		t.Fatalf("close subject bead: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "blocker closed — "+subject.ID+" may be unblocked", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		Reference: &nudgeReference{Kind: "bead", ID: subject.ID},
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake := runtime.NewFake()
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	for i := 0; i < 3; i++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+		if err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller(pass %d): %v", i+1, err)
+		}
+		if delivered {
+			t.Fatalf("pass %d delivered a reminder about a closed bead", i+1)
+		}
+	}
+	if got := countNudgeInjections(fake.Calls); got != 0 {
+		t.Fatalf("injections = %d, want 0 for a purpose-extinct reminder", got)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want the reminder fully retired as superseded", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerDeliversReminderForOpenBead pins the live
+// half of the gate: while the referenced bead is open the reminder still has a
+// purpose and must deliver normally.
+func TestTryDeliverQueuedNudgesByPollerDeliversReminderForOpenBead(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	subject, err := store.Create(beads.Bead{Title: "blocked work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create subject bead: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "check "+subject.ID, "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		Reference: &nudgeReference{Kind: "bead", ID: subject.ID},
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake := runtime.NewFake()
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true while the referenced bead is open")
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerDeliversWhenReferenceUnreadable pins the
+// fail-closed-toward-delivery rule: an unreadable reference (missing bead,
+// store hiccup, a bead owned by another store) must never drop a live reminder.
+func TestTryDeliverQueuedNudgesByPollerDeliversWhenReferenceUnreadable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	item := newQueuedNudgeWithOptions("worker", "check gc-does-not-exist", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		Reference: &nudgeReference{Kind: "bead", ID: "gc-does-not-exist"},
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	target, obs := startNudgePollTargetSession(t, dir, store, fake)
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true when the reference cannot be resolved")
+	}
+}
+
+// TestCmdSessionNudgeAboutStampsBeadReference proves the mint site: the
+// cascade/route orders name the subject bead on the CLI, and that id must
+// survive onto the queued item as a bead Reference — without it the
+// purpose-extinct gate above can never fire in production.
+func TestCmdSessionNudgeAboutStampsBeadReference(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+provider = "codex"
+start_command = "echo"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sess-worker",
+			"agent_name":   "myrig/worker",
+			"template":     "myrig/worker",
+			"provider":     "codex",
+			"work_dir":     rigDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNudge([]string{"sess-worker", "check", "gc-42"}, nudgeDeliveryQueue, "gc-42", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	pending, _, _, err := listQueuedNudges(cityDir, sessionBead.ID, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if pending[0].Reference == nil {
+		t.Fatal("Reference = nil, want the --about bead stamped on the queued item")
+	}
+	if pending[0].Reference.Kind != "bead" || pending[0].Reference.ID != "gc-42" {
+		t.Fatalf("Reference = %+v, want {bead gc-42}", *pending[0].Reference)
+	}
 }

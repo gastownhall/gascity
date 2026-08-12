@@ -69,7 +69,7 @@ func TestPhase0CLISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		{
 			name: "gc session nudge",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionNudge([]string{"template:worker", "hello"}, nudgeDeliveryImmediate, false, stdout, stderr)
+				return cmdSessionNudge([]string{"template:worker", "hello"}, nudgeDeliveryImmediate, "", false, stdout, stderr)
 			},
 		},
 	}
@@ -155,7 +155,7 @@ func TestPhase0CLISessionTargetingSurfaces_BareConfigNameDoesNotMaterializeOrdin
 		{
 			name: "gc session nudge",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionNudge([]string{"worker", "hello"}, nudgeDeliveryImmediate, false, stdout, stderr)
+				return cmdSessionNudge([]string{"worker", "hello"}, nudgeDeliveryImmediate, "", false, stdout, stderr)
 			},
 		},
 	}
