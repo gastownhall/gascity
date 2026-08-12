@@ -1477,11 +1477,19 @@ const startupNudgeRetryBudgetFraction = 0.5
 // fallback for ErrNudgeSubmitUnconfirmed) gets a chance to return — the
 // retry exists to make startup more robust, not to spend the deadline the
 // rest of startup needs.
+//
+// startupNudgeNow is the clock behind that wall-clock measurement. It is a
+// package variable (same shape as internal/extmsg's timeNow) so the budget
+// test can advance a fake clock from its send/sleep fakes instead of really
+// sleeping — the resourcecensus fixed_sleep ratchet forbids new untagged
+// time.Sleep call sites, and a fake clock also makes the bound deterministic
+// rather than scheduler-dependent.
+var startupNudgeNow = time.Now
 func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration)) error {
-	start := time.Now()
+	start := startupNudgeNow()
 	budget := time.Duration(-1)
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 {
+		if remaining := deadline.Sub(start); remaining > 0 {
 			budget = time.Duration(float64(remaining) * startupNudgeRetryBudgetFraction)
 		} else {
 			budget = 0
@@ -1501,7 +1509,7 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 			return err
 		}
 		next := startupNudgeRetryBackoffs[attempt]
-		if budget >= 0 && time.Since(start)+next > budget {
+		if budget >= 0 && startupNudgeNow().Sub(start)+next > budget {
 			return err
 		}
 		sleep(next)

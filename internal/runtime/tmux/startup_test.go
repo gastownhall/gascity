@@ -1110,39 +1110,51 @@ func TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping(t *testin
 // (see launchOrchestration's warning-and-continue path), even when the busy
 // indicator never appears and every attempt comes back unconfirmed.
 //
-// send itself sleeps a little on every call, standing in for
-// NudgeSession/submitEnterAndConfirm's real busy-indicator polling, which is
-// the dominant cost of an unconfirmed attempt in production — not the
-// backoff between attempts. A budget that only bounded the sum of the
+// send itself advances the fake clock a little on every call, standing in
+// for NudgeSession/submitEnterAndConfirm's real busy-indicator polling,
+// which is the dominant cost of an unconfirmed attempt in production — not
+// the backoff between attempts. A budget that only bounded the sum of the
 // backoffs (ignoring how long each send call actually took) would let a
 // handful of slow, always-unconfirmed sends alone blow through the ctx
-// deadline; this proves wall-clock time is what's actually bounded.
+// deadline; this proves wall-clock time (as sendStartupNudgeWithRetry
+// observes it through startupNudgeNow) is what's actually bounded. The
+// clock is faked rather than really slept: the resourcecensus fixed_sleep
+// ratchet forbids new untagged time.Sleep call sites, and the fake makes
+// the bound deterministic instead of scheduler-dependent.
 func TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline(t *testing.T) {
 	origBackoffs := startupNudgeRetryBackoffs
 	const perSendCost = 30 * time.Millisecond
 	startupNudgeRetryBackoffs = []time.Duration{perSendCost, perSendCost, perSendCost, perSendCost}
 	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
 
-	// Deliberately short so the test runs fast: the ladder's own worst case
-	// (4 sends + 4 backoffs, each perSendCost) is well over budget for this
-	// deadline, so the bound must cut retries short.
+	// Fake clock, anchored at the real present so the ctx deadline below
+	// still lies in its future. Every fake send/sleep advances it.
+	start := time.Now()
+	now := start
+	origNow := startupNudgeNow
+	startupNudgeNow = func() time.Time { return now }
+	defer func() { startupNudgeNow = origNow }()
+
+	// Deliberately short so the ladder's own worst case (4 sends + 4
+	// backoffs, each perSendCost) is well over budget for this deadline, so
+	// the bound must cut retries short. The real ctx timer never fires —
+	// nothing here really sleeps — only its deadline value matters.
 	const ctxTimeout = 80 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(ctxTimeout))
 	defer cancel()
 
 	calls := 0
 	send := func() error {
 		calls++
-		time.Sleep(perSendCost) // stand-in for submitEnterAndConfirm's real polling cost
+		now = now.Add(perSendCost) // stand-in for submitEnterAndConfirm's real polling cost
 		return ErrNudgeSubmitUnconfirmed
 	}
 	var sleeps []time.Duration
-	start := time.Now()
 	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) {
 		sleeps = append(sleeps, d)
-		time.Sleep(d)
+		now = now.Add(d)
 	})
-	elapsed := time.Since(start)
+	elapsed := now.Sub(start)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
 	}
