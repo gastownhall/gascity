@@ -418,6 +418,13 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		if errors.Is(err, context.Canceled) {
 			return NudgeResult{Delivered: false}, err
 		}
+		if errors.Is(err, runtime.ErrInteractionUnsupported) {
+			// The waiter itself cannot do idle-waits on this runtime: that is the
+			// permanent provider property, not a busy session — a caller must not
+			// read it as "delivered at the next boundary" (there is no boundary
+			// channel to deliver on).
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return NudgeResult{Delivered: false}, ctxErr
