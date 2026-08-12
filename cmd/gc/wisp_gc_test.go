@@ -110,6 +110,57 @@ func TestWispGC_NothingExpired(t *testing.T) {
 	}
 }
 
+func TestWispGCClosesGeneratedMembersOnlyForTerminalRoots(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("completed-root", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.outcome":          "pass",
+		}),
+		makeGCBeadWithMetadata("completed-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "completed-root",
+		}),
+		makeGCBeadWithMetadata("superseded-root", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.outcome":          "canceled",
+		}),
+		makeGCBeadWithMetadata("partial-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "superseded-root",
+		}),
+		makeGCBeadWithMetadata("live-root", now.Add(-30*time.Minute), "in_progress", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("live-step", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.root_bead_id": "live-root",
+		}),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+
+	for _, id := range []string{"completed-step", "partial-step"} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" || got.Metadata["gc.outcome"] != "skipped" {
+			t.Fatalf("%s = status %q outcome %q, want closed/skipped", id, got.Status, got.Metadata["gc.outcome"])
+		}
+	}
+	live, err := store.Get("live-step")
+	if err != nil {
+		t.Fatalf("Get(live-step): %v", err)
+	}
+	if live.Status != "open" {
+		t.Fatalf("live-step status = %q, want open", live.Status)
+	}
+}
+
 func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{

@@ -118,7 +118,7 @@ func TestDispatchAllQueuedNudgesNoOpInLegacyMode(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	cfg := &config.City{Daemon: config.DaemonConfig{}} // legacy default
-	delivered, err := dispatchAllQueuedNudges(dir, cfg, nil, nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, cfg, nil, nil, nil, newSessionBeadSnapshot(nil), nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestDispatchAllQueuedNudgesEmptyQueue(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	dir := t.TempDir()
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, nil, newSessionBeadSnapshot(nil), nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
 		},
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
 
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, fake, snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, fake, snapshot, nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{created})
 
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, store, fake, snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, store, fake, snapshot, nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
@@ -360,12 +360,99 @@ func TestDispatchAllQueuedNudgesSkipsACPSessionWhenNotRunning(t *testing.T) {
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
 	// Fake has no started session, so IsRunning("worker-session") is false.
-	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot)
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
 	if delivered != 0 {
 		t.Fatalf("delivered = %d, want 0 (stopped ACP session must not receive delivery)", delivered)
+	}
+}
+
+// TestDispatchAllQueuedNudgesRecordsSkipReasons guards ra-oudpha's
+// observability fix: before this change, every continue in the per-session
+// loop was silent — dispatchAllQueuedNudges returned (0, nil) whether the
+// queue was empty, nothing matched, or a matched-and-live target's observe
+// call reported not-running, with no way to tell these apart after the
+// fact. The "matched but obs.Running is false" case is exactly finding-3's
+// still-unidentified live-session gate shape (core.control-dispatcher: a
+// live session repeatedly zero-stamped). This test drives that path and
+// asserts the skip is now (a) logged via the GC_DEBUG route-audit
+// convention and (b) counted in the persisted queue state, where `gc
+// nudge status --json` can read it back for any agent.
+func TestDispatchAllQueuedNudgesRecordsSkipReasons(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_DEBUG", "1")
+
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	bead := beads.Bead{
+		ID:     "worker-session",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"transport":    "acp",
+		},
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
+	var debugOut strings.Builder
+	// Fake has no started session, so IsRunning("worker-session") is false —
+	// the target is matched (queue has a pending "worker" item) but obs.Running
+	// comes back false, hitting the "not-running" skip.
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, &debugOut)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0", delivered)
+	}
+	if !strings.Contains(debugOut.String(), "route=skip reason=not-running") {
+		t.Fatalf("debug output missing not-running skip line, got: %q", debugOut.String())
+	}
+	if !strings.Contains(debugOut.String(), "agent=worker") {
+		t.Fatalf("debug output missing agent=worker, got: %q", debugOut.String())
+	}
+
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := state.DispatchSkips["not-running"]; got != 1 {
+		t.Fatalf("DispatchSkips[not-running] = %d, want 1 (full map: %#v)", got, state.DispatchSkips)
+	}
+
+	// The routine skip: a fresh city whose queue holds a pending item for one
+	// agent while the only open session belongs to another. The loop reaches
+	// the target but nothing in the queue names it, so it falls through the
+	// matched check. A separate city dir keeps the cumulative counters above
+	// from bleeding into this assertion.
+	otherDir := t.TempDir()
+	if err := enqueueQueuedNudge(otherDir, newQueuedNudge("other-worker", "msg", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	var unmatchedOut strings.Builder
+	delivered, err = dispatchAllQueuedNudges(otherDir, supervisorCfg(), nil, nil, runtime.NewFake(), snapshot, &unmatchedOut)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges (not-matched): %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0", delivered)
+	}
+	if !strings.Contains(unmatchedOut.String(), "route=skip reason=not-matched") {
+		t.Fatalf("debug output missing not-matched skip line, got: %q", unmatchedOut.String())
+	}
+
+	otherState, err := nudgequeue.LoadState(otherDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := otherState.DispatchSkips["not-matched"]; got != 1 {
+		t.Fatalf("DispatchSkips[not-matched] = %d, want 1 (full map: %#v)", got, otherState.DispatchSkips)
 	}
 }
 
@@ -389,7 +476,7 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
-	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, nil, newSessionBeadSnapshot(nil))
+	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, nil, newSessionBeadSnapshot(nil), nil)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}

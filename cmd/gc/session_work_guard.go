@@ -90,6 +90,14 @@ func closeSessionInfoIfUnassigned(
 // (which already funnels its writes through sessionFrontDoor AND runs the
 // extmsg/orphaned-work release cascade Store.Close does not — so the close stays
 // on closeBead, not Store.Close, to preserve that behavior).
+//
+// excludeOwnDrainStep selects the drain-ack close-gate form of the
+// assigned-work probe (sessionHasOpenAssignedWorkForReachableStoreForCloseGate),
+// which excludes the session's own mol-do-work "drain" step so a session that
+// has already signaled completion is not judged to still have work.
+// Pass true ONLY from the drain-ack finalize path; every
+// other caller (failed-create close, generic idle/config-drift close) passes
+// false to keep its existing behavior unchanged.
 func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
@@ -99,11 +107,16 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	reason string,
 	now time.Time,
 	stderr io.Writer,
+	excludeOwnDrainStep bool,
 ) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+	assignedWorkProbe := sessionHasOpenAssignedWorkForReachableStore
+	if excludeOwnDrainStep {
+		assignedWorkProbe = sessionHasOpenAssignedWorkForReachableStoreForCloseGate
+	}
+	hasAssignedWork, err := assignedWorkProbe(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false

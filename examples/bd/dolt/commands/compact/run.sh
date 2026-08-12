@@ -14,6 +14,9 @@
 # Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
+#   0. Version a dirty dolt_ignore in its own commit, so the flatten's -Am
+#      cannot first-commit it (gc's read-only health probe registers its probe
+#      table there and leaves the row uncommitted).
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
 #   2. Soft-reset to the root commit; all data stays staged.
@@ -42,6 +45,11 @@
 #      flatten's own commit (a writer landed during/after verify). All other
 #      failures — and gain+drift or row-decrease with a stable HEAD — still
 #      quarantine. Probe failure leaves the race unproven and quarantines.
+#   4b. Committed-root drift gate. When per-table verification passed but the
+#      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
+#      differ across the flatten. Drift is benign only when every named table
+#      is either already verified or a table the -Am first-committed whose
+#      content diff is added-only; anything else quarantines.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
@@ -728,10 +736,12 @@ user_tables() {
 # committed_tables — emit one table name per line for the tables present in
 # the committed root at <at_head>. Tables visible in information_schema but
 # absent from the committed root (dolt_ignore'd working-set-only tables such
-# as bd's wisp tier, or not-yet-committed new tables) cannot be staged or
-# touched by the flatten's soft-reset+commit, and churn freely under
-# concurrent writers — so flatten integrity verification must be scoped to
-# this set, not to all user tables.
+# as bd's wisp tier, or not-yet-committed new tables) churn freely under
+# concurrent writers, and the dolt_ignore'd ones cannot be staged by the
+# flatten's -Am at all — so flatten integrity verification must be scoped to
+# this set, not to all user tables. A non-ignored table absent from the
+# committed root IS first-committed by the -Am; it stays out of the per-table
+# checks, and db_root_drift_within_verified_tables accounts for it instead.
 committed_tables() {
   db="$1"
   at_head="$2"
@@ -765,6 +775,59 @@ dolt_ignore_patterns() {
   fi
   awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
   rm -f "$out_tmp" "$err_tmp"
+}
+
+# version_dirty_dolt_ignore — commit a dirty dolt_ignore before the flatten.
+# gc's read-only health probe registers its probe table in dolt_ignore, which
+# leaves an uncommitted dolt_ignore row on every database it touches. The
+# flatten's -Am commits a dirty dolt_ignore like any other tracked table, so
+# the committed root drifts on a table no per-table check covers and the run
+# hard-quarantines (the daa 2026-08-04 incident class, one table removed).
+# Versioning it in its own commit first keeps the flatten's diff confined to
+# tables the verification set knows about. Always returns 0: this is an
+# optimization pass and must never block the flatten. Callers must run it
+# before capturing the pre-flight HEAD, since the commit moves HEAD.
+version_dirty_dolt_ignore() {
+  db="$1"
+  ignore_dirty=$(query_single_cell "$db" "dolt_ignore status probe failed" \
+    "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dolt_ignore'" || true)
+  # A failed or non-numeric probe fails safe but not free: dolt_ignore is
+  # outside user_tables, so one left dirty for the -Am to first-commit lands in
+  # the drift proof's "outside verified set" branch — quarantine, not defer.
+  case "$ignore_dirty" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$ignore_dirty" -gt 0 ] || return 0
+  ignore_err_tmp=$(mktemp)
+  ignore_rc=0
+  dolt_query "$db" "CALL DOLT_ADD('dolt_ignore')" >/dev/null 2>"$ignore_err_tmp" || ignore_rc=$?
+  if [ "$ignore_rc" -ne 0 ]; then
+    printf 'compact: db=%s WARN: staging dirty dolt_ignore failed rc=%s — flattening anyway\n' \
+      "$db" "$ignore_rc" >&2
+    emit_error_file "$db" "$ignore_err_tmp"
+    rm -f "$ignore_err_tmp"
+    return 0
+  fi
+  rm -f "$ignore_err_tmp"
+  # DOLT_COMMIT fails with "nothing to commit" when the add staged nothing, so
+  # confirm the staged row before issuing the targeted commit.
+  ignore_staged=$(query_single_cell "$db" "dolt_ignore staged status probe failed" \
+    "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dolt_ignore' AND staged = 1" || true)
+  [ "$ignore_staged" = "1" ] || return 0
+  ignore_err_tmp=$(mktemp)
+  ignore_rc=0
+  dolt_query "$db" "CALL DOLT_COMMIT('-m', 'compaction: version dolt_ignore')" \
+    >/dev/null 2>"$ignore_err_tmp" || ignore_rc=$?
+  if [ "$ignore_rc" -ne 0 ]; then
+    printf 'compact: db=%s WARN: committing dirty dolt_ignore failed rc=%s — flattening anyway\n' \
+      "$db" "$ignore_rc" >&2
+    emit_error_file "$db" "$ignore_err_tmp"
+    rm -f "$ignore_err_tmp"
+    return 0
+  fi
+  rm -f "$ignore_err_tmp"
+  printf 'compact: db=%s versioned dirty dolt_ignore before flatten\n' "$db"
+  return 0
 }
 
 # row_count — COUNT(*) for one table. Returns "" on error.
@@ -918,10 +981,13 @@ push_remote_refspec() {
 # tables present in the committed root at <at_head>. Two categories are excluded:
 #
 # 1. Tables absent from the committed root (dolt_ignore'd working-set-only tables,
-#    not-yet-committed new tables): the flatten's soft-reset+commit cannot stage or
-#    touch them, their concurrent churn is indistinguishable from the gain+drift
-#    corruption signal, and the Option A DOLT_DIFF preservation probe structurally
-#    fails on a table that exists in no commit — a guaranteed false quarantine.
+#    not-yet-committed new tables): their concurrent churn is indistinguishable
+#    from the gain+drift corruption signal, and the Option A DOLT_DIFF
+#    preservation probe structurally fails on a table that exists in no commit —
+#    a guaranteed false quarantine. The flatten cannot stage a dolt_ignore'd
+#    table at all; a non-ignored one it DOES first-commit, which is why the
+#    committed-root drift proof re-admits this category with an added-only
+#    content diff (db_root_drift_within_verified_tables).
 #
 # 2. Tables present in the committed root that are dolt_ignore'd (#3541): a
 #    force-healed store (dolt#11131) can inline a dolt_ignore'd table into HEAD
@@ -1202,33 +1268,88 @@ verify_counts() {
 # table (e.g. a writer's cursor cell) move the committed root across the
 # flatten with no HEAD movement — indistinguishable from corruption by the
 # aggregate hash alone. DOLT_DIFF_STAT between the pre-flight head and the
-# flatten head names exactly which tables differ; if every one is in the
-# verified set, their current values are already proven equal to the
-# pre-flight snapshot and the drift is absorbed working-set state. Any table
-# outside the verified set (system tables such as dolt_schemas), an empty
-# diff, or a probe failure fails closed.
+# flatten head names exactly which tables differ; each one must be proven
+# benign in one of two ways:
+#
+# 1. Verified: present in the pre-flight file, so its current value is already
+#    proven equal to the pre-flight snapshot and the drift is absorbed
+#    working-set state.
+# 2. Preflight-excluded (preflight_excluded_tables), which holds both of the
+#    categories preflight_counts drops: a table absent from the committed root
+#    at the pre-flight head, which the -Am first-commits when it is not
+#    dolt_ignore'd (gc's own __gc_read_only_probe is exactly this shape); and a
+#    dolt_ignore'd table a force-healed store inlined into the committed root
+#    (#3541, dolt#11131). For both the load-bearing preservation proof is the
+#    added-only content diff: nothing committed at <from> was deleted or
+#    rewritten, so a first commit only introduced rows, and an
+#    already-committed table keeps every row it held at <from> intact at <to>.
+#
+# Any other table (system tables such as dolt_schemas), a first-committed
+# table whose diff is not added-only or whose diff probe fails, an empty
+# DOLT_DIFF_STAT, or a DIFF_STAT probe failure fails closed. Exports the full
+# drift-table list in db_root_drift_stat_tables for the quarantine marker.
 db_root_drift_within_verified_tables() {
   db="$1"
   from="$2"
   to="$3"
   preflight_file="$4"
+  db_root_drift_proven_tables=""
+  db_root_drift_first_committed_tables=""
+  db_root_drift_stat_tables=""
   [ -n "$from" ] && [ -n "$to" ] || return 1
   stat_tmp=$(mktemp)
+  stat_err_tmp=$(mktemp)
   if ! dolt_query "$db" \
     "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
-    > "$stat_tmp" 2>/dev/null; then
-    rm -f "$stat_tmp"
+    > "$stat_tmp" 2>"$stat_err_tmp"; then
+    printf 'compact: db=%s committed-root drift probe (DOLT_DIFF_STAT %s..%s) failed\n' \
+      "$db" "$from" "$to" >&2
+    emit_error_file "$db" "$stat_err_tmp"
+    rm -f "$stat_tmp" "$stat_err_tmp"
     return 1
   fi
+  rm -f "$stat_err_tmp"
   drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
   rm -f "$stat_tmp"
-  [ -n "$drift_tables" ] || return 1
+  if [ -z "$drift_tables" ]; then
+    printf 'compact: db=%s committed-root drift probe returned empty DOLT_DIFF_STAT(%s..%s) — quarantine\n' \
+      "$db" "$from" "$to" >&2
+    return 1
+  fi
+  drift_verified_tables=""
+  drift_first_committed_tables=""
+  drift_unproven_tables=""
   for drift_t in $drift_tables; do
-    if ! awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
-      return 1
+    db_root_drift_stat_tables="$db_root_drift_stat_tables $drift_t"
+    if ! valid_table_name "$drift_t"; then
+      drift_unproven_tables="$drift_unproven_tables $drift_t (invalid name)"
+      continue
     fi
+    if awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+      drift_verified_tables="$drift_verified_tables $drift_t"
+      continue
+    fi
+    case " $preflight_excluded_tables " in
+      *" $drift_t "*)
+        if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
+          drift_first_committed_tables="$drift_first_committed_tables $drift_t"
+        else
+          drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
+        fi
+        ;;
+      *)
+        drift_unproven_tables="$drift_unproven_tables $drift_t (outside verified set)"
+        ;;
+    esac
   done
-  db_root_drift_proven_tables="$drift_tables"
+  db_root_drift_stat_tables=${db_root_drift_stat_tables# }
+  if [ -n "$drift_unproven_tables" ]; then
+    printf 'compact: db=%s committed-root drift includes unproven table(s):%s — quarantine\n' \
+      "$db" "$drift_unproven_tables" >&2
+    return 1
+  fi
+  db_root_drift_proven_tables=${drift_verified_tables# }
+  db_root_drift_first_committed_tables=${drift_first_committed_tables# }
   return 0
 }
 
@@ -2190,6 +2311,13 @@ flatten_database() {
     return 0
   fi
 
+  # Runs before the root/HEAD probes below because it may commit, and every
+  # commit hash this run relies on must be captured after it. Skipped under
+  # dry-run, which mutates nothing.
+  if [ -z "$dry_run" ]; then
+    version_dirty_dolt_ignore "$db"
+  fi
+
   if ! root=$(root_commit "$db"); then
     return 1
   fi
@@ -2635,14 +2763,16 @@ flatten_database() {
       return 1
     else
       # Per-table verification passed, no row gain, no HEAD movement — the
-      # remaining benign explanation is standing uncommitted working-set
+      # remaining benign explanations are standing uncommitted working-set
       # state on a tracked table that the flatten's -Am committed (observed
-      # on a production hq: one dirty cursor cell in `config`). Prove it by
-      # confining the root diff to the verified table set; defer exactly as
-      # the proven writer-race paths do. Anything else stays quarantined.
+      # on a production hq: one dirty cursor cell in `config`) and tables the
+      # -Am first-committed because they were never in the committed root
+      # (gc's __gc_read_only_probe; daa 2026-08-04). Prove each drifted table
+      # belongs to one of those categories; defer exactly as the proven
+      # writer-race paths do. Anything else stays quarantined.
       if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
-        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "$head" "$flatten_head" >&2
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] and first-committed unversioned table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "$head" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -2655,7 +2785,8 @@ flatten_database() {
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_quarantine_marker "$db" "post-flatten value hash changed without row-count increase" \
-        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" || {
+        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" \
+        "db_root_drift_stat_tables=${db_root_drift_stat_tables:-unavailable}" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
         rm -f "$preflight_tmp"
         return 1

@@ -11,6 +11,7 @@ Environment:
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
+  GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
 USAGE
 }
 
@@ -62,12 +63,30 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
+# One per-package go test budget for the unit sweep and the cmd/gc shards. The
+# fan-out runs LOCAL_TEST_JOBS heavyweight test binaries at once, so a package's
+# wall time here is far above its runtime in isolation and Go's built-in 10m
+# default fires on aggregate load rather than on a real hang: six packages
+# panicked with "test timed out after 10m0s" while still working through their
+# test lists, which made this target unusable as the merge baseline (ga-9au).
+# The unit sweep and the cmd/gc shards contend for the same box, so they share
+# one number — two independently tuned budgets are what drifted apart before.
+# GO_TEST_TIMEOUT deliberately does not reach the integration jobs: it is not
+# in the per-job `env -i` allowlist below and is not prefixed onto their
+# jobspecs, so scripts/test-integration-shard keeps its own 30m default.
+# Adding it there would silently cut that budget from 30m to 20m.
+go_test_timeout="${GO_TEST_TIMEOUT:-20m}"
+
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
   echo "LOCAL_TEST_JOBS must be a positive integer" >&2
   exit 1
 fi
 if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
   echo "CMD_GC_PROCESS_TOTAL must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$go_test_timeout" =~ ^[0-9]+[smh]$ ]]; then
+  echo "GO_TEST_TIMEOUT must be a Go duration of the form <n>s, <n>m, or <n>h" >&2
   exit 1
 fi
 
@@ -90,9 +109,13 @@ add_fsys_compile_job() {
     'tmp=$(mktemp -d); trap '"'"'rm -rf "$tmp"'"'"' EXIT; GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys'
 }
 
+# The unit sweep runs with -count=1, mirroring the cmd/gc shards' GO_TEST_COUNT=1
+# so it is a real run rather than a cached-result stall, and shares the shards'
+# timeout budget. Package parallelism is bounded separately for every job by the
+# GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc\$')"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -119,7 +142,7 @@ add_cmd_gc_shards() {
   local tags="$3"
   local i command
   for i in $(seq 1 "$cmd_gc_total"); do
-    command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m"
+    command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=${go_test_timeout}"
     if [[ -n "$tags" ]]; then
       command+=" GO_TEST_TAGS=${tags}"
     fi

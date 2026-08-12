@@ -183,22 +183,35 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // `gc bd update --status=closed`) invocation closes against the work-record
 // contract. Best-effort: it never blocks on its own read failure. Returns
 // whether the close should be blocked (only when enforcement is enabled).
-func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, stderr io.Writer) bool {
+//
+// preOpened and preFetched let a caller that already opened the store and
+// fetched the target beads (e.g. the write-ID collision guard, which reads
+// the same beads for the same IDs immediately before this gate runs) hand
+// them in instead of paying a second openStoreAtForCity + store.Get round
+// trip. Both are optional (nil is fine): preOpened falls back to opening its
+// own store, and any ID missing from preFetched falls back to store.Get.
+func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) bool {
 	if _, ok := workRecordCloseTargets(bdArgs); !ok {
 		return false
 	}
-	store, err := openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
-	if err != nil {
-		// Cannot verify — never block a close on our own read failure.
-		return false
+	store := preOpened
+	if store == nil {
+		var err error
+		store, err = openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
+		if err != nil {
+			// Cannot verify — never block a close on our own read failure.
+			return false
+		}
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, scopeRoot, workRecordEnforceEnabled(), stderr)
+	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, workRecordEnforceEnabled(), stderr)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
 // from the IO wrapper so it is unit-testable with an in-memory store. It logs
-// each violation and reports whether the close should be blocked.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+// each violation and reports whether the close should be blocked. preFetched
+// (optional) supplies beads already read by an earlier guard in this same
+// invocation, avoiding a duplicate store.Get for the same ID.
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -208,8 +221,15 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 		mode = "enforced"
 	}
 	for _, id := range ids {
-		bead, getErr := store.Get(id)
-		if getErr != nil || !isWorkRecordGatedBead(bead) {
+		bead, cached := preFetched[id]
+		if !cached {
+			var getErr error
+			bead, getErr = store.Get(id)
+			if getErr != nil {
+				continue
+			}
+		}
+		if !isWorkRecordGatedBead(bead) {
 			continue
 		}
 		var projectionErr error

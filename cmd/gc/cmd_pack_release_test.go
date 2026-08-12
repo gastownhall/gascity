@@ -302,3 +302,24 @@ func TestRunPackReleaseNetworkGitInjectsCredentialHelper(t *testing.T) {
 		t.Fatalf("injected git argv missing credential.helper: %q", string(argv))
 	}
 }
+
+func TestResolveLocalPackReleaseSourceResolvesSymlinkedSource(t *testing.T) {
+	repo, _ := initPackReleaseRepo(t)
+
+	link := filepath.Join(t.TempDir(), "link-repo")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	repoDir, resolvedPackPath, err := resolveLocalPackReleaseSource(filepath.Join(link, "packs", "demo"), "")
+	if err != nil {
+		t.Fatalf("resolveLocalPackReleaseSource: %v", err)
+	}
+	wantRepoDir := normalizePathForCompare(repo)
+	if repoDir != wantRepoDir {
+		t.Fatalf("repoDir = %q, want %q (real repo root, not the %q symlink)", repoDir, wantRepoDir, link)
+	}
+	if resolvedPackPath != "packs/demo" {
+		t.Fatalf("resolvedPackPath = %q, want %q", resolvedPackPath, "packs/demo")
+	}
+}

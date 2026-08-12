@@ -437,7 +437,7 @@ func TestPendingCreateStartedAtNowSubstitutesCurrentTimeForZeroInput(t *testing.
 	}
 }
 
-func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
+func TestWakeReasons_DrainedConfigEligibility(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -447,19 +447,53 @@ func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
 		},
 	}
 
-	session := makeBead("b1", map[string]string{
-		"template":     "worker",
-		"session_name": "test-worker-1",
-		"pool_slot":    "1",
-		"state":        "asleep",
-		"sleep_reason": "drained",
-	})
+	tests := []struct {
+		name       string
+		metadata   map[string]string
+		wantConfig bool
+	}{
+		{
+			name: "always named session",
+			metadata: map[string]string{
+				"template":                  "worker",
+				"session_name":              "always-worker",
+				"configured_named_session":  "true",
+				"configured_named_identity": "always-worker",
+				"configured_named_mode":     "always",
+			},
+			wantConfig: true,
+		},
+		{
+			name: "on demand named session",
+			metadata: map[string]string{
+				"template":                  "worker",
+				"session_name":              "demand-worker",
+				"configured_named_session":  "true",
+				"configured_named_identity": "demand-worker",
+				"configured_named_mode":     "on_demand",
+			},
+		},
+		{
+			name: "pool slot",
+			metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "test-worker-1",
+				"pool_slot":    "1",
+			},
+		},
+	}
 
-	reasons := wakeReasonsForBead(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
-	for _, reason := range reasons {
-		if reason == WakeConfig {
-			t.Fatalf("drained sleep session should not get WakeConfig, got %v", reasons)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.metadata["state"] = "asleep"
+			tt.metadata["sleep_reason"] = "drained"
+			session := makeBead("b1", tt.metadata)
+
+			reasons := wakeReasonsForBead(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
+			if got := containsWakeReason(reasons, WakeConfig); got != tt.wantConfig {
+				t.Fatalf("WakeConfig present = %v, want %v; reasons = %v", got, tt.wantConfig, reasons)
+			}
+		})
 	}
 }
 
@@ -1102,11 +1136,10 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 // a city scope that resolves to an authoritative postgres backend with
 // no resolvable password makes controllerQueryRuntimeEnv return an error.
 func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified

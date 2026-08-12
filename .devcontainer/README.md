@@ -14,7 +14,7 @@ This devcontainer reproduces a development environment for [gastownhall/gascity]
 | `git` | devcontainer feature | latest |
 | `gh` | devcontainer feature | latest |
 | `dolt` | `.github/scripts/install-dolt-archive.sh` (SHA-256 verified) | `DOLT_VERSION` from `deps.env` (currently 2.1.7) |
-| `bd` (Beads CLI) | `.github/scripts/install-bd-archive.sh` (SHA-256 verified) | `BD_VERSION` from `deps.env` (currently v1.0.4) |
+| `bd` (Beads CLI) | `.github/scripts/install-bd-archive.sh` (SHA-256 verified) | `BD_VERSION` from `deps.env` (currently v1.1.0) |
 | `gc` (Gas City) | `make install` from source | built from current commit |
 
 Versions come from `deps.env` so bumping is one file change.

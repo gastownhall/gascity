@@ -352,6 +352,55 @@ func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
 	}
 }
 
+// TestResolveStoreByPrefixKeepsRigRouteResolution pins the non-class routing
+// behavior: a self-route ("ga" -> ".") resolves to the rig that owns the routes
+// file, and a cross-rig route ("gb" -> "../beta") resolves to the rig it points
+// at. Both must stay exactly as they are.
+func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
+		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	}
+	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
+		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	}
+}
+
+// TestResolveStoreByPrefixDoesNotCaptureForeignRoute pins that a rig route
+// resolving to a path which is NOT a registered rig no longer answers with that
+// rig's store. The route says the prefix lives elsewhere, so resolution falls
+// through to the by-id candidate scan — which still contains every store, so the
+// bead stays reachable instead of being pinned to the wrong one.
+func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	cityStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	routes := `{"prefix":"ga","path":"."}` + "\n" +
+		`{"prefix":"gb","path":"../beta"}` + "\n" +
+		`{"prefix":"gz","path":"../../elsewhere"}`
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("gz"); got != nil {
+		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	}
+	got := s.beadStoresForID("gz-1")
+	want := []beads.Store{cityStore, alphaStore, betaStore}
+	if len(got) != len(want) {
+		t.Fatalf("beadStoresForID(gz-1) = %v (len %d), want the full candidate scan %v", got, len(got), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("beadStoresForID(gz-1)[%d] = %p, want %p", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	created, err := rigStore.Create(beads.Bead{Title: "close me"})
@@ -669,6 +718,10 @@ func TestBeadListFiltering(t *testing.T) {
 func TestBeadListCrossRig(t *testing.T) {
 	state := newFakeState(t)
 	store2 := beads.NewMemStore()
+	// Two rigs mint under different prefixes (config.Rig.EffectivePrefix); two
+	// MemStores left on the default prefix would both mint "gc-1", i.e. one bead
+	// co-resident in two legs rather than two beads.
+	store2.IDPrefix = "r2"
 	state.stores["rig2"] = store2
 
 	state.stores["myrig"].Create(beads.Bead{Title: "Bead from rig1"}) //nolint:errcheck
@@ -1754,8 +1807,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 		t.Fatalf("assign alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 
 	listReq := httptest.NewRequest("GET", cityURL(state, "/beads?assignee=worker"), nil)
@@ -1775,16 +1828,28 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 	}
 }
 
-func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
+// TestPhase2BeadListAssigneeAliasServesEveryRigsBeads pins that resolving an
+// assignee alias into several identity terms does not cost a rig its rows: every
+// bead assigned to the session, in every rig, is in the response exactly once.
+//
+// The rigs mint under different prefixes because that is the only shape a
+// running city can have — config.ValidateRigs rejects a colliding rig prefix on
+// every start, reload and config-edit path, so two rigs cannot mint the same id.
+// (Its ancestor left both MemStores on the default prefix, which made "two beads"
+// and "one bead resident in two legs" the same fixture; the fan-out reads bead
+// ids as identity, the way GET /v0/beads/ready and every by-id endpoint do.)
+func TestPhase2BeadListAssigneeAliasServesEveryRigsBeads(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.stores["otherrig"] = beads.NewMemStore()
-	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig"})
+	otherStore := beads.NewMemStore()
+	otherStore.IDPrefix = "or"
+	state.stores["otherrig"] = otherStore
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "or"})
 	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
 	workA, _ := state.stores["myrig"].Create(beads.Bead{Title: "Task A", Assignee: sessionBead.ID})
-	workB, _ := state.stores["otherrig"].Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
-	if workA.ID != workB.ID {
-		t.Fatalf("test setup expected duplicate local IDs, got %q and %q", workA.ID, workB.ID)
+	workB, _ := otherStore.Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
+	if workA.ID == workB.ID {
+		t.Fatalf("test setup expected distinct per-rig IDs, got %q twice", workA.ID)
 	}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
@@ -1805,6 +1870,17 @@ func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
 	}
 	if listed.Total != 2 || len(listed.Items) != 2 {
 		t.Fatalf("list by alias total/items = %d/%d, want 2/2: %#v", listed.Total, len(listed.Items), listed.Items)
+	}
+	for _, want := range []string{workA.ID, workB.ID} {
+		found := false
+		for _, b := range listed.Items {
+			if b.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("alias fan-out dropped %q: %#v", want, listed.Items)
+		}
 	}
 }
 
@@ -1865,8 +1941,8 @@ func TestPhase2BeadAssignNormalizesCurrentSessionName(t *testing.T) {
 		t.Fatalf("assign session_name status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want session_name preserved as %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want session_name normalized to canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2000,8 +2076,8 @@ func TestPhase2BeadAssignAcceptsRepairableSessionBeadID(t *testing.T) {
 		t.Fatalf("assign repairable session status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want repairable session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want repairable session alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 	gotSession, _ := state.cityBeadStore.Get(sessionBead.ID)
 	if gotSession.Type != session.BeadType {
@@ -2027,8 +2103,8 @@ func TestPhase2BeadUpdateNormalizesRawAssigneeAlias(t *testing.T) {
 		t.Fatalf("update alias status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	got, _ := store.Get(work.ID)
-	if got.Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("assignee = %q, want alias normalized to session_name %q", got.Assignee, sessionBead.Metadata["session_name"])
+	if got.Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("assignee = %q, want canonical alias %q", got.Assignee, sessionBead.Metadata["alias"])
 	}
 }
 
@@ -2053,8 +2129,8 @@ func TestPhase2BeadCreateNormalizesRawAssigneeAlias(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("created %d beads, want 1", len(items))
 	}
-	if items[0].Assignee != sessionBead.Metadata["session_name"] {
-		t.Fatalf("created assignee = %q, want alias normalized to session_name %q", items[0].Assignee, sessionBead.Metadata["session_name"])
+	if items[0].Assignee != sessionBead.Metadata["alias"] {
+		t.Fatalf("created assignee = %q, want canonical alias %q", items[0].Assignee, sessionBead.Metadata["alias"])
 	}
 }
 

@@ -272,7 +272,7 @@ func TestAgentEffectivelySuspendedDirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent with Suspended=true should be effectively suspended")
 	}
 }
@@ -283,8 +283,31 @@ func TestAgentEffectivelySuspendedViaRig(t *testing.T) {
 		Agents:    []config.Agent{{Name: "polecat", Dir: "myrig"}},
 		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in rig with suspended_on_start=true should be effectively suspended")
+	}
+}
+
+// TestAgentEffectivelySuspendedViaRigDirPath verifies that an agent whose Dir
+// is a filesystem path pointing at the rig root — rather than the literal rig
+// name — is still recognized as rig-suspended. Third-party-pack agents bound
+// into a rig through a dir override carry a path-form Dir, so name-only rig
+// matching missed them: a suspended rig kept waking them even though the
+// desired-state build (which resolves the rig path-aware, via agentInSuspendedRig)
+// had already dropped them, producing the start/drain wake loop. The awake-set
+// gate must resolve the rig the same path-aware way the desired-state build does.
+func TestAgentEffectivelySuspendedViaRigDirPath(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:        "cashtuner",
+			BindingName: "qa-wonks",
+			Dir:         "/tmp/myrig", // the rig PATH, not the rig NAME
+		}},
+		Rigs: []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
+	}
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
+		t.Error("agent whose Dir is the suspended rig's path should be effectively suspended")
 	}
 }
 
@@ -293,7 +316,7 @@ func TestAgentEffectivelySuspendedViaCity(t *testing.T) {
 		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in city with suspended_on_start=true should be effectively suspended")
 	}
 }
@@ -303,7 +326,7 @@ func TestAgentEffectivelySuspendedNot(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("non-suspended agent should not be effectively suspended")
 	}
 }
@@ -324,7 +347,7 @@ func TestSuspendInheritance(t *testing.T) {
 	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if !isAgentEffectivelySuspendedWith(cfg, a, suspensionstate.State{}) {
+		if !isAgentEffectivelySuspendedWith(cfg, "", a, suspensionstate.State{}) {
 			t.Errorf("agent %q should be suspended when city has suspended_on_start=true", a.QualifiedName())
 		}
 	}

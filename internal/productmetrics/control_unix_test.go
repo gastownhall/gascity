@@ -1301,6 +1301,90 @@ func TestDisableAndPurgeFilesystemFailureKeepsExactOwnerForRetry(t *testing.T) {
 	requireCleanDisabledTree(t, home)
 }
 
+// A peer that re-persists the byte-identical owner record between the disable
+// write's rename and the authority-minting read-back must surface as a
+// conflict, not be silently adopted as this process's own record. Before
+// authority was bound to the installed incarnation, this window let two
+// holders revalidate successfully against the same inode — the exact hole the
+// same-numeric-ABA case guards at revalidation time, one step earlier.
+func TestDisableAndPurgeDetectsByteIdenticalRecordSwapAtAuthorityMint(t *testing.T) {
+	home, service, _ := newRecordServiceFixture(t, testEventIDThree)
+	configPath := filepath.Join(home.Root(), configFileName)
+	var swapped atomic.Bool
+	var swapErr error
+	service.deps.storageHooks.afterAtomicWrite = func(path string, outcome storageWriteState) {
+		if path != configPath || outcome != storageWriteAppliedDurable || swapped.Load() {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		state, err := decodePersistedState(data)
+		if err != nil || state.Preference != preferenceDisabled || state.CleanupKind != cleanupDisable {
+			return
+		}
+		swapped.Store(true)
+		temp := path + ".aba-swap"
+		if err := os.WriteFile(temp, data, 0o600); err != nil {
+			swapErr = err
+			return
+		}
+		swapErr = os.Rename(temp, path)
+	}
+	_, err := service.DisableAndPurge(context.Background())
+	if swapErr != nil || !swapped.Load() {
+		t.Fatalf("byte-identical swap: performed=%v err=%v", swapped.Load(), swapErr)
+	}
+	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
+}
+
+// The different-bytes variant of the mint-window race: a peer installing a
+// MUTATED record between the disable write's rename and the read-back must
+// classify as a concurrent state change, not as a generic disable-write
+// failure. This is the interleaving TestDisableAndPurgeRejectsUnprovenPeerSuccessor
+// hits nondeterministically when its unlocked successor write lands before
+// authority is minted.
+func TestDisableAndPurgeClassifiesMutatedRecordSwapAtAuthorityMint(t *testing.T) {
+	home, service, _ := newRecordServiceFixture(t, testEventIDThree)
+	configPath := filepath.Join(home.Root(), configFileName)
+	var swapped atomic.Bool
+	var swapErr error
+	service.deps.storageHooks.afterAtomicWrite = func(path string, outcome storageWriteState) {
+		if path != configPath || outcome != storageWriteAppliedDurable || swapped.Load() {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		state, err := decodePersistedState(data)
+		if err != nil || state.Preference != preferenceDisabled || state.CleanupKind != cleanupDisable {
+			return
+		}
+		swapped.Store(true)
+		state.RequiredNoticeVersion++
+		mutated, err := encodePersistedState(state)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		temp := path + ".mutated-swap"
+		if err := os.WriteFile(temp, mutated, 0o600); err != nil {
+			swapErr = err
+			return
+		}
+		swapErr = os.Rename(temp, path)
+	}
+	_, err := service.DisableAndPurge(context.Background())
+	if swapErr != nil || !swapped.Load() {
+		t.Fatalf("mutated swap: performed=%v err=%v", swapped.Load(), swapErr)
+	}
+	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
+}
+
 func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -1338,7 +1422,9 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service.deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+			// Peer setup under the barrier can stretch under make test -p=N CPU
+			// contention; keep the quiescence budget above GoroutineRaceTimeout.
+			service.deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			call := startDisableAndPurge(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
@@ -1655,12 +1741,14 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 				return nil
 			}
 			deps.storageHooks.beforeStep = func(step storageStep) error {
+				// directorySync also runs during beginDisable; only inject once armed
+				// after the peer successor is written (do not wait — would deadlock).
 				if armed.Load() && test.failSync && step == storageStepDirectorySync {
 					return injected
 				}
 				return nil
 			}
-			deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
 			call := startDisableAndPurge(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
@@ -1708,16 +1796,27 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		t.Fatal(err)
 	}
 
-	var armed, replaced atomic.Bool
+	var replaced atomic.Bool
+	armed := make(chan struct{})
 	var replacement persistedState
 	var replacementData []byte
 	var replaceErr error
 	replacementTemp := filepath.Join(home.Root(), ".peer-successor-replacement")
 	configPath := filepath.Join(home.Root(), configFileName)
 	deps := defaultTestServiceDependencies(home, 2)
-	deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+	// Peer encoding + barrier hold can stretch under make test -p=N load.
+	deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 	deps.storageHooks.beforeStep = func(step storageStep) error {
-		if step != storageStepEnumerate || !armed.Load() || !replaced.CompareAndSwap(false, true) {
+		if step != storageStepEnumerate {
+			return nil
+		}
+		// beginDisable does not enumerate; the first enumerate is the clean-tree
+		// proof after the uploader lock. Wait for the test to arm so we never
+		// race past the injection point before replacementData is ready (#4653).
+		if !waitForTestArm(armed) {
+			return nil
+		}
+		if !replaced.CompareAndSwap(false, true) {
 			return nil
 		}
 		if err := os.WriteFile(replacementTemp, replacementData, 0o600); err != nil {
@@ -1740,7 +1839,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	armed.Store(true)
+	close(armed)
 	if err := barrier.Release(); err != nil {
 		t.Fatal(err)
 	}
@@ -2183,6 +2282,19 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 		result <- purgeCallResult{result: purge, err: err}
 	}()
 	return result
+}
+
+// waitForTestArm blocks until armed is closed, or until GoroutineRaceTimeout, so a
+// storage hook cannot inject before the test arms it under -p=N CPU starvation.
+func waitForTestArm(armed <-chan struct{}) bool {
+	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	defer timer.Stop()
+	select {
+	case <-armed:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func receivePurgeCall(t *testing.T, call <-chan purgeCallResult) purgeCallResult {

@@ -57,6 +57,8 @@ type Options struct {
 	// DeferAssignees creates assignable beads without an assignee and stores
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
+
+	nativeStepTopologyPrepared bool
 }
 
 const (
@@ -102,6 +104,8 @@ type FragmentOptions struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, the existing workflow root's priority is inherited.
 	PriorityOverride *int
+
+	nativeStepTopologyPrepared bool
 }
 
 // ExternalDep binds a fragment step to an already-existing bead.
@@ -246,10 +250,11 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
 	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
 	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong
-	// root>) and burned ralph attempts (maintainer-city incident,
-	// gcg-wisp-y785sz). A genuine top-level head with no run chain still
-	// self-roots via its own id (ResolveRunID's selfID fallback).
+	// reconciliation then enumerated siblings via
+	// beads.DirectMembers(<wrong root>) and burned ralph attempts
+	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
+	// with no run chain still self-roots via its own id (ResolveRunID's
+	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
@@ -328,12 +333,15 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		recipe.Steps[0].Metadata[beadmeta.AttachFencePendingMetadataKey] = "true"
 	}
 
+	recipe = recipeWithNativeStepDependencies(recipe)
+	preserveAttachedNativeStepTopology(parentBead, recipe)
 	result, err := Instantiate(ctx, store, recipe, Options{
-		Title:            opts.Title,
-		Vars:             opts.Vars,
-		PriorityOverride: clonePriority(parentBead.Priority),
-		PreserveRootType: true,
-		DeferAssignees:   fencedDeferred,
+		Title:                      opts.Title,
+		Vars:                       opts.Vars,
+		PriorityOverride:           clonePriority(parentBead.Priority),
+		PreserveRootType:           true,
+		DeferAssignees:             fencedDeferred,
+		nativeStepTopologyPrepared: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -759,6 +767,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
+	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
@@ -1060,6 +1072,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
+	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+		return nil, err
+	}
+	opts.nativeStepTopologyPrepared = true
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
 		root, err := store.Get(opts.RootID)

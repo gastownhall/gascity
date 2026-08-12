@@ -204,3 +204,64 @@ func TestWorkRecordCloseGateReusesTheLoadedCityConfig(t *testing.T) {
 		t.Fatalf("found %d config-carrying store open(s) in runWorkRecordCloseGate, want exactly 1", opens)
 	}
 }
+
+// The write-ID collision guard reads every bead a mutating `gc bd` invocation
+// targets, and the work-record close gate then reads that same set again for
+// the same IDs — so `gc bd close` opened the store twice and paid for the same
+// store.Get twice. runWorkRecordCloseGate accepts the guard's store and beads
+// to skip the second round trip, but accepting them only dedupes if doBd
+// actually hands them over: a refactor that drops the arguments back to nil
+// would restore the double read with the whole suite still green.
+func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
+	const (
+		callee        = "runWorkRecordCloseGate"
+		wantStoreArg  = "guardStore"
+		wantBeadsArg  = "guardBeads"
+		storeArgIndex = 4
+		beadsArgIndex = 5
+	)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cmd_bd.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing cmd_bd.go: %v", err)
+	}
+
+	fn := findFuncDecl(file, "doBd")
+	if fn == nil {
+		t.Fatal("doBd not found in cmd_bd.go")
+	}
+
+	var calls int
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || ident.Name != callee {
+			return true
+		}
+		calls++
+		if len(call.Args) != 7 {
+			t.Fatalf("%s: got %d args, want 7", callee, len(call.Args))
+		}
+		for _, want := range []struct {
+			index int
+			name  string
+		}{
+			{storeArgIndex, wantStoreArg},
+			{beadsArgIndex, wantBeadsArg},
+		} {
+			arg, ok := call.Args[want.index].(*ast.Ident)
+			if !ok || arg.Name != want.name {
+				t.Fatalf("doBd passes %s as %s arg %d; want the write-ID guard's %q, so the gate reuses the read it already paid for",
+					exprText(call.Args[want.index]), callee, want.index, want.name)
+			}
+		}
+		return true
+	})
+	if calls != 1 {
+		t.Fatalf("found %d %s call(s) in doBd, want exactly 1", calls, callee)
+	}
+}

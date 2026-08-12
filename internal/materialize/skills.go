@@ -49,6 +49,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // vendorSinks maps an agent provider to the relative directory under the
@@ -934,52 +935,19 @@ func targetUnderOwnedRoot(target string, ownedRoots []string) bool {
 	return false
 }
 
-// canonicalizePath returns a path with all leading symlinks resolved
-// (via filepath.EvalSymlinks). When the path itself does not exist
-// (e.g., a dangling symlink target or a not-yet-created sink entry),
-// the function walks up to find the deepest ancestor that does exist,
-// canonicalizes that, and re-appends the missing tail. This handles
-// platforms where common roots are symlinks (macOS /tmp →
-// /private/tmp; certain Linux distros where /var symlinks elsewhere)
-// without breaking comparisons against materializer-written targets
-// that may have been recorded with the unresolved prefix.
+// canonicalizePath returns path with all symlinks resolved, walking up to
+// the deepest existing ancestor when path itself does not exist (e.g., a
+// dangling symlink target or a not-yet-created sink entry) and re-appending
+// the missing tail. Delegates to pathutil.NormalizePathForCompare, which
+// also collapses platform path aliases (macOS /tmp → /private/tmp; certain
+// Linux distros where /var symlinks elsewhere) so comparisons against
+// materializer-written targets don't break on an unresolved prefix.
 //
-// Returns an error only when filepath.Abs fails on a relative input.
-// All EvalSymlinks errors are absorbed by the walk-up fallback.
-func canonicalizePath(path string) (string, error) {
-	if path == "" {
-		return "", nil
-	}
-	abs := path
-	if !filepath.IsAbs(abs) {
-		a, err := filepath.Abs(abs)
-		if err != nil {
-			return "", err
-		}
-		abs = a
-	}
-	abs = filepath.Clean(abs)
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved, nil
-	}
-	// Walk up until an ancestor exists; canonicalize it, then re-append
-	// the missing suffix. Falls back to the cleaned absolute path when
-	// nothing along the way exists (e.g., entirely-fictional path
-	// supplied by a test).
-	var suffix []string
-	cur := abs
-	for {
-		parent := filepath.Dir(cur)
-		suffix = append([]string{filepath.Base(cur)}, suffix...)
-		if parent == cur {
-			return abs, nil
-		}
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			parts := append([]string{resolved}, suffix...)
-			return filepath.Join(parts...), nil
-		}
-		cur = parent
-	}
+// Always returns a nil error; the signature is kept for call-site
+// compatibility (all callers already treat resolution failure as
+// non-fatal).
+func canonicalizePath(path string) (string, error) { //nolint:unparam // error slot preserves the call-site contract for all 7 callers
+	return pathutil.NormalizePathForCompare(path), nil
 }
 
 // atomicSymlink creates or replaces a symlink at path pointing to

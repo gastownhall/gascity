@@ -23,5 +23,8 @@ func ValidateDoltConfig(cfg *City, source string) error {
 	if err := checkNonNegative("write_timeout_millis", cfg.Dolt.WriteTimeoutMillis); err != nil {
 		return err
 	}
+	if err := checkNonNegative("wait_timeout_seconds", cfg.Dolt.WaitTimeoutSeconds); err != nil {
+		return err
+	}
 	return nil
 }

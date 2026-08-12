@@ -85,6 +85,17 @@ type AwakeWorkBead struct {
 	Assignee string
 	Status   string // "open", "in_progress"
 	Ready    bool   // true for open work only after readiness/blocker filtering
+	// Blocked is true when an in_progress bead carries an open
+	// ready-blocking dependency or gate (bd's IsBlocked projection). It is
+	// meaningless for open work, whose blocker state is already folded into
+	// Ready. Zero value is false, so every existing in_progress caller that
+	// does not populate it keeps today's unconditional-wake behavior.
+	//
+	// Setting it is not purely suppressive: workBeadHasAwakeDemand also feeds
+	// countAssignedScaleSlots, so blocked in_progress work additionally
+	// releases the session's scale slot, which can wake a different session
+	// as scaled:demand.
+	Blocked bool
 }
 
 // AwakeDecision is the output for a single session.
@@ -452,10 +463,11 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 		// Idle sleep: desired sessions idle too long should sleep.
 		// Attached, pending, pinned, mode=always named, and sessions with
-		// assigned demand work are exempt. Assigned demand work means either
-		// in_progress ownership or open work with Ready=true; blocked open
-		// assignments do not prevent idle sleep. Manual sessions within their
-		// grace period are also exempt.
+		// assigned demand work are exempt. A claimed in_progress bead also
+		// vetoes idle sleep even when blocked: blocked work does not wake an
+		// asleep owner, but it must not park the live seat that owns the claim.
+		// Blocked open assignments do not prevent idle sleep. Manual sessions
+		// within their grace period are also exempt.
 		//
 		// On_demand named sessions woken by routed/named demand
 		// ("named-demand", "routed-demand", "work-query") are also exempt:
@@ -468,14 +480,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
-		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
+		agent, hasAgent := lookupAgent(bead.Template)
+		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
+		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
-			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {
 			case bead.ManualSession && input.ChatIdleTimeout > 0:
@@ -699,10 +712,19 @@ func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession
 	return false
 }
 
+func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) bool {
+	for _, wb := range workBeads {
+		if wb.Status == "in_progress" && sessionAssigneeMatches(named, bead, strings.TrimSpace(wb.Assignee)) {
+			return true
+		}
+	}
+	return false
+}
+
 func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
 	switch bead.Status {
 	case "in_progress":
-		return true
+		return !bead.Blocked
 	case "open":
 		return bead.Ready
 	default:

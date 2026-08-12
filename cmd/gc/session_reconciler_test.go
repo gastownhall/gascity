@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1889,6 +1890,208 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 	}
 	if got.Status == "closed" {
 		t.Errorf("stranded bead status = %q, SDK must not close the bead", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent pins that
+// a session whose ONLY assigned work is its own mol-do-work "drain" step
+// must actually close on drain-ack (no pool respawn) and must NOT emit
+// SessionDrainAckedWithAssignedWork, since nothing is genuinely stranded.
+// Before the close-gate fix, the drain step counted as assigned work, so the
+// bead stayed open forever and the pool controller respawned a fresh session
+// onto the same still-open step every ~20s.
+func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+
+	root, err := env.store.Create(beads.Bead{
+		Title: "Run of mol-do-work",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.FormulaNameMetadataKey: "mol-do-work",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	drainStep, err := env.store.Create(beads.Bead{
+		Title:    "Close drain step and signal completion",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			// Formula-qualified, matching what the live store actually writes
+			// — a bare "drain" fixture would pass before and
+			// after the fix and prove nothing.
+			beadmeta.StepRefMetadataKey:    "mol-do-work.drain",
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(drainStep): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	gotSession := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, nil)
+	if gotSession.Status != "closed" {
+		t.Fatalf("session bead status = %q, want closed (own drain step must not block close): metadata=%v",
+			gotSession.Status, gotSession.Metadata)
+	}
+
+	matches := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matches++
+		}
+	}
+	if matches != 0 {
+		t.Fatalf("%s events = %d, want 0 — the session's own drain step is not stranded work", events.SessionDrainAckedWithAssignedWork, matches)
+	}
+
+	// The drain step itself is untouched by the close gate — the event path
+	// (firstOpenAssignedWorkBeadForReachableStore) and IsSessionBeadOrRepairable
+	// classification are deliberately unchanged; this just confirms the fix
+	// didn't mutate the step bead as a side effect.
+	gotStep, err := env.store.Get(drainStep.ID)
+	if err != nil {
+		t.Fatalf("Get(drainStep): %v", err)
+	}
+	if gotStep.Status == "closed" {
+		t.Errorf("drain step status = %q, the close gate must not itself close the step bead", gotStep.Status)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksClose
+// guards the narrow-match requirement in isSessionOwnDrainStepBead: a step bead
+// that happens to reuse the literal step id "drain" but whose molecule root was
+// NOT compiled from the mol-do-work formula must still count as assigned work —
+// the exclusion is scoped to mol-do-work's drain step specifically, not to any
+// step named "drain".
+func TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksClose(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	root, err := env.store.Create(beads.Bead{
+		Title: "Run of some-other-formula",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.FormulaNameMetadataKey: "some-other-formula",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	decoyStep, err := env.store.Create(beads.Bead{
+		Title:    "drain the widget queue",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			beadmeta.StepRefMetadataKey:    "some-other-formula.drain",
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(decoyStep): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	gotSession := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+	if gotSession.Status == "closed" {
+		t.Fatalf("session bead closed unexpectedly: a same-named 'drain' step from an unrelated formula must still block close: metadata=%v", gotSession.Metadata)
+	}
+
+	matches := 0
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("%s events = %d, want exactly 1 for the genuinely-stranded decoy step", events.SessionDrainAckedWithAssignedWork, matches)
+	}
+
+	got, err := env.store.Get(decoyStep.ID)
+	if err != nil {
+		t.Fatalf("Get(decoyStep): %v", err)
+	}
+	if got.Assignee != session.ID {
+		t.Errorf("decoy step assignee = %q, want %q", got.Assignee, session.ID)
 	}
 }
 
