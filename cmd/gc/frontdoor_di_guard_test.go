@@ -358,6 +358,18 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // so it is intentionally absent from the routed-files list. The positive cliSessionStore(
 // tripwire protects the routed delivery arm; as a non-front-door router this guard is
 // a regression canary for the file, not a completeness proof.
+//
+// cmd_mail.go routes at its store-opening ROOTS rather than per-read, because every
+// store access in its identity/target resolver family is session-class: session-ID
+// resolution, the gc:session enumeration behind named-target matching, and mailbox
+// identity. The five roots — resolveMailTargetsForCommand,
+// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
+// cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
+// hand it down; the whole resolver family therefore names its parameter sessStore and
+// does NO routing of its own, so a relocation is applied exactly once per command.
+// Mail MESSAGES are a different coordination class and never travel through these
+// resolvers — they go through mail.Provider. The two out-of-file callers
+// (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.
 var sessionRelocationRoutedFiles = []string{
 	"cmd_session_wake.go",
 	"cmd_session_pin.go",
@@ -381,6 +393,7 @@ var sessionRelocationRoutedFiles = []string{
 	"cmd_runtime_heartbeat.go",
 	"cmd_wait.go",
 	"cmd_nudge.go",
+	"cmd_mail.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

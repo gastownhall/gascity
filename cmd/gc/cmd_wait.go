@@ -708,11 +708,13 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 	if store == nil {
 		return result, code
 	}
-	// Route SESSION/wait access to the session coordination-class store; the
-	// nudge lookup rides a NudgesStore over the same work store. Identity today.
+	// Route SESSION/wait access to the session coordination-class store and the
+	// nudge lookup to the nudges class store. Identity today; on a relocated city
+	// an unrouted nudge read is silent-empty, which re-delivers a nudge that was
+	// already delivered.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
-	nudges := beads.NudgesStore{Store: store}
+	nudges := cliNudgesStore(store, cfg, cityPath)
 	w, err := sessFront.GetWait(waitID)
 	if err != nil {
 		if errors.Is(err, sessionpkg.ErrNotAWait) {
@@ -997,7 +999,7 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
 		return loadWaitDependencyBead(cityPath, store, depID)
 	})
-	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, beads.NudgesStore{Store: store}, now, nil)
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
 func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
@@ -1131,15 +1133,15 @@ func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionp
 
 func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
-	// class params so existing test call sites stay untouched. Route the session
-	// arm through the session coordination-class store (via cliSessionFrontDoor)
-	// so a [beads.classes.sessions] relocation reaches it; identity to the work
-	// store today.
+	// class params so existing test call sites stay untouched. Both arms route
+	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
+	// so a [beads.classes.*] relocation reaches them; identity to the work store
+	// today.
 	var cfg *config.City
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), beads.NudgesStore{Store: store}, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
