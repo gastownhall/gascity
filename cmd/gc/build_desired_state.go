@@ -3181,8 +3181,10 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 }
 
 // bindNamedSessionTriggerBead clears a named session's trigger stamp when its
-// stamped target is no longer workable (absent, closed, or blocked),
-// mirroring bindPoolSessionTriggerBead's clear semantics for the pool path.
+// stamped target is no longer workable (absent, closed, or blocked -- the last
+// read off bd's IsBlocked ready-work projection, since production stores fold
+// the raw `blocked` status into "open"), mirroring bindPoolSessionTriggerBead's
+// clear semantics for the pool path.
 // Unlike pool dispatch, the named path has no per-tick SessionRequest that
 // already reflects "no ready work" -- resolvePreservedConfiguredNamedSessionTemplate
 // only replays whatever is currently stamped -- so without this check a
@@ -3207,15 +3209,23 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info) (session.
 		return info, nil
 	}
 	if !stale {
-		stale = target.Status == "closed" || target.Status == "blocked"
+		// mapBdStatus folds bd's raw `blocked` into "open" (gc-4zb/#4395), so a
+		// literal status check never fires through BdStore/DoltLite/NativeDolt.
+		// IsBlocked is bd's denormalized ready-work projection and is the signal
+		// the wake side already uses for #4726. A nil projection (native DoltLite
+		// snapshots, pre-1.0.5 bd) fails open: the stamp survives one more tick
+		// rather than risking a wrong clear. The literal check stays for stores
+		// that do surface the raw status.
+		stale = target.Status == "closed" ||
+			target.Status == "blocked" ||
+			(target.IsBlocked != nil && *target.IsBlocked)
 	}
 	if !stale {
 		return info, nil
 	}
+	// info.TriggerBeadStoreRef is empty here: any non-empty store ref returned
+	// above as a cross-store target, so the store-ref key needs no clear.
 	patch := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}
-	if strings.TrimSpace(info.TriggerBeadStoreRef) != "" {
-		patch[beadmeta.TriggerBeadStoreRefMetadataKey] = ""
-	}
 	if strings.TrimSpace(info.BrainParentSID) != "" {
 		patch[beadmeta.BrainParentSIDMetadataKey] = ""
 	}
