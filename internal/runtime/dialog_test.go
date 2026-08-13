@@ -1456,6 +1456,47 @@ func TestAcceptStartupDialogsAcceptsClaudeThemePicker(t *testing.T) {
 	}
 }
 
+// TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker covers the theme
+// picker on the production stream path
+// (AcceptStartupDialogsFromStreamWithStatus, dialog.go:150), which the
+// polling-path twin TestAcceptStartupDialogsAcceptsClaudeThemePicker does not
+// exercise. It proves the picker is accepted with Enter and — because the
+// picker must not be mistaken for readiness — the next startup dialog in the
+// same stream (here the Claude resume selector) still advances afterward.
+func TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- claudeThemePickerPane
+	snapshots <- strings.Join([]string{
+		"This session is 1h 55m old and 212.7k tokens.",
+		"",
+		"❯ 1. Resume from summary (recommended)",
+		"  2. Resume full session as-is",
+		"  3. Don't ask me again",
+		"",
+		"Enter to confirm · Esc to cancel",
+	}, "\n")
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter Down Enter] (accept theme, then advance the resume dialog)", sent)
+	}
+}
+
 func TestContainsThemeSelectionDialog(t *testing.T) {
 	t.Parallel()
 

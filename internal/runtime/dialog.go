@@ -117,6 +117,7 @@ func newStartupDialogConfig(opts []StartupDialogOption) startupDialogConfig {
 //  6. Codex hook review dialog — requires Down+Enter to trust hooks
 //  7. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
 //  8. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  9. Rate-limit / usage-limit dialog ("Usage limit reached") — requires Down+Enter to select "Stop" so the session exits cleanly
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
