@@ -686,6 +686,37 @@ func TestSnapshotDoltProcessesForConfigRootsCatchesSourceTreeLeak(t *testing.T) 
 	}
 }
 
+func TestDoltLeakGuardedTestingMLeakRootsIncludeCheckoutRoot(t *testing.T) {
+	tempRoot := filepath.Join("/tmp", "gct12345-678")
+	checkoutRoot := filepath.Join(t.TempDir(), "gascity")
+	sourceRoot := filepath.Join(checkoutRoot, "cmd", "gc")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkoutRoot, "go.mod"), []byte("module example.com/gascity\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := &doltLeakGuardedTestingM{
+		tempRoot:     tempRoot,
+		sourceRoot:   sourceRoot,
+		checkoutRoot: checkoutRootForTestSource(sourceRoot),
+	}
+
+	if roots := g.leakRoots(); len(roots) != 3 || roots[2] != checkoutRoot {
+		t.Fatalf("leakRoots() = %q, want checkout root %q", roots, checkoutRoot)
+	}
+}
+
+func TestCheckoutRootForTestSourceRejectsUnexpectedLayout(t *testing.T) {
+	sourceRoot := filepath.Join(t.TempDir(), "cmd", "gc")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := checkoutRootForTestSource(sourceRoot); got != "" {
+		t.Fatalf("checkoutRootForTestSource() = %q, want empty without go.mod", got)
+	}
+}
+
 // An unresolved root must narrow the snapshot, never widen it to match every
 // dolt server on the host — the reaping paths would then kill real cities.
 func TestSnapshotDoltProcessesForConfigRootsIgnoresEmptyRoots(t *testing.T) {
