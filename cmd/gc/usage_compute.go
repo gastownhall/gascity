@@ -527,6 +527,9 @@ func (cr *CityRuntime) emitRecentlyClosedUsage(ctx context.Context) {
 		fmt.Fprintf(cr.stderr, format+"\n", args...) //nolint:errcheck
 	}
 	for _, b := range closed {
+		if ctx.Err() != nil {
+			return
+		}
 		if !recentlyClosedUsageCandidate(b, now) {
 			continue
 		}
@@ -567,7 +570,24 @@ func (cr *CityRuntime) emitRecentlyClosedUsage(ctx context.Context) {
 			}
 		}
 		if strings.TrimSpace(fresh.Metadata[usageComputeEmittedAtKey]) != awakeStart {
-			emitComputeFactForBead(ctx, sink, store, fresh, runtimeKind, cr.cityName, now, logf, sweepSettled)
+			// ClosePatch stamps closed_at and never slept_at, so emitComputeFactForBead
+			// would fall through to `now` and bill this interval to RECOVERY time rather
+			// than close time — inflating wall_seconds by up to recentlyClosedUsageWindow
+			// after a controller restart. closed_at is the true interval end; present it
+			// as slept_at on a COPY so the shared helper's existing preference applies and
+			// the open-set lane is untouched.
+			billing := fresh
+			if closedRaw := strings.TrimSpace(fresh.Metadata["closed_at"]); closedRaw != "" {
+				if closedAt, perr := time.Parse(time.RFC3339, closedRaw); perr == nil {
+					meta := make(map[string]string, len(fresh.Metadata))
+					for k, v := range fresh.Metadata {
+						meta[k] = v
+					}
+					meta["slept_at"] = closedAt.UTC().Format(time.RFC3339)
+					billing.Metadata = meta
+				}
+			}
+			emitComputeFactForBead(ctx, sink, store, billing, runtimeKind, cr.cityName, now, logf, sweepSettled)
 		}
 	}
 }

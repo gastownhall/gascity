@@ -1211,6 +1211,20 @@ func TestEmitRecentlyClosedUsageRecoversUnsweptSession(t *testing.T) {
 	if got := kindCount(facts, usage.KindCompute); got != 1 {
 		t.Fatalf("compute facts = %d, want 1 from recently-closed sweep", got)
 	}
+	// The recovered interval must end at closed_at, not at the recovery pass's
+	// wall clock: ClosePatch never stamps slept_at, so an unadjusted emit would
+	// bill discovery time and inflate wall_seconds by the whole recovery lag.
+	var compute usage.Fact
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute {
+			compute = f
+			break
+		}
+	}
+	wantWall := closedAt.Truncate(time.Second).Sub(start).Seconds()
+	if delta := compute.WallSeconds - wantWall; delta < -1 || delta > 1 {
+		t.Fatalf("compute wall_seconds = %v, want ~%v (interval must end at closed_at, not at recovery time)", compute.WallSeconds, wantWall)
+	}
 	refreshed, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
