@@ -1458,6 +1458,176 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 }
 
+func TestGcBdRejectsUnregisteredRigQualifiedMetadataWrites(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	scratchBead := filepath.Join(t.TempDir(), "scratch-bead.json")
+	const original = "{\"id\":\"scratch-1\",\"metadata\":{}}\n"
+	if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCRATCH_BEAD", scratchBead)
+
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		actor string
+	}{
+		{"lease owner", []string{"--set-metadata", "gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"inline lease owner", []string{"--set-metadata=gc.lease_owner=ghostrig/polecat-01"}, "ghostrig/polecat-01"},
+		{"route target", []string{"--set-metadata", "gc.routed_to=desktop3080saitoc/polecat-01"}, "desktop3080saitoc/polecat-01"},
+		{"whole metadata object", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"inline metadata object", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			if got := doBd(args, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "not configured") || !strings.Contains(stderr.String(), tc.actor) {
+				t.Fatalf("stderr = %q, want unconfigured-rig diagnostic for %q", stderr.String(), tc.actor)
+			}
+			got, err := os.ReadFile(scratchBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != original {
+				t.Fatalf("scratch bead changed on refusal:\n got %q\nwant %q", got, original)
+			}
+		})
+	}
+}
+
+func TestGcBdRejectsMetadataItCannotValidateBeforeWrite(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf 'called' > "$BD_CAPTURE"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_CAPTURE", capture)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"metadata file", []string{"--metadata", "@metadata.json"}, "@file input"},
+		{"malformed metadata", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
+		{"non-string guarded metadata", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
+		{"malformed set metadata", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
+		{"missing metadata", []string{"--metadata"}, "without a value"},
+		{"missing set metadata", []string{"--set-metadata"}, "without a value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			if got := doBd(args, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("bd was invoked for unvalidated metadata: %v", err)
+			}
+		})
+	}
+}
+
+func TestGcBdAllowsRegisteredAndLegacyMetadataActors(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "bd-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf '%s' "$*" > "$BD_CAPTURE"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_CAPTURE", capture)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"registered rig", []string{"update", "scratch-1", "--set-metadata", "gc.routed_to=saitoc/polecat-01"}},
+		{"bare actor", []string{"update", "scratch-1", "--set-metadata", "gc.lease_owner=polecat-01"}},
+		{"dotted actor", []string{"update", "scratch-1", "--set-metadata", "gc.lease_owner=gastown.polecat-01"}},
+		{"whole metadata object", []string{"update", "scratch-1", "--metadata", `{"gc.routed_to":"saitoc/polecat-01"}`}},
+		{"unrelated non-string metadata", []string{"update", "scratch-1", "--metadata", `{"attempts":2}`}},
+		{"metadata-looking notes value", []string{"update", "scratch-1", "--notes", "--metadata=not-json"}},
+		{"metadata-looking positional after terminator", []string{"update", "scratch-1", "--", "--metadata=not-json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			args := append([]string{"--city", cityDir}, tc.args...)
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd() = %d, want success; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(capture); err != nil {
+				t.Fatalf("bd was not invoked for compatible actor: %v", err)
+			}
+		})
+	}
+}
+
 func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
