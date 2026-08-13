@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
-	doctorchecks "github.com/gastownhall/gascity/internal/doctor/checks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -31,7 +30,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut, explainPostgresAuth bool
+	var fix, verbose, jsonOut bool
 	var checkTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -50,11 +49,10 @@ legacy-to-current pack rewrites that are available on this branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
-  gc doctor --json
-  gc doctor --explain-postgres-auth`,
+  gc doctor --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, checkTimeout, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, checkTimeout, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -63,40 +61,9 @@ legacy-to-current pack rewrites that are available on this branch.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
-	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false,
-		"after running checks, print per-scope Postgres credential resolution table (no values printed)")
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 60*time.Second,
 		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
 	return cmd
-}
-
-// doctorWorkspaceHasPostgresScope reports whether at least one scope
-// (city or any rig) has MetadataState.Backend == "postgres". Used to
-// gate registration of PostgresAuthCheck so pure-Dolt cities never see
-// a "skipped postgres-auth" line.
-func doctorWorkspaceHasPostgresScope(cityPath string, cfg *config.City) bool {
-	if scopeBackendIsPostgres(cityPath, cityPath) {
-		return true
-	}
-	if cfg == nil {
-		return false
-	}
-	for _, rig := range cfg.Rigs {
-		if rig.Suspended {
-			continue
-		}
-		rigPath := strings.TrimSpace(rig.Path)
-		if rigPath == "" {
-			continue
-		}
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(cityPath, rigPath)
-		}
-		if scopeBackendIsPostgres(cityPath, rigPath) {
-			return true
-		}
-	}
-	return false
 }
 
 // doDoctor runs all health checks and prints results.
@@ -327,9 +294,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
-	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
-		register(doctorchecks.NewPostgresAuthCheck(cityPath, cfg))
-	}
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
 	// can inherit the city-managed server even when the city itself is not a
@@ -421,7 +385,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
-func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time.Duration, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -429,7 +393,7 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, checkTimeout time
 	}
 
 	d := &doctor.Doctor{CheckTimeout: checkTimeout}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose, ExplainPostgresAuth: explainPostgresAuth}
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)

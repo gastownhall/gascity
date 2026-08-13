@@ -336,7 +336,13 @@ func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) 
 }
 
 func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
-	stores := workflowStores(state)
+	// The feed lists order-tracking beads, which are orders class and live in
+	// the orders binding on a split city. workflowStores leads with the GRAPH
+	// binding (its own callers scan workflow roots), so on a city that relocates
+	// only graph the tracking beads would still be missed; the orders leg is
+	// appended here and deduplicated, so a city that serves both classes from
+	// one binding — the shape this build supports — reads it once.
+	stores := appendOrdersClassStoreInfo(workflowStores(state), state, workflowCityScopeRef(state.CityName()))
 	allOrders := state.OrdersAll()
 	orderByScopedName := make(map[string]orders.Order, len(allOrders))
 	for _, order := range allOrders {

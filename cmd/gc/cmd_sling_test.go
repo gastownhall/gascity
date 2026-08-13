@@ -23,7 +23,6 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -1318,6 +1317,63 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "gascity/workflows.codex-max-8") {
 		t.Fatalf("stdout = %q, want nudge output for city-store pool instance", stdout.String())
+	}
+}
+
+// TestDoSlingNudgePoolMemberBindingQualifiedCityScope is a regression for
+// #4843: doSlingNudge must deliver a nudge to a running, city-scoped,
+// binding-qualified pool instance (testpack.worker-1). Before the
+// resolveAgentIdentity Step 2b guard fix, doSlingNudge's identity lookup on the
+// dot-qualified ref (cmd_sling.go:1521) failed, so it logged
+// `agent "testpack.worker-1" not found in config` and returned handled
+// without delivering the nudge or poking the controller, leaving routed pool
+// work unclaimed.
+func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	sessionName := "testpack__worker-session-test"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Calls = nil
+	a := config.Agent{
+		Name:              "worker",
+		BindingName:       "testpack",
+		Dir:               "",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2),
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+	if _, err := deps.Store.Create(beads.Bead{
+		Title:  "testpack.worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "testpack.worker",
+			"session_name": sessionName,
+			"pool_slot":    "1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	if strings.Contains(stderr.String(), "not found in config") {
+		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
+		t.Fatalf("sling nudge missed live binding-qualified pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "testpack.worker-1") {
+		t.Fatalf("stdout = %q, want nudge delivered to binding-qualified pool instance testpack.worker-1", stdout.String())
 	}
 }
 
@@ -3465,8 +3521,7 @@ dolt.auto-start: false
 	}
 }
 
-func TestSlingStoreEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
+func TestSlingStoreEnvWithError_RefusesAnUnregisteredBackend(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir := t.TempDir()
@@ -3481,7 +3536,7 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(cityDir, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "")
+	writeUnregisteredBackendMetadata(t, rigDir)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
@@ -3492,12 +3547,7 @@ dolt.auto-start: false
 	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: rigDir}}}
 
 	_, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
-	if err == nil {
-		t.Fatal("slingStoreEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
+	assertRefusesUnregisteredBackend(t, err)
 }
 
 func TestTargetType(t *testing.T) {

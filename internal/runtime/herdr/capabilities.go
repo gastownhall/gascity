@@ -22,18 +22,49 @@ var (
 	_ runtime.LivenessObserver = (*Provider)(nil)
 )
 
-// WaitForIdle blocks until herdr reports the agent idle or the timeout elapses,
-// via herdr's native `agent wait --until idle` (the ≥0.7.5 flag spelling) — vs
-// the pane-polling tmux does. Either outcome (idle reached or timed out) means
-// the caller may proceed — as does an unregistered session (raw shell panes
-// have no agent to wait on) — so only context cancellation surfaces as an
-// error; the timeout is a hard bound.
-func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+// idleWaitOutcome is the legible verdict of one `agent wait --until idle`
+// probe. The interface-facing WaitForIdle keeps its proceed-either-way
+// contract, but internal callers (Start's startup delivery) need to see WHY a
+// wait did not confirm: the live city measured 0 ok / 8 timeout / 2 error
+// over 20h with every verdict silently discarded (gas-90h).
+type idleWaitOutcome string
+
+const (
+	idleWaitReached idleWaitOutcome = "idle"     // herdr observed the agent idle
+	idleWaitTimeout idleWaitOutcome = "timeout"  // bound elapsed without idle
+	idleWaitNoAgent idleWaitOutcome = "no_agent" // no registered agent (raw shell pane)
+	idleWaitError   idleWaitOutcome = "error"    // transport or unexpected herdr error
+)
+
+// waitForIdleOutcome blocks until herdr reports the agent idle or the timeout
+// elapses, via herdr's native `agent wait --until idle` (the ≥0.7.5 flag
+// spelling) — vs the pane-polling tmux does — and returns the verdict
+// distinctly instead of discarding it.
+func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout time.Duration) idleWaitOutcome {
 	ms := int(timeout / time.Millisecond)
 	if ms < 1 {
 		ms = 1
 	}
-	_, _ = p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--timeout", strconv.Itoa(ms))
+	_, err := p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--timeout", strconv.Itoa(ms))
+	switch {
+	case err == nil:
+		return idleWaitReached
+	case herdrErrorCode(err) == "timeout":
+		return idleWaitTimeout
+	case isAgentNotFound(err):
+		return idleWaitNoAgent
+	default:
+		return idleWaitError
+	}
+}
+
+// WaitForIdle blocks until herdr reports the agent idle or the timeout
+// elapses. Either outcome (idle reached or timed out) means the caller may
+// proceed — as does an unregistered session (raw shell panes have no agent to
+// wait on) — so only context cancellation surfaces as an error; the timeout
+// is a hard bound.
+func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	_ = p.waitForIdleOutcome(ctx, name, timeout)
 	return ctx.Err()
 }
 

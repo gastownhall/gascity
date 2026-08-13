@@ -46,11 +46,11 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode"}
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode", "pi"}
 	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
 		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
 	}
-	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "antigravity"}
+	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "pi", "antigravity"}
 	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
 		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
@@ -79,6 +79,17 @@ func stageMimoProbeBinary(t *testing.T, homeDir string) {
 		t.Fatalf("mkdir user bin: %v", err)
 	}
 	writeExecutable(t, userBin, "mimo", "#!/bin/sh\nexit 0\n")
+}
+
+// stagePiProbeBinary installs a stub pi executable into homeDir's
+// ~/.local/bin so findProbeBinary resolves it.
+func stagePiProbeBinary(t *testing.T, homeDir string) {
+	t.Helper()
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(userBin, 0o755); err != nil {
+		t.Fatalf("mkdir user bin: %v", err)
+	}
+	writeExecutable(t, userBin, "pi", "#!/bin/sh\nexit 0\n")
 }
 
 func TestProbeMimoCodeNotInstalled(t *testing.T) {
@@ -222,6 +233,46 @@ func TestProbeMimoCodeRelativeXDGDataHomeFallsBackToHome(t *testing.T) {
 	result := probeMimoCode(homeDir)
 	if result.status != probeStatusConfigured {
 		t.Fatalf("probeMimoCode status = %q, want %q (%s)", result.status, probeStatusConfigured, result.detail)
+	}
+}
+
+func TestProbePiNotInstalled(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+
+	result := probePi(homeDir)
+	if result.status != probeStatusNotInstalled {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusNotInstalled, result.detail)
+	}
+}
+
+func TestProbePiNeedsAuthWithoutAuthJson(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stagePiProbeBinary(t, homeDir)
+
+	result := probePi(homeDir)
+	if result.status != probeStatusNeedsAuth {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusNeedsAuth, result.detail)
+	}
+}
+
+func TestProbePiConfiguredByAuthJson(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stagePiProbeBinary(t, homeDir)
+
+	authDir := filepath.Join(homeDir, ".pi", "agent")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := probePi(homeDir)
+	if result.status != probeStatusConfigured {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusConfigured, result.detail)
 	}
 }
 

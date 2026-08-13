@@ -43,6 +43,15 @@ func isSourceSpecStep(step *Step) bool {
 	return isSourceSpecKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
+// namespaceSourceSpecStep re-namespaces a spec sidecar into a ralph iteration.
+//
+// The dependency fields are nilled rather than rewritten the way
+// namespaceRalphBodySteps rewrites a body step's: a spec is a SNAPSHOT of the
+// step it describes, not a node in the graph, and an edge on it would put a
+// bead with no worker in the iteration's critical path. That is also what makes
+// a spec unreachable by any dependency walk — the property beads.Membership
+// cites when it explains why direct root-id membership is the only complete
+// rule.
 func namespaceSourceSpecStep(step *Step, iterationID string) *Step {
 	clone := cloneStep(step)
 	clone.ID = iterationID + "." + step.ID

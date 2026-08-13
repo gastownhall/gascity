@@ -466,15 +466,20 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return c.backing.Ready(query...)
 	}
 	var (
-		statusByID map[string]string
-		depsByID   map[string][]Dep
-		openBeads  []Bead
+		statusByID   map[string]string
+		depsByID     map[string][]Dep
+		openBeads    []Bead
+		unanswerable bool
 	)
-	// Ready requires a fully live cache with complete dependency coverage; the
-	// overlay refreshes any dirty rows first, then computes readiness from the
-	// cache. On overlay error the read takes the old full backing.Ready scan.
+	// Ready requires a fully live cache with complete dependency coverage and a
+	// ready projection the backing store can actually serve; the overlay
+	// refreshes any dirty rows first, then computes readiness from the cache.
+	// On overlay error the read takes the old full backing.Ready scan.
 	if err := c.readCacheWithOverlay(
-		func() bool { return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil },
+		func() bool {
+			return c.state == cacheLive && c.depsComplete && c.primePartialErr == nil &&
+				!c.readyReadsMustGoLive()
+		},
 		func(suppressed map[string]struct{}) {
 			statusByID = make(map[string]string, len(c.beads))
 			openBeads = make([]Bead, 0, len(c.beads))
@@ -485,6 +490,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				}
 				statusByID[b.ID] = b.Status
 				if IsReadyCandidate(b, now) {
+					if c.readyProjectionUnknownLocked(b.ID) {
+						unanswerable = true
+						return
+					}
 					openBeads = append(openBeads, cloneBead(b))
 				}
 			}
@@ -494,6 +503,11 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
+		return c.backing.Ready(query...)
+	}
+	if unanswerable {
+		// One candidate whose verdict the cache cannot vouch for costs this
+		// read the cache, not correctness: the live scan is slower and right.
 		return c.backing.Ready(query...)
 	}
 
@@ -542,7 +556,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	if c.state != cacheLive && c.state != cachePartial {
 		return nil, false
 	}
-	if c.primePartialErr != nil || len(c.dirty) > 0 {
+	if c.primePartialErr != nil || len(c.dirty) > 0 || c.readyReadsMustGoLive() {
 		return nil, false
 	}
 
@@ -552,6 +566,9 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		if IsReadyCandidate(b, now) {
+			if c.readyProjectionUnknownLocked(b.ID) {
+				return nil, false
+			}
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}

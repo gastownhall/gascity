@@ -255,6 +255,13 @@ func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
 // resolveGraphInput expands convoy inputs to their children.
 // Non-containers are passed through. Multiple args are resolved individually.
 // Duplicate IDs are removed. Returns the full Bead objects to avoid re-fetching.
+//
+// This is NOT a molecule membership rule and deliberately implements none of
+// beads.Membership: `gc graph` renders the dependency edges among the ids the
+// operator named, and only "convoy" is a container type. A molecule root
+// therefore expands to itself — unlike `gc bd graph <root>`, which returns the
+// whole molecule. Do not "fix" that by folding a membership rule in here
+// without deciding what `gc graph <root> <unrelated-id>` should then mean.
 func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]beads.Bead, error) {
 	seen := make(map[string]bool)
 	var result []beads.Bead

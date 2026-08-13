@@ -165,6 +165,12 @@ const (
 
 type storageWriteResult struct {
 	state storageWriteState
+	// record identifies the exact file this write installed at the target
+	// name (rename preserves the temporary file's inode). Callers that mint
+	// exact-record authority from a subsequent path re-open must require the
+	// re-opened record to match, or a peer's byte-identical replacement
+	// landing between the rename and the re-open is silently adopted.
+	record recordIncarnation
 }
 
 type recordIncarnation struct {

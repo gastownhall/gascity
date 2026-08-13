@@ -21,9 +21,11 @@ import (
 // launches a supported kind into an existing shell pane and registers the
 // name; the name exists only while the agent runs (state file "registered");
 // raw commands are typed into the pane and never register anything. State
-// files drive the scenario (registered / pane_gone / busy), and calls.log
-// records every verb so tests can assert what was — and crucially was NOT —
-// issued (the spawn storm was one placement per reconcile tick).
+// files drive the scenario (registered / pane_gone / busy / name_taken /
+// agent_blocked, plus the startup-delivery verdicts prompt_stalled /
+// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// tests can assert what was — and crucially was NOT — issued (the spawn storm
+// was one placement per reconcile tick).
 
 var paneBindSession int64
 
@@ -42,27 +44,64 @@ shift 2
 printf '%s\n' "$*" >> "$STATE/calls.log"
 case "$1_$2" in
 agent_get)
-  if [ -e "$STATE/registered" ]; then
-    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
-  else
+  if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/agent_blocked" ]; then
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"blocked"}}}'
+  else
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
   printf '%s' '{"result":{"agents":[]}}' ;;
 agent_start)
-  : > "$STATE/agent_started"
-  : > "$STATE/registered"
-  if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
-  if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
-  printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}' ;;
+  if [ -e "$STATE/name_taken" ]; then
+    # A concurrent Start won the name and its agent is live: herdr rejects the
+    # launch, agent get then resolves the live holder and its pane probes
+    # busy, so resolveAgentNameTaken adopts instead of reaping.
+    : > "$STATE/registered"
+    : > "$STATE/busy"
+    printf '%s' '{"error":{"code":"agent_name_taken","message":"agent name already registered"}}'
+  else
+    : > "$STATE/agent_started"
+    : > "$STATE/registered"
+    if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
+    if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
+  fi ;;
 agent_wait)
-  printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}' ;;
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/wait_times_out" ]; then
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  else
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}'
+  fi ;;
 agent_prompt)
-  if [ -e "$STATE/registered" ]; then
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/prompt_stalled" ]; then
+    # No state change inside herdr's fixed 5000ms window: the submit CR never
+    # reached the TUI and the text sits unsubmitted in an idle input box.
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/prompt_times_out" ]; then
+    # The state-change gate passed (the CR landed) but no --until state was
+    # observed before --timeout. herdr only reports this when --timeout
+    # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  elif [ -e "$STATE/prompt_blocked" ]; then
+    # The first turn opened a confirmation dialog. herdr matches only the
+    # requested --until states, so this settles iff the caller asked for
+    # blocked; otherwise the caller waits out its bound.
+    case "$*" in
+      *"--until blocked"*)
+        : > "$STATE/prompted"
+        printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"blocked"}}}' ;;
+      *)
+        printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}' ;;
+    esac
+  else
     : > "$STATE/prompted"
     printf '%s' '{"result":{"type":"agent_prompted"}}'
-  else
-    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   fi ;;
 pane_run)
   : > "$STATE/busy"
@@ -100,6 +139,11 @@ esac
 	}
 	p := New(session, metaDir, t.TempDir(), time.Second, time.Second)
 	p.c.bin = script
+	// The paste fallback's settle delay guards a real paste racing a real
+	// submit; against a shell script there is no race, and the production 1s
+	// would be per-test wall-clock the resource census cannot see (it counts
+	// only time.Sleep written directly in a _test.go).
+	p.c.settleDelay = time.Millisecond
 	return p, session, state
 }
 

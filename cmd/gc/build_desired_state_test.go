@@ -11319,20 +11319,40 @@ func TestCanonicalSessionIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("named bead keeps base identity (out of scope for this canonicalization)", func(t *testing.T) {
-		// Named-session TemplateParams carry ConfiguredNamedIdentity/Mode,
-		// GC_SESSION_ORIGIN=named, and a canonical session_name set by the
-		// main named-sessions loop and reconstructNamedSessionTemplateParams.
-		// Rewriting just the identity qualifier in rediscovery without also
-		// repopulating that contract would produce a partially-named
-		// TemplateParams that downstream consumers don't expect — so the
-		// helper intentionally leaves named beads on the base shape.
+	t.Run("named bead resolves to its own stored alias, not the backing template", func(t *testing.T) {
+		// A named-session bead must resolve its identity (and therefore its
+		// work_dir/AgentBase) from its stored configured_named_identity
+		// ("gascity/opus"), NOT the shared backing template ("gascity/dog").
+		// Returning the template QN here binds AgentBase to the template's base
+		// name, so every named session on that template resolves work_dir to one
+		// shared directory instead of its own.
 		agent, qn := canonicalSessionIdentity(poolAgent, namedBead)
 		if agent != poolAgent {
 			t.Errorf("named bead must not produce a deep-copied instance agent")
 		}
+		if qn != "gascity/opus" {
+			t.Errorf("qn = %q, want stored alias %q", qn, "gascity/opus")
+		}
+	})
+
+	t.Run("named bead without stored identity falls back to base template QN", func(t *testing.T) {
+		// Legacy named beads that predate the identity stamp have no
+		// configured_named_identity; they must still resolve safely (base QN)
+		// rather than empty. Such beads get corrected on their next fresh spawn.
+		unstampedNamedBead := beads.Bead{
+			Metadata: map[string]string{
+				"template":              "gascity/dog",
+				"agent_name":            "gascity/dog",
+				"session_name":          "s-legacy",
+				namedSessionMetadataKey: "true",
+			},
+		}
+		agent, qn := canonicalSessionIdentity(poolAgent, unstampedNamedBead)
+		if agent != poolAgent {
+			t.Errorf("unstamped named bead must not produce a deep-copied instance agent")
+		}
 		if qn != "gascity/dog" {
-			t.Errorf("qn = %q, want base %q (named canonicalization is scoped out)", qn, "gascity/dog")
+			t.Errorf("qn = %q, want base fallback %q", qn, "gascity/dog")
 		}
 	})
 
