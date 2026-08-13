@@ -165,23 +165,45 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
+		workStoreRef := ""
+		if storeRefAware {
+			workStoreRef = assignedWorkStoreRefs[i]
+		}
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
 			}
 		} else {
-			workStoreRef := ""
-			if storeRefAware {
-				workStoreRef = assignedWorkStoreRefs[i]
-			}
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
-				continue
-			}
+			// A named session's legitimate rig-routed / cross-store claim is
+			// preserved unconditionally: releasing it would mint a duplicate backup
+			// worker on the same bead (#3453). This guard is deliberately NOT
+			// bypassed by the escalation-handoff release below — a genuine
+			// route-away to a different agent already fails this guard's template
+			// check, so the two are consistent; keeping it first states that
+			// decision explicitly.
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
-			if liveOpenSessionAssignmentExists(store, assignee) {
-				continue
+			// sr-wz8.3: openSessionOwnsWork / liveOpenSessionAssignmentExists
+			// PRESERVE a bead a live session legitimately owns (dead-session
+			// orphans fall through them naturally and get released). When the bead
+			// has been routed AWAY to a different agent than the owning session's
+			// own agent (an L1->L2 escalation handoff) AND the gc.routed_at settle
+			// window has elapsed, the owning session is the stale source, not the
+			// legitimate owner — assigneeRoutedAwayFromOwnAgent detects that
+			// (store-ref-aware, settle-gated, over all owners, biased to preserve)
+			// and lets the release proceed past these two live-owner guards. The
+			// live-releasable + detached-probe checks below still gate the actual
+			// write. Without this, an escalated bead stays pinned to the live
+			// source, starving the target pool of demand until the source session
+			// is closed.
+			if !assigneeRoutedAwayFromOwnAgent(cfg, cityPath, openSessionInfos, assignee, agentCfg.QualifiedName(), workStoreRef, wb.Metadata[beadmeta.RoutedAtMetadataKey], storeRefAware) {
+				if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+					continue
+				}
+				if liveOpenSessionAssignmentExists(store, assignee) {
+					continue
+				}
 			}
 		}
 
@@ -211,6 +233,145 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+// assigneeRoutedAwayFromOwnAgent reports whether an assigned work bead has been
+// routed to a DIFFERENT agent than every live session that legitimately owns the
+// assignee — i.e. an escalation/handoff (sr-wz8.3: L1 slings the bead to
+// l2-<family> but it stays assigned to the live L1 session). Such an assignment
+// must be releasable even while the source session is open so the routed-to
+// target pool gains demand; otherwise the escalation deadlocks until the source
+// session is closed.
+//
+// Ownership resolution mirrors openSessionOwnsWork and is deliberately biased to
+// PRESERVE (return false) — an over-release steals work a session is actively
+// doing, which is worse than a missed wake:
+//   - It scans ALL matching sessions, not just the first: one identity string can
+//     be held by two live sessions (via alias_history, or the same identity across
+//     rig stores), so a first-match resolver could pick the wrong one.
+//   - It is store-ref-aware: a matching session in a different concrete store is
+//     not an owner of this bead (gastownhall/gascity#3621 / #1544). An unresolved
+//     store-ref is treated conservatively as reachable.
+//   - A cross-store-eligible (city-scoped) owner legitimately federates work in
+//     any store regardless of routed_to (vp-kvp) and is never a handoff.
+//   - It concludes route-away only when there is at least one store-scoped owner
+//     AND every such owner resolves to a DIFFERENT, non-cross-store agent than
+//     routedTarget. Any owner that IS the routed target, is cross-store eligible,
+//     or whose agent cannot be resolved, preserves the bead.
+//   - Settle window: the handoff must have had time to land. gc sling stamps
+//     gc.routed_to (and gc.routed_at) without clearing the assignee, so for a
+//     short period after a mid-turn escalation the source may still be producing
+//     output on the bead; releasing instantly would let the target pool claim it
+//     under that live turn, racing the source's non-CAS completion write. Until
+//     routeAwaySettleWindow has elapsed since routedAt, the bead is preserved.
+//     An absent or unparseable routedAt counts as elapsed — see
+//     routeAwaySettleElapsed for why that fallback direction is mandatory.
+//
+// The settle window is deliberately NOT the owning session's
+// currently_processing_bead_id. That marker cannot serve as a liveness signal:
+// nothing ever clears it (recordCurrentBeadIDOnWake and
+// cycleAliveSessionForFreshReassign both no-op on an empty bead ID) and
+// ComputeAwakeSet keeps re-anchoring the session on the escalated bead while it
+// stays assigned and in_progress. So marker == bead is exactly the PRIMARY
+// escalation shape — L1 slinging the ticket it is working — and gating on it
+// preserves forever: the same deadlock with a gate in front of it
+// (gastownhall/gascity#4073 review).
+func assigneeRoutedAwayFromOwnAgent(cfg *config.City, cityPath string, openSessionInfos []session.Info, assignee, routedTarget, workStoreRef, routedAt string, storeRefAware bool) bool {
+	assignee = strings.TrimSpace(assignee)
+	routedTarget = strings.TrimSpace(routedTarget)
+	if cfg == nil || assignee == "" || routedTarget == "" {
+		return false
+	}
+	// Checked before any owner scan: inside the window nothing is releasable, and
+	// this is pure metadata arithmetic.
+	if !routeAwaySettleElapsed(routedAt) {
+		return false
+	}
+	ownerFound := false
+	for _, info := range openSessionInfos {
+		if info.Closed {
+			continue
+		}
+		matched := false
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if strings.TrimSpace(id) == assignee {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		// Resolve the owning session's own agent. If it cannot be resolved, do not
+		// risk a wrong release — treat the bead as legitimately owned.
+		ownerAgent := sessionAgentConfigInfo(cfg, info)
+		if ownerAgent == nil {
+			return false
+		}
+		// Store-ref scoping mirrors openSessionOwnsWork: a matching session owns
+		// THIS bead when its reachable store-ref is unresolved, cross-store
+		// eligible, or equal to the bead's store. A different concrete store means
+		// a different-store session — not an owner of this bead.
+		if storeRefAware {
+			ref := openSessionReachableStoreRefInfo(cityPath, cfg, info)
+			if ref != unresolvedOpenSessionStoreRef && ref != crossStoreOpenSessionStoreRef && ref != workStoreRef {
+				continue
+			}
+		}
+		// A cross-store-eligible (city-scoped) owner legitimately federates work in
+		// any store regardless of routed_to (vp-kvp) — not an escalation handoff.
+		// An owner whose own agent IS the routed target is likewise legitimate.
+		// Either way, never release.
+		if agentIsCrossStoreEligible(ownerAgent) || ownerAgent.QualifiedName() == routedTarget {
+			return false
+		}
+		ownerFound = true
+	}
+	return ownerFound
+}
+
+// routeAwaySettleWindow is how long a route-away assignment is preserved after
+// gc.routed_at before releaseOrphanedPoolAssignments will reopen it. It mirrors
+// idleClaimNudgeGrace's "let the normal thing land" role: long enough that a
+// source finishing its turn normally wins the race, short enough that a genuine
+// escalation is not held hostage to it.
+//
+// This BOUNDS the race sjarmak flagged; it does not eliminate it. A source whose
+// turn outruns the window can still have a release land under it. Retiring the
+// race for real means making the source's completion write conditional (CAS) so
+// it loses to a release instead of racing it — deliberately left as a separate
+// change (gastownhall/gascity#4073).
+const routeAwaySettleWindow = 90 * time.Second
+
+// routeAwaySettleNow is overridable in tests.
+var routeAwaySettleNow = time.Now
+
+// routeAwaySettleElapsed reports whether routeAwaySettleWindow has passed since
+// routedAt (RFC3339, as stamped alongside gc.routed_to).
+//
+// Absent or unparseable timestamps report TRUE (elapsed). That direction is not
+// leniency, it is a safety requirement: the failure this whole change exists to
+// fix is a PERMANENT PRESERVE, so no input state may be able to hold a bead
+// forever. Reporting false on missing metadata would recreate exactly that for
+// every bead routed before this key existed, and would need a doctor backfill to
+// unstick. Pre-existing routed beads are old by definition, so treating them as
+// settled is also the semantically right answer.
+func routeAwaySettleElapsed(routedAt string) bool {
+	stamped, ok := beadmeta.ParseRoutedAt(routedAt)
+	if !ok {
+		return true
+	}
+	now := routeAwaySettleNow().UTC()
+	// A route cannot have happened in the future. Rig stores are written from more
+	// than one host (#3621 / #1544), so a stamp ahead of this host's clock means
+	// skew, and honoring it would hold the assignment for the whole skew — for a
+	// badly-set clock, indistinguishable from the permanent preserve this window
+	// replaced. An unusable clock reading falls back the same way an unusable
+	// stamp does: settled.
+	if stamped.After(now) {
+		return true
+	}
+	return !now.Before(stamped.Add(routeAwaySettleWindow))
 }
 
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {

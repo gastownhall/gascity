@@ -165,15 +165,23 @@ const (
 	RigRootMetadataKey                   = "gc.rig_root"
 	RootBeadIDMetadataKey                = "gc.root_bead_id"
 	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// RoutedAtMetadataKey records WHEN gc.routed_to was last stamped by a handoff
+	// (gc sling and its API equivalent). It carries no routing target, so it does
+	// not compete with gc.routed_to as "the sole persisted routing key"
+	// (engdocs/design/session-model-unification.md) — it is a timestamp about a
+	// route, not a route. Consumed by the sr-wz8.3 route-away settle window in
+	// releaseOrphanedPoolAssignments; absent or unparseable means "window
+	// elapsed", so pre-existing routed beads need no backfill.
+	RoutedAtMetadataKey        = "gc.routed_at"
+	RoutedToMetadataKey        = "gc.routed_to"
+	RunTargetMetadataKey       = "gc.run_target"
+	RuntimeVarsMetadataKey     = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey       = "gc.scope_kind"
+	ScopeNameMetadataKey       = "gc.scope_name"
+	ScopeRefMetadataKey        = "gc.scope_ref"
+	ScopeRoleMetadataKey       = "gc.scope_role"
+	SessionAffinityMetadataKey = "gc.session_affinity"
+	SessionIDMetadataKey       = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -415,6 +423,7 @@ var KnownMetadataKeys = []string{
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
+	RoutedAtMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,

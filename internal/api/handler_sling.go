@@ -513,5 +513,13 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
+	// Same handoff as the CLI router, so it records the same gc.routed_at the
+	// sr-wz8.3 settle window reads; without it, API-routed escalations would skip
+	// the liveness preserve entirely. Best-effort: an absent stamp reads as
+	// "settled", which is the pre-window behavior, so a failure here must not
+	// fail a route that has already landed.
+	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedAtMetadataKey, beadmeta.FormatRoutedAt(time.Now())); err != nil {
+		fmt.Fprintf(apiSlingStderr(), "gc api sling: setting %s on %s: %v (route stands; settle window will read as elapsed)\n", beadmeta.RoutedAtMetadataKey, req.BeadID, err) //nolint:errcheck
+	}
 	return nil
 }
