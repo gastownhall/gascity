@@ -379,8 +379,8 @@ func installStartManagedDoltLoopStubs(t *testing.T, stubs startManagedDoltLoopSt
 
 // TestStartManagedDoltProcessWithOptions_AddressInUseSamePortRetrySucceeds
 // drives the full loop body through the address-in-use branch. The first
-// attempt simulates dolt failing to bind (log returns the address-in-use
-// substring); the wait helper returns available (probe shim) so the loop
+// attempt simulates the current dolt server failing to bind (log returns its
+// "Port N already in use" message); the wait helper returns available so the loop
 // retries the SAME port; the second attempt succeeds (waitReady returns
 // Ready=true). PR contract:
 //
@@ -413,7 +413,7 @@ func TestStartManagedDoltProcessWithOptions_AddressInUseSamePortRetrySucceeds(t 
 		},
 		logSuffixFn: func(_ string, _ int64) (string, error) {
 			atomic.AddInt32(&logCalls, 1)
-			return "panic: listen tcp 0.0.0.0:17777: bind: address already in use\n", nil
+			return "Port 17777 already in use.\n", nil
 		},
 		portAvailableFn: func(_ string, _ int) bool { return true }, // wait succeeds → retry same port
 		retryWindow:     50 * time.Millisecond,
