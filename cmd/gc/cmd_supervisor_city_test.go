@@ -2911,3 +2911,50 @@ func TestNormalizeRegisteredCityPathResolvesSymlinks(t *testing.T) {
 		t.Fatalf("normalizeRegisteredCityPath(%q) = %q, want %q", link, got, want)
 	}
 }
+
+// TestIsStructuralInitFailureMessageDetectsSchemaVersionGate pins #4484:
+// a bd schema-version gate ("database is at vN, binary knows up to vM")
+// is a structural failure -- no retry, and no city.toml edit, can ever
+// resolve it, since the fix is an out-of-band bd binary upgrade. Ordinary
+// transient failures (a lock held, a socket busy) must not match.
+func TestIsStructuralInitFailureMessageDetectsSchemaVersionGate(t *testing.T) {
+	structural := `init: beads lifecycle: init city beads: bd list: exit status 1: { "error": "schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)", "schema_skew": {"current_version":53,"delta":4,"required_version":49}, "schema_version": 1 }`
+	if !isStructuralInitFailureMessage(structural) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = false, want true", structural)
+	}
+
+	transient := "controller lock: lock held by another process"
+	if isStructuralInitFailureMessage(transient) {
+		t.Errorf("isStructuralInitFailureMessage(%q) = true, want false", transient)
+	}
+}
+
+// TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling
+// pins #4484: gc supervisor previously applied the same capped exponential
+// backoff (10s doubling to a 5-minute ceiling) to every init failure,
+// including a structural schema-version gate that retrying can never
+// resolve -- observed live retrying at the 5-minute ceiling for ~6 days
+// straight. A structural failure must back off to a far longer interval
+// immediately (not escalate gradually like a transient one), while
+// ordinary transient failures keep their existing behavior unchanged.
+func TestInitFailureBackoffDelayEscalatesStructuralFailuresBeyondTransientCeiling(t *testing.T) {
+	structuralMsg := `init: bd list: exit status 1: schema version mismatch: database is at v53, binary knows up to v49 (4 migrations ahead)`
+
+	if got := initFailureBackoffDelay(1, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(1, structural) = %s, want %s (should not use the transient ceiling even on the first failure)", got, structuralInitFailureBackoff)
+	}
+	if got := initFailureBackoffDelay(27, structuralMsg); got != structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(27, structural) = %s, want %s", got, structuralInitFailureBackoff)
+	}
+
+	transientMsg := "controller lock: lock held by another process"
+	if got, want := initFailureBackoffDelay(1, transientMsg), 10*time.Second; got != want {
+		t.Errorf("initFailureBackoffDelay(1, transient) = %s, want %s (unchanged transient behavior)", got, want)
+	}
+	if got, want := initFailureBackoffDelay(7, transientMsg), 5*time.Minute; got != want {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, want %s (transient ceiling unchanged)", got, want)
+	}
+	if got := initFailureBackoffDelay(7, transientMsg); got == structuralInitFailureBackoff {
+		t.Errorf("initFailureBackoffDelay(7, transient) = %s, must not equal the structural backoff by coincidence", got)
+	}
+}

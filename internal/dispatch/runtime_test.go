@@ -9165,7 +9165,7 @@ func mustGetBead(t *testing.T, store beads.Store, beadID string) beads.Bead {
 
 func findWorkflowBeadByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}

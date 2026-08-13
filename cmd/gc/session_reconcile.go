@@ -878,7 +878,7 @@ func mergeMetadataPatch(dst, src map[string]string) map[string]string {
 // pendingCreateLeaseExpiredForRollbackInfo, isNamedSessionInfo,
 // namedSessionModeInfo). Byte-identical to the bead form; the reconciler forward
 // pass folds the returned batch onto its coherent infoByID snapshot.
-func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
+func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	var now time.Time
 	var staleCreatingAfter time.Duration
 	if clk != nil {
@@ -886,7 +886,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 		staleCreatingAfter = staleCreatingStateTimeout
 	}
 	lcInput := sessionpkg.LifecycleInputFromInfo(info)
-	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: true, Alive: alive}
+	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: observed, Alive: alive}
 	lcInput.CreatedAt = info.CreatedAt
 	lcInput.StaleCreatingAfter = staleCreatingAfter
 	lcInput.Now = now
@@ -920,7 +920,15 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 		target = string(sessionpkg.StateAsleep)
 		clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
 	}
-	if rollbackAvailable && !alive && strings.TrimSpace(info.MetadataState) == "creating" {
+	// gcf-ru0: this gate originally checked MetadataState == "creating" only,
+	// from before #2583 split "start-pending" out as its own state ahead of
+	// "creating". projectRuntimeProjection's BaseStateStartPending branch has
+	// no staleness check of its own (unlike its BaseStateCreating sibling), so
+	// a bead stuck in start-pending with no rollback gate here just keeps
+	// re-projecting start-pending forever — pendingCreateLeaseExpiredForRollbackInfo
+	// already understands start-pending via pendingCreateRollbackState, so widen
+	// the gate to match instead of restricting it to "creating".
+	if rollbackAvailable && !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) {
 		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
@@ -959,14 +967,14 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, clk clock.
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
 // their current projection authoritative for the rest of the pass.
-func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
+func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
 	// Info.Closed is the projected mirror).
 	if info.Closed {
 		return nil, nil
 	}
-	batch := healStatePatchWithRollbackInfo(info, alive, clk, startupTimeout, rollbackAvailable)
+	batch := healStatePatchWithRollbackInfo(info, alive, observed, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
 		return nil, nil
 	}

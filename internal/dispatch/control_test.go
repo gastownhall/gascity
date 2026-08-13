@@ -2436,6 +2436,49 @@ func TestBuildAttemptRecipeSimpleRetry(t *testing.T) {
 	}
 }
 
+// TestBuildAttemptRecipePreservesStepDescription pins gastownhall/gascity#4861:
+// ralph-loop attempt beads created for later iterations lost the task
+// description, making fresh-session execution fail with "missing_task_input"
+// while a warm session could mask the defect through context carryover.
+// buildAttemptRecipe's root attempt step copied title/type/labels/assignee/
+// metadata from the frozen step spec but not step.Description. This drives
+// attempts 1 and 2 (the reported failure was specifically iteration 2+) and
+// asserts both iteration roots retain the authored description — the same
+// symmetry retry cloning already has for subject/child/check beads
+// (internal/dispatch/ralph.go, ~526-535/563-572/596-605).
+func TestBuildAttemptRecipePreservesStepDescription(t *testing.T) {
+	t.Parallel()
+
+	const authoredDescription = "Full task description with detailed requirements the agent needs to do the work without any ambient session context."
+
+	step := &formula.Step{
+		ID:          "converge",
+		Title:       "Converge",
+		Description: authoredDescription,
+		Type:        "task",
+		Ralph:       &formula.RalphSpec{MaxAttempts: 5},
+	}
+
+	control := beads.Bead{
+		ID: "gc-1",
+		Metadata: map[string]string{
+			"gc.step_id":  "converge",
+			"gc.step_ref": "mol-test.converge",
+		},
+	}
+
+	for _, attempt := range []int{1, 2} {
+		recipe := buildAttemptRecipe(step, control, attempt)
+		if len(recipe.Steps) != 1 {
+			t.Fatalf("attempt %d: steps = %d, want 1", attempt, len(recipe.Steps))
+		}
+		rootStep := recipe.Steps[0]
+		if rootStep.Description != authoredDescription {
+			t.Errorf("attempt %d: root step Description = %q, want %q (a fresh session claiming this attempt would fail with missing_task_input)", attempt, rootStep.Description, authoredDescription)
+		}
+	}
+}
+
 func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	t.Parallel()
 
@@ -3109,7 +3152,7 @@ func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType strin
 
 func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}

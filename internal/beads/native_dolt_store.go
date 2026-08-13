@@ -2,7 +2,6 @@ package beads
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,107 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
-
-// rawDBGetter matches beadslib's internal storage.RawDBAccessor without
-// importing its internal package. DoltStore satisfies this interface.
-type rawDBGetter interface {
-	DB() *sql.DB
-}
-
-// idDefaultRepairTables lists the char(36) id columns whose DEFAULT (uuid())
-// some Dolt versions silently strip from the expression default that beads
-// migrations add via PREPARE/EXECUTE. Without the default, beadslib INSERTs
-// that never supply id fail with "Field 'id' doesn't have a default value":
-//   - dependencies: DepAdd (migration 0043)
-//   - events / wisp_events: RecordEventInTable, reached when gc stamps
-//     metadata (e.g. gc.routed_to during sling) on a non-ephemeral bead.
-var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
-
-// repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
-// tolerant of an absent table (e.g. wisp_events): it only issues the ALTER when
-// the id column exists without a default.
-//
-// The probe is a single-table SHOW COLUMNS, not INFORMATION_SCHEMA.COLUMNS:
-// Dolt does not push the WHERE predicate into INFORMATION_SCHEMA, so the old
-// probe was a full catalog scan — cheap once, but it runs per store open per
-// repair table, and a fleet of concurrent gc/bd sessions firing it several
-// times a second pegged the shared Dolt server's CPU. SHOW COLUMNS returns the
-// Default cell directly, so one cheap statement replaces the scan.
-func repairIDDefault(db *sql.DB, table string) error {
-	// 'id' contains no LIKE wildcards, but Field is still compared exactly
-	// (matching upstream beads' SHOW COLUMNS probes) rather than trusting LIKE.
-	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
-	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
-	if err != nil {
-		if isTableNotExistError(err) {
-			return nil
-		}
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	defaultIdx := -1
-	for i, col := range cols {
-		if strings.EqualFold(col, "Default") {
-			defaultIdx = i
-			break
-		}
-	}
-	if defaultIdx < 0 {
-		return fmt.Errorf("checking %s.id default: SHOW COLUMNS returned no Default column (got %v)", table, cols)
-	}
-
-	idFound, withDefault := false, false
-	cells := make([]sql.RawBytes, len(cols))
-	dest := make([]any, len(cols))
-	for i := range cells {
-		dest[i] = &cells[i]
-	}
-	for rows.Next() {
-		if err := rows.Scan(dest...); err != nil {
-			return fmt.Errorf("checking %s.id default: %w", table, err)
-		}
-		if len(cells) > 0 && string(cells[0]) == "id" {
-			idFound = true
-			withDefault = cells[defaultIdx] != nil
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("checking %s.id default: %w", table, err)
-	}
-	if !idFound || withDefault {
-		// Column absent, or the default is already present.
-		return nil
-	}
-	//nolint:gosec // G201: table is drawn from idDefaultRepairTables, hardcoded constants.
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN `id` char(36) NOT NULL DEFAULT (uuid())", table)); err != nil {
-		return fmt.Errorf("repairing %s.id default: %w", table, err)
-	}
-	return nil
-}
-
-// isTableNotExistError reports whether err is the MySQL/Dolt "table doesn't
-// exist" error (1146). SHOW COLUMNS errors on a missing table where the old
-// INFORMATION_SCHEMA probe returned zero rows; an absent repair table (e.g.
-// wisp_events on an older schema) is not an error.
-func isTableNotExistError(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return mysqlErr.Number == 1146
-	}
-	// The embedded Dolt driver surfaces the same condition without the
-	// go-sql-driver error type; match Dolt's message shape.
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
-}
 
 const nativeDoltStoreActor = "gascity"
 
@@ -249,6 +149,71 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 	}
 }
 
+// beadsEnvPrefix is the namespace the upstream library configures itself from.
+const beadsEnvPrefix = "BEADS_"
+
+// nativeDoltWithheldEnvMu serializes whole-namespace withholding.
+//
+// It is a second lock rather than the projection lock above because the two
+// cover different sets and nest: a withheld open still runs the scoped
+// projection inside itself, and one mutex would deadlock on the second take.
+// Taking them only in this order — withhold, then project — is what keeps that
+// nesting acyclic.
+var nativeDoltWithheldEnvMu sync.Mutex
+
+// withWithheldBeadsEnv unsets every ambient BEADS_-prefixed variable and
+// returns the restore.
+//
+// It is prefix-based rather than a key list on purpose. The scoped projection
+// above names the thirteen variables gc itself sets; the library reads many
+// more — a credential command, database and directory overrides, a central
+// config path — and the list grows with the library. A caller that must be
+// sure a workspace is served by its own configuration alone cannot maintain a
+// mirror of somebody else's environment surface, so it withholds the namespace.
+func withWithheldBeadsEnv() (func(), error) {
+	nativeDoltWithheldEnvMu.Lock()
+	type withheld struct{ key, value string }
+	var previous []withheld
+	restore := func() {
+		for _, entry := range previous {
+			_ = os.Setenv(entry.key, entry.value)
+		}
+	}
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, beadsEnvPrefix) {
+			continue
+		}
+		previous = append(previous, withheld{key: key, value: value})
+		if err := os.Unsetenv(key); err != nil {
+			restore()
+			nativeDoltWithheldEnvMu.Unlock()
+			return nil, fmt.Errorf("withholding ambient %s: %w", key, err)
+		}
+	}
+	return func() {
+		restore()
+		nativeDoltWithheldEnvMu.Unlock()
+	}, nil
+}
+
+// OpenNativeDoltStoreAtWithoutAmbientEnv opens a native store at scopeRoot with
+// every ambient BEADS_-prefixed variable withheld for the duration of the open.
+//
+// It is for a caller whose whole contract is that the workspace's own
+// configuration decides how the workspace is served — so an inherited variable
+// naming another database, another directory, or a credential command must not
+// be able to re-point it. Passing an empty scoped environment is not enough:
+// that clears only the variables gc itself projects.
+func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	restore, err := withWithheldBeadsEnv()
+	if err != nil {
+		return nil, err
+	}
+	defer restore()
+	return newNativeDoltStoreAt(ctx, scopeRoot, nil, opts...)
+}
+
 // NativeDoltStore is a Store implementation backed by the upstream beads
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
@@ -368,7 +333,7 @@ func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
-	storage, prefix, err := openAndRepairNativeStorage(ctx, scopeRoot, env, true)
+	storage, prefix, err := openNativeStorage(ctx, scopeRoot, env, true)
 	if err != nil {
 		return nil, err
 	}
@@ -385,17 +350,15 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 // caller that has re-resolved the CURRENT managed Dolt env (fresh port) passes
 // it here to get a fresh handle bound to the live server.
 func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]string) (NativeStorage, error) {
-	storage, _, err := openAndRepairNativeStorage(ctx, scopeRoot, env, false)
+	storage, _, err := openNativeStorage(ctx, scopeRoot, env, false)
 	return storage, err
 }
 
-// openAndRepairNativeStorage projects the scoped Dolt env, opens the
-// best-available native storage, repairs the id-default columns some Dolt
-// versions strip, and (when readPrefix) reads the configured issue prefix while
-// the env is still projected. It is shared by the initial open and by the
-// read-path reconnect that recovers from a managed-Dolt hard-kill/rebind, so
-// both establish an identically configured connection.
-func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
+// openNativeStorage projects the scoped Dolt env, opens the best-available
+// native storage, and (when readPrefix) reads the configured issue prefix while
+// the env is still projected. It is shared by the initial open and the
+// read-path reconnect that recovers from a managed-Dolt hard-kill/rebind.
+func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
 	restoreEnv, err := withNativeDoltOpenEnv(env)
 	if err != nil {
 		return nil, "", err
@@ -411,15 +374,6 @@ func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[s
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
-		}
-	}
-	if accessor, ok := storage.(rawDBGetter); ok {
-		for _, table := range idDefaultRepairTables {
-			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
-				// Log but don't fail: the error will surface on the first
-				// DepAdd / event-recording write against the affected table.
-				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
-			}
 		}
 	}
 	return storage, prefix, nil
@@ -763,7 +717,7 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	if err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
-	if err := validateNativeGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan); err != nil {
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
@@ -988,10 +942,17 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		return s.applyUpdateInTx(ctx, tx, id, opts)
+	// Retry a lost serialization race rather than surfacing it to the caller:
+	// a concurrent writer to the same bead store is normal (the supervisor,
+	// the reconciler and an operator request all write during city startup),
+	// and without this an ordinary conflict fails the write permanently and
+	// reaches the API as a 500.
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
+			return s.applyUpdateInTx(ctx, tx, id, opts)
+		})
 	})
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1423,9 +1384,47 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 }
 
 const (
-	nativeMetadataWriteAttempts     = 3
-	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+	nativeWriteAttempts     = 3
+	nativeWriteRetryBackoff = 25 * time.Millisecond
 )
+
+// retryOnNativeDoltSerializationConflict runs attempt until it succeeds, fails
+// with something other than a Dolt serialization conflict, or exhausts
+// nativeWriteAttempts.
+//
+// Re-running the whole attempt is safe: it re-reads inside a fresh transaction
+// and therefore builds on the competing transaction's committed rows rather
+// than overwriting them from a stale read. In the conflict this guards against,
+// the regular-table commit is the one that loses the race and nothing lands.
+// isNativeDoltSerializationConflict classifies on error text and cannot tell
+// which of beadslib's commit points failed, so a conflict reported after the
+// regular commit already succeeded would replay the attempt; callers must
+// therefore keep each attempt idempotent under replay, which the metadata
+// merge, label add/remove and reparent operations are.
+//
+// Each attempt gets its own operation context, so an earlier attempt's deadline
+// cannot doom the retries.
+//
+// Every other error is returned on the first try. Retrying a genuine fault only
+// multiplies write load and hides the cause behind a slower failure.
+//
+// Callers hold the storage read lock across every attempt, so the backoff sleeps
+// inside this loop delay anything waiting to take s.mu for writing (store close
+// and the reconnect handle swap) by at most the total backoff. Holding it is
+// deliberate: releasing between attempts would let the handle be swapped
+// mid-retry, so a retry could run against a different storage than the one whose
+// transaction it is repeating.
+func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	var err error
+	for n := 1; n <= nativeWriteAttempts; n++ {
+		err = attempt()
+		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
+	}
+	return err
+}
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -1435,16 +1434,11 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+	return retryOnNativeDoltSerializationConflict(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
-		cancel()
-		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
-			return err
-		}
-		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
-	}
-	return err
+		defer cancel()
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+	})
 }
 
 // setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
@@ -1869,53 +1863,6 @@ func nativeBeadIDPrefix(id string) string {
 		return ""
 	}
 	return normalizeIDPrefix(before)
-}
-
-func validateNativeGraphApplyPlan(plan *GraphApplyPlan) error {
-	if len(plan.Nodes) == 0 {
-		return fmt.Errorf("plan has no nodes")
-	}
-	knownKeys := make(map[string]bool, len(plan.Nodes))
-	for i, node := range plan.Nodes {
-		if strings.TrimSpace(node.Key) == "" {
-			return fmt.Errorf("node %d has empty key", i)
-		}
-		if knownKeys[node.Key] {
-			return fmt.Errorf("duplicate node key %q", node.Key)
-		}
-		knownKeys[node.Key] = true
-		if strings.TrimSpace(node.Title) == "" {
-			return fmt.Errorf("node %q has empty title", node.Key)
-		}
-	}
-	for _, node := range plan.Nodes {
-		for metaKey, refKey := range node.MetadataRefs {
-			if !knownKeys[refKey] {
-				return fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
-			}
-		}
-		if node.ParentKey != "" && !knownKeys[node.ParentKey] {
-			return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
-		}
-	}
-	for i, edge := range plan.Edges {
-		if edge.FromKey != "" && !knownKeys[edge.FromKey] {
-			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
-		}
-		if edge.ToKey != "" && !knownKeys[edge.ToKey] {
-			return fmt.Errorf("edge %d: to key %q not found in plan", i, edge.ToKey)
-		}
-		if edge.FromKey == "" && edge.FromID == "" {
-			return fmt.Errorf("edge %d: must specify from_key or from_id", i)
-		}
-		if edge.ToKey == "" && edge.ToID == "" {
-			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
-		}
-		if depType := nativeGraphApplyDependencyType(edge.Type); !depType.IsValid() {
-			return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
-		}
-	}
-	return nil
 }
 
 func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {

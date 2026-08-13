@@ -223,12 +223,12 @@ const (
 	StoreDiskWarn     = "gc.store.disk_warn"
 	StoreDiskCritical = "gc.store.disk_critical"
 
-	// Postgres credential resolution. Emitted by the bd-env projection
-	// path on every successful pgauth resolve. The payload identifies
-	// the scope and the resolution tier that supplied the value; it
-	// MUST NOT carry the password value (asserted by
-	// TestPostgresEventOmitsPassword).
-	PostgresCredentialResolved = "pg.credential_resolved"
+	// BackendCredentialResolved records that a credential for a storage
+	// backend was resolved for one scope. The payload names the backend,
+	// the scope and the resolution tier that supplied the value; it MUST
+	// NOT carry the value itself (asserted by
+	// TestBackendCredentialResolvedPayloadOmitsTheCredential).
+	BackendCredentialResolved = "backend.credential_resolved"
 
 	// ProviderHealthGateAlert fires once per red episode when the provider-health
 	// gate parks respawns for a provider. Carries episode ID, onset time, and
@@ -251,6 +251,20 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// Storage-class binding outcomes. Emitted once per controller boot by the
+	// storage gate, and once per run by `gc storage migrate`, for a city whose
+	// [storage.classes] relocate the infrastructure classes to a binding.
+	//
+	// Converged and Genesis are the two serving outcomes: the first opened a
+	// binding a proven copy already populated, the second created one for a
+	// city that had nothing to move. Unconverged and Uncheckable are the two
+	// refusals: config and data disagree, or the check that would decide could
+	// not run. A city with no [storage] section emits none of them.
+	StorageBindingConverged   = "storage.binding.converged"
+	StorageBindingGenesis     = "storage.binding.genesis"
+	StorageBindingUnconverged = "storage.binding.unconverged"
+	StorageBindingUncheckable = "storage.binding.uncheckable"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -294,9 +308,11 @@ var KnownEventTypes = []string{
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
-	PostgresCredentialResolved,
+	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	StorageBindingConverged, StorageBindingGenesis,
+	StorageBindingUnconverged, StorageBindingUncheckable,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

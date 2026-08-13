@@ -35,6 +35,24 @@ func (f mkdirAllErrorFS) MkdirAll(path string, perm os.FileMode) error {
 	return f.FS.MkdirAll(path, perm)
 }
 
+// writeLocalCityPacks materializes a local pack (a directory holding
+// pack.toml) at each city-relative path, so an --include naming it resolves.
+// `gc rig add` rejects include tokens that resolve to no pack, so a test that
+// exercises import composition has to supply packs that actually exist.
+func writeLocalCityPacks(t *testing.T, cityPath string, relPaths ...string) {
+	t.Helper()
+	for _, rel := range relPaths {
+		dir := filepath.Join(cityPath, filepath.FromSlash(rel))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		packToml := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", filepath.Base(dir))
+		if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func writeSchema2RigCity(t *testing.T, cityPath, workspaceName, cityToml, siteToml string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -718,6 +736,7 @@ func TestDoRigAdd_ReAddWarnsDifferingFlags(t *testing.T) {
 		"[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\n",
 		fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"my-frontend\"\npath = %q\n", rigPath),
 	)
+	writeLocalCityPacks(t, cityPath, "packs/new")
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
@@ -892,6 +911,7 @@ func TestDoRigAdd_ExplicitIncludeSkipsUnusedDefaultRigImportErrors(t *testing.T)
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("not = [valid\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeLocalCityPacks(t, cityPath, "packs/custom")
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1423,6 +1443,7 @@ ref = "v1.2.3"
 func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	writeLocalCityPacks(t, cityPath, "packs/planner", "packs/architect")
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1861,6 +1882,8 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+
+	writeLocalCityPacks(t, cityPath, "packs/custom")
 
 	var stdout, stderr bytes.Buffer
 	// Explicit --include should override default_rig_includes while still

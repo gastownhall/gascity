@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -348,7 +349,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+	topo := cityQueryTopology(cityPath, cfg)
+	warnFederationBlindOverrides(stderr, &a, topo)
+	workQuery := a.EffectiveWorkQueryFor(topo)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
@@ -392,30 +395,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
-	// A cross-store-eligible (city-scoped) agent federates its work query across
-	// all stores — its own first, then every rig store — matched on its own
-	// identity (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead
-	// queries its own <rig> store FIRST: its routed work lives there, but its
-	// city-scoped work-query env does not reach it, so without this the hook
-	// returns empty and the spawned session exits with nothing to do. The rig
-	// store goes first (as the primary entry, not a best-effort federated
-	// extra) so a rig-store work-query timeout still surfaces to the reconciler
-	// via bestStoreWithWork's emit-on-timeout contract — the agent's
-	// (work-less) city-scoped env stays as a best-effort secondary. This
-	// extends the #2877 city-scoped cross-store delivery to rig-scoped agents.
-	stores := []hookStore{{dir: workDir, env: queryEnv}}
-	if agentIsCrossStoreEligible(&a) {
-		stores = appendRigHookStores(stores, cityPath, cfg, &a, overrides)
-	} else if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
-		if rigStores := appendOneRigHookStore(nil, cityPath, cfg, &a, rig, overrides); len(rigStores) > 0 {
-			stores = append(rigStores, stores...)
-		}
-		// A rig-backed agent's own env above is ALSO rig-scoped, so without
-		// this no entry reaches the CITY store and root-only beads assigned
-		// to the agent stay invisible. Best-effort tertiary; see
-		// appendCityHookStore.
-		stores = appendCityHookStore(stores, cityPath, cfg, &a, overrides)
-	}
+	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	// On a split city the ready tiers of workQuery are already city-wide, so
+	// running the whole query once per store re-asks the same question R+1 times
+	// and re-opens every leg each time. Pin the city-wide read to the primary
+	// entry and leave the extras on the single-store command they ran before the
+	// swap, which still covers the per-store crash-recovery and ephemeral tiers
+	// `gc ready` does not answer. No-op on a single-store city and for a custom
+	// work_query, where both forms are the same string.
+	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -467,7 +455,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -597,8 +585,26 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // claimHookWork claims routed work for gc hook --claim from the federated store
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
-func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+//
+// The claim ops carry the CLASS axis (claim_class_route.go): every store in the
+// federated set is a bd WORKSPACE, and a relocated coordination class is not
+// one, so the binding is reached through the ops rather than through a leg. On a
+// city that relocates nothing the route is nil and the ops value is the one this
+// function has always passed.
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	// The city relocates a class and its front door could not be projected.
+	// Claiming through the work store anyway would write ownership into a
+	// ledger that does not hold the bead, which is the wrong-answer lane this
+	// routing exists to close — so every failure but one is fatal here. The
+	// exception, a binding with no claim CAS, degrades to unrouted claiming;
+	// see hookClaimRouteVerdict.
+	opened, err := hookClaimClassRouteForCity(cityPath)
+	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
+	if !proceed {
+		return 1
+	}
+	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -616,8 +622,17 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // has been exhausted; the drain reason is claims_errored when any exhausted
 // store's eligible claims errored rather than merely lost the race, else no_work.
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
+//
+// The store set is also what the claim-time class escalation is measured
+// against: only the PRIMARY leg runs the city-wide reader, so it is the only leg
+// whose query can serve a bead it does not itself hold, and a not-found there
+// says nothing about the work legs behind it. observeWorkLegs hands the route
+// the whole fan-out so it can prove "no WORK store holds this bead" before it
+// writes ownership into the binding (claim_class_route.go). Nil on a city that
+// relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	ops.ClassRoute.observeWorkLegs(stores)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -682,6 +697,30 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 	return agentutil.RoutedToIdentity(a)
+}
+
+// singleStoreHookWorkQuery returns the agent's work query built for the SAME
+// city with the federated reader turned off — the command the hook ran against
+// every store before the reader was swapped. It is the command
+// scopeFederatedHookStores gives the federated extras, so their cost and
+// coverage stay exactly what they were.
+//
+// It returns "" on a city that federates nothing, so the caller's scoping is a
+// no-op there rather than a second build of the identical string.
+func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) string {
+	if !topo.FederatedReady || cfg == nil || a == nil {
+		return ""
+	}
+	singleStore := topo
+	singleStore.FederatedReady = false
+	// A custom work_query is returned verbatim for both topologies; scoping then
+	// no-ops on the equality check, and expanding it twice would repeat its
+	// template diagnostic, so stop before that.
+	command := a.EffectiveWorkQueryFor(singleStore)
+	if command == a.EffectiveWorkQueryFor(topo) {
+		return ""
+	}
+	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)
 }
 
 func hookSessionAgentForQuery() string {
@@ -868,10 +907,10 @@ func workQueryHasReadyWork(output string) bool {
 
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: future defer_until, any open blocking dep in the row's
-// blocked_by array, or the row's own is_blocked / status=="blocked" marker.
-// The work_query is expected to gate these, but defensive filtering here
-// prevents a single broken query from cascading into agent action on a bead
-// it cannot progress.
+// blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
+// canonical dispatch hold label. The work_query is expected to gate these, but
+// defensive filtering here prevents a single broken query from cascading into
+// agent action on a bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -902,6 +941,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isSelfBlockedHookCandidate(obj) {
+			continue
+		}
+		if isHeldHookCandidate(obj) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -963,6 +1005,51 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 	}
 	if status, ok := item["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "blocked") {
 		return true
+	}
+	return false
+}
+
+// isHeldHookCandidate reports whether item carries a canonical dispatch hold
+// label (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
+// required next actor or condition is, by construction, not this session.
+//
+// Serving one as work is never right for ANY hook path: the assignee cannot
+// advance it, and because the assignment is never released the same bead comes
+// back on every subsequent tick, so a worker that correctly parked its bead was
+// permanently starved of ready work (gas-kg6). The status+assignee tests in
+// hookClaimExistingAssignment / claimFirstReadyHookAssignment cannot catch this
+// on their own — a held bead is validly in_progress and validly ours — so the
+// hold dimension is filtered here, in the one seam every hook path already runs
+// through (the claim, the cross-store federation, and plain `gc hook`).
+//
+// Only the two canonical values match, compared exactly against the shared
+// beadmeta constants: unrelated labels that merely look hold-ish (`mpr-human-hold`,
+// the routing label `needs-mayor`) are ordinary work and must not be stranded.
+//
+// An absent or null labels field means "no labels", never "unknown" — bd emits
+// labels:null for an unlabeled bead — so this fails open exactly like the
+// is_blocked projection above it.
+//
+// Scope (ga-5736js): this filters what the hook SERVES as work. It does not
+// touch the assignee-scoped demand/liveness tiers, which stay hold-transparent
+// by design so a held assignment still keeps its owner visible to the pool and
+// to crash recovery.
+func isHeldHookCandidate(item map[string]any) bool {
+	raw, ok := item["labels"].([]any)
+	if !ok {
+		return false
+	}
+	for _, entry := range raw {
+		label, ok := entry.(string)
+		if !ok {
+			continue
+		}
+		label = strings.TrimSpace(label)
+		for _, hold := range beadmeta.DispatchHoldLabels {
+			if strings.EqualFold(label, hold) {
+				return true
+			}
+		}
 	}
 	return false
 }

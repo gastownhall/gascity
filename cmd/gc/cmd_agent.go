@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -18,6 +19,13 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
+
+// loadCityConfigCalls counts every full TOML load performed by
+// loadCityConfigFS (city.toml + all pack includes). Store-open call sites on
+// hot per-tick paths (order dispatch) must reuse an already-resolved
+// *config.City instead of driving this counter once per scope per tick
+// (ga-237xpr) — tests assert on this counter to guard against a regression.
+var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
 
@@ -37,6 +45,7 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
@@ -301,8 +310,13 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
-	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
-	if strings.Contains(input, "/") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
+	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
+	// matches the corresponding pool template. Mirrors the shared resolver
+	// helper (internal/agentutil/resolve.go), which gates on
+	// ContainsAny(input, "/.") so dot-qualified instances resolve too
+	// (#4843).
+	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
 			return a, true
 		}
@@ -497,7 +511,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg)
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -522,7 +536,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -538,7 +552,7 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
+			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,

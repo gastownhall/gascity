@@ -365,6 +365,19 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 			if b.Status == "closed" && wasConfiguredNamedSession(b) {
 				continue
 			}
+			// A retired ephemeral pool slot must not permanently reserve the
+			// name either. The reconciler closes the slot bead without
+			// clearing session_name, and a configured named session that was
+			// materialized through the pool path lands here with neither the
+			// configured_named_session marker nor configured_named_identity,
+			// so the release above never fires for it. A dead pool slot must
+			// not poison future materialization of the identity it happened
+			// to be running as.
+			if b.Status == "closed" &&
+				strings.TrimSpace(b.Metadata["pool_managed"]) == "true" &&
+				strings.TrimSpace(b.Metadata["session_origin"]) == "ephemeral" {
+				continue
+			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 		}
 		if b.Status == "closed" {
