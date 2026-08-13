@@ -246,7 +246,7 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 	}
 
 	validate := func(key, value string) (string, bool) {
-		if key != "gc.lease_owner" && key != "gc.routed_to" {
+		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
 			return "", false
 		}
 		rig, _, qualified := strings.Cut(value, "/")
@@ -303,7 +303,7 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
 		}
 		for key, rawValue := range metadata {
-			if key != "gc.lease_owner" && key != "gc.routed_to" {
+			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
 				continue
 			}
 			var metadataValue string
