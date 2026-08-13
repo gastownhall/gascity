@@ -14055,5 +14055,82 @@ func TestBuildDesiredState_RigDispatcherOnLegacyCityStillProbesRigStore(t *testi
 	}
 	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "rig:fixture" {
 		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: a city that relocates nothing keeps the rig probe", ref, "rig:fixture")
+// SESSION-RECON-015: an API-created agent session bead carries
+// session_origin=ephemeral with agent_name set and no pool markers
+// (pool_managed / pool_slot). On a multi-session template that bead is
+// user-created capacity, not controller-created pool capacity, so
+// desired-state construction must keep it — including when the same backing
+// template also carries a configured [[named_session]], which owns the
+// template's canonical identity but must not evict the separate ad-hoc
+// session bead.
+func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) {
+	const (
+		sessionName = "test-city--worker-adhoc"
+		agentName   = "worker-adhoc"
+	)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+	}{
+		{
+			name: "multi session agent",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+			},
+		},
+		{
+			name: "multi session agent with always named session",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "worker",
+					Mode:     "always",
+				}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  "adhoc worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"session_name":   sessionName,
+					"agent_name":     agentName,
+					"state":          "active",
+					"session_origin": "ephemeral",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), tc.cfg, runtime.NewFake(), store, &stderr)
+			tp, ok := dsResult.State[sessionName]
+			if !ok {
+				t.Fatalf("API-created agent session %q missing from desired state, got keys %v; stderr=%s",
+					sessionName, mapKeys(dsResult.State), stderr.String())
+			}
+			if tp.TemplateName != "worker" {
+				t.Fatalf("desired[%q].TemplateName = %q, want worker", sessionName, tp.TemplateName)
+			}
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
+					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
 	}
 }
