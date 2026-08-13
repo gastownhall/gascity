@@ -19,6 +19,8 @@ set -euo pipefail
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/latency.sh"
+. "$PACK_DIR/assets/scripts/loadavg.sh"
+. "$PACK_DIR/assets/scripts/supervisor_signals.sh"
 . "$PACK_DIR/assets/scripts/advisory_state.sh"
 . "$PACK_DIR/assets/scripts/_notify.sh"
 
@@ -36,6 +38,29 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
 ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
+
+# Watchdog soft-signal knobs (Step 2b): detect the store destabilizing under
+# CPU load. Both checks are dolt-free — a local load-average read and a read of
+# the controller's own reconcile trace — so they add no query load to the
+# server they protect.
+#
+# Per-core 1-minute load-average warn threshold. A CPU-saturated host starves
+# the managed dolt server (latency climbs, the client circuit breaker trips), so
+# a sustained per-core load at or above this raises the advisory. Default
+# 4.0/core is unambiguous saturation; 0 disables. GC_DOCTOR_LOADAVG_1MIN
+# overrides the measured value for tests / constrained hosts.
+LOADAVG_WARN_PER_CORE_CENTI="$(to_centi "${GC_DOCTOR_LOADAVG_WARN_PER_CORE:-4.0}")"
+# Lookback window for the supervisor reconcile-trace read, sized just above the
+# order interval (`interval` in orders/mol-dog-doctor.toml) so consecutive ticks
+# overlap and no snapshot is missed between them.
+SUPERVISOR_WINDOW="${GC_DOCTOR_SUPERVISOR_WINDOW:-6m}"
+# Wall-clock bound (seconds) for that trace read. It is a local, dolt-free
+# `gc trace show`, but under the very CPU saturation this watchdog exists to
+# catch even a local subprocess can stall — so bound it, exactly as dolt_sql
+# bounds its query, to keep the SOFT contract ("never hang, never pile on")
+# honest. On timeout the read yields no signal and the doctor degrades to
+# "supervisor: ok" for the tick rather than blocking; the next tick re-checks.
+SUPERVISOR_TIMEOUT_SECS="${GC_DOCTOR_SUPERVISOR_TIMEOUT_SECS:-10}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -205,9 +230,53 @@ if [ -n "$BACKUP_STALE_ITEMS" ]; then
     BACKUP_STALE="$BACKUP_STALE [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
 fi
 
+# --- Step 2b: Soft degradation signals (dolt-free) ---
+#
+# Catch the store destabilizing under CPU load *before* it becomes an outage,
+# without adding any query load to the server we are watching. Both signals are
+# read from outside dolt:
+#   - the host 1-minute load average (a local read), and
+#   - the controller's own reconcile trace (`gc trace show`), which surfaces
+#     scale-check / store PARTIAL reads — the supervisor-side shadow of a tripped
+#     "dolt circuit breaker is open".
+# If dolt is too wedged to answer, these still report, so the advisory fires.
+
+LOADAVG_1MIN="$(loadavg_1min)"
+CPU_COUNT="$(cpu_count)"
+LOADAVG_CENTI="$(to_centi "$LOADAVG_1MIN")"
+LOADAVG_PER_CORE_CENTI="$(( LOADAVG_CENTI / CPU_COUNT ))"
+LOADAVG_WARN=""
+if loadavg_should_warn "$LOADAVG_CENTI" "$CPU_COUNT" "$LOADAVG_WARN_PER_CORE_CENTI"; then
+    LOADAVG_WARN=" [WARN: load avg 1m $(centi_to_dec "$LOADAVG_PER_CORE_CENTI")/core >= threshold $(centi_to_dec "$LOADAVG_WARN_PER_CORE_CENTI")/core — server may starve]"
+fi
+
+# Read the supervisor's recorded reconcile signals. The fetch is both time-bounded
+# (run_bounded, like dolt_sql) and error-guarded (|| true) so a missing, slow, or
+# wedged trace store can never hang or abort the doctor (SOFT: back off, don't
+# pile on); on timeout it yields empty output — i.e. no signal this tick. The
+# parse lives in supervisor_signals.sh so it is unit-testable on canned JSON.
+SUPERVISOR_JSON="$(run_bounded "$SUPERVISOR_TIMEOUT_SECS" gc trace show --since "$SUPERVISOR_WINDOW" --type cycle_input_snapshot --json 2>/dev/null || true)"
+SUPERVISOR_ACTIVE="$(supervisor_signals "$SUPERVISOR_JSON")"
+SUPERVISOR_STATE="ok"
+SCALECHECK_WARN=""
+STORE_WARN=""
+case " $SUPERVISOR_ACTIVE " in
+    *" scalecheck "*)
+        SCALECHECK_WARN=" [WARN: supervisor scale-check query PARTIAL — pools may not scale, work stalls]"
+        ;;
+esac
+case " $SUPERVISOR_ACTIVE " in
+    *" store "*)
+        STORE_WARN=" [WARN: supervisor store read PARTIAL since last tick — circuit breaker / store instability]"
+        ;;
+esac
+if [ -n "$SCALECHECK_WARN$STORE_WARN" ]; then
+    SUPERVISOR_STATE="PARTIAL (${SUPERVISOR_ACTIVE})"
+fi
+
 # --- Step 3: Compose report and escalate if critical ---
 
-WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
+WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}${LOADAVG_WARN}${SCALECHECK_WARN}${STORE_WARN}"
 if [ -n "$WARNINGS" ]; then
     # Dedup (#3409): key on which conditions are active — not their tick-volatile
     # values (exact latency ms, connection count, backup age) — and re-send only
@@ -219,21 +288,45 @@ if [ -n "$WARNINGS" ]; then
     if [ -n "$CONN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}conn "; fi
     if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
     if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
+    if [ -n "$LOADAVG_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}load "; fi
+    if [ -n "$SCALECHECK_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}scalecheck "; fi
+    if [ -n "$STORE_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}store "; fi
     if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
         if send_escalation \
             "Dolt health advisory [MEDIUM]" \
             "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
-Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
+Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}
+Load avg (1m): ${LOADAVG_1MIN} over ${CPU_COUNT} core(s)${LOADAVG_WARN}
+Supervisor reconcile: ${SUPERVISOR_STATE}${SCALECHECK_WARN}${STORE_WARN}"; then
             advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
         fi
     fi
 else
-    # Healthy: forget the last advisory so a future condition re-alerts.
-    advisory_clear "$ADVISORY_STATE_FILE"
+    # Healthy this tick. If the prior tick was degraded (state file non-empty),
+    # send exactly one [RECOVERED] note — the recovery mirror of the dedup: one
+    # alert per transition — then forget the advisory so a future condition
+    # re-alerts. Clear only after a successful send so a failed recovery note
+    # retries next tick.
+    if [ -s "$ADVISORY_STATE_FILE" ]; then
+        PRIOR_SIG=""
+        IFS= read -r PRIOR_SIG < "$ADVISORY_STATE_FILE" 2>/dev/null || true
+        if send_escalation \
+            "Dolt health advisory [RECOVERED]" \
+            "Dolt health has returned to normal after a degraded advisory.
+Latency: ${LATENCY_MS}ms
+Connections: ${CONN_COUNT}/${CONN_MAX}
+Load avg (1m): ${LOADAVG_1MIN} over ${CPU_COUNT} core(s)
+Supervisor reconcile: ${SUPERVISOR_STATE}
+Cleared conditions: ${PRIOR_SIG}"; then
+            advisory_clear "$ADVISORY_STATE_FILE"
+        fi
+    else
+        advisory_clear "$ADVISORY_STATE_FILE"
+    fi
 fi
 
-SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
+SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}, load: ${LOADAVG_1MIN}/${CPU_COUNT}c, supervisor: ${SUPERVISOR_STATE}"
 dolt_notify_done "$SUMMARY"
 echo "doctor: $SUMMARY"
