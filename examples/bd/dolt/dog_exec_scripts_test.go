@@ -5260,6 +5260,70 @@ func TestDoctorScriptSendsRecoveredNoteAfterAdvisoryClears(t *testing.T) {
 	}
 }
 
+// TestDoctorScriptToleratesSlowSupervisorTrace asserts the SOFT contract holds
+// even when the supervisor trace read itself stalls. `gc trace show` is a local,
+// dolt-free read, but under the CPU saturation this watchdog exists to catch
+// even a local subprocess can wedge — so the fetch is wall-clock bounded
+// (GC_DOCTOR_SUPERVISOR_TIMEOUT_SECS). On timeout it yields no signal and the
+// doctor finishes the tick reporting "supervisor: ok" and raises no advisory,
+// rather than hanging to collect a signal it could read next tick. A regression
+// that dropped the bound would instead block for the full stall, read the
+// store-PARTIAL the fake then emits, and wrongly alert — so this fails on both
+// timing and outcome.
+func TestDoctorScriptToleratesSlowSupervisorTrace(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := filepath.Join(binDir, "gc.log")
+	// Fake gc logs every call first (so the attempted read is recorded even when
+	// the process is killed mid-read), then stalls 10s on `trace show` before it
+	// would emit a store-PARTIAL record — well past the 2s bound set below.
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf 'gc %%s\n' "$*" >> %s
+if [ "$1" = "trace" ] && [ "$2" = "show" ]; then
+  sleep 10
+  printf '[{"type":"cycle_input_snapshot","fields":{"store_query_partial":true}}]\n'
+fi
+exit 0
+`, shellQuote(gcLogPath)))
+	queryLogPath := filepath.Join(binDir, "dolt-queries.log")
+	writeDoctorHealthyDolt(t, binDir, queryLogPath)
+
+	// Bound the trace read at 2s against the 10s stall; keep load low so a hang
+	// would be the only possible source of delay or of any warning.
+	start := time.Now()
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_SUPERVISOR_TIMEOUT_SECS=2",
+		"GC_DOCTOR_LOADAVG_1MIN=0.10", "GC_DOCTOR_CPU_COUNT=8")
+	if elapsed := time.Since(start); elapsed > 8*time.Second {
+		t.Fatalf("doctor blocked on the slow trace read (%s); the fetch must be time-bounded", elapsed)
+	}
+	if !strings.Contains(out, "supervisor: ok") {
+		t.Fatalf("a timed-out trace read must yield no signal (supervisor: ok), output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "trace show --since") {
+		t.Fatalf("doctor should still attempt the bounded trace read, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "[MEDIUM]") {
+		t.Fatalf("a timed-out trace read must not raise a (false) advisory, log:\n%s", gcLog)
+	}
+	// SOFT contract: the supervisor probe never touches dolt, even on timeout.
+	queryLog, err := os.ReadFile(queryLogPath)
+	if err != nil {
+		t.Fatalf("read dolt query log: %v", err)
+	}
+	if strings.Contains(string(queryLog), "cycle_input_snapshot") || strings.Contains(string(queryLog), "trace") {
+		t.Fatalf("supervisor probe must not touch dolt, query log:\n%s", queryLog)
+	}
+}
+
 // TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
 
 // server-unreachable path goes through the generic escalation recipient.

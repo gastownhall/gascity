@@ -54,6 +54,13 @@ LOADAVG_WARN_PER_CORE_CENTI="$(to_centi "${GC_DOCTOR_LOADAVG_WARN_PER_CORE:-4.0}
 # order interval (`interval` in orders/mol-dog-doctor.toml) so consecutive ticks
 # overlap and no snapshot is missed between them.
 SUPERVISOR_WINDOW="${GC_DOCTOR_SUPERVISOR_WINDOW:-6m}"
+# Wall-clock bound (seconds) for that trace read. It is a local, dolt-free
+# `gc trace show`, but under the very CPU saturation this watchdog exists to
+# catch even a local subprocess can stall — so bound it, exactly as dolt_sql
+# bounds its query, to keep the SOFT contract ("never hang, never pile on")
+# honest. On timeout the read yields no signal and the doctor degrades to
+# "supervisor: ok" for the tick rather than blocking; the next tick re-checks.
+SUPERVISOR_TIMEOUT_SECS="${GC_DOCTOR_SUPERVISOR_TIMEOUT_SECS:-10}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -243,10 +250,12 @@ if loadavg_should_warn "$LOADAVG_CENTI" "$CPU_COUNT" "$LOADAVG_WARN_PER_CORE_CEN
     LOADAVG_WARN=" [WARN: load avg 1m $(centi_to_dec "$LOADAVG_PER_CORE_CENTI")/core >= threshold $(centi_to_dec "$LOADAVG_WARN_PER_CORE_CENTI")/core — server may starve]"
 fi
 
-# Read the supervisor's recorded reconcile signals. The fetch is guarded so a
-# missing/slow trace store never aborts the doctor (SOFT: back off, don't hang);
-# the parse lives in supervisor_signals.sh so it is unit-testable on canned JSON.
-SUPERVISOR_JSON="$(gc trace show --since "$SUPERVISOR_WINDOW" --type cycle_input_snapshot --json 2>/dev/null || true)"
+# Read the supervisor's recorded reconcile signals. The fetch is both time-bounded
+# (run_bounded, like dolt_sql) and error-guarded (|| true) so a missing, slow, or
+# wedged trace store can never hang or abort the doctor (SOFT: back off, don't
+# pile on); on timeout it yields empty output — i.e. no signal this tick. The
+# parse lives in supervisor_signals.sh so it is unit-testable on canned JSON.
+SUPERVISOR_JSON="$(run_bounded "$SUPERVISOR_TIMEOUT_SECS" gc trace show --since "$SUPERVISOR_WINDOW" --type cycle_input_snapshot --json 2>/dev/null || true)"
 SUPERVISOR_ACTIVE="$(supervisor_signals "$SUPERVISOR_JSON")"
 SUPERVISOR_STATE="ok"
 SCALECHECK_WARN=""
