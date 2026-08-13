@@ -165,6 +165,10 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
+		// Resolved before the liveness gates because the graph-resident-session
+		// probe below reads the same store; the missing-store report stays where
+		// it was, so a bead skipped by a liveness gate never reaches it.
+		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
@@ -183,20 +187,24 @@ func releaseOrphanedPoolAssignments(
 			if liveOpenSessionAssignmentExists(store, assignee) {
 				continue
 			}
+			// The sessions binding is not the only ledger that can hold a session
+			// bead. Graph-resident run sessions (gcg-session-*) are written into
+			// the same store as the work they drive, so on a city whose graph
+			// binding is separate from the sessions binding the probe above is
+			// structurally blind to every graph-run assignee and releases live
+			// claims. A session bead of that shape lives in the work bead's own
+			// owner store, so probing that one store after the sessions store
+			// misses closes the gap without enumerating every attached store.
+			if ownerStore != nil && liveOpenSessionAssignmentExists(ownerStore, assignee) {
+				continue
+			}
 		}
 
-		var ownerStore beads.Store
-		if storeAware {
-			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
+		if ownerStore == nil {
+			if storeAware {
 				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
-				continue
 			}
-			ownerStore = assignedWorkStores[i]
-		} else {
-			ownerStore = storeForPoolAssignment(cfg, store, rigStores, wb)
-			if ownerStore == nil {
-				continue
-			}
+			continue
 		}
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
 			continue
@@ -211,6 +219,21 @@ func releaseOrphanedPoolAssignments(
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+// assignedWorkOwnerStore resolves the store that owns the assigned work bead at
+// index i: the index-aligned snapshot store when the caller supplied one (the
+// store-aware form), otherwise the routed/prefix fallback. A nil result means
+// the snapshot is misaligned or no store resolves, and the caller must skip the
+// bead rather than guess at a store.
+func assignedWorkOwnerStore(cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, assignedWorkStores []beads.Store, i int, wb beads.Bead) beads.Store {
+	if len(assignedWorkStores) > 0 {
+		if i >= len(assignedWorkStores) {
+			return nil
+		}
+		return assignedWorkStores[i]
+	}
+	return storeForPoolAssignment(cfg, cityStore, rigStores, wb)
 }
 
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
