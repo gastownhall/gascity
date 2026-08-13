@@ -18,7 +18,9 @@
 #
 # advisory_archive_superseded is the mailbox half of the same lifecycle: the
 # signature dedup bounds how often an advisory is SENT, and the sweep bounds how
-# many advisory beads stay OPEN — at most one, the latest snapshot.
+# many *unread* advisory beads stay OPEN — at most one, the latest snapshot.
+# Read-but-open advisories are left alone (the sweep does not pass
+# --include-read).
 #
 # Sourced by mol-dog-doctor.sh; unit-tested by test/dolt/advisory_dedup_test.sh.
 
