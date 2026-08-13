@@ -92,6 +92,35 @@ func TestCachingStoreCreateWithStorageForwardsPolicyStorageAndCachesResult(t *te
 	}
 }
 
+func TestCachingStoreCreateWithStoragePreservesStorageForPlainBacking(t *testing.T) {
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+
+	created, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageNoHistory)
+	if err != nil {
+		t.Fatalf("CreateWithStorage: %v", err)
+	}
+	if !created.NoHistory || created.Ephemeral {
+		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+	}
+	persisted, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	if !persisted.NoHistory || persisted.Ephemeral {
+		t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+	}
+}
+
+func TestCachingStoreCreateWithStorageRejectsUnknownStorageForPlainBacking(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+
+	_, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageClass("unknown"))
+	if err == nil || !strings.Contains(err.Error(), "unknown storage class") {
+		t.Fatalf("CreateWithStorage error = %v, want unknown storage class", err)
+	}
+}
+
 func TestCachingStoreGraphApplyHandleForwardsStorageAndCachesResult(t *testing.T) {
 	backing := &storageGraphApplyRecordingStore{Store: NewMemStore()}
 	cache := NewCachingStoreForTest(backing, nil)
