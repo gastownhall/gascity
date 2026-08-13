@@ -157,27 +157,41 @@ func TestBeadPolicyStoreAppliesDefaultStorageForAllowlistedCreates(t *testing.T)
 }
 
 func TestBeadPolicyStorePreservesNoHistoryThroughCachingStoreWithPlainBacking(t *testing.T) {
-	backing := beads.NewMemStore()
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	store := wrapStoreWithBeadPolicies(cache, &config.City{})
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "session",
+			bead: beads.Bead{Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession}},
+		},
+		{
+			name: "order tracking",
+			bead: beads.Bead{Title: "order:daily", Labels: []string{"order-run:daily", labelOrderTracking}},
+		},
+	}
 
-	created, err := store.Create(beads.Bead{
-		Title:  "session",
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if !created.NoHistory || created.Ephemeral {
-		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
-	}
-	persisted, err := backing.Get(created.ID)
-	if err != nil {
-		t.Fatalf("backing Get: %v", err)
-	}
-	if !persisted.NoHistory || persisted.Ephemeral {
-		t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			store := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+			created, err := store.Create(tt.bead)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if !created.NoHistory || created.Ephemeral {
+				t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+			}
+			persisted, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("backing Get: %v", err)
+			}
+			if !persisted.NoHistory || persisted.Ephemeral {
+				t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+			}
+		})
 	}
 }
 

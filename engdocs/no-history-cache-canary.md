@@ -42,15 +42,27 @@ printf '%s %s %s\n' "$BASELINE_UTC" "$CANARY_TAG" "b2763cc2e" \
    those two IDs.  Both rows must show `no_history=1` and `ephemeral=0`.
 4. Close both controlled objects.  Query the same IDs again.  The two flags
    must remain unchanged after close.
-5. Run the operator's native-Dolt query restricted to
-   `created_at >= BASELINE_UTC` and the recorded IDs/tag.  It must return zero
-   rows with `no_history <> 1` or `ephemeral <> 0`.  Do not use an unbounded
-   query: the known older durable session rows are outside this proof.
+5. Run this null-safe native-Dolt query for the recorded IDs and
+   `created_at >= BASELINE_UTC`.  It must return zero rows.  Do not replace the
+   null-safe comparisons with `<>`: SQL treats `NULL <> 1` as unknown, which
+   would hide the legacy state this canary is designed to detect.
+
+   ```sql
+   SELECT id, no_history, ephemeral
+   FROM issues
+   WHERE created_at >= :baseline_utc
+     AND id IN (:session_id, :order_id)
+     AND (NOT (no_history <=> 1) OR NOT (ephemeral <=> 0));
+   ```
+
+   Do not use an unbounded query: the known older durable session rows are
+   outside this proof.
 6. Separately query runtime rows updated after `BASELINE_UTC` but created
    before it.  Name every returned ID in the receipt; this is monitoring for
    legacy state, not a failure of the create canary.  Any returned row with
    `no_history <> 1` stops rollout and requires an explicit allowlist or a
-   guarded remediation decision outside this manifest.
+   guarded remediation decision outside this manifest.  Use
+   `NOT (no_history <=> 1)` for this check as well so `NULL` is a failure.
 7. Reconcile the HQ/Dolt commit delta during the window to the named runtime
    rows.  An unexplained commit is a failed canary.
 
