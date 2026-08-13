@@ -1915,7 +1915,7 @@ func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
 		Interval: "1h",
 		Exec:     "true",
 	}}
-	ad := newMemoryOrderDispatcher(aa, cityDir, cfg, events.Discard, io.Discard)
+	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
 
 	before := loadCityConfigCalls.Load()
 	now := time.Now()
