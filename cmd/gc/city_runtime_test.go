@@ -7387,6 +7387,40 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_CapFormatAtLimit(t *testing.T) {
 	}
 }
 
+func TestReplaceConfigWatcherSerializesConcurrentRestarts(t *testing.T) {
+	cr := &CityRuntime{}
+	var active atomic.Int64
+	var maxActive atomic.Int64
+	start := func() func() {
+		n := active.Add(1)
+		for {
+			old := maxActive.Load()
+			if n <= old || maxActive.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		return func() { active.Add(-1) }
+	}
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cr.replaceConfigWatcher(start)
+		}()
+	}
+	wg.Wait()
+	cr.stopConfigWatcher()
+
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum active config watchers = %d, want 1", got)
+	}
+	if got := active.Load(); got != 0 {
+		t.Fatalf("active config watchers after stop = %d, want 0", got)
+	}
+}
+
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
 	warnIfClosedOrderTrackingBacklogLarge([]beads.Store{nil}, io.Discard)

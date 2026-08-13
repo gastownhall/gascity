@@ -2294,18 +2294,29 @@ func (cr *CityRuntime) restartConfigWatcher() {
 	if cr.tomlPath == "" {
 		return
 	}
-	cr.stopConfigWatcher()
 
 	dirty := cr.configDirty
 	if dirty == nil {
 		dirty = &atomic.Bool{}
 		cr.configDirty = dirty
 	}
-	cleanup := watchConfigTargets(cr.configWatcherTargets(), dirty, cr.pokeCh, cr.stderr)
+	cr.replaceConfigWatcher(func() func() {
+		return watchConfigTargets(cr.configWatcherTargets(), dirty, cr.pokeCh, cr.stderr)
+	})
+}
 
+func (cr *CityRuntime) replaceConfigWatcher(start func() func()) {
+	// Serialize the whole replace operation. Locking stop and install
+	// separately lets concurrent reloads both create a watcher, after which
+	// the second install overwrites the first cleanup handle and permanently
+	// leaks its recursive fsnotify registrations.
 	cr.watchMu.Lock()
-	cr.watchCleanup = cleanup
-	cr.watchMu.Unlock()
+	defer cr.watchMu.Unlock()
+	if cleanup := cr.watchCleanup; cleanup != nil {
+		cr.watchCleanup = nil
+		cleanup()
+	}
+	cr.watchCleanup = start()
 }
 
 func (cr *CityRuntime) stopConfigWatcher() {
