@@ -65,11 +65,11 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
+		bdSourceRef    = "5b17b8da9e6c1fd478d522586e671a4810038048"
+		bdSourceSHA256 = "9e1a981267197b0e2d8cf5ff10a6c980bb7962379116ead43e0cb90177389afb"
+		bdBuild        = "5b17b8da9e"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		grpcVersion    = "1.83.0"
 	)
 
 	root := repoRoot(t)
