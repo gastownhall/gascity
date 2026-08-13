@@ -10,7 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -433,13 +432,6 @@ func firedRootsByKey(t *testing.T, store beads.Store, key string) []beads.Bead {
 	return out
 }
 
-func enableFormulaV2ForTest(t *testing.T) {
-	t.Helper()
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
-}
-
 // TestPromoteReadyFireRootsKeyedIdempotencySurvivesLinkStampFailure is the
 // Fix-1 hardening regression. Because promoteReadyFireRoots re-runs on EVERY
 // patrol tick, a linkFiredRoot forward-pointer stamp that fails right after a
@@ -451,8 +443,6 @@ func enableFormulaV2ForTest(t *testing.T) {
 // next tick re-detects the already-cooked live convoy by that key, re-asserts the
 // missing linkage, and does NOT cook a duplicate.
 func TestPromoteReadyFireRootsKeyedIdempotencySurvivesLinkStampFailure(t *testing.T) {
-	enableFormulaV2ForTest(t)
-
 	// A minimal graph.v2 workflow formula: its root is a gc.kind=workflow bead
 	// molecule.Cook does NOT parent on the fire-root, so the ONLY idempotency link
 	// is the workflow_id forward pointer linkFiredRoot stamps afterward — the
@@ -490,6 +480,10 @@ needs = ["setup"]
 		stderr:              io.Discard,
 		cfg:                 &config.City{FormulaLayers: config.FormulaLayers{City: []string{formulaDir}}},
 	}
+	// Enable formula v2 through the sanctioned propagator: daemon.formula_v2
+	// defaults to true when unset, so this leaves the flag at its production
+	// default and the graph.v2 cook below resolves.
+	applyFeatureFlags(cr.cfg)
 	key := firedRootIdempotencyKey("FR-1")
 
 	// Tick 1: the fire-root cooks, but the forward-pointer stamp fails (transient).
