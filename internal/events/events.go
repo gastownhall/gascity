@@ -170,7 +170,11 @@ const (
 	// the store had already refused was, by construction, invisible on the
 	// event bus: no event, no metric, every health surface green. It is
 	// edge-triggered on the quarantine, not level-triggered on the retry — one
-	// emission per stalled bead, never one per attempt.
+	// emission per stalled bead under the intended single-control-dispatcher-
+	// per-city topology, never one per attempt. Control beads carry no
+	// claim/lease, so a misconfigured second dispatcher over the same store
+	// could also observe expiry and emit; consumers should tolerate a duplicate
+	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous

@@ -125,7 +125,12 @@ func truncateControllerRetryReason(cause error) string {
 	for limit > 0 && !utf8.ValidString(reason[:limit]) {
 		limit--
 	}
-	return reason[:limit]
+	// Re-trim after truncation so the stored reason and a freshly-recomputed one
+	// stay byte-identical: the repeat check reads the stored value back through
+	// strings.TrimSpace, so a cut that lands on trailing whitespace would
+	// otherwise defeat repeat detection for a >maxControllerRetryErrorMetadata
+	// refusal.
+	return strings.TrimSpace(reason[:limit])
 }
 
 // quietControllerRetryError marks a transient failure that repeats the previous
