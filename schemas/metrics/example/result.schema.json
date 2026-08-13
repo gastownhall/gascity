@@ -211,7 +211,8 @@
               "storage-migrate",
               "storage-status",
               "ready",
-              "storage-recover-stranded"
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

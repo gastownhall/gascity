@@ -942,10 +942,17 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		return s.applyUpdateInTx(ctx, tx, id, opts)
+	// Retry a lost serialization race rather than surfacing it to the caller:
+	// a concurrent writer to the same bead store is normal (the supervisor,
+	// the reconciler and an operator request all write during city startup),
+	// and without this an ordinary conflict fails the write permanently and
+	// reaches the API as a 500.
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
+			return s.applyUpdateInTx(ctx, tx, id, opts)
+		})
 	})
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1377,9 +1384,47 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 }
 
 const (
-	nativeMetadataWriteAttempts     = 3
-	nativeMetadataWriteRetryBackoff = 25 * time.Millisecond
+	nativeWriteAttempts     = 3
+	nativeWriteRetryBackoff = 25 * time.Millisecond
 )
+
+// retryOnNativeDoltSerializationConflict runs attempt until it succeeds, fails
+// with something other than a Dolt serialization conflict, or exhausts
+// nativeWriteAttempts.
+//
+// Re-running the whole attempt is safe: it re-reads inside a fresh transaction
+// and therefore builds on the competing transaction's committed rows rather
+// than overwriting them from a stale read. In the conflict this guards against,
+// the regular-table commit is the one that loses the race and nothing lands.
+// isNativeDoltSerializationConflict classifies on error text and cannot tell
+// which of beadslib's commit points failed, so a conflict reported after the
+// regular commit already succeeded would replay the attempt; callers must
+// therefore keep each attempt idempotent under replay, which the metadata
+// merge, label add/remove and reparent operations are.
+//
+// Each attempt gets its own operation context, so an earlier attempt's deadline
+// cannot doom the retries.
+//
+// Every other error is returned on the first try. Retrying a genuine fault only
+// multiplies write load and hides the cause behind a slower failure.
+//
+// Callers hold the storage read lock across every attempt, so the backoff sleeps
+// inside this loop delay anything waiting to take s.mu for writing (store close
+// and the reconnect handle swap) by at most the total backoff. Holding it is
+// deliberate: releasing between attempts would let the handle be swapped
+// mid-retry, so a retry could run against a different storage than the one whose
+// transaction it is repeating.
+func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	var err error
+	for n := 1; n <= nativeWriteAttempts; n++ {
+		err = attempt()
+		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+			return err
+		}
+		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
+	}
+	return err
+}
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -1389,16 +1434,11 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	for attempt := 1; attempt <= nativeMetadataWriteAttempts; attempt++ {
+	return retryOnNativeDoltSerializationConflict(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		err = s.setMetadataBatchOnce(ctx, storage, id, kvs)
-		cancel()
-		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeMetadataWriteAttempts {
-			return err
-		}
-		time.Sleep(time.Duration(attempt) * nativeMetadataWriteRetryBackoff)
-	}
-	return err
+		defer cancel()
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+	})
 }
 
 // setMetadataBatchOnce performs one complete metadata read-merge-write attempt.

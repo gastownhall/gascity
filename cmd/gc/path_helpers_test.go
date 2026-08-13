@@ -117,6 +117,7 @@ type doltLeakGuardedTestingM struct {
 	// an unscoped guard would reap the developer's own city servers, which
 	// legitimately start and stop during a long test run.
 	sourceRoot   string
+	checkoutRoot string
 	cleanupPaths []string
 }
 
@@ -133,7 +134,27 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 		m:            m,
 		tempRoot:     tempRoot,
 		sourceRoot:   sourceRoot,
+		checkoutRoot: checkoutRootForTestSource(sourceRoot),
 		cleanupPaths: cleanupPaths,
+	}
+}
+
+// checkoutRootForTestSource returns the nearest repository root above cmd/gc's
+// package directory. The go.mod check is a fail-closed safety guard: if the
+// test binary ever runs from an unexpected directory, the process reaper must
+// narrow its scope rather than treating an arbitrary ancestor as test-owned.
+func checkoutRootForTestSource(sourceRoot string) string {
+	if sourceRoot == "" {
+		return ""
+	}
+	for root := filepath.Clean(sourceRoot); ; root = filepath.Dir(root) {
+		if info, err := os.Stat(filepath.Join(root, "go.mod")); err == nil && !info.IsDir() {
+			return root
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return ""
+		}
 	}
 }
 
@@ -141,13 +162,13 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 // sql-server whose --config lies under any of them is this run's to detect and
 // reap.
 func (g *doltLeakGuardedTestingM) leakRoots() []string {
-	return []string{g.tempRoot, g.sourceRoot}
+	return []string{g.tempRoot, g.sourceRoot, g.checkoutRoot}
 }
 
 // nonEmptyLeakRoots is leakRoots minus unresolved entries, for diagnostics that
 // name the roots a leak was found under.
 func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
-	roots := make([]string, 0, 2)
+	roots := make([]string, 0, 3)
 	for _, root := range g.leakRoots() {
 		if root != "" {
 			roots = append(roots, root)
