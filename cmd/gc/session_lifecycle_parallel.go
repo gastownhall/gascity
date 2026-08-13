@@ -918,7 +918,7 @@ func refreshConfiguredNamedStartCandidate(
 		}
 		return candidate
 	}
-	refreshed, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
+	refreshed, refreshedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
@@ -926,6 +926,13 @@ func refreshConfiguredNamedStartCandidate(
 		return candidate
 	}
 	candidate.tp = refreshed
+	// Fold the resolver's Info too, not just the params: the resolve may have
+	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
+	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
+	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
+	// pre-call Info here would hand the seat starting on the clearing tick the
+	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	candidate.info = refreshedInfo
 	return candidate
 }
 
@@ -1206,8 +1213,11 @@ func buildPreparedStartWithWorkDirResolver(
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
 // (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. Neither key is mutated on the start-prep path, so the
-// append-captured Info is coherent.
+// the raw bead metadata. The trigger key IS mutated on the start-prep path —
+// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
+// clears a stamp whose target is no longer workable (gascity#4373) — so
+// coherence here depends on that refresh folding its returned Info onto
+// candidate.info, not on the key being immutable.
 func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
 	if triggerBeadID == "" {

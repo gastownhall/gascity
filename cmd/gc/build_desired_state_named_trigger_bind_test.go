@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -30,10 +31,12 @@ func namedSessionBeadWithTrigger(workBeadID, storeRef string) beads.Bead {
 	}
 }
 
-// TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked pins the core
-// gascity#4373 repro: a named session's trigger stamp must clear once its
-// target is parked, exactly like the pool path's bindPoolSessionTriggerBead
-// already does for the request-driven case.
+// TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked covers the
+// literal `blocked` status, which only a MemStore-backed (or otherwise
+// unmapped) target can hold. The production shape is
+// TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked
+// below: every real store folds bd's raw `blocked` into "open" (gc-4zb/#4395)
+// and reports the park through the IsBlocked projection instead.
 func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked(t *testing.T) {
 	mem := beads.NewMemStore()
 	target, err := mem.Create(beads.Bead{Title: "work"})
@@ -71,6 +74,143 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked(t *testing.T) 
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked is
+// the production-shaped gascity#4373 repro. Through BdStore/DoltLite/
+// NativeDolt, mapBdStatus folds bd's raw `blocked` into "open", so the parked
+// target this reconciler actually sees is `open` + IsBlocked=true — bd's
+// denormalized ready-work projection. The stamp must clear on that shape, not
+// only on the literal status a MemStore fixture can hand back.
+func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked(t *testing.T) {
+	mem := beads.NewMemStore()
+	blocked := true
+	target, err := mem.Create(beads.Bead{Title: "work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	stored, err := mem.Get(target.ID)
+	if err != nil {
+		t.Fatalf("get target: %v", err)
+	}
+	if stored.Status != "open" || stored.IsBlocked == nil || !*stored.IsBlocked {
+		t.Fatalf("fixture target = {Status:%q IsBlocked:%v}, want the production shape {open, &true}", stored.Status, stored.IsBlocked)
+	}
+	sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, ""))
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	rec := beadstest.NewRecordingStore(mem)
+
+	info, err := sessionFrontDoor(rec).Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	bound, err := bindNamedSessionTriggerBead(rec, info)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if bound.TriggerBeadID != "" {
+		t.Errorf("TriggerBeadID = %q, want cleared for a dependency-blocked target", bound.TriggerBeadID)
+	}
+	if bound.BrainParentSID != "" {
+		t.Errorf("BrainParentSID = %q, want cleared alongside the trigger", bound.BrainParentSID)
+	}
+	after, err := mem.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get after bind: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
+		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// TestBindNamedSessionTriggerBead_LeavesStampWhenTargetProjectionUnavailable
+// pins the fail-open half of the projection read: a store that does not
+// publish IsBlocked (native DoltLite snapshots, pre-1.0.5 bd) reports an open
+// target with a nil projection, and a nil projection must never be read as
+// "parked".
+func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetProjectionUnavailable(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work", Status: "open"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if stored, getErr := mem.Get(target.ID); getErr != nil || stored.IsBlocked != nil {
+		t.Fatalf("fixture target IsBlocked = %v (err %v), want nil", stored.IsBlocked, getErr)
+	}
+	sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, ""))
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	rec := beadstest.NewRecordingStore(mem)
+
+	info, err := sessionFrontDoor(rec).Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	bound, err := bindNamedSessionTriggerBead(rec, info)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if bound.TriggerBeadID != target.ID {
+		t.Errorf("TriggerBeadID = %q, want unchanged %q when the projection is unavailable", bound.TriggerBeadID, target.ID)
+	}
+}
+
+// failingGetStore fails Get for one bead ID and delegates everything else,
+// standing in for a transient backend error on the target lookup.
+type failingGetStore struct {
+	beads.Store
+	failID string
+	err    error
+}
+
+func (s *failingGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+// TestBindNamedSessionTriggerBead_LeavesStampWhenTargetLookupFails: a Get
+// failure that is not ErrNotFound says nothing about the target's state, so
+// the stamp must survive. Clearing on a transient backend blip would silently
+// unaim a live session from workable work.
+func TestBindNamedSessionTriggerBead_LeavesStampWhenTargetLookupFails(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work", Status: "open"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	sess, err := mem.Create(namedSessionBeadWithTrigger(target.ID, ""))
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	rec := beadstest.NewRecordingStore(mem)
+	failing := &failingGetStore{Store: rec, failID: target.ID, err: errors.New("backend unavailable")}
+
+	info, err := sessionFrontDoor(rec).Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	bound, err := bindNamedSessionTriggerBead(failing, info)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if bound.TriggerBeadID != target.ID {
+		t.Errorf("TriggerBeadID = %q, want unchanged %q after a transient lookup failure", bound.TriggerBeadID, target.ID)
+	}
+	after, err := mem.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get after bind: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != target.ID {
+		t.Errorf("durable trigger stamp = %q, want unchanged %q", v, target.ID)
+	}
+	if n := len(rec.CallsForOp("Update")); n != 0 {
+		t.Errorf("Update ops = %d, want 0 (an unreadable target is not a stale one)", n)
 	}
 }
 
