@@ -156,6 +156,31 @@ func TestBeadPolicyStoreAppliesDefaultStorageForAllowlistedCreates(t *testing.T)
 	}
 }
 
+func TestBeadPolicyStorePreservesNoHistoryThroughCachingStoreWithPlainBacking(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	store := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+	created, err := store.Create(beads.Bead{
+		Title:  "session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.NoHistory || created.Ephemeral {
+		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+	}
+	persisted, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	if !persisted.NoHistory || persisted.Ephemeral {
+		t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+	}
+}
+
 func TestBeadPolicyStoreBD105OptInUsesFastDefaultStorage(t *testing.T) {
 	backing := &captureCreateStore{Store: beads.NewMemStore()}
 	store := wrapStoreWithBeadPolicies(backing, &config.City{
