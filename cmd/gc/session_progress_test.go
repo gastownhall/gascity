@@ -177,6 +177,46 @@ func TestIsMinFloorExemptIdleSession(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("non-pool identities neither consume a floor rank nor are exempt themselves", func(t *testing.T) {
+		// The min_active_sessions guarantee covers pool-managed beads only
+		// (isMinActivePoolBead, compute_awake_set.go): configured-named,
+		// manual and dependency-only sessions are excluded. A lower-id
+		// non-pool session must not push the real pool member (s-b) out of
+		// the min=1 exempt set — that would silently no-op the keep-warm fix
+		// in a mixed-identity template — and must not become idle-exempt
+		// itself, which would extend the exemption beyond the pool floor.
+		cases := []struct {
+			name string
+			info sessionpkg.Info
+		}{
+			{"configured-named session", sessionpkg.Info{
+				ID: "s-a", Template: "worker", State: sessionpkg.StateActive,
+				ConfiguredNamedSession: true,
+			}},
+			{"configured-named identity", sessionpkg.Info{
+				ID: "s-a", Template: "worker", State: sessionpkg.StateActive,
+				ConfiguredNamedIdentity: "worker#1",
+			}},
+			{"manual session", sessionpkg.Info{
+				ID: "s-a", Template: "worker", State: sessionpkg.StateActive,
+				SessionOrigin: "manual",
+			}},
+			{"dependency-only session", sessionpkg.Info{
+				ID: "s-a", Template: "worker", State: sessionpkg.StateActive,
+				DependencyOnly: true,
+			}},
+		}
+		for _, tc := range cases {
+			infoByID := map[string]sessionpkg.Info{"s-a": tc.info, "s-b": warm("s-b")}
+			if !isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-b") {
+				t.Errorf("%s: the pool member s-b must stay exempt; a lower-id %s must not consume the floor rank", tc.name, tc.name)
+			}
+			if isMinFloorExemptIdleSession(infoByID, floorCfg(1), "worker", "s-a") {
+				t.Errorf("%s: a non-pool session must never be min-floor exempt itself", tc.name)
+			}
+		}
+	})
 }
 
 // TestIsWarmFloorCandidate pins the explicit ALLOW-LIST of states that occupy a

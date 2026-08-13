@@ -9453,6 +9453,64 @@ func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T
 	}
 }
 
+// TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession is the
+// mixed-identity end-to-end proof: the min_active_sessions floor covers
+// pool-managed beads only (isMinActivePoolBead), so a LOWER-bead-id
+// configured-named session sharing the template must not consume the floor
+// rank — the real pool member still stays warm — and must not inherit the
+// keep-warm exemption itself: it idle-reclaims exactly as it did before
+// sc-5mtyhy.
+func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
+	env.addDesired("named", "worker", true)
+	env.addDesired("w1", "worker", true)
+
+	// The named session is created FIRST so it holds the lower bead ID: that
+	// is the ordering under which an un-narrowed floor rank would swallow the
+	// pool member's exempt slot and silently no-op the keep-warm fix.
+	named := env.createSessionBead("named", "worker")
+	env.setSessionMetadata(&named, map[string]string{
+		"configured_named_session":  "true",
+		"configured_named_identity": "named",
+	})
+	pool := env.createSessionBead("w1", "worker")
+	if !(named.ID < pool.ID) {
+		t.Fatalf("fixture: named bead id %q must sort below the pool bead id %q", named.ID, pool.ID)
+	}
+	env.markSessionActive(&named)
+	env.markSessionActive(&pool)
+	if err := env.sp.SetMeta("named", "GC_SESSION_ID", named.ID); err != nil {
+		t.Fatalf("SetMeta(named): %v", err)
+	}
+	if err := env.sp.SetMeta("w1", "GC_SESSION_ID", pool.ID); err != nil {
+		t.Fatalf("SetMeta(w1): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["named"] = true
+	it.idle["w1"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{named, pool}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("w1") {
+		t.Error("the pool floor member must stay warm; a lower-id named session must not consume its floor rank")
+	}
+	if pb, err := env.store.Get(pool.ID); err == nil && pb.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("pool floor member sleep_reason = idle-timeout, want kept warm")
+	}
+	if env.sp.IsRunning("named") {
+		t.Error("the configured-named session is not a floor member and must follow its pre-existing idle path")
+	}
+	if nb, err := env.store.Get(named.ID); err == nil && nb.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Errorf("named session sleep_reason = %q, want idle-timeout (unchanged pre-existing path)", nb.Metadata["sleep_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_IdleTimeoutUsesTemplateFallbackForPoolSession(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
