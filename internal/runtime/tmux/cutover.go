@@ -29,7 +29,8 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)

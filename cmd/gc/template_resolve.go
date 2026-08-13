@@ -99,6 +99,11 @@ type TemplateParams struct {
 	// metadata, and start background helpers, but they do not initiate the
 	// first model turn on their own.
 	HookEnabled bool
+	// PreparedMergeableFiles binds each reconciled workdir-relative settings
+	// path to its verified regular-file digest. Resolution only populates this
+	// for current configured agent/named-session homes, independent of the
+	// session record's origin metadata.
+	PreparedMergeableFiles map[string]string
 	// SessionOverride is the per-agent session provider override (e.g., "acp",
 	// "tmux", "exec:..."). Empty means use the city-level default.
 	SessionOverride string
@@ -871,6 +876,12 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
+	// PreparedMergeableFiles is already restricted to verified configured
+	// homes by resolveTemplatePrepared. Session origin is intentionally not a
+	// gate: a manual or legacy/ephemeral record targeting that same home must
+	// preserve the same single-writer document, while isolated workdirs carry no
+	// prepared ownership and retain full overlay staging.
+	materialize.ApplyVerifiedMergeableOwnership(&cfg, tp.PreparedMergeableFiles)
 	// Prompt delivery may prepend the startup prompt to the configured nudge.
 	cfg.Nudge = nudge
 	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)

@@ -1,14 +1,18 @@
 package hooks
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/codexhooks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -553,6 +557,85 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 	}
 }
 
+func TestCodexHooksAreConvergedRequiresCompleteCurrentBehaviorSet(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	current := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	if !CodexHooksAreConverged(current, "/city") {
+		t.Fatalf("freshly installed hooks were not converged:\n%s", current)
+	}
+	if CodexHooksAreConverged(current, "/other-city") {
+		t.Fatal("hooks bound to a different city were reported converged")
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(current, &doc); err != nil {
+		t.Fatalf("unmarshal current hooks: %v", err)
+	}
+	hooksMap := doc["hooks"].(map[string]any)
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		original := hooksMap[event]
+		delete(hooksMap, event)
+		data, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("marshal hooks without %s: %v", event, err)
+		}
+		if CodexHooksAreConverged(data, "/city") {
+			t.Fatalf("hooks missing %s were reported converged", event)
+		}
+		hooksMap[event] = original
+	}
+
+	partial := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /city prime --hook --hook-format codex"}]}]}}`)
+	if CodexHooksAreConverged(partial, "/city") {
+		t.Fatal("partial managed hooks were reported converged")
+	}
+
+	assertRejectedMutation := func(name string, mutate func(map[string]any)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			var mutated map[string]any
+			if err := json.Unmarshal(current, &mutated); err != nil {
+				t.Fatalf("unmarshal current hooks: %v", err)
+			}
+			mutate(mutated)
+			data, err := json.Marshal(mutated)
+			if err != nil {
+				t.Fatalf("marshal mutation: %v", err)
+			}
+			if CodexHooksAreConverged(data, "/city") {
+				t.Fatalf("structurally invalid managed hooks were reported converged: %s", data)
+			}
+		})
+	}
+	entryFor := func(doc map[string]any, event string) map[string]any {
+		return doc["hooks"].(map[string]any)[event].([]any)[0].(map[string]any)
+	}
+	assertRejectedMutation("restrictive matcher", func(doc map[string]any) {
+		entryFor(doc, "PreCompact")["matcher"] = "manual"
+	})
+	assertRejectedMutation("missing command type", func(doc map[string]any) {
+		delete(entryFor(doc, "SessionStart")["hooks"].([]any)[0].(map[string]any), "type")
+	})
+	assertRejectedMutation("bare managed command", func(doc map[string]any) {
+		hooksMap := doc["hooks"].(map[string]any)
+		entry := entryFor(doc, "SessionStart")
+		command := entry["hooks"].([]any)[0].(map[string]any)["command"]
+		hooksMap["SessionStart"] = []any{map[string]any{"command": command}}
+	})
+	assertRejectedMutation("split managed prompt entries", func(doc map[string]any) {
+		hooksMap := doc["hooks"].(map[string]any)
+		entry := entryFor(doc, "UserPromptSubmit")
+		inner := entry["hooks"].([]any)
+		hooksMap["UserPromptSubmit"] = []any{
+			map[string]any{"matcher": "", "hooks": []any{inner[0]}},
+			map[string]any{"matcher": "", "hooks": []any{inner[1]}},
+		}
+	})
+}
+
 func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
@@ -564,6 +647,300 @@ func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	got := fs.Files["/work/.codex/hooks.json"]
 	if !bytes.Equal(custom, got) {
 		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
+	}
+}
+
+func TestReconcileCodexHooksPreservesSharedMatcherCustomAndConfiguredHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	existing := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf custom-live"}]}]}}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), existing...)
+	configured := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf configured-overlay"}]}]}}`)
+	digest, err := ReconcileCodexHooks(fs, "/city", "/work", [][]byte{configured})
+	if err != nil {
+		t.Fatalf("ReconcileCodexHooks: %v", err)
+	}
+	if digest == "" {
+		t.Fatal("reconciled Codex hooks were not verified")
+	}
+	got := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	if !CodexHooksAreConvergedWithOverlays(got, "/city", [][]byte{configured}) {
+		t.Fatalf("reconciled hooks are not a configured fixed point:\n%s", got)
+	}
+	for _, command := range []string{"printf custom-live", "printf configured-overlay"} {
+		if !bytes.Contains(got, []byte(command)) {
+			t.Fatalf("reconciled hooks lost %q:\n%s", command, got)
+		}
+	}
+	digest, err = ReconcileCodexHooks(fs, "/city", "/work", [][]byte{configured})
+	if err != nil || digest == "" {
+		t.Fatalf("second ReconcileCodexHooks = digest:%q err:%v", digest, err)
+	}
+	if after := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, after) {
+		t.Fatalf("second reconcile was not byte-stable:\nbefore:\n%s\nafter:\n%s", got, after)
+	}
+}
+
+func TestReconcileCodexHooksPreservesMalformedInputs(t *testing.T) {
+	t.Run("malformed live", func(t *testing.T) {
+		fs := fsys.NewFake()
+		malformed := []byte(`{"hooks":`)
+		fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), malformed...)
+		digest, err := ReconcileCodexHooks(fs, "/city", "/work", nil)
+		if err == nil || digest != "" {
+			t.Fatalf("ReconcileCodexHooks = digest:%q err:%v, want preserved failure", digest, err)
+		}
+		if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, malformed) {
+			t.Fatalf("malformed live hooks changed:\ngot: %s\nwant: %s", got, malformed)
+		}
+	})
+
+	t.Run("malformed configured layer", func(t *testing.T) {
+		fs := fsys.NewFake()
+		if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+		digest, err := ReconcileCodexHooks(fs, "/city", "/work", [][]byte{[]byte(`{"hooks":`)})
+		if err == nil || digest != "" {
+			t.Fatalf("ReconcileCodexHooks = digest:%q err:%v, want preserved failure", digest, err)
+		}
+		if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, before) {
+			t.Fatalf("configured parse failure changed live hooks:\ngot: %s\nwant: %s", got, before)
+		}
+	})
+
+	for name, malformed := range map[string][]byte{
+		"event is not array":      []byte(`{"hooks":{"UserPromptSubmit":"keep-me"}}`),
+		"empty wrapper":           []byte(`{"hooks":{"UserPromptSubmit":[{}]}}`),
+		"empty inner handler":     []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{}]}]}}`),
+		"invalid handler type":    []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"bogus"}]}]}}`),
+		"invalid command timeout": []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf keep","timeout":"bad"}]}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), malformed...)
+			digest, err := ReconcileCodexHooks(fs, "/city", "/work", nil)
+			if err == nil || digest != "" {
+				t.Fatalf("ReconcileCodexHooks = digest:%q err:%v, want shape failure", digest, err)
+			}
+			if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, malformed) {
+				t.Fatalf("shape-invalid live hooks changed:\ngot: %s\nwant: %s", got, malformed)
+			}
+		})
+	}
+}
+
+func TestReconcileCodexHooksPreservesMixedSessionStartCustomMatcher(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime --hook"},{"type":"command","command":"printf all-session-starts"}]}]}}`)
+	digest, err := ReconcileCodexHooks(fs, "/city", "/work", nil)
+	if err != nil || digest == "" {
+		t.Fatalf("ReconcileCodexHooks = digest:%q err:%v", digest, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(fs.Files["/work/.codex/hooks.json"], &doc); err != nil {
+		t.Fatalf("unmarshal reconciled hooks: %v", err)
+	}
+	entries := doc["hooks"].(map[string]any)["SessionStart"].([]any)
+	var customMatcher, managedMatcher string
+	for _, value := range entries {
+		entry := value.(map[string]any)
+		for _, inner := range entry["hooks"].([]any) {
+			command, _ := inner.(map[string]any)["command"].(string)
+			if strings.Contains(command, "printf all-session-starts") {
+				customMatcher, _ = entry["matcher"].(string)
+			}
+			if strings.Contains(command, "GC_MANAGED_SESSION_HOOK=1") {
+				managedMatcher, _ = entry["matcher"].(string)
+			}
+		}
+	}
+	if customMatcher != "" || managedMatcher != "startup" {
+		t.Fatalf("SessionStart matchers custom=%q managed=%q, want empty/startup; hooks=%s", customMatcher, managedMatcher, fs.Files["/work/.codex/hooks.json"])
+	}
+}
+
+func TestReconcileCodexHooksRejectsSymlinkPaths(t *testing.T) {
+	t.Run("leaf", func(t *testing.T) {
+		fs := fsys.NewFake()
+		fs.Files["/shared/hooks.json"] = []byte(`{"hooks":{}}`)
+		fs.Symlinks["/work/.codex/hooks.json"] = "/shared/hooks.json"
+		before := append([]byte(nil), fs.Files["/shared/hooks.json"]...)
+		if digest, err := ReconcileCodexHooks(fs, "/city", "/work", nil); err == nil || digest != "" {
+			t.Fatalf("leaf symlink reconcile = digest:%q err:%v", digest, err)
+		}
+		if !bytes.Equal(fs.Files["/shared/hooks.json"], before) {
+			t.Fatal("leaf symlink target was mutated")
+		}
+	})
+	t.Run("parent", func(t *testing.T) {
+		fs := fsys.NewFake()
+		fs.Dirs["/shared/.codex"] = true
+		fs.Files["/shared/.codex/hooks.json"] = []byte(`{"hooks":{}}`)
+		fs.Symlinks["/work/.codex"] = "/shared/.codex"
+		before := append([]byte(nil), fs.Files["/shared/.codex/hooks.json"]...)
+		if digest, err := ReconcileCodexHooks(fs, "/city", "/work", nil); err == nil || digest != "" {
+			t.Fatalf("parent symlink reconcile = digest:%q err:%v", digest, err)
+		}
+		if !bytes.Equal(fs.Files["/shared/.codex/hooks.json"], before) {
+			t.Fatal("parent symlink target was mutated")
+		}
+	})
+}
+
+func TestReconcileCodexHooksPreservesModeAndLargeNumericMetadata(t *testing.T) {
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := []byte(`{"sequence":9007199254740993,"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if err := os.WriteFile(hookPath, existing, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := ReconcileCodexHooks(fsys.OSFS{}, "/city", workDir, nil)
+	if err != nil || digest == "" {
+		t.Fatalf("ReconcileCodexHooks = digest:%q err:%v", digest, err)
+	}
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("hooks mode = %o, want 600", got)
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte(`9007199254740993`)) {
+		t.Fatalf("large numeric metadata was rounded: %s", got)
+	}
+}
+
+func TestReconcileCodexHooksWaitsForCrossProcessHookSave(t *testing.T) {
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCodexHooksCrossProcessLockHelper$")
+	cmd.Env = append(os.Environ(),
+		"GC_CODEX_HOOK_LOCK_HELPER=1",
+		"GC_CODEX_HOOK_LOCK_TARGET="+hookPath,
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("helper stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("helper stdout pipe: %v", err)
+	}
+	var helperStderr bytes.Buffer
+	cmd.Stderr = &helperStderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start lock helper: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			_, _ = stdin.Write([]byte("release\n"))
+			_ = stdin.Close()
+		}
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	type pipeResult struct {
+		line string
+		err  error
+	}
+	ready := make(chan pipeResult, 1)
+	go func() {
+		line, err := bufio.NewReader(stdout).ReadString('\n')
+		ready <- pipeResult{line: line, err: err}
+	}()
+	select {
+	case got := <-ready:
+		if got.err != nil || strings.TrimSpace(got.line) != "ready" {
+			t.Fatalf("lock helper readiness = %q, err=%v, stderr=%s", got.line, got.err, helperStderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for lock helper readiness; stderr=%s", helperStderr.String())
+	}
+
+	type reconcileResult struct {
+		digest string
+		err    error
+	}
+	result := make(chan reconcileResult, 1)
+	go func() {
+		digest, err := ReconcileCodexHooks(fsys.OSFS{}, "/city", workDir, nil)
+		result <- reconcileResult{digest: digest, err: err}
+	}()
+	select {
+	case got := <-result:
+		t.Fatalf("reconcile completed while sibling process held the path lock: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf cross-process-save"}]}]}}`)
+	if err := os.WriteFile(hookPath, custom, 0o600); err != nil {
+		t.Fatalf("save custom hook: %v", err)
+	}
+	if _, err := stdin.Write([]byte("release\n")); err != nil {
+		t.Fatalf("release helper: %v", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close helper stdin: %v", err)
+	}
+	released = true
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("lock helper: %v; stderr=%s", err, helperStderr.String())
+	}
+	cmd.Process = nil
+
+	select {
+	case got := <-result:
+		if got.err != nil || got.digest == "" {
+			t.Fatalf("ReconcileCodexHooks = digest:%q err:%v", got.digest, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile did not resume after sibling process released the path lock")
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("printf cross-process-save")) {
+		t.Fatalf("cross-process custom hook save was overwritten:\n%s", got)
+	}
+}
+
+func TestCodexHooksCrossProcessLockHelper(t *testing.T) {
+	if os.Getenv("GC_CODEX_HOOK_LOCK_HELPER") != "1" {
+		return
+	}
+	target := os.Getenv("GC_CODEX_HOOK_LOCK_TARGET")
+	if err := codexhooks.WithPathLock(fsys.OSFS{}, target, func() error {
+		if _, err := os.Stdout.Write([]byte("ready\n")); err != nil {
+			return err
+		}
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(line) != "release" {
+			return errors.New("unexpected lock release signal")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

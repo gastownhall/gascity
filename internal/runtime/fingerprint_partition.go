@@ -78,6 +78,7 @@ func hashProvisionFields(h hash.Hash, cfg Config) {
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 
 	hashOverlayProviders(h, OverlayProviderNames(cfg))
+	hashSortedStringSet(h, "reconciler_owned_mergeable_paths", cfg.ReconcilerOwnedMergeablePaths)
 
 	for _, cf := range cfg.CopyFiles {
 		if cf.Probed {

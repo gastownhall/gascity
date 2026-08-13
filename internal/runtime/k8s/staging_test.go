@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -171,6 +172,121 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 	if got := ops.files["/workspace/rigs/team/task.txt"]; got != "rig payload" {
 		t.Fatalf("staged rig workdir payload = %q, want copied under rig-relative workspace path", got)
+	}
+}
+
+func TestStageFilesPreservesOwnedCodexHookAndStagesUnownedSiblings(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, "sessions", "operator")
+	canonicalPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(canonicalPath), 0o755); err != nil {
+		t.Fatalf("mkdir canonical hook dir: %v", err)
+	}
+	canonical := `{"hooks":{"SessionStart":[{"matcher":"startup"}]}}`
+	if err := os.WriteFile(canonicalPath, []byte(canonical), 0o644); err != nil {
+		t.Fatalf("write canonical hook: %v", err)
+	}
+
+	packOverlay := t.TempDir()
+	for rel, contents := range map[string]string{
+		filepath.Join("per-provider", "codex", ".codex", "hooks.json"): `{"hooks":{"SessionStart":[{"matcher":""}]}}`,
+		filepath.Join("per-provider", "codex", "AGENTS.codex.md"):      "codex sibling",
+		filepath.Join(".gemini", "settings.json"):                      `{"hooks":{"BeforeAgent":[]}}`,
+	} {
+		path := filepath.Join(packOverlay, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir overlay %s: %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write overlay %s: %v", rel, err)
+		}
+	}
+
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-codex", runtime.Config{
+		WorkDir:                       workDir,
+		ProviderName:                  "codex",
+		PackOverlayDirs:               []string{packOverlay},
+		ReconcilerOwnedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+		CopyFiles: []runtime.CopyEntry{{
+			Src: canonicalPath, RelDst: filepath.Join(".codex", "hooks.json"), Probed: true,
+			ContentHash: runtime.HashPathContent(canonicalPath),
+		}},
+	}, cityRoot, io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+
+	if got := ops.files["/workspace/sessions/operator/.codex/hooks.json"]; got != canonical {
+		t.Fatalf("owned Codex hook = %q, want canonical %q", got, canonical)
+	}
+	if _, exists := ops.files["/workspace/.codex/hooks.json"]; exists {
+		t.Fatal("owned Codex hook was staged at city root instead of the named session workdir")
+	}
+	if got := ops.files["/workspace/sessions/operator/AGENTS.codex.md"]; got != "codex sibling" {
+		t.Fatalf("ordinary overlay sibling = %q, want staged", got)
+	}
+	if got := ops.files["/workspace/sessions/operator/.gemini/settings.json"]; !strings.Contains(got, `"BeforeAgent"`) {
+		t.Fatalf("unowned mergeable sibling = %q, want staged", got)
+	}
+}
+
+func TestStageFilesFailsWhenOwnedCodexHookCopyFails(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, "sessions", "operator")
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	ops := newCapturingStageOps()
+	ops.failDestination = "/workspace/sessions/operator/.codex"
+	err := stageFiles(context.Background(), ops, "gc-codex", runtime.Config{
+		WorkDir:                       workDir,
+		ReconcilerOwnedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+		CopyFiles: []runtime.CopyEntry{{
+			Src: hookPath, RelDst: filepath.Join(".codex", "hooks.json"), Probed: true,
+			ContentHash: runtime.HashPathContent(hookPath),
+		}},
+	}, cityRoot, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "staging reconciler-owned copy_file") {
+		t.Fatalf("stageFiles error = %v, want fatal owned CopyFile context", err)
+	}
+}
+
+func TestStageFilesFailsWhenOwnedSourceChangesDuringCopy(t *testing.T) {
+	workDir := t.TempDir()
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	original := []byte(`{"hooks":{}}`)
+	if err := os.WriteFile(hookPath, original, 0o644); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	ops := newCapturingStageOps()
+	ops.mutateSourceOnMkdir = hookPath
+	ops.mutateMkdirDestination = "/workspace/.codex"
+	ops.mutateContents = bytes.Repeat([]byte("x"), len(original))
+	err := stageFiles(context.Background(), ops, "gc-codex", runtime.Config{
+		WorkDir:                       workDir,
+		ReconcilerOwnedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+		CopyFiles: []runtime.CopyEntry{{
+			Src: hookPath, RelDst: filepath.Join(".codex", "hooks.json"), Probed: true,
+			ContentHash: runtime.HashPathContent(hookPath),
+		}},
+	}, workDir, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "pod destination") || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("stageFiles error = %v, want remote destination digest mismatch", err)
+	}
+	if !ops.mutatedSource {
+		t.Fatal("test did not mutate source after validation and before tar reopen")
+	}
+	if ops.readySignaled {
+		t.Fatal("init container was released after owned destination digest mismatch")
 	}
 }
 
@@ -367,7 +483,13 @@ func TestWaitForExecReadyReturnsContextCancellationDuringDelay(t *testing.T) {
 }
 
 type capturingStageOps struct {
-	files map[string]string
+	files                  map[string]string
+	failDestination        string
+	mutateSourceOnMkdir    string
+	mutateMkdirDestination string
+	mutateContents         []byte
+	mutatedSource          bool
+	readySignaled          bool
 }
 
 func newCapturingStageOps() *capturingStageOps {
@@ -399,7 +521,17 @@ func (o *capturingStageOps) listPods(context.Context, string, string) ([]corev1.
 }
 
 func (o *capturingStageOps) execInPod(_ context.Context, _, _ string, cmd []string, stdin io.Reader) (string, error) {
+	if len(cmd) == 3 && cmd[0] == "mkdir" && cmd[1] == "-p" &&
+		cmd[2] == o.mutateMkdirDestination && o.mutateSourceOnMkdir != "" && !o.mutatedSource {
+		if err := os.WriteFile(o.mutateSourceOnMkdir, o.mutateContents, 0o644); err != nil {
+			return "", err
+		}
+		o.mutatedSource = true
+	}
 	if len(cmd) == 5 && cmd[0] == "tar" && cmd[1] == "xf" && cmd[2] == "-" && cmd[3] == "-C" && stdin != nil {
+		if o.failDestination != "" && cmd[4] == o.failDestination {
+			return "", errors.New("injected copy failure")
+		}
 		tr := tar.NewReader(stdin)
 		for {
 			hdr, err := tr.Next()
@@ -418,6 +550,16 @@ func (o *capturingStageOps) execInPod(_ context.Context, _, _ string, cmd []stri
 			}
 			o.files[path.Join(cmd[4], hdr.Name)] = string(data)
 		}
+	}
+	if len(cmd) == 5 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc-read-owned" {
+		contents, ok := o.files[cmd[4]]
+		if !ok {
+			return "", fmt.Errorf("missing pod destination %s", cmd[4])
+		}
+		return contents, nil
+	}
+	if len(cmd) == 2 && cmd[0] == "touch" && cmd[1] == "/workspace/.gc-ready" {
+		o.readySignaled = true
 	}
 	return "", nil
 }

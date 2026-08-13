@@ -14,11 +14,13 @@ package rppcheck
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -104,8 +106,18 @@ func (o *Options) applyDefaults() {
 // checker speaks the documented protocol, not the Go client's
 // serialization helper.
 type startConfig struct {
-	WorkDir string `json:"work_dir,omitempty"`
-	Command string `json:"command,omitempty"`
+	WorkDir                       string      `json:"work_dir,omitempty"`
+	Command                       string      `json:"command,omitempty"`
+	OverlayDir                    string      `json:"overlay_dir,omitempty"`
+	CopyFiles                     []copyEntry `json:"copy_files,omitempty"`
+	ReconcilerOwnedMergeablePaths []string    `json:"reconciler_owned_mergeable_paths,omitempty"`
+}
+
+type copyEntry struct {
+	Src         string `json:"src"`
+	RelDst      string `json:"rel_dst,omitempty"`
+	Probed      bool   `json:"probed,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // Run validates the executable against RPP v0 and returns per-check
@@ -121,6 +133,7 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 
 	c := &checker{path: path, opts: opts}
 	c.checkHandshake(ctx)
+	c.checkReconcilerOwnedStagingCapability(ctx)
 	c.checkLifecycle(ctx)
 	return c.result, nil
 }
@@ -187,12 +200,15 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	return opResult{stdout: strings.TrimRight(stdout.String(), "\n")}
 }
 
-// knownCapabilities maps declared capability strings to the op each one
-// promises. Unknown declared strings are ignored (forward compatibility,
+// knownCapabilities maps declared capability strings to the operation or
+// contract each one promises. Report capabilities are exercised through their
+// named op; the staging capability has a dedicated multi-start fixture below.
+// Unknown declared strings are ignored (forward compatibility,
 // RUNTIME-RPP-008).
 var knownCapabilities = map[string]string{
-	runtime.ProtocolCapabilityReportAttachment: "is-attached",
-	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
+	runtime.ProtocolCapabilityReportAttachment:              "is-attached",
+	runtime.ProtocolCapabilityReportActivity:                "get-last-activity",
+	runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths: "start staging contract",
 }
 
 const handshakeCheck = "protocol handshake"
@@ -232,6 +248,279 @@ func (c *checker) checkHandshake(ctx context.Context) {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
 	c.record(handshakeCheck, StatusPass, detail)
+}
+
+const reconcilerOwnedStagingCheckPrefix = "capability " + runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths + ": "
+
+// checkReconcilerOwnedStagingCapability exercises the safety contract carried
+// by the start payload rather than trusting the handshake token. A positive
+// fixture proves that an owned Codex hook wins over a conflicting overlay while
+// an unowned sibling still stages. Two negative fixtures prove that stale and
+// missing canonical sources are rejected before a session can run.
+func (c *checker) checkReconcilerOwnedStagingCapability(ctx context.Context) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths) {
+		return
+	}
+
+	root, err := os.MkdirTemp("", "gc-rpp-owned-staging-")
+	if err != nil {
+		c.record(reconcilerOwnedStagingCheckPrefix+"fixture", StatusFail, err.Error())
+		return
+	}
+	defer os.RemoveAll(root) //nolint:errcheck // best-effort conformance cleanup
+
+	workDir := filepath.Join(root, "work")
+	overlayDir := filepath.Join(root, "overlay")
+	hookRel := filepath.Join(".codex", "hooks.json")
+	hookPath := filepath.Join(workDir, hookRel)
+	expectedPath := filepath.Join(overlayDir, ".gc-rpp-expected-hooks")
+	verifyPath := filepath.Join(overlayDir, ".gc-rpp-owned-check.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		c.record(reconcilerOwnedStagingCheckPrefix+"fixture", StatusFail, err.Error())
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(overlayDir, ".codex"), 0o755); err != nil {
+		c.record(reconcilerOwnedStagingCheckPrefix+"fixture", StatusFail, err.Error())
+		return
+	}
+	canonical := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc prime"}]}]},"rpp_nonce":9007199254740993}`)
+	conflicting := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"overlay wins"}]}]}}`)
+	digest := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	base := startConfig{
+		WorkDir:    workDir,
+		Command:    "sh .gc-rpp-owned-check.sh",
+		OverlayDir: overlayDir,
+		CopyFiles: []copyEntry{{
+			Src: hookPath, RelDst: filepath.ToSlash(hookRel), Probed: true, ContentHash: digest,
+		}},
+		ReconcilerOwnedMergeablePaths: []string{filepath.ToSlash(hookRel)},
+	}
+	acknowledgement := ownedProbeAcknowledgement(base)
+	ackPath := filepath.Join(overlayDir, acknowledgement)
+	verifyScript := []byte("#!/bin/sh\n" +
+		"[ \"$(cat .codex/hooks.json)\" = \"$(cat .gc-rpp-expected-hooks)\" ] || exit 41\n" +
+		"[ -f .gc-rpp-overlay-sibling ] || exit 42\n" +
+		fmt.Sprintf("exec './%s'\n", acknowledgement))
+	ackScript := []byte("#!/bin/sh\nwhile :; do sleep 300; done\n")
+	for path, data := range map[string][]byte{
+		hookPath:     canonical,
+		expectedPath: canonical,
+		verifyPath:   verifyScript,
+		ackPath:      ackScript,
+		filepath.Join(overlayDir, ".codex", "hooks.json"):    conflicting,
+		filepath.Join(overlayDir, ".gc-rpp-overlay-sibling"): []byte("staged\n"),
+	} {
+		mode := os.FileMode(0o644)
+		if path == verifyPath || path == ackPath {
+			mode = 0o755
+		}
+		if err := os.WriteFile(path, data, mode); err != nil {
+			c.record(reconcilerOwnedStagingCheckPrefix+"fixture", StatusFail, err.Error())
+			return
+		}
+	}
+
+	c.checkOwnedPositiveStart(ctx, c.capabilityProbeName("owned"), base)
+
+	stale := base
+	stale.CopyFiles = append([]copyEntry(nil), base.CopyFiles...)
+	stale.CopyFiles[0].ContentHash = strings.Repeat("0", sha256.Size*2)
+	c.checkOwnedRejectedStart(ctx, reconcilerOwnedStagingCheckPrefix+"stale digest rejection", c.capabilityProbeName("stale"), stale)
+
+	if err := os.Remove(hookPath); err != nil {
+		c.record(reconcilerOwnedStagingCheckPrefix+"missing source rejection", StatusFail, err.Error())
+		return
+	}
+	c.checkOwnedRejectedStart(ctx, reconcilerOwnedStagingCheckPrefix+"missing source rejection", c.capabilityProbeName("missing"), base)
+}
+
+func (c *checker) capabilityProbeName(suffix string) string {
+	base := c.opts.SessionName
+	if len(base) > 44 {
+		base = base[:44]
+	}
+	return base + "-ro-" + suffix
+}
+
+func (c *checker) checkOwnedPositiveStart(ctx context.Context, name string, cfg startConfig) {
+	const check = reconcilerOwnedStagingCheckPrefix + "canonical handoff"
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		c.record(check, StatusFail, err.Error())
+		return
+	}
+	start := c.runOpTimeout(ctx, c.opts.StartTimeout, payload, "start", name)
+	// A provider may allocate a pod/session before start discovers a staging or
+	// launch error. Detach cleanup from caller cancellation and schedule it as
+	// soon as start returns, regardless of that result.
+	defer c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+	if start.unsupported {
+		c.record(check, StatusFail, "declared capability but start returned exit 2")
+		return
+	}
+	if start.err != nil {
+		c.record(check, StatusFail, start.err.Error())
+		return
+	}
+	proof, err := c.awaitOwnedVerifierAcknowledgement(ctx, name, ownedProbeAcknowledgement(cfg))
+	if err != nil {
+		c.record(check, StatusFail, err.Error())
+		return
+	}
+	c.record(check, StatusPass, "owned canonical bytes preserved and unowned overlay sibling staged; "+proof)
+}
+
+const (
+	ownedProbeAcknowledgementPrefix = "gc-rpp-owned-staging-ack-"
+	ownedProbeAcknowledgementWait   = 5 * time.Second
+	ownedProbePollInterval          = 25 * time.Millisecond
+	ownedProbeFallbackObservation   = time.Second
+)
+
+func ownedProbeAcknowledgement(cfg startConfig) string {
+	digest := "missing"
+	for _, owned := range cfg.ReconcilerOwnedMergeablePaths {
+		for _, entry := range cfg.CopyFiles {
+			if entry.RelDst == owned && entry.Probed && entry.ContentHash != "" {
+				digest = entry.ContentHash
+				break
+			}
+		}
+		if digest != "missing" {
+			break
+		}
+	}
+	if len(digest) > 16 {
+		digest = digest[:16]
+	}
+	return ownedProbeAcknowledgementPrefix + digest
+}
+
+// awaitOwnedVerifierAcknowledgement waits for a fact produced only after the
+// in-session verifier has compared the canonical bytes and observed the
+// unowned overlay sibling: it execs a uniquely named long-lived process, then
+// process-alive observes that exact name. Providers that do not implement the
+// optional observation op retain compatibility through a longer, repeated
+// is-running observation rather than the former single 250ms recheck.
+func (c *checker) awaitOwnedVerifierAcknowledgement(ctx context.Context, name, acknowledgement string) (string, error) {
+	wait := minDuration(c.opts.OpTimeout, ownedProbeAcknowledgementWait)
+	deadline := time.Now().Add(wait)
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", fmt.Errorf("verifier did not acknowledge successful staging within %s", wait)
+		}
+		alive := c.runOpTimeout(ctx, minDuration(remaining, time.Second), []byte(acknowledgement+"\n"), "process-alive", name)
+		switch {
+		case alive.unsupported:
+			return c.observeOwnedVerifierFallback(ctx, name)
+		case alive.err != nil:
+			return "", alive.err
+		case alive.stdout == "true":
+			return "verifier process acknowledged", nil
+		case alive.stdout != "false":
+			return "", fmt.Errorf("process-alive stdout %q while awaiting staging acknowledgement", alive.stdout)
+		}
+
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return "", fmt.Errorf("verifier did not acknowledge successful staging within %s", wait)
+		}
+		running := c.runOpTimeout(ctx, minDuration(remaining, c.opts.OpTimeout), nil, "is-running", name)
+		switch {
+		case running.unsupported:
+			return "", errors.New("is-running returned exit 2 while awaiting staging acknowledgement")
+		case running.err != nil:
+			return "", running.err
+		case running.stdout != "true":
+			return "", fmt.Errorf("is-running stdout %q; verifier exited before staging acknowledgement", running.stdout)
+		}
+		if err := waitForOwnedProbePoll(ctx, time.Until(deadline)); err != nil {
+			return "", err
+		}
+	}
+}
+
+func (c *checker) observeOwnedVerifierFallback(ctx context.Context, name string) (string, error) {
+	observation := minDuration(c.opts.OpTimeout, ownedProbeFallbackObservation)
+	deadline := time.Now().Add(observation)
+	observations := 0
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Sprintf("process-alive unavailable; verifier remained running across %d checks over %s", observations, observation), nil
+		}
+		running := c.runOpTimeout(ctx, minDuration(remaining, c.opts.OpTimeout), nil, "is-running", name)
+		switch {
+		case running.unsupported:
+			return "", errors.New("is-running returned exit 2 during staging stabilization fallback")
+		case running.err != nil:
+			return "", running.err
+		case running.stdout != "true":
+			return "", fmt.Errorf("is-running stdout %q during staging stabilization fallback; verifier exited early", running.stdout)
+		}
+		observations++
+		if err := waitForOwnedProbePoll(ctx, time.Until(deadline)); err != nil {
+			return "", err
+		}
+	}
+}
+
+func waitForOwnedProbePoll(ctx context.Context, remaining time.Duration) error {
+	if remaining <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(minDuration(ownedProbePollInterval, remaining))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("canceled while awaiting staging acknowledgement: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (c *checker) checkOwnedRejectedStart(ctx context.Context, check, name string, cfg startConfig) {
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		c.record(check, StatusFail, err.Error())
+		return
+	}
+	start := c.runOpTimeout(ctx, c.opts.StartTimeout, payload, "start", name)
+	// A provider may allocate a pod/session before discovering the invalid
+	// staging contract. Cleanup is mandatory even when start reports failure.
+	if start.unsupported {
+		c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+		c.record(check, StatusFail, "declared capability but start returned exit 2")
+		return
+	}
+	if start.err == nil {
+		c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+		c.record(check, StatusFail, "start accepted an invalid reconciler-owned copy contract")
+		return
+	}
+	running := c.runOp(ctx, nil, "is-running", name)
+	c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "stop", name)
+	switch {
+	case running.unsupported:
+		c.record(check, StatusFail, "could not prove failed start stayed closed: is-running returned exit 2")
+	case running.err != nil:
+		c.record(check, StatusFail, fmt.Sprintf("could not prove failed start stayed closed: %v", running.err))
+	case running.stdout == "true":
+		c.record(check, StatusFail, "invalid staging contract became runnable before start returned an error")
+	case running.stdout != "false":
+		c.record(check, StatusFail, fmt.Sprintf("could not prove failed start stayed closed: is-running stdout %q", running.stdout))
+	default:
+		c.record(check, StatusPass, "start failed closed before the session became runnable")
+	}
 }
 
 // checkLifecycle runs the required round-trip — start → is-running true

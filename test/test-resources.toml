@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 611
-baseline_files = 174
+baseline_calls = 613
+baseline_files = 176
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 415
-baseline_files = 118
+baseline_calls = 417
+baseline_files = 120
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -216,6 +216,28 @@ resources = ["subprocess"]
 owner_bead = "ga-80po0c.2.1"
 invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
 resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestReconcileCodexHooksWaitsForCrossProcessHookSave"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "Codex hook cross-process path-lock regression is a checked Medium owner"
+resource_owner = "the test-binary helper subprocess is confined to TestReconcileCodexHooksWaitsForCrossProcessHookSave, signals readiness over stdout, and is released over stdin"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/runtime/exec"
+package_name = "exec"
+owner = "TestScreenSessionScriptOwnedPathContract"
+resources = ["subprocess"]
+owner_bead = "ga-80po0c.2.1"
+invariant = "screen session-script reconciler-owned path contract is a checked Medium owner"
+resource_owner = "the adapter subprocess factory is confined to TestScreenSessionScriptOwnedPathContract and each child uses isolated temporary state"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 

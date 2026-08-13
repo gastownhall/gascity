@@ -7,13 +7,129 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// TestSupervisorSubmitPreservesConvergedCodexHooksWithoutExplicitInstallList
+// exercises the real dashboard/CLI fast path: API worker factory -> Message ->
+// session.Manager.Submit -> provider restart. A Codex-family configured named
+// session must carry the reconciler-owned file even though install_agent_hooks
+// is omitted, because provider-family overlay staging still selects Codex.
+func TestSupervisorSubmitPreservesConvergedCodexHooksWithoutExplicitInstallList(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cityPath = t.TempDir()
+	workDir := filepath.Join(fs.cityPath, "mayor-home")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workdir): %v", err)
+	}
+	overlayDir := filepath.Join(fs.cityPath, "packs", "core", "overlay")
+	overlayHookDir := filepath.Join(overlayDir, "per-provider", "codex", ".codex")
+	if err := os.MkdirAll(overlayHookDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	overlayHooks, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Codex overlay: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayHookDir, "hooks.json"), overlayHooks, 0o644); err != nil {
+		t.Fatalf("write Codex overlay: %v", err)
+	}
+
+	codexBase := "builtin:codex"
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "mayor",
+		Provider: "codex-local",
+		WorkDir:  "mayor-home",
+		// Deliberately no InstallAgentHooks: this is the live regression.
+	}}
+	fs.cfg.NamedSessions = []config.NamedSession{{Template: "mayor"}}
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"codex-local": {
+			Base:          &codexBase,
+			Command:       "/bin/echo",
+			ResumeCommand: "/bin/echo resume {{.SessionKey}}",
+			PathCheck:     "/bin/echo",
+		},
+	}
+	fs.cfg.PackOverlayDirs = []string{overlayDir}
+
+	layers, err := hooks.ReadCodexHookOverlayLayers(overlayDir, []string{"codex"})
+	if err != nil {
+		t.Fatalf("ReadCodexHookOverlayLayers: %v", err)
+	}
+	if _, err := hooks.ReconcileCodexHooks(fsys.OSFS{}, fs.cityPath, workDir, layers); err != nil {
+		t.Fatalf("ReconcileCodexHooks: %v", err)
+	}
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	canonical, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read canonical hooks: %v", err)
+	}
+	if !hooks.CodexHooksAreConvergedWithOverlays(canonical, fs.cityPath, layers) {
+		t.Fatal("test setup did not produce a configured fixed point")
+	}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Alias:        "mayor",
+		ExplicitName: "test-city--mayor",
+		Template:     "mayor",
+		Title:        "Mayor",
+		Command:      "/bin/echo",
+		WorkDir:      workDir,
+		Provider:     "codex-local",
+		Resume:       session.ProviderResume{ResumeCommand: "/bin/echo resume {{.SessionKey}}"},
+		// Model a legacy named record: ownership must be recovered from the
+		// configured home even without the newer configured_named metadata.
+		ExtraMeta: map[string]string{"session_origin": "named"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	srv := New(fs)
+	if _, err := srv.submitMessageToSession(context.Background(), fs.cityBeadStore, info.ID, "probe", session.SubmitIntentDefault); err != nil {
+		t.Fatalf("submitMessageToSession: %v", err)
+	}
+	started := fs.sp.LastStartConfig(info.SessionName)
+	if started == nil {
+		t.Fatal("submit did not restart the named session")
+	}
+	if got := started.ReconcilerOwnedMergeablePaths; len(got) != 1 || got[0] != materialize.CodexManagedMergeablePath {
+		t.Fatalf("restart ownership = %v, want [%s]", got, materialize.CodexManagedMergeablePath)
+	}
+	foundSelfCopy := false
+	for _, entry := range started.CopyFiles {
+		if filepath.Clean(entry.Src) == filepath.Clean(hookPath) && entry.RelDst == materialize.CodexManagedMergeablePath && entry.Probed && entry.ContentHash != "" {
+			foundSelfCopy = true
+		}
+	}
+	if !foundSelfCopy {
+		t.Fatalf("restart config missing verified canonical self-copy: %+v", started.CopyFiles)
+	}
+	if err := runtime.StageSessionWorkDir(*started); err != nil {
+		t.Fatalf("StageSessionWorkDir(restart config): %v", err)
+	}
+	after, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hooks after API restart staging: %v", err)
+	}
+	if string(after) != string(canonical) {
+		t.Fatalf("API restart staging reintroduced legacy hook bytes:\nbefore:\n%s\nafter:\n%s", canonical, after)
+	}
+}
 
 func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCurrentResumeSettings(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "api-resume-anthropic-token")

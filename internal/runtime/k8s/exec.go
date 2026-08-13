@@ -141,6 +141,14 @@ func (f *fakeK8sOps) createPod(_ context.Context, pod *corev1.Pod) (*corev1.Pod,
 	}
 	p := pod.DeepCopy()
 	p.Status.Phase = corev1.PodRunning
+	if len(p.Spec.InitContainers) > 0 {
+		p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+			Name: p.Spec.InitContainers[0].Name,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{},
+			},
+		}}
+	}
 	f.pods[pod.Name] = p
 	return p, nil
 }

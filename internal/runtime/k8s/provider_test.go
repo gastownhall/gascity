@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,24 @@ import (
 func TestProviderImplementsInterface(_ *testing.T) {
 	// Compile-time check is in provider.go, but verify at test time too.
 	var _ runtime.Provider = (*Provider)(nil)
+}
+
+func TestSeamBackedPreservesReconcilerOwnershipCapability(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		prebaked bool
+		want     bool
+	}{
+		{name: "native staging", want: true},
+		{name: "prebaked staging", prebaked: true, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &seamBackedProvider{raw: &Provider{prebaked: tt.prebaked}}
+			if got := provider.SupportsReconcilerOwnedMergeablePaths(); got != tt.want {
+				t.Fatalf("SupportsReconcilerOwnedMergeablePaths() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestManagedServiceAliasDefaults(t *testing.T) {
@@ -660,6 +680,67 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	}
 	if pod.Annotations["gc-session-name"] != "gc-test-agent" {
 		t.Errorf("annotation gc-session-name = %q, want gc-test-agent", pod.Annotations["gc-session-name"])
+	}
+}
+
+func TestStartRejectsOwnedDestinationChangedByCityInit(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	cityDir := t.TempDir()
+	hookPath := filepath.Join(cityDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+	canonical := `{"hooks":{"SessionStart":[]}}`
+	if err := os.WriteFile(hookPath, []byte(canonical), 0o644); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	initRan := false
+	readCount := 0
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "gc init --from") {
+			initRan = true
+			return "", nil
+		}
+		if len(cmd) == 5 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "gc-read-owned" {
+			readCount++
+			if initRan {
+				return `{"hooks":{"SessionStart":[{"matcher":"rewritten"}]}}`, nil
+			}
+			return canonical, nil
+		}
+		return "", nil
+	}
+
+	err := p.Start(context.Background(), "gc-owned-init", runtime.Config{
+		Command: "sleep 300",
+		WorkDir: cityDir,
+		Env: map[string]string{
+			"GC_CITY": cityDir,
+		},
+		ReconcilerOwnedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+		CopyFiles: []runtime.CopyEntry{{
+			Src: hookPath, RelDst: filepath.Join(".codex", "hooks.json"), Probed: true,
+			ContentHash: runtime.HashPathContent(hookPath),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("Start error = %v, want post-init owned destination mismatch", err)
+	}
+	if readCount != 2 {
+		t.Fatalf("owned destination read count = %d, want pre-release checks before and after init", readCount)
+	}
+	if _, exists := fake.pods["gc-owned-init"]; exists {
+		t.Fatal("pod was not cleaned up after post-init owned destination mismatch")
+	}
+	for _, call := range fake.calls {
+		if call.method == "execInPod" && strings.Join(call.cmd, " ") == "touch /workspace/.gc-workspace-ready" {
+			t.Fatal("workspace entrypoint was released after post-init owned destination mismatch")
+		}
 	}
 }
 

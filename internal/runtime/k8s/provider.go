@@ -53,6 +53,10 @@ type Provider struct {
 	stderr             io.Writer           // warning output (default os.Stderr)
 }
 
+// SupportsReconcilerOwnedMergeablePaths reports whether the provider has a
+// staging boundary where the ownership contract can be enforced.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool { return !p.prebaked }
+
 type schedulingFields struct {
 	nodeSelector      map[string]string
 	tolerations       []corev1.Toleration
@@ -169,6 +173,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
+	if len(cfg.ReconcilerOwnedMergeablePaths) > 0 && p.prebaked {
+		return fmt.Errorf("starting session %q: prebaked k8s runtime cannot stage reconciler-owned mergeable paths", name)
+	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 
@@ -239,6 +249,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			if err := initCityInPod(ctx, p.ops, podName, ctrlCity); err != nil {
 				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
 			}
+		}
+		// gc init writes into the shared workspace after staging. Re-bind the
+		// ownership handoff to the final agent-visible bytes immediately before
+		// releasing the entrypoint.
+		if err := verifyReconcilerOwnedPodFiles(ctx, p.ops, podName, "agent", cfg, projectedPodWorkDir(cfg)); err != nil {
+			cleanup("post-init owned-file verification failed")
+			return fmt.Errorf("verifying reconciler-owned files after city init for session %q: %w", name, err)
 		}
 
 		// Signal entrypoint to proceed.

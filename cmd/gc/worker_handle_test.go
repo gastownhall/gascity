@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2196,7 +2198,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToProviderNameWhenResolv
 		},
 	}
 
-	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), runtime.NewFake(), cfg)
 	if resolver == nil {
 		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
 	}
@@ -2231,7 +2233,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 		},
 	}
 
-	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), runtime.NewFake(), cfg)
 	if resolver == nil {
 		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
 	}
@@ -2296,7 +2298,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedProviderWhenC
 		},
 	}
 
-	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), runtime.NewFake(), cfg)
 	if resolver == nil {
 		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
 	}
@@ -2333,6 +2335,415 @@ func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
 	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
 	if !hints.MouseOn {
 		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}
+
+func TestResolvedWorkerRuntimeOwnershipFollowsConfiguredHomeNotSessionMetadata(t *testing.T) {
+	cityDir := t.TempDir()
+	installCodex(t, cityDir, cityDir)
+	codexBase := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "mayor",
+			Provider: "codex-local",
+			// Deliberately no InstallAgentHooks: a Codex-family launch still
+			// selects the Codex provider overlay and must claim the canonical
+			// file on CLI fallback resumes.
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"codex-local": {
+				Base:          &codexBase,
+				Command:       "/bin/echo",
+				PathCheck:     "/bin/echo",
+				ResumeCommand: "/bin/echo resume {{.SessionKey}}",
+			},
+		},
+	}
+	if _, err := config.ResolveProvider(&cfg.Agents[0], &cfg.Workspace, cfg.Providers, func(name string) (string, error) { return name, nil }); err != nil {
+		t.Fatalf("ResolveProvider(test setup): %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		info    session.Info
+		wantOwn bool
+	}{
+		{
+			name: "fully annotated named record at configured home",
+			info: session.Info{
+				Template:                "mayor",
+				Command:                 "/bin/echo",
+				Provider:                "codex-local",
+				WorkDir:                 cityDir,
+				ConfiguredNamedSession:  true,
+				ConfiguredNamedIdentity: "mayor",
+			},
+			wantOwn: true,
+		},
+		{
+			name: "legacy named record without configured boolean",
+			info: session.Info{
+				Template:      "mayor",
+				Command:       "/bin/echo",
+				Provider:      "codex-local",
+				WorkDir:       cityDir,
+				SessionOrigin: "named",
+			},
+			wantOwn: true,
+		},
+		{
+			name: "manual record at configured home",
+			info: session.Info{
+				Template:      "mayor",
+				Command:       "/bin/echo",
+				Provider:      "codex-local",
+				WorkDir:       cityDir,
+				SessionOrigin: "manual",
+			},
+			wantOwn: true,
+		},
+		{
+			name: "named task worktree",
+			info: session.Info{
+				Template:                "mayor",
+				Command:                 "/bin/echo",
+				Provider:                "codex-local",
+				WorkDir:                 filepath.Join(cityDir, ".gc", "worktrees", "task"),
+				ConfiguredNamedSession:  true,
+				ConfiguredNamedIdentity: "mayor",
+			},
+		},
+		{
+			name: "ephemeral at home path",
+			info: session.Info{
+				Template:      "mayor",
+				Command:       "/bin/echo",
+				Provider:      "codex-local",
+				WorkDir:       cityDir,
+				SessionOrigin: "ephemeral",
+			},
+			wantOwn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, tt.info, "")
+			if err != nil {
+				t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+			}
+			if resolved == nil {
+				t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+			}
+			got := len(resolved.Hints.ReconcilerOwnedMergeablePaths) > 0
+			if got != tt.wantOwn {
+				t.Fatalf("ReconcilerOwnedMergeablePaths = %v, want ownership=%v", resolved.Hints.ReconcilerOwnedMergeablePaths, tt.wantOwn)
+			}
+			if tt.wantOwn {
+				wantSrc := filepath.Join(cityDir, ".codex", "hooks.json")
+				var found bool
+				for _, entry := range resolved.Hints.CopyFiles {
+					if samePath(entry.Src, wantSrc) {
+						if entry.RelDst != codexManagedMergeablePath {
+							t.Fatalf("verified hook RelDst = %q, want workdir-relative %q", entry.RelDst, codexManagedMergeablePath)
+						}
+						if !entry.Probed || entry.ContentHash == "" {
+							t.Fatalf("verified hook must carry a probed content hash: %+v", entry)
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("verified remote-resume hook missing from CopyFiles: %+v", resolved.Hints.CopyFiles)
+				}
+			}
+		})
+	}
+}
+
+type workerOwnershipCapabilityProvider struct {
+	runtime.Provider
+	supported bool
+}
+
+func (p workerOwnershipCapabilityProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return p.supported
+}
+
+func TestWorkerFactoryResumeOwnershipFollowsProviderCapability(t *testing.T) {
+	tests := []struct {
+		name         string
+		wrapProvider func(*runtime.Fake) runtime.Provider
+		wantOwned    bool
+	}{
+		{
+			name:         "capable provider",
+			wrapProvider: func(provider *runtime.Fake) runtime.Provider { return provider },
+			wantOwned:    true,
+		},
+		{
+			name: "missing capability",
+			wrapProvider: func(provider *runtime.Fake) runtime.Provider {
+				return struct{ runtime.Provider }{Provider: provider}
+			},
+		},
+		{
+			name: "provider declines",
+			wrapProvider: func(provider *runtime.Fake) runtime.Provider {
+				return workerOwnershipCapabilityProvider{Provider: provider, supported: false}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			installCodex(t, cityDir, cityDir)
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "mayor",
+					Provider:          "stub",
+					InstallAgentHooks: []string{"codex"},
+				}},
+				Providers: map[string]config.ProviderSpec{
+					"stub": {Command: "/bin/echo"},
+				},
+			}
+			store := beads.NewMemStore()
+			fake := runtime.NewFake()
+			provider := tt.wrapProvider(fake)
+			manager := newSessionManagerWithConfig(cityDir, store, provider, cfg)
+			info, err := manager.CreateSession(context.Background(), session.CreateOptions{
+				BeadOnly: true,
+				Template: "mayor",
+				Title:    "Mayor",
+				Command:  "/bin/echo",
+				WorkDir:  cityDir,
+				Provider: "stub",
+				ExtraMeta: map[string]string{
+					"session_origin":                     "named",
+					session.NamedSessionMetadataKey:      "true",
+					session.NamedSessionIdentityMetadata: "mayor",
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+
+			factory, err := workerFactoryWithConfig(cityDir, store, provider, cfg)
+			if err != nil {
+				t.Fatalf("workerFactoryWithConfig: %v", err)
+			}
+			handle, err := factory.SessionByID(info.ID)
+			if err != nil {
+				t.Fatalf("SessionByID: %v", err)
+			}
+			if err := handle.Start(context.Background()); err != nil {
+				t.Fatalf("handle.Start: %v", err)
+			}
+
+			started := fake.LastStartConfig(info.SessionName)
+			if started == nil {
+				t.Fatalf("LastStartConfig(%q) = nil", info.SessionName)
+			}
+			gotOwned := len(started.ReconcilerOwnedMergeablePaths) > 0
+			if gotOwned != tt.wantOwned {
+				t.Fatalf("ReconcilerOwnedMergeablePaths = %v, want ownership=%v", started.ReconcilerOwnedMergeablePaths, tt.wantOwned)
+			}
+			foundOwnedCopy := false
+			for _, entry := range started.CopyFiles {
+				if path.Clean(filepath.ToSlash(entry.RelDst)) == codexManagedMergeablePath {
+					foundOwnedCopy = true
+					break
+				}
+			}
+			if foundOwnedCopy != tt.wantOwned {
+				t.Fatalf("owned CopyFile present=%v, want %v: %+v", foundOwnedCopy, tt.wantOwned, started.CopyFiles)
+			}
+		})
+	}
+}
+
+func TestResolvedWorkerRuntimeOwnershipProbeIsReadOnlyAndNonBlocking(t *testing.T) {
+	cityDir := t.TempDir()
+	customPath := filepath.Join(cityDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("mkdir custom hooks: %v", err)
+	}
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if err := os.WriteFile(customPath, custom, 0o644); err != nil {
+		t.Fatalf("write custom hooks: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			Provider:          "stub",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {Command: "/bin/echo"},
+		},
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:                "mayor",
+		Command:                 "/bin/echo",
+		Provider:                "stub",
+		WorkDir:                 cityDir,
+		ConfiguredNamedSession:  true,
+		ConfiguredNamedIdentity: "mayor",
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolved runtime = nil; observation/recovery operations must remain usable")
+	}
+	if got := resolved.Hints.ReconcilerOwnedMergeablePaths; len(got) != 1 || got[0] != codexManagedMergeablePath {
+		t.Fatalf("custom-only configured home protection = %v, want fail-closed path", got)
+	}
+	if len(resolved.Hints.CopyFiles) != 0 {
+		t.Fatalf("custom-only hooks produced a verified ownership copy: %+v", resolved.Hints.CopyFiles)
+	}
+	got, readErr := os.ReadFile(customPath)
+	if readErr != nil || string(got) != string(custom) {
+		t.Fatalf("runtime resolution mutated custom hooks: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestResolvedWorkerRuntimeRefusesOwnershipWhenConfiguredCodexLayerIsMissing(t *testing.T) {
+	cityDir := t.TempDir()
+	installCodex(t, cityDir, cityDir)
+	overlayDir := t.TempDir()
+	overlayHook := filepath.Join(overlayDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir overlay hook dir: %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf configured-but-missing"}]}]}}`), 0o644); err != nil {
+		t.Fatalf("write overlay hook: %v", err)
+	}
+	cfg := &config.City{
+		Workspace:       config.Workspace{Name: "test-city"},
+		PackOverlayDirs: []string{overlayDir},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			Provider:          "stub",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers: map[string]config.ProviderSpec{"stub": {Command: "/bin/echo"}},
+	}
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:                "mayor",
+		Command:                 "/bin/echo",
+		Provider:                "stub",
+		WorkDir:                 cityDir,
+		ConfiguredNamedSession:  true,
+		ConfiguredNamedIdentity: "mayor",
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if got := resolved.Hints.ReconcilerOwnedMergeablePaths; len(got) != 1 || got[0] != codexManagedMergeablePath {
+		t.Fatalf("configured-but-missing layer protection = %v, want fail-closed path", got)
+	}
+	if len(resolved.Hints.CopyFiles) != 0 {
+		t.Fatalf("worker produced a verified copy before configured layer landed: %+v", resolved.Hints.CopyFiles)
+	}
+}
+
+func TestWorkerReconcilerOwnedPathsUsesConfiguredNamedIdentity(t *testing.T) {
+	cityDir := t.TempDir()
+	identity := "operator"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "stub",
+			WorkDir:           "sessions/{{.AgentBase}}",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers:     map[string]config.ProviderSpec{"stub": {Command: "/bin/echo"}},
+		NamedSessions: []config.NamedSession{{Name: identity, Template: "worker"}},
+	}
+	workDir, err := resolveConfiguredWorkDir(cityDir, cfg.EffectiveCityName(), identity, &cfg.Agents[0], cfg.Rigs)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir: %v", err)
+	}
+	installCodex(t, cityDir, workDir)
+	hints := runtime.Config{ProviderName: "stub", InstallAgentHooks: []string{"codex"}}
+	if got := materialize.ResolveConfiguredCodexHookOwnership(cityDir, cfg, "worker", workDir, hints, nil); len(got) != 1 || got[codexManagedMergeablePath] == "" {
+		t.Fatalf("ownership files = %v, want configured identity path and digest", got)
+	}
+	if got := materialize.ResolveConfiguredCodexHookOwnership("", cfg, "worker", workDir, hints, nil); len(got) != 0 {
+		t.Fatalf("empty city root must not claim ownership: %v", got)
+	}
+}
+
+func TestWorkerReconcilerOwnedPathsDoesNotCreateConfiguredHome(t *testing.T) {
+	cityDir := t.TempDir()
+	homesDir := filepath.Join(cityDir, "sessions")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "stub",
+			WorkDir:           "sessions/{{.AgentBase}}",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers: map[string]config.ProviderSpec{"stub": {Command: "/bin/echo"}},
+	}
+	isolated := t.TempDir()
+	if _, err := os.Stat(homesDir); !os.IsNotExist(err) {
+		t.Fatalf("configured home parent unexpectedly exists before probe: %v", err)
+	}
+	if got := materialize.ResolveConfiguredCodexHookOwnership(cityDir, cfg, "worker", isolated, runtime.Config{}, nil); len(got) != 0 {
+		t.Fatalf("task worktree claimed configured-home ownership: %v", got)
+	}
+	if _, err := os.Stat(homesDir); !os.IsNotExist(err) {
+		t.Fatalf("read-only ownership probe created configured home parent: %v", err)
+	}
+}
+
+func TestWorkerReconcilerOwnedFilesRejectsSymlinkedHooks(t *testing.T) {
+	for _, symlinkParent := range []bool{false, true} {
+		name := "leaf"
+		if symlinkParent {
+			name = "parent"
+		}
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			targetDir := t.TempDir()
+			installCodex(t, cityDir, targetDir)
+			if symlinkParent {
+				if err := os.Symlink(filepath.Join(targetDir, ".codex"), filepath.Join(cityDir, ".codex")); err != nil {
+					t.Fatalf("symlink hooks parent: %v", err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Join(cityDir, ".codex"), 0o755); err != nil {
+					t.Fatalf("mkdir hooks parent: %v", err)
+				}
+				if err := os.Symlink(filepath.Join(targetDir, ".codex", "hooks.json"), filepath.Join(cityDir, ".codex", "hooks.json")); err != nil {
+					t.Fatalf("symlink hooks leaf: %v", err)
+				}
+			}
+
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					Provider:          "stub",
+					InstallAgentHooks: []string{"codex"},
+				}},
+				Providers: map[string]config.ProviderSpec{"stub": {Command: "/bin/echo"}},
+			}
+			hints := runtime.Config{ProviderName: "stub", InstallAgentHooks: []string{"codex"}}
+			if got := materialize.ResolveConfiguredCodexHookOwnership(cityDir, cfg, "worker", cityDir, hints, nil); got[codexManagedMergeablePath] != "" {
+				t.Fatalf("symlinked hooks produced a verified ownership copy: %v", got)
+			}
+		})
 	}
 }
 
@@ -2491,7 +2902,7 @@ func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t 
 
 	// Apply the overlay hints exactly as
 	// newWorkerSessionHandleForResolvedRuntimeWithConfig does before the factory call.
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved)
+	materialize.ApplyConfiguredSessionOverlayHints(cityDir, cfg, "myrig/polecat", resolved, &sessionCfg.Runtime.Hints)
 
 	if got := strings.TrimSpace(sessionCfg.Runtime.Hints.ProviderOverlayName); got != "pi-vllm" {
 		t.Fatalf("create Hints.ProviderOverlayName = %q, want %q", got, "pi-vllm")

@@ -4,7 +4,7 @@
 # Implements the exec session provider protocol.
 # See docs/exec-session-protocol.md for the full protocol specification.
 #
-# Dependencies: screen, jq, bash
+# Dependencies: screen, jq, tar, sha256sum or shasum, bash
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-screen gc start <city>
 #
@@ -51,7 +51,110 @@ name="${2:-}"
 STATE_DIR="${GC_EXEC_STATE_DIR:-${TMPDIR:-/tmp}/gc-session-screen}"
 mkdir -p "$STATE_DIR"
 
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
+# A script advertising the ownership capability must independently reject an
+# incomplete or stale handoff. Go preflights the same contract, but validating
+# again here prevents direct protocol callers and delayed starts from turning
+# overlay suppression into a missing or unverified hook file.
+validate_reconciler_owned_copy_files() {
+  local config="$1"
+  local work_dir="$2"
+  local counts owned_count unique_count owned_path match_count entry
+  local src probed expected_hash actual_hash expected_src parent
+
+  if ! printf '%s' "$config" | jq -e '
+    (.reconciler_owned_mergeable_paths // []) as $owned |
+    (.copy_files // []) as $copies |
+    ($owned | type == "array") and ($copies | type == "array") and
+    all($owned[]; type == "string" and length > 0) and
+    all($copies[]; type == "object")
+  ' >/dev/null; then
+    echo "start: invalid reconciler-owned staging payload" >&2
+    return 1
+  fi
+
+  counts=$(printf '%s' "$config" | jq -r '
+    (.reconciler_owned_mergeable_paths // []) as $owned |
+    [($owned | length), ($owned | unique | length)] | @tsv
+  ')
+  owned_count=${counts%%$'\t'*}
+  unique_count=${counts#*$'\t'}
+  if [ "$owned_count" -ne "$unique_count" ]; then
+    echo "start: duplicate reconciler-owned mergeable path" >&2
+    return 1
+  fi
+  if [ "$owned_count" -gt 0 ] && [ -z "$work_dir" ]; then
+    echo "start: reconciler-owned mergeable paths require work_dir" >&2
+    return 1
+  fi
+
+  while IFS= read -r owned_path; do
+    [ -z "$owned_path" ] && continue
+    case "$owned_path" in
+      .agents/hooks.json|.claude/settings.json|.gemini/settings.json|.codex/hooks.json|.cursor/hooks.json|.github/hooks/gascity.json)
+        ;;
+      *)
+        echo "start: unsupported reconciler-owned mergeable path $owned_path" >&2
+        return 1
+        ;;
+    esac
+
+    match_count=$(printf '%s' "$config" | jq -r --arg rel "$owned_path" '
+      [.copy_files[] | select(.rel_dst == $rel)] | length
+    ')
+    if [ "$match_count" -ne 1 ]; then
+      echo "start: reconciler-owned path $owned_path requires exactly one copy_file (got $match_count)" >&2
+      return 1
+    fi
+    entry=$(printf '%s' "$config" | jq -c --arg rel "$owned_path" '
+      [.copy_files[] | select(.rel_dst == $rel)][0]
+    ')
+    src=$(printf '%s' "$entry" | jq -r '.src // ""')
+    probed=$(printf '%s' "$entry" | jq -r '.probed == true')
+    expected_hash=$(printf '%s' "$entry" | jq -r '.content_hash // ""')
+    expected_src="${work_dir%/}/$owned_path"
+    if [ -z "$src" ] || [ "$src" != "$expected_src" ]; then
+      echo "start: reconciler-owned copy_file $owned_path must use canonical source $expected_src" >&2
+      return 1
+    fi
+    if [ "$probed" != "true" ]; then
+      echo "start: reconciler-owned copy_file $owned_path must be probed" >&2
+      return 1
+    fi
+    if [ "${#expected_hash}" -ne 64 ] || [[ "$expected_hash" == *[!0-9a-f]* ]]; then
+      echo "start: reconciler-owned copy_file $owned_path requires a SHA-256 content_hash" >&2
+      return 1
+    fi
+    parent=$(dirname "$src")
+    if [ ! -f "$src" ] || [ -L "$src" ] || [ ! -d "$parent" ] || [ -L "$parent" ]; then
+      echo "start: missing or unsafe reconciler-owned copy_file $src" >&2
+      return 1
+    fi
+    if ! actual_hash=$(sha256_stream < "$src"); then
+      echo "start: failed to hash reconciler-owned copy_file $src" >&2
+      return 1
+    fi
+    if [ "$actual_hash" != "$expected_hash" ]; then
+      echo "start: reconciler-owned copy_file $owned_path changed after reconciliation" >&2
+      return 1
+    fi
+  done < <(printf '%s' "$config" | jq -r '.reconciler_owned_mergeable_paths // [] | .[]')
+}
+
 case "$op" in
+  protocol)
+    printf '%s\n' '{"version":0,"capabilities":["staging.reconciler-owned-mergeable-paths"]}'
+    ;;
+
   start)
     # Read JSON config from stdin.
     config=$(cat)
@@ -63,6 +166,7 @@ case "$op" in
       echo "start: missing session name" >&2
       exit 1
     fi
+    validate_reconciler_owned_copy_files "$config" "$work_dir"
 
     # Check if session already exists.
     if screen -list 2>/dev/null | grep -q "[[:space:]]${name}[[:space:]]"; then
@@ -95,25 +199,70 @@ case "$op" in
 
     # Copy overlay_dir contents into agent working directory.
     overlay_dir=$(echo "$config" | jq -r '.overlay_dir // ""')
+    overlay_excludes=()
+    while IFS= read -r owned_path; do
+      case "$owned_path" in
+        .agents/hooks.json|.claude/settings.json|.gemini/settings.json|.codex/hooks.json|.cursor/hooks.json|.github/hooks/gascity.json)
+          overlay_excludes+=("--exclude=./$owned_path")
+          ;;
+      esac
+    done < <(echo "$config" | jq -r '.reconciler_owned_mergeable_paths // [] | .[]' 2>/dev/null)
     if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ] && [ -n "$work_dir" ]; then
-      cp -r "$overlay_dir/." "$work_dir/" 2>/dev/null || true
+      if [ "${#overlay_excludes[@]}" -gt 0 ]; then
+        # Preserve the reconciler's canonical hook/settings documents while
+        # retaining legacy best-effort staging for every sibling overlay file.
+        if ! (cd "$overlay_dir" && tar "${overlay_excludes[@]}" -cf - .) 2>/dev/null | \
+          (cd "$work_dir" && tar -xf -) 2>/dev/null; then
+          echo "start: failed to filter reconciler-owned overlay paths" >&2
+          exit 1
+        fi
+      else
+        cp -r "$overlay_dir/." "$work_dir/" 2>/dev/null || true
+      fi
     fi
 
+    # Overlay filtering can take long enough for a named-home file to change.
+    # Recheck immediately before the self-copy handoff that makes suppression
+    # authoritative.
+    validate_reconciler_owned_copy_files "$config" "$work_dir"
+
     # Copy copy_files entries into agent working directory.
-    echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null | while IFS= read -r entry; do
+    while IFS= read -r entry; do
       [ -z "$entry" ] && continue
       src=$(echo "$entry" | jq -r '.src')
       rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
+      is_owned=$(echo "$config" | jq -r --arg rel "$rel_dst" 'any((.reconciler_owned_mergeable_paths // [])[]; . == $rel)')
       dst="${work_dir:-.}"
       [ -n "$rel_dst" ] && dst="$dst/$rel_dst"
-      if [ -d "$src" ]; then
-        mkdir -p "$dst"
-        cp -r "$src/." "$dst/" 2>/dev/null || true
-      elif [ -f "$src" ]; then
-        mkdir -p "$(dirname "$dst")"
-        cp "$src" "$dst" 2>/dev/null || true
+      # Named local sessions source their canonical hook from the same workdir
+      # destination. Verify that it still exists before treating it as staged;
+      # the overlay fallback was deliberately suppressed for owned paths.
+      if [ "$src" = "$dst" ]; then
+        if [ ! -e "$src" ] && [ "$is_owned" = "true" ]; then
+          echo "start: missing reconciler-owned copy_file $src" >&2
+          exit 1
+        fi
+        continue
       fi
-    done
+      if [ -d "$src" ]; then
+        if ! mkdir -p "$dst" || ! cp -r "$src/." "$dst/" 2>/dev/null; then
+          if [ "$is_owned" = "true" ]; then
+            echo "start: failed to stage reconciler-owned copy_file $src" >&2
+            exit 1
+          fi
+        fi
+      elif [ -f "$src" ]; then
+        if ! mkdir -p "$(dirname "$dst")" || ! cp "$src" "$dst" 2>/dev/null; then
+          if [ "$is_owned" = "true" ]; then
+            echo "start: failed to stage reconciler-owned copy_file $src" >&2
+            exit 1
+          fi
+        fi
+      elif [ "$is_owned" = "true" ]; then
+        echo "start: missing reconciler-owned copy_file $src" >&2
+        exit 1
+      fi
+    done < <(echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null)
 
     screen -dmS "$name" "$wrapper"
     ;;

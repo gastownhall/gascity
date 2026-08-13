@@ -531,3 +531,43 @@ func TestWaitForInterruptBoundaryDelegatesToRoutedBackend(t *testing.T) {
 		t.Fatalf("last call = %#v, want WaitForInterruptBoundary for interactive-agent", last)
 	}
 }
+
+type reconcilerOwnershipProvider struct {
+	runtime.Provider
+	supported bool
+}
+
+func (p reconcilerOwnershipProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return p.supported
+}
+
+func TestSupportsReconcilerOwnedMergeablePathsFailsClosed(t *testing.T) {
+	capable := func() runtime.Provider {
+		return reconcilerOwnershipProvider{Provider: runtime.NewFake(), supported: true}
+	}
+	missing := func() runtime.Provider {
+		return struct{ runtime.Provider }{Provider: runtime.NewFake()}
+	}
+	unsupported := func() runtime.Provider {
+		return reconcilerOwnershipProvider{Provider: runtime.NewFake(), supported: false}
+	}
+
+	tests := []struct {
+		name      string
+		defaultSP runtime.Provider
+		acpSP     runtime.Provider
+		want      bool
+	}{
+		{name: "both capable", defaultSP: capable(), acpSP: capable(), want: true},
+		{name: "default capability missing", defaultSP: missing(), acpSP: capable()},
+		{name: "acp capability missing", defaultSP: capable(), acpSP: missing()},
+		{name: "backend declines", defaultSP: unsupported(), acpSP: capable()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := New(tt.defaultSP, tt.acpSP).SupportsReconcilerOwnedMergeablePaths(); got != tt.want {
+				t.Fatalf("SupportsReconcilerOwnedMergeablePaths() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

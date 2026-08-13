@@ -9,14 +9,18 @@ package exec
 
 import (
 	"encoding/json"
+	"path"
+	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // copyEntry is the JSON wire format for [runtime.CopyEntry].
 type copyEntry struct {
-	Src    string `json:"src"`
-	RelDst string `json:"rel_dst,omitempty"`
+	Src         string `json:"src"`
+	RelDst      string `json:"rel_dst,omitempty"`
+	Probed      bool   `json:"probed,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // startConfig is the JSON wire format sent to the script's stdin on Start.
@@ -24,45 +28,59 @@ type copyEntry struct {
 // contract — the script sees stable JSON field names regardless of Go struct
 // changes.
 type startConfig struct {
-	WorkDir            string            `json:"work_dir,omitempty"`
-	Command            string            `json:"command,omitempty"`
-	Lifecycle          runtime.Lifecycle `json:"lifecycle,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	ProcessNames       []string          `json:"process_names,omitempty"`
-	Nudge              string            `json:"nudge,omitempty"`
-	ReadyPromptPrefix  string            `json:"ready_prompt_prefix,omitempty"`
-	ReadyDelayMs       int               `json:"ready_delay_ms,omitempty"`
-	PreStart           []string          `json:"pre_start,omitempty"`
-	SessionSetup       []string          `json:"session_setup,omitempty"`
-	SessionSetupScript string            `json:"session_setup_script,omitempty"`
-	SessionLive        []string          `json:"session_live,omitempty"`
-	PackOverlayDirs    []string          `json:"pack_overlay_dirs,omitempty"`
-	OverlayDir         string            `json:"overlay_dir,omitempty"`
-	CopyFiles          []copyEntry       `json:"copy_files,omitempty"`
+	WorkDir                       string            `json:"work_dir,omitempty"`
+	Command                       string            `json:"command,omitempty"`
+	Lifecycle                     runtime.Lifecycle `json:"lifecycle,omitempty"`
+	Env                           map[string]string `json:"env,omitempty"`
+	ProcessNames                  []string          `json:"process_names,omitempty"`
+	Nudge                         string            `json:"nudge,omitempty"`
+	ReadyPromptPrefix             string            `json:"ready_prompt_prefix,omitempty"`
+	ReadyDelayMs                  int               `json:"ready_delay_ms,omitempty"`
+	PreStart                      []string          `json:"pre_start,omitempty"`
+	SessionSetup                  []string          `json:"session_setup,omitempty"`
+	SessionSetupScript            string            `json:"session_setup_script,omitempty"`
+	SessionLive                   []string          `json:"session_live,omitempty"`
+	PackOverlayDirs               []string          `json:"pack_overlay_dirs,omitempty"`
+	OverlayDir                    string            `json:"overlay_dir,omitempty"`
+	CopyFiles                     []copyEntry       `json:"copy_files,omitempty"`
+	ReconcilerOwnedMergeablePaths []string          `json:"reconciler_owned_mergeable_paths,omitempty"`
 }
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
 func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
+	owned := make(map[string]bool, len(cfg.ReconcilerOwnedMergeablePaths))
+	for _, rel := range cfg.ReconcilerOwnedMergeablePaths {
+		owned[path.Clean(filepath.ToSlash(rel))] = true
+	}
 	var cfs []copyEntry
 	for _, ce := range cfg.CopyFiles {
-		cfs = append(cfs, copyEntry{Src: ce.Src, RelDst: ce.RelDst})
+		wire := copyEntry{Src: ce.Src, RelDst: ce.RelDst}
+		// probed/content_hash were added with the reconciler-owned staging
+		// capability. Keep legacy payloads byte-compatible for strict custom
+		// adapters that do not opt into that contract.
+		if owned[path.Clean(filepath.ToSlash(ce.RelDst))] {
+			wire.Probed = ce.Probed
+			wire.ContentHash = ce.ContentHash
+		}
+		cfs = append(cfs, wire)
 	}
 	sc := startConfig{
-		WorkDir:            cfg.WorkDir,
-		Command:            cfg.Command,
-		Lifecycle:          cfg.Lifecycle,
-		Env:                cfg.Env,
-		ProcessNames:       cfg.ProcessNames,
-		Nudge:              cfg.Nudge,
-		ReadyPromptPrefix:  cfg.ReadyPromptPrefix,
-		ReadyDelayMs:       cfg.ReadyDelayMs,
-		PreStart:           cfg.PreStart,
-		SessionSetup:       cfg.SessionSetup,
-		SessionSetupScript: cfg.SessionSetupScript,
-		SessionLive:        cfg.SessionLive,
-		PackOverlayDirs:    cfg.PackOverlayDirs,
-		OverlayDir:         cfg.OverlayDir,
-		CopyFiles:          cfs,
+		WorkDir:                       cfg.WorkDir,
+		Command:                       cfg.Command,
+		Lifecycle:                     cfg.Lifecycle,
+		Env:                           cfg.Env,
+		ProcessNames:                  cfg.ProcessNames,
+		Nudge:                         cfg.Nudge,
+		ReadyPromptPrefix:             cfg.ReadyPromptPrefix,
+		ReadyDelayMs:                  cfg.ReadyDelayMs,
+		PreStart:                      cfg.PreStart,
+		SessionSetup:                  cfg.SessionSetup,
+		SessionSetupScript:            cfg.SessionSetupScript,
+		SessionLive:                   cfg.SessionLive,
+		PackOverlayDirs:               cfg.PackOverlayDirs,
+		OverlayDir:                    cfg.OverlayDir,
+		CopyFiles:                     cfs,
+		ReconcilerOwnedMergeablePaths: cfg.ReconcilerOwnedMergeablePaths,
 	}
 	return json.Marshal(sc)
 }

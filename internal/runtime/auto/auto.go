@@ -25,14 +25,15 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.Provider                             = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker            = (*Provider)(nil)
+	_ runtime.InteractionProvider                  = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider        = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider         = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider          = (*Provider)(nil)
+	_ runtime.RelaunchProvider                     = (*Provider)(nil)
+	_ runtime.LivenessObserver                     = (*Provider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -43,6 +44,18 @@ func New(defaultSP, acpSP runtime.Provider) *Provider {
 		acpSP:     acpSP,
 		routes:    make(map[string]bool),
 	}
+}
+
+// SupportsReconcilerOwnedMergeablePaths reports support only when every
+// backend that auto routing may select supports the ownership contract.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool {
+	for _, provider := range []runtime.Provider{p.defaultSP, p.acpSP} {
+		capability, ok := provider.(runtime.ReconcilerOwnedMergeablePathProvider)
+		if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+			return false
+		}
+	}
+	return true
 }
 
 // RouteACP registers a session name to use the ACP backend.

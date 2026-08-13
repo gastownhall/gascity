@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,11 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	if err := waitForExecReady(ctx, ops, podName, 120*time.Second); err != nil {
 		return err
 	}
+	// Recheck after the potentially long pod-readiness wait, immediately before
+	// overlay suppression and transport.
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 
 	// Copy rig work_dir into the pod.
 	podWorkDir := "/workspace"
@@ -44,16 +50,35 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
 		return err
 	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return err
+	}
 
 	// Copy each copy_files entry.
 	for _, entry := range cfg.CopyFiles {
 		dst := "/workspace"
+		owned := runtimeOwnsMergeablePath(cfg, entry.RelDst)
+		if owned {
+			if _, err := os.Stat(entry.Src); err != nil {
+				return fmt.Errorf("staging reconciler-owned copy_file %s: %w", entry.Src, err)
+			}
+			dst = podWorkDir
+		}
 		if entry.RelDst != "" {
-			dst = "/workspace/" + entry.RelDst
+			dst = strings.TrimSuffix(dst, "/") + "/" + filepath.ToSlash(entry.RelDst)
 		}
 		if err := copyToPod(ctx, ops, podName, "stage", entry.Src, dst); err != nil {
+			if owned {
+				return fmt.Errorf("staging reconciler-owned copy_file %s to %s: %w", entry.Src, dst, err)
+			}
 			fmt.Fprintf(warn, "gc: warning: staging copy_file %s → %s: %v\n", entry.Src, dst, err) //nolint:errcheck
 		}
+	}
+	// Copying reopens the local source after the last contract validation. Bind
+	// the handoff to the bytes that actually landed in the pod before allowing
+	// the init container to release the main container.
+	if err := verifyReconcilerOwnedPodFiles(ctx, ops, podName, "stage", cfg, podWorkDir); err != nil {
+		return err
 	}
 
 	// Mirror .gc/ into city volume when GC_CITY differs from work_dir.
@@ -66,6 +91,44 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	_, err := ops.execInPod(ctx, podName, "stage",
 		[]string{"touch", "/workspace/.gc-ready"}, nil)
 	return err
+}
+
+const podFileReadScript = `
+set -eu
+path=$1
+[ -f "$path" ] && [ ! -L "$path" ]
+parent=${path%/*}
+[ -d "$parent" ] && [ ! -L "$parent" ]
+cat "$path"
+`
+
+func verifyReconcilerOwnedPodFiles(ctx context.Context, ops k8sOps, podName, container string, cfg runtime.Config, podWorkDir string) error {
+	for _, entry := range cfg.CopyFiles {
+		if !runtimeOwnsMergeablePath(cfg, entry.RelDst) {
+			continue
+		}
+		dst := strings.TrimSuffix(podWorkDir, "/") + "/" + filepath.ToSlash(entry.RelDst)
+		output, err := ops.execInPod(ctx, podName, container,
+			[]string{"sh", "-c", podFileReadScript, "gc-read-owned", dst}, nil)
+		if err != nil {
+			return fmt.Errorf("reading reconciler-owned pod destination %s: %w", dst, err)
+		}
+		actual := fmt.Sprintf("%x", sha256.Sum256([]byte(output)))
+		if actual != entry.ContentHash {
+			return fmt.Errorf("reconciler-owned pod destination %s digest mismatch: got %s, want %s", dst, actual, entry.ContentHash)
+		}
+	}
+	return nil
+}
+
+func runtimeOwnsMergeablePath(cfg runtime.Config, rel string) bool {
+	want := filepath.Clean(filepath.FromSlash(rel))
+	for _, owned := range cfg.ReconcilerOwnedMergeablePaths {
+		if filepath.Clean(filepath.FromSlash(owned)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) error {
@@ -83,14 +146,13 @@ func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string,
 	defer os.RemoveAll(stageDir) //nolint:errcheck
 
 	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
-	providers := runtime.EffectiveOverlayProviderNames(cfg)
 	for _, od := range cfg.PackOverlayDirs {
-		if err := stageProviderOverlay(od, stageDir, providers, "pack overlay", warn); err != nil {
+		if err := stageProviderOverlay(od, stageDir, cfg, "pack overlay", warn); err != nil {
 			return err
 		}
 	}
 	if cfg.OverlayDir != "" {
-		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn); err != nil {
+		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, cfg, "overlay", warn); err != nil {
 			return err
 		}
 	}
@@ -116,9 +178,9 @@ func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
 	}
 }
 
-func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) error {
+func stageProviderOverlay(srcDir, dstDir string, cfg runtime.Config, label string, warn io.Writer) error {
 	var warnings bytes.Buffer
-	if err := runtime.StageProviderOverlayDir(srcDir, dstDir, providers, &warnings); err != nil {
+	if err := runtime.StageConfiguredProviderOverlayDir(srcDir, dstDir, cfg, &warnings); err != nil {
 		return fmt.Errorf("staging %s %s: %w", label, srcDir, err)
 	}
 	if warnings.Len() > 0 {

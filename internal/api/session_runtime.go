@@ -153,6 +153,27 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 	}
 }
 
+// applySessionResumeOverlayOwnership routes API runtime construction through
+// the same metadata-independent configured-home classifier as the controller
+// and CLI fallback.
+func (s *Server) applySessionResumeOverlayOwnership(info session.Info, resolved *config.ResolvedProvider, hints *runtime.Config) {
+	if hints == nil || resolved == nil {
+		return
+	}
+	cfg := s.state.Config()
+	if cfg == nil {
+		return
+	}
+	materialize.ApplyConfiguredSessionOverlayHints(s.state.CityPath(), cfg, info.Template, resolved, hints)
+	capability, ok := s.state.SessionProvider().(runtime.ReconcilerOwnedMergeablePathProvider)
+	if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+		return
+	}
+	workDir := firstNonEmptyString(info.WorkDir, hints.WorkDir)
+	verified := materialize.ResolveConfiguredCodexHookOwnership(s.state.CityPath(), cfg, info.Template, workDir, *hints, nil)
+	materialize.ApplyVerifiedMergeableOwnership(hints, verified)
+}
+
 // sessionResumeInteractive reports whether a resumed session is interactive and
 // human-attached (session_origin=manual) versus a controller-polled pool/headless
 // agent. It mirrors the create-path gate templateParamsSessionOrigin(tp)=="manual"
@@ -381,7 +402,9 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
+	hints := sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata))
+	s.applySessionResumeOverlayOwnership(info, resolved, &hints)
+	return session.BuildResumeCommand(resolvedInfo), hints, nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -499,12 +522,14 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		}
 	}
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	hints := sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata))
+	s.applySessionResumeOverlayOwnership(info, resolved, &hints)
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		Hints:      hints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

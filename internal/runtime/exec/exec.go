@@ -165,6 +165,9 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
@@ -186,6 +189,25 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return nil
 }
 
+func (p *Provider) validateReconcilerOwnedStaging(cfg runtime.Config) error {
+	if len(cfg.ReconcilerOwnedMergeablePaths) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
+		return fmt.Errorf("exec provider: %w", err)
+	}
+	if !p.handshakeCapability(runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths) {
+		return fmt.Errorf("exec provider %s must declare %q before receiving reconciler-owned mergeable paths", p.script, runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths)
+	}
+	return nil
+}
+
+// SupportsReconcilerOwnedMergeablePaths reports the maintained script's
+// declared support for the reconciler-owned settings-file protocol.
+func (p *Provider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return p.handshakeCapability(runtime.ProtocolCapabilityReconcilerOwnedMergeablePaths)
+}
+
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
 // (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
@@ -201,6 +223,9 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.)
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}

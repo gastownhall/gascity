@@ -285,3 +285,44 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
 	}
 }
+
+type reconcilerOwnershipProvider struct {
+	runtime.Provider
+	supported bool
+}
+
+func (p reconcilerOwnershipProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return p.supported
+}
+
+func TestSupportsReconcilerOwnedMergeablePathsFailsClosed(t *testing.T) {
+	capable := func() runtime.Provider {
+		return reconcilerOwnershipProvider{Provider: runtime.NewFake(), supported: true}
+	}
+	missing := func() runtime.Provider {
+		return struct{ runtime.Provider }{Provider: runtime.NewFake()}
+	}
+	unsupported := func() runtime.Provider {
+		return reconcilerOwnershipProvider{Provider: runtime.NewFake(), supported: false}
+	}
+
+	tests := []struct {
+		name   string
+		local  runtime.Provider
+		remote runtime.Provider
+		want   bool
+	}{
+		{name: "both capable", local: capable(), remote: capable(), want: true},
+		{name: "local capability missing", local: missing(), remote: capable()},
+		{name: "remote capability missing", local: capable(), remote: missing()},
+		{name: "backend declines", local: capable(), remote: unsupported()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := New(tt.local, tt.remote, func(string) bool { return false })
+			if got := provider.SupportsReconcilerOwnedMergeablePaths(); got != tt.want {
+				t.Fatalf("SupportsReconcilerOwnedMergeablePaths() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

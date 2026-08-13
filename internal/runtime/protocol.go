@@ -53,6 +53,10 @@ const (
 	// requires proc.exec); without it, the controller uses the welded `start` op
 	// (compat). It gates TransportCapabilities.SeparableLaunch.
 	ProtocolCapabilityProvision = "proc.provision"
+	// ProtocolCapabilityReconcilerOwnedMergeablePaths declares that an exec
+	// adapter preserves every reconciler-owned overlay path and then stages its
+	// matching copy_file into the session workdir, failing on missing/copy errors.
+	ProtocolCapabilityReconcilerOwnedMergeablePaths = "staging.reconciler-owned-mergeable-paths"
 )
 
 // ProtocolInfo is the parsed `protocol` handshake response. The zero

@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -3018,12 +3019,159 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 	}
 
 	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
-	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat", io.Discard)
+	owns := prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat", io.Discard)
+	if len(owns) != 0 {
+		t.Fatal("standalone pi hook must not claim ownership of mergeable JSON settings")
+	}
 
 	staged := filepath.Join(rigDir, ".pi", "extensions", "gc-hooks.js")
 	if _, err := os.Stat(staged); err != nil {
 		t.Fatalf("family pi overlay not materialized before fingerprint for custom pi-vllm provider (gc-6bw8o): %v", err)
 	}
+}
+
+func TestPrepareTemplateResolutionClaimsMergeableOwnershipOnlyAfterInstall(t *testing.T) {
+	newConfig := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:              "mayor",
+				Provider:          "stub",
+				InstallAgentHooks: []string{"codex"},
+			}},
+			Providers: map[string]config.ProviderSpec{
+				"stub": {Command: "/bin/echo"},
+			},
+		}
+	}
+
+	t.Run("provider without capability stays on legacy path", func(t *testing.T) {
+		cityDir := t.TempDir()
+		cfg := newConfig()
+		provider := struct{ runtime.Provider }{Provider: runtime.NewFake()}
+		bp := newAgentBuildParams("test-city", cityDir, cfg, provider, time.Now().UTC(), nil, io.Discard)
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 0 {
+			t.Fatalf("provider without ownership capability claimed paths: %v", owns)
+		}
+	})
+
+	t.Run("successful install", func(t *testing.T) {
+		cityDir := t.TempDir()
+		cfg := newConfig()
+		bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] == "" {
+			t.Fatalf("successful codex hook install ownership = %v, want [%s]", owns, codexManagedMergeablePath)
+		}
+		if _, err := os.Stat(filepath.Join(cityDir, ".codex", "hooks.json")); err != nil {
+			t.Fatalf("installed codex hook: %v", err)
+		}
+	})
+
+	t.Run("custom-only file stages before ownership verification", func(t *testing.T) {
+		cityDir := t.TempDir()
+		hookPath := filepath.Join(cityDir, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+			t.Fatalf("mkdir custom hook dir: %v", err)
+		}
+		if err := os.WriteFile(hookPath, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`), 0o644); err != nil {
+			t.Fatalf("write custom hooks: %v", err)
+		}
+		overlayDir := seedCodexOverlay(t)
+		cfg := newConfig()
+		cfg.PackOverlayDirs = []string{overlayDir}
+		bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] == "" {
+			t.Fatalf("ownership = %v, want verified Codex path", owns)
+		}
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatalf("read reconciled hooks: %v", err)
+		}
+		if !strings.Contains(string(got), "printf custom") || !strings.Contains(string(got), "GC_MANAGED_SESSION_HOOK=1") {
+			t.Fatalf("custom and managed hooks did not converge together:\n%s", got)
+		}
+	})
+
+	t.Run("partial managed file converges before ownership and stays stable", func(t *testing.T) {
+		cityDir := t.TempDir()
+		hookPath := filepath.Join(cityDir, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+			t.Fatalf("mkdir partial hook dir: %v", err)
+		}
+		partial := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime --hook"}]}]}}`
+		if err := os.WriteFile(hookPath, []byte(partial), 0o644); err != nil {
+			t.Fatalf("write partial managed hooks: %v", err)
+		}
+		cfg := newConfig()
+		cfg.PackOverlayDirs = []string{seedCodexOverlay(t)}
+		bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] == "" {
+			t.Fatalf("first ownership = %v, want verified Codex path", owns)
+		}
+		before, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatalf("read converged hooks: %v", err)
+		}
+		if !hooks.CodexHooksAreConverged(before, cityDir) {
+			t.Fatalf("partial hooks did not converge to the full behavior set:\n%s", before)
+		}
+
+		owns = prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] == "" {
+			t.Fatalf("second ownership = %v, want verified Codex path", owns)
+		}
+		after, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatalf("read second-pass hooks: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("second prepare changed converged hooks:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+
+	t.Run("failed install", func(t *testing.T) {
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, ".codex"), []byte("blocks hook directory"), 0o644); err != nil {
+			t.Fatalf("write blocking .codex file: %v", err)
+		}
+		cfg := newConfig()
+		bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] != "" {
+			t.Fatalf("failed hook install protection = %v, want owned path with no verified digest", owns)
+		}
+	})
+
+	t.Run("malformed live file is preserved and protected from fallback writers", func(t *testing.T) {
+		cityDir := t.TempDir()
+		hookPath := filepath.Join(cityDir, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+			t.Fatalf("mkdir malformed hook dir: %v", err)
+		}
+		malformed := []byte(`{"hooks":`)
+		if err := os.WriteFile(hookPath, malformed, 0o644); err != nil {
+			t.Fatalf("write malformed hooks: %v", err)
+		}
+		cfg := newConfig()
+		cfg.PackOverlayDirs = []string{seedCodexOverlay(t)}
+		bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+		owns := prepareTemplateResolution(bp, &cfg.Agents[0], "mayor", io.Discard)
+		if len(owns) != 1 || owns[codexManagedMergeablePath] != "" {
+			t.Fatalf("malformed hooks protection = %v, want owned path with no verified digest", owns)
+		}
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatalf("read malformed hooks: %v", err)
+		}
+		if !bytes.Equal(got, malformed) {
+			t.Fatalf("malformed live hooks changed:\ngot: %s\nwant: %s", got, malformed)
+		}
+	})
 }
 
 func TestBuildDesiredState_IncludesImportedAlwaysNamedSessions(t *testing.T) {

@@ -20,8 +20,9 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider            = (*seamBackedProvider)(nil)
-	_ runtime.ProcessTableScanner = (*seamBackedProvider)(nil)
+	_ runtime.Provider                             = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner                  = (*seamBackedProvider)(nil)
+	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked returns a subprocess provider served through the seams, storing
@@ -52,4 +53,8 @@ func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+func (s *seamBackedProvider) SupportsReconcilerOwnedMergeablePaths() bool {
+	return s.raw.SupportsReconcilerOwnedMergeablePaths()
 }

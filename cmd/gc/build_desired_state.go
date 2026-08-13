@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -5071,32 +5072,81 @@ func agentInSuspendedRig(
 	return suspendedRigPaths[filepath.Clean(rigRootForName(rigName, rigs))]
 }
 
-// prepareTemplateResolution installs any hook-backed files that must exist
-// before resolveTemplate fingerprints CopyFiles. This keeps generated hook
-// files from looking like config drift on the next reconcile tick.
-func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, stderr io.Writer) {
+const codexManagedMergeablePath = materialize.CodexManagedMergeablePath
+
+// prepareTemplateResolution reconciles hook-backed files before resolveTemplate
+// fingerprints CopyFiles. Codex is composed in one transaction so configured
+// overlay additions and the managed core reach a stable fixed point without a
+// second writer temporarily re-drifting the live document.
+func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, stderr io.Writer) map[string]string {
 	if bp == nil || cfgAgent == nil {
-		return
+		return nil
 	}
 	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
 	if err != nil {
-		return
+		return nil
 	}
 	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
 		}
-		return
+		return nil
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
-	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
-		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
+	installHooks := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+	// Provider overlays are selected from the launch family even when the
+	// agent/workspace omits install_agent_hooks. A Codex-family runtime can
+	// therefore stage per-provider/codex/.codex/hooks.json and must enter the
+	// same single-writer path; requiring the redundant hook list here lets the
+	// controller re-seed legacy unbound hooks after doctor/reconciliation.
+	codexRequested := resolvedProviderLaunchFamily(resolved) == "codex" || installHooksIncludeFamily(installHooks, "codex", bp.providers)
+	capability, supportsReconcilerOwnership := bp.sp.(runtime.ReconcilerOwnedMergeablePathProvider)
+	codexSingleWriter := codexRequested && supportsReconcilerOwnership && capability.SupportsReconcilerOwnedMergeablePaths()
+	configuredCodexLayers, layerErr := materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, codexSingleWriter, stderr)
+	codexHash := ""
+	prepared := make(map[string]string)
+	if codexSingleWriter {
+		// Claim the path as reconciler-controlled even when validation fails.
+		// Named-session runtime conversion will then suppress fallback overlay
+		// writes but omit the required canonical CopyEntry, causing provider
+		// preflight to fail closed without mutating the malformed document.
+		prepared[codexManagedMergeablePath] = ""
+		if layerErr != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "agent %q: codex hook layers: %v\n", qualifiedName, layerErr) //nolint:errcheck
+			}
+		} else {
+			var hErr error
+			codexHash, hErr = hooks.ReconcileCodexHooks(bp.fs, bp.cityPath, workDir, configuredCodexLayers)
+			if hErr != nil && stderr != nil {
+				fmt.Fprintf(stderr, "agent %q: codex hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
+			}
+		}
+	}
+
+	// Codex is reconciled above in one parse-then-write transaction. Install all
+	// other requested hook families through their existing provider handlers.
+	otherHooks := make([]string, 0, len(installHooks))
+	for _, name := range installHooks {
+		family := resolver(name)
+		if family == "" {
+			family = name
+		}
+		if family != "codex" || !codexSingleWriter {
+			otherHooks = append(otherHooks, name)
+		}
+	}
+	if len(otherHooks) > 0 {
+		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, otherHooks, resolver); hErr != nil && stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
 		}
 	}
+	if codexHash != "" {
+		prepared[codexManagedMergeablePath] = codexHash
+	}
+	return prepared
 }
 
 func materializeProviderOverlaysBeforeFingerprint(
@@ -5106,10 +5156,11 @@ func materializeProviderOverlaysBeforeFingerprint(
 	qualifiedName string,
 	rigName string,
 	workDir string,
+	reconcileCodex bool,
 	stderr io.Writer,
-) {
+) ([][]byte, error) {
 	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
-		return
+		return nil, nil
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -5124,41 +5175,90 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
-	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
-	// runs immediately after this staging on the SAME workDir (see
-	// prepareTemplateResolution), so it must be the sole writer of those files
-	// ON THE RECONCILE TICK. Staging them too leaves two writers with
-	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
-	// The runtime task-worktree staging path keeps staging them — it is their
-	// sole writer.
-	//
-	// "Sole writer" is scoped to the tick on purpose. For a persistent
-	// (non-task) agent the home dir is also the session workDir, and
-	// session-start staging writes these same files through the NON-skipping
-	// path — internal/runtime/tmux.stageStartFiles and
-	// runtime.StageSessionWorkDir (subprocess/acp) both call
-	// StageProviderOverlayDir with a nil skip. So a hybrid document can
-	// reappear at session start; the next tick converges it. That turns the
-	// permanent drift this fix targets into a transient one, which is the
-	// actual invariant — not that nothing else ever writes these paths.
-	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
-			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
+	var (
+		codexLayers [][]byte
+		layerErr    error
+	)
+	stage := func(od, label string) {
+		var err error
+		if reconcileCodex {
+			err = runtime.StageProviderOverlayDirSkippingPaths(od, workDir, overlayProviders, []string{codexManagedMergeablePath}, stderr)
+		} else {
+			err = runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr)
 		}
+		if err != nil {
+			fmt.Fprintf(stderr, "agent %q: %s %q: %v\n", qualifiedName, label, od, err) //nolint:errcheck
+		}
+		if !reconcileCodex || layerErr != nil {
+			return
+		}
+		layers, err := collectCodexHookOverlayLayers(od, overlayProviders)
+		if err != nil {
+			layerErr = fmt.Errorf("%s %q: %w", label, od, err)
+			return
+		}
+		codexLayers = append(codexLayers, layers...)
+	}
+	for _, od := range packDirs {
+		stage(od, "pack overlay")
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
-			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
-		}
+		stage(overlayDir, "overlay")
 	}
+	return codexLayers, layerErr
+}
+
+// collectCodexHookOverlayLayers reads the exact universal and flattened
+// per-provider Codex hook contributions in the same order provider-aware
+// overlay staging applies them. Missing files are no-ops; unreadable files are
+// returned as errors so reconciliation can preserve the live document.
+func collectCodexHookOverlayLayers(overlayDir string, providers []string) ([][]byte, error) {
+	return hooks.ReadCodexHookOverlayLayers(overlayDir, providers)
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
-	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+	preparedMergeableSettings := prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	tp, err := resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+	if err != nil {
+		return TemplateParams{}, err
+	}
+	// Ownership follows the current config's filesystem homes, not the bead's
+	// origin metadata. The preparation pass also runs for isolated pool/task
+	// workdirs; those must keep legacy full-overlay staging, so only carry the
+	// prepared result when this exact WorkDir is an agent or named-session home.
+	ownershipCfg := bp.city
+	if ownershipCfg == nil {
+		workspace := config.Workspace{}
+		if bp.workspace != nil {
+			workspace = *bp.workspace
+		}
+		ownershipCfg = &config.City{
+			Workspace:       workspace,
+			Agents:          bp.agents,
+			Providers:       bp.providers,
+			Rigs:            bp.rigs,
+			PackOverlayDirs: bp.packOverlayDirs,
+			RigOverlayDirs:  bp.rigOverlayDirs,
+		}
+	}
+	capability, ok := bp.sp.(runtime.ReconcilerOwnedMergeablePathProvider)
+	if !ok || !capability.SupportsReconcilerOwnedMergeablePaths() {
+		return tp, nil
+	}
+	ownershipHints := tp.Hints.ToRuntimeConfig()
+	ownershipHints.WorkDir = tp.WorkDir
+	tp.PreparedMergeableFiles = materialize.ResolveConfiguredCodexHookOwnership(
+		bp.cityPath,
+		ownershipCfg,
+		tp.TemplateName,
+		tp.WorkDir,
+		ownershipHints,
+		preparedMergeableSettings,
+	)
+	return tp, nil
 }
 
 func validateAgentSessionTransportForBuild(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string) error {
@@ -5208,6 +5308,11 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 	// drop the explicit "claude" entry here to avoid duplicating the
 	// filesystem write on every reconciler tick.
 	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+	// prepareTemplateResolution is the sole Codex writer, including its
+	// preserve-on-error path. Never fall back to the legacy installer here: it
+	// cannot compose configured layers in the same validated transaction.
+	ih = hooksWithoutFamily(ih, "codex", resolver)
 	if tp.ResolvedProvider != nil {
 		family := resolvedProviderLaunchFamily(tp.ResolvedProvider)
 		if family == "claude" || tp.ResolvedProvider.Name == "claude" {
@@ -5215,7 +5320,6 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 		}
 	}
 	if len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, tp.WorkDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
 		}
@@ -5226,6 +5330,25 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 			autoSP.RouteACP(tp.SessionName)
 		}
 	}
+}
+
+func hooksWithoutFamily(ih []string, excluded string, resolver hooks.FamilyResolver) []string {
+	if len(ih) == 0 {
+		return ih
+	}
+	out := make([]string, 0, len(ih))
+	for _, name := range ih {
+		family := name
+		if resolver != nil {
+			if resolved := resolver(name); resolved != "" {
+				family = resolved
+			}
+		}
+		if family != excluded {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // hooksWithoutClaude returns ih with any "claude" entries filtered out.
