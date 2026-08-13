@@ -770,11 +770,11 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
-	// 3 assigned beads with different priorities, max=2. Highest priority wins.
+	// 3 assigned beads with different priority bands, max=2. P0 then P1 win.
 	work := []beads.Bead{
-		workBead("w-low", "claude", "s1", "in_progress", 1),
-		workBead("w-high", "claude", "s2", "in_progress", 10),
-		workBead("w-mid", "claude", "s3", "in_progress", 5),
+		workBead("w-p1", "claude", "s1", "in_progress", 1),
+		workBead("w-p2", "claude", "s2", "in_progress", 2),
+		workBead("w-p0", "claude", "s3", "in_progress", 0),
 	}
 	sessions := []beads.Bead{
 		sessionBead("s1", "open"),
@@ -787,12 +787,11 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
 	}
-	// Highest priority resume requests should be accepted.
-	if result[0].Requests[0].BeadPriority != 10 {
-		t.Errorf("first priority = %d, want 10", result[0].Requests[0].BeadPriority)
+	if got := beads.PriorityValue(result[0].Requests[0].BeadPriority); got != 0 {
+		t.Errorf("first priority = %d, want 0", got)
 	}
-	if result[0].Requests[1].BeadPriority != 5 {
-		t.Errorf("second priority = %d, want 5", result[0].Requests[1].BeadPriority)
+	if got := beads.PriorityValue(result[0].Requests[1].BeadPriority); got != 1 {
+		t.Errorf("second priority = %d, want 1", got)
 	}
 }
 
@@ -1556,7 +1555,7 @@ func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) 
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
 	}
 	requests := []SessionRequest{
-		{Template: "claude", Tier: "resume", SessionBeadID: "sess-1", BeadPriority: 10},
+		{Template: "claude", Tier: "resume", SessionBeadID: "sess-1", BeadPriority: intPtr(10)},
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-1"},
 		{Template: "claude", Tier: "new", SessionBeadID: "sess-2"},
 	}

@@ -201,7 +201,7 @@ func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []bea
 	return out
 }
 
-// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --sort oldest --limit=N`.
+// filterReadyByRoute mirrors `bd ready --metadata-field $metadataKey=$route --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --sort priority --limit=N`.
 // This is a route-scoped, unassigned tier (Tier 3 pool-demand/control-dispatcher
 // routing), so held beads must be excluded (ga-5736js): filterReadyByAssignee
 // (Tier 1/2, assignee-scoped) stays hold-transparent by design and must not
@@ -227,7 +227,7 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.B
 		}
 		matched = append(matched, b)
 	}
-	beads.SortBeads(matched, beads.SortCreatedAsc)
+	beads.SortBeadsReadyOrder(matched)
 	if len(matched) > workflowServeScanLimit {
 		matched = matched[:workflowServeScanLimit]
 	}

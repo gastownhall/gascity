@@ -358,8 +358,8 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			// one is what proves it.
 			renormalized := strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 			renormalized = strings.ReplaceAll(renormalized, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-			renormalized = strings.ReplaceAll(renormalized, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-			renormalized = strings.ReplaceAll(renormalized, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
+			renormalized = strings.ReplaceAll(renormalized, `--sort priority --limit=20) || exit $?`, `--sort priority --limit=20 2>/dev/null)`)
+			renormalized = strings.ReplaceAll(renormalized, `--sort priority --limit=20 2>/dev/null) || exit $?`, `--sort priority --limit=20 2>/dev/null)`)
 			if renormalized != single {
 				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader and its failure clause\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}

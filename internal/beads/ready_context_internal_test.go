@@ -128,7 +128,7 @@ func TestSortBeadsReadyOrderBackgroundUsesNonCancellableFastPath(t *testing.T) {
 		t.Fatalf("uncancellable context checks = %d, want 0", checks)
 	}
 	for i := 1; i < len(rows); i++ {
-		if beadReadyLess(rows[i], rows[i-1]) {
+		if ReadyLess(rows[i], rows[i-1]) {
 			t.Fatalf("rows are not sorted at index %d: %+v before %+v", i, rows[i-1], rows[i])
 		}
 	}

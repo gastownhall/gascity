@@ -698,6 +698,36 @@ func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	}
 }
 
+func TestDoHookClaimFallsThroughAfterHigherPriorityLostRaces(t *testing.T) {
+	var attempts []string
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"p0-a","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"p0-b","status":"open","priority":0,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"p1","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			if beadID != "p1" {
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "other"}, false, nil
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"worker"}, JSON: true}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(attempts, ","); got != "p0-a,p0-b,p1" {
+		t.Fatalf("claim attempts = %q, want p0-a,p0-b,p1", got)
+	}
+}
+
 // TestDoHookClaimEmitsRejectedOnLostClaim covers ADR-0009 acceptance (a): a
 // second claim on a bead already live-claimed by another worker is rejected as
 // a no-op and surfaces a bead.claim_rejected event naming the winner.

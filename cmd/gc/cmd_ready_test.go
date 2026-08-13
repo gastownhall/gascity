@@ -753,9 +753,31 @@ func TestReadyUnknownSortIsRejected(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})
 
-	_, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{sortOrder: "priority"})
+	_, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{sortOrder: "random"})
 	if err == nil || !strings.Contains(err.Error(), "unknown --sort") {
 		t.Fatalf("readyBeadsForOpts error = %v, want a rejection naming the unknown order", err)
+	}
+}
+
+func TestReadyPrioritySortUsesCanonicalPriorityBandFIFO(t *testing.T) {
+	city := splittest.NewWorkStore(t, "gc")
+	oldP2 := mustCreateReadyBead(t, city, beads.Bead{Title: "old P2", Type: "task", Priority: readyPriority(2)})
+	newP0 := mustCreateReadyBead(t, city, beads.Bead{Title: "new P0", Type: "task", Priority: readyPriority(0)})
+	oldP0 := mustCreateReadyBead(t, city, beads.Bead{Title: "old P0", Type: "task", Priority: readyPriority(0)})
+
+	rows, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", city)}, readyOpts{sortOrder: "priority"})
+	if err != nil {
+		t.Fatalf("gc ready --sort priority: %v", err)
+	}
+	got := readyWireIDs(rows)
+	expected := []beads.Bead{oldP2, newP0, oldP0}
+	beads.SortBeadsReadyOrder(expected)
+	want := make([]string, 0, len(expected))
+	for _, bead := range expected {
+		want = append(want, bead.ID)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("priority order = %v, want %v", got, want)
 	}
 }
 
@@ -1055,13 +1077,12 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 		t.Errorf("the steer does not name the shorthand gap: %q", rejected)
 	}
 
-	// --sort is shared by NAME and incompatible by VALUE: bd defaults to
-	// "priority", which `gc ready` rejects. A steer that named --sort without
-	// that caveat would still send an operator to a dead end.
-	if _, err := readySortOrder("priority"); err == nil {
-		t.Error("`gc ready --sort priority` is accepted; the steer says the orders are oldest|newest")
+	// --sort is shared by name and accepts the canonical priority order plus
+	// the two created-at-only orders.
+	if _, err := readySortOrder("priority"); err != nil {
+		t.Errorf("`gc ready --sort priority` rejected: %v", err)
 	}
-	if !strings.Contains(msg, "oldest|newest") {
+	if !strings.Contains(msg, "priority|oldest|newest") {
 		t.Errorf("the steer names --sort without its accepted values: %q", msg)
 	}
 }

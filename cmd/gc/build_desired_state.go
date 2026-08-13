@@ -168,6 +168,8 @@ type scaleCheckDemand struct {
 	Count       int
 	WorkBeadIDs []string
 	Titles      map[string]string
+	Priorities  map[string]int
+	CreatedAt   map[string]time.Time
 	Packs       map[string]string
 	Workspaces  map[string]string
 	StoreRefs   map[string]string
@@ -194,21 +196,54 @@ func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDes
 	demands := make([]poolplan.Demand, 0, len(states))
 	for _, state := range states {
 		demand := poolplan.Demand{Template: state.Template}
+		var freshRequests []SessionRequest
 		for _, request := range state.Requests {
 			// Requests with a session bead ID represent in-flight capacity and
 			// must not reserve fresh-create budget for this template.
-			if request.Tier != "new" || request.SessionBeadID != "" {
+			if request.SessionBeadID != "" {
+				continue
+			}
+			if isResumeLikeTier(request.Tier) {
+				demand.RecoveryCreates++
+				continue
+			}
+			if request.Tier != "new" {
 				continue
 			}
 			demand.FreshCreates++
+			freshRequests = append(freshRequests, request)
 			demand.HasFloor = demand.HasFloor || request.FloorGuarantee
 		}
-		if demand.FreshCreates > 0 {
+		demand.FreshPriorities = freshCreatePriorities(freshRequests)
+		if demand.FreshCreates > 0 || demand.RecoveryCreates > 0 {
 			demands = append(demands, demand)
 		}
 	}
 	seed := poolSessionCreateFairShareCounter.Add(1) - 1
 	bp.poolSessionCreateBudget.ConfigureFairShare(demands, seed)
+}
+
+func freshCreatePriorities(requests []SessionRequest) []int {
+	var floor, elastic []int
+	for _, request := range requests {
+		if request.Tier != "new" || request.SessionBeadID != "" {
+			continue
+		}
+		priority := beads.PriorityValue(request.BeadPriority)
+		if request.FloorGuarantee {
+			floor = append(floor, priority)
+		} else {
+			elastic = append(elastic, priority)
+		}
+	}
+	sort.Ints(floor)
+	sort.Ints(elastic)
+	if len(floor) == 0 {
+		return elastic
+	}
+	remainder := append(append([]int(nil), floor[1:]...), elastic...)
+	sort.Ints(remainder)
+	return append([]int{floor[0]}, remainder...)
 }
 
 func (bp *agentBuildParams) tryClaimPoolSessionCreate(template string) bool {
@@ -1667,6 +1702,14 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				entry.Titles = make(map[string]string)
 			}
 			entry.Titles[b.ID] = b.Title
+			if entry.Priorities == nil {
+				entry.Priorities = make(map[string]int)
+			}
+			entry.Priorities[b.ID] = beads.PriorityValue(b.Priority)
+			if entry.CreatedAt == nil {
+				entry.CreatedAt = make(map[string]time.Time)
+			}
+			entry.CreatedAt[b.ID] = b.CreatedAt
 			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
 				if entry.Packs == nil {
 					entry.Packs = make(map[string]string)
@@ -1692,7 +1735,25 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			demand[template] = entry
 		}
 	}
+	for template, entry := range demand {
+		sortScaleCheckDemand(&entry)
+		demand[template] = entry
+	}
 	return counts, demand, partialTemplates, errs
+}
+
+func sortScaleCheckDemand(demand *scaleCheckDemand) {
+	sort.SliceStable(demand.WorkBeadIDs, func(i, j int) bool {
+		return beads.ReadyLess(scaleCheckDemandBead(*demand, demand.WorkBeadIDs[i]), scaleCheckDemandBead(*demand, demand.WorkBeadIDs[j]))
+	})
+}
+
+func scaleCheckDemandBead(demand scaleCheckDemand, id string) beads.Bead {
+	priority := beads.DefaultPriority
+	if recorded, ok := demand.Priorities[id]; ok {
+		priority = recorded
+	}
+	return beads.Bead{ID: id, Priority: &priority, CreatedAt: demand.CreatedAt[id]}
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
@@ -1708,6 +1769,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	}
 	if existing.Titles == nil && len(incoming.Titles) > 0 {
 		existing.Titles = make(map[string]string, len(incoming.Titles))
+	}
+	if existing.Priorities == nil && len(incoming.Priorities) > 0 {
+		existing.Priorities = make(map[string]int, len(incoming.Priorities))
+	}
+	if existing.CreatedAt == nil && len(incoming.CreatedAt) > 0 {
+		existing.CreatedAt = make(map[string]time.Time, len(incoming.CreatedAt))
 	}
 	if existing.Packs == nil && len(incoming.Packs) > 0 {
 		existing.Packs = make(map[string]string, len(incoming.Packs))
@@ -1725,6 +1792,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]
+		}
+		if incoming.Priorities != nil {
+			existing.Priorities[id] = incoming.Priorities[id]
+		}
+		if incoming.CreatedAt != nil {
+			existing.CreatedAt[id] = incoming.CreatedAt[id]
 		}
 		if incoming.Packs != nil {
 			existing.Packs[id] = incoming.Packs[id]
@@ -1745,6 +1818,7 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.Count < count {
 		existing.Count = count
 	}
+	sortScaleCheckDemand(&existing)
 	return existing
 }
 

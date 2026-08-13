@@ -434,7 +434,7 @@ func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
 		"--unassigned, --metadata-field, --exclude-type, --exclude-label, --sort, --limit, --include-ephemeral, --status "+
 		"and --json, and rejects the rest of bd's ready surface (--label, --label-any, --parent, --type, --priority, "+
 		"--offset, --has-metadata-key, --mol, --include-deferred, --gated, --claim, and every single-letter shorthand), "+
-		"with --sort taking oldest|newest rather than bd's priority|hybrid|oldest. A query only bd's surface can express "+
+		"with --sort taking priority|oldest|newest (not bd's hybrid). A query only bd's surface can express "+
 		"has no federated spelling yet: narrow with --metadata-field, or read the relocated class directly from the "+
 		"binding",
 		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))

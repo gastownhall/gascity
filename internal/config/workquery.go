@@ -230,7 +230,7 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest ` + limitFlag
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort priority ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -258,7 +258,7 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels 
 	if excludeHoldLabels {
 		body += excludeHoldLabelsJQClause()
 	}
-	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "")`
+	filter := `[.[] | ` + body + `]` + ` | sort_by((.priority // 2), (if ((.created_at // "") == "") then 1 else 0 end), (.created_at // ""), (.id // ""))`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -309,12 +309,12 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
+	// sorting; the worker first-row path asks the reader for priority-band FIFO
+	// order. The tier is widened past a single row (limit=20, not limit=1)
 	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
 	// behind it to fall through to instead of idle-exiting; the hook layer
 	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	return bdReadyPoolDemandShell("--sort priority --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts

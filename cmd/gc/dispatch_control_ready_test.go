@@ -130,20 +130,36 @@ func TestFilterReadyByAssigneeRespectsLimit(t *testing.T) {
 	}
 }
 
-func TestFilterReadyByRouteRequiresUnassignedAndSortsOldestFirst(t *testing.T) {
+func TestFilterReadyByRouteRequiresUnassignedAndSortsPriorityBandFIFO(t *testing.T) {
 	newer := time.Unix(200, 0)
 	older := time.Unix(100, 0)
+	p0, p2 := 0, 2
 	ready := []beads.Bead{
-		{ID: "ga-assigned-routed", CreatedAt: older, Assignee: "someone", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
-		{ID: "ga-newer", CreatedAt: newer, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
-		{ID: "ga-older", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
+		{ID: "ga-assigned-routed", Priority: &p0, CreatedAt: older, Assignee: "someone", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
+		{ID: "ga-newer-p0", Priority: &p0, CreatedAt: newer, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
+		{ID: "ga-older-p2", Priority: &p2, CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-epic-routed", CreatedAt: older, Type: "epic", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
 		{ID: "ga-other-route", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "other"}},
 	}
 	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
-	want := []string{"ga-older", "ga-newer"}
+	want := []string{"ga-newer-p0", "ga-older-p2"}
 	if !stringSlicesEqual(beadIDs(got), want) {
 		t.Fatalf("filterReadyByRoute = %#v, want %#v", beadIDs(got), want)
+	}
+}
+
+func TestFilterReadyByRouteAppliesPriorityBeforeLimit(t *testing.T) {
+	p0, p2 := 0, 2
+	route := "core/control-dispatcher"
+	ready := make([]beads.Bead, 0, workflowServeScanLimit+1)
+	for i := 0; i < workflowServeScanLimit; i++ {
+		ready = append(ready, beads.Bead{ID: fmt.Sprintf("p2-%02d", i), Priority: &p2, CreatedAt: time.Unix(int64(i+1), 0), Metadata: map[string]string{beadmeta.RunTargetMetadataKey: route}})
+	}
+	ready = append(ready, beads.Bead{ID: "p0-newer", Priority: &p0, CreatedAt: time.Unix(100, 0), Metadata: map[string]string{beadmeta.RunTargetMetadataKey: route}})
+
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, route)
+	if len(got) != workflowServeScanLimit || got[0].ID != "p0-newer" {
+		t.Fatalf("filtered prefix starts with %q (len %d), want priority P0 first before limit %d", got[0].ID, len(got), workflowServeScanLimit)
 	}
 }
 

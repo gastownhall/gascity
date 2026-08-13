@@ -11,12 +11,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// readySortOldest and readySortNewest are the two orders `bd ready --sort`
-// accepts. Anything else is a typo, and a typo that silently fell back to a
-// different order is how a bounded query ends up serving the wrong prefix.
+// These are the explicit orders gc ready accepts. Priority is the canonical
+// priority-band FIFO order; oldest and newest ignore priority.
 const (
-	readySortOldest = "oldest"
-	readySortNewest = "newest"
+	readySortPriority = "priority"
+	readySortOldest   = "oldest"
+	readySortNewest   = "newest"
 )
 
 // readyStatusInProgress is the one status whose list must read LIVE: it is the
@@ -171,9 +171,9 @@ authoritative-looking short answer. On a city that relocates no coordination
 class it reads the one store, unchanged.
 
 The flags mirror the "bd ready" contract the default work_query builds:
-  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
-           --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+	gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+	           --exclude-type=epic --exclude-label "hold:mayor" \
+	           --sort priority --limit 20 --json
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -209,7 +209,7 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
-	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
+	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: priority|oldest|newest (default: priority)")
 	cmd.Flags().IntVar(&opts.limit, "limit", 0, "max beads to return (0 = unlimited)")
 	// --include-ephemeral is accepted for parity with `bd ready`, which the
 	// generated work_query carries verbatim on a bd-1.0.5 city. It selects
@@ -462,13 +462,13 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // which is how a bounded query quietly serves the wrong prefix.
 func readySortOrder(order string) (func([]beads.Bead), error) {
 	switch strings.TrimSpace(order) {
-	case "":
+	case "", readySortPriority:
 		return beads.SortBeadsReadyOrder, nil
 	case readySortOldest:
 		return func(items []beads.Bead) { beads.SortBeads(items, beads.SortCreatedAsc) }, nil
 	case readySortNewest:
 		return func(items []beads.Bead) { beads.SortBeads(items, beads.SortCreatedDesc) }, nil
 	default:
-		return nil, fmt.Errorf("unknown --sort %q (want %s or %s)", order, readySortOldest, readySortNewest)
+		return nil, fmt.Errorf("unknown --sort %q (want %s, %s, or %s)", order, readySortPriority, readySortOldest, readySortNewest)
 	}
 }

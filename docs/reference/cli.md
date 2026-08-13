@@ -3327,9 +3327,9 @@ authoritative-looking short answer. On a city that relocates no coordination
 class it reads the one store, unchanged.
 
 The flags mirror the "bd ready" contract the default work_query builds:
-  gc ready --metadata-field "gc.routed_to=$target" --unassigned \
-           --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+	gc ready --metadata-field "gc.routed_to=$target" --unassigned \
+	           --exclude-type=epic --exclude-label "hold:mayor" \
+	           --sort priority --limit 20 --json
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -3353,7 +3353,7 @@ gc ready [flags]
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
-| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--sort` | string |  | sort order: priority\|oldest\|newest (default: priority) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |
 
