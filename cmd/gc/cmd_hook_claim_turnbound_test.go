@@ -387,12 +387,18 @@ func TestHookClaimKeepsDeliveredClaim(t *testing.T) {
 func TestHookClaimStraddleUnwinds(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
-	ops.InvokedAt = time.Now()
-	ops.ClaimWindow = 40 * time.Millisecond
+	// A controlled clock rather than a real sleep: the property under test is
+	// "the CAS returned after the window closed", and sleeping to produce it
+	// would only make the test slower and racier than the fact it is pinning.
+	clock := time.Now()
+	ops.Now = func() time.Time { return clock }
+	ops.InvokedAt = clock
+	ops.ClaimWindow = 40 * time.Second
 	baseClaim := ops.Claim
 	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-		// The CAS commits, but only after the invoking process's window is spent.
-		time.Sleep(80 * time.Millisecond)
+		// The CAS commits, but only after the invoking process's window is spent —
+		// the bd child carries its own ceiling, so this is the straddle.
+		clock = clock.Add(80 * time.Second)
 		return baseClaim(ctx, dir, env, beadID, assignee)
 	}
 
@@ -422,11 +428,14 @@ func TestHookClaimStraddleUnwinds(t *testing.T) {
 func TestHookClaimSlowButInsideWindowStands(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
-	ops.InvokedAt = time.Now()
+	clock := time.Now()
+	ops.Now = func() time.Time { return clock }
+	ops.InvokedAt = clock
 	ops.ClaimWindow = 30 * time.Second
 	baseClaim := ops.Claim
 	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-		time.Sleep(50 * time.Millisecond)
+		// Slow, but still comfortably inside the window.
+		clock = clock.Add(5 * time.Second)
 		return baseClaim(ctx, dir, env, beadID, assignee)
 	}
 
