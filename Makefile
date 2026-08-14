@@ -177,7 +177,7 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows test
+check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -209,6 +209,18 @@ check-routed-test-rows:
 ## and that the suite never constructs an env directly.
 check-split-topology-rows:
 	./scripts/check-split-topology-rows.sh
+
+## check-residency-boundary: forbid a new store-enumeration site outside internal/storeref
+## The lookup contract ("which stores answer this question, in what order, with what
+## failure semantics") lives in internal/storeref. Every list assembled elsewhere
+## re-derives the identity gate, the leg order, the dedupe rule and the fail-loud
+## policy, and each restatement is a chance to get one clause wrong (the ~90-site
+## census behind ga-axin6, ga-whzrt, ga-j4ob9). Shrink-only ratchet against
+## scripts/residency-boundary-baseline.txt; the AST half runs as
+## TestResidencyResolverBoundary in ./scripts.
+check-residency-boundary:
+	./scripts/check-residency-boundary.sh --self-test
+	./scripts/check-residency-boundary.sh
 
 ## check-gomod-replace: block unreleased replace directives (pseudo-version, local path, git ref)
 ## Tripwire for the 2026-06-11 incident where PR #3489 shipped a pseudo-version replace
