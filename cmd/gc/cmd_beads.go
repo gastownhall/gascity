@@ -69,7 +69,7 @@ and is not wired for this command; use --format=json.`,
 	}
 	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
-	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: open only)")
+	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
