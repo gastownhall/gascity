@@ -966,8 +966,9 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 		// Report the downgrade rather than failing the enqueue: the queued item
 		// is still valid and the controller's own patrol tick can deliver it.
 		if nudgeWarningWriter != nil {
-			fmt.Fprintf(nudgeWarningWriter, "gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
-				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront)) //nolint:errcheck
+			fmt.Fprintf(nudgeWarningWriter, //nolint:errcheck // best-effort warning
+				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
+				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
 		}
 		return nil
 	}
@@ -1149,8 +1150,9 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Outcome:       "queued",
 		})
 	}
-	fmt.Fprintf(stdout, "Queued nudge for %s in %s%s\n",
-		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered)) //nolint:errcheck
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
+		"Queued nudge for %s in %s%s\n",
+		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered))
 	return 0
 }
 

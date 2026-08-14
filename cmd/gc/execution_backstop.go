@@ -302,8 +302,9 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 		return
 	}
 	p.emitStepStalled(s, beadID, atoiOr0(s.Metadata[executionClaimNudgeCountKey]))
-	fmt.Fprintf(stdout, "execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
-		sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason) //nolint:errcheck // best-effort
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+		"execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
+		sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}

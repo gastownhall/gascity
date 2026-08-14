@@ -26,14 +26,14 @@ import (
 const agreementTemplate = "rig/worker"
 
 func agreementConfig() *config.City {
-	max := 3
 	// "solo" is capped at one session, so it is a singleton rather than a pool:
 	// NormalizePoolRouteTarget must not collapse a suffix against it.
+	poolMax := 3
 	return &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "rig", Path: "/tmp/rig"}},
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "rig", MinActiveSessions: intPtr(0), MaxActiveSessions: &max},
+			{Name: "worker", Dir: "rig", MinActiveSessions: intPtr(0), MaxActiveSessions: &poolMax},
 			{Name: "solo", Dir: "rig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
 		},
 	}
@@ -53,8 +53,10 @@ type agreementRow struct {
 
 func agreementRows() []agreementRow {
 	routed := func(id, target string) beads.Bead {
-		return beads.Bead{ID: id, Status: "open", Type: "task",
-			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target}}
+		return beads.Bead{
+			ID: id, Status: "open", Type: "task",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
+		}
 	}
 	return []agreementRow{
 		{name: "canonical base route", bead: routed("a-1", agreementTemplate), wantServable: true},
@@ -75,8 +77,10 @@ func agreementRows() []agreementRow {
 		},
 		{
 			name: "routed epic",
-			bead: beads.Bead{ID: "a-7", Status: "open", Type: "epic",
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}},
+			bead: beads.Bead{
+				ID: "a-7", Status: "open", Type: "epic",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
 			wantServable: false,
 		},
 		{
@@ -86,8 +90,10 @@ func agreementRows() []agreementRow {
 			// is counted. A case-folding demand predicate would refuse to count
 			// work its own workers will happily claim.
 			name: "routed epic with a case-variant type",
-			bead: beads.Bead{ID: "a-8", Status: "open", Type: "Epic",
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}},
+			bead: beads.Bead{
+				ID: "a-8", Status: "open", Type: "Epic",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
 			wantServable: true,
 		},
 		{
@@ -95,9 +101,11 @@ func agreementRows() []agreementRow {
 			// other way: the reader serves it (exact-match miss) but the hook
 			// strips it (EqualFold hit), so the worker never sees it.
 			name: "routed bead held by a case-variant hold label",
-			bead: beads.Bead{ID: "a-10", Status: "open", Type: "task",
+			bead: beads.Bead{
+				ID: "a-10", Status: "open", Type: "task",
 				Labels:   []string{strings.ToUpper(beadmeta.DispatchHoldLabels[0])},
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
 			wantServable: false,
 		},
 		{
@@ -106,22 +114,28 @@ func agreementRows() []agreementRow {
 			// rewrite must happen even for a row nobody may claim yet (the hold
 			// lifts later; a dead route form does not).
 			name: "held bead on a slot-suffixed route",
-			bead: beads.Bead{ID: "a-11", Status: "open", Type: "task",
+			bead: beads.Bead{
+				ID: "a-11", Status: "open", Type: "task",
 				Labels:   []string{beadmeta.DispatchHoldLabels[0]},
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"}},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"},
+			},
 			wantServable: false, wantRewrittenTo: agreementTemplate,
 		},
 		{
 			// Collapse x epic: same independence, other exclusion.
 			name: "epic on a slot-suffixed route",
-			bead: beads.Bead{ID: "a-12", Status: "open", Type: "epic",
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"}},
+			bead: beads.Bead{
+				ID: "a-12", Status: "open", Type: "epic",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"},
+			},
 			wantServable: false, wantRewrittenTo: agreementTemplate,
 		},
 		{
 			name: "assigned row",
-			bead: beads.Bead{ID: "a-9", Status: "open", Type: "task", Assignee: "someone",
-				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}},
+			bead: beads.Bead{
+				ID: "a-9", Status: "open", Type: "task", Assignee: "someone",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
 			wantServable: false,
 		},
 	}
@@ -309,8 +323,10 @@ func TestSlotSuffixCollapseIsPersistedForClaimableFormsOnly(t *testing.T) {
 func TestSlotSuffixCollapseIsIdempotent(t *testing.T) {
 	cfg := agreementConfig()
 	store := beads.NewMemStore()
-	created, err := store.Create(beads.Bead{Title: "slot routed", Type: "task",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"}})
+	created, err := store.Create(beads.Bead{
+		Title: "slot routed", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"},
+	})
 	if err != nil {
 		t.Fatalf("seeding: %v", err)
 	}

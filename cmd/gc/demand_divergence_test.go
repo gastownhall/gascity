@@ -34,8 +34,13 @@ func divergenceOptions(env ...string) hookClaimOptions {
 	}
 }
 
-func demandSpawnEnv(triggerID string) []string {
-	return []string{"GC_SPAWN_ORIGIN=demand", "GC_TRIGGER_WORK_BEAD_ID=" + triggerID}
+// demandSpawnEnv is the env a seat the controller minted from counted demand
+// carries: the presence-only origin marker plus the trigger id the diagnostics
+// classify against.
+const demandSpawnTriggerID = "wb-1"
+
+func demandSpawnEnv() []string {
+	return []string{"GC_SPAWN_ORIGIN=demand", "GC_TRIGGER_WORK_BEAD_ID=" + demandSpawnTriggerID}
 }
 
 // captureDivergence swaps the emitter seam and records what it was called with,
@@ -67,7 +72,7 @@ func captureDivergenceEmitter(t *testing.T, stdout *bytes.Buffer) *divergenceCap
 func TestDivergenceIsRecordedOnlyAfterTheDrainResult(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	capture := captureDivergenceEmitter(t, &stdout)
-	opts := divergenceOptions(demandSpawnEnv("wb-1")...)
+	opts := divergenceOptions(demandSpawnEnv()...)
 
 	code := writeHookClaimNoWork(opts, hookClaimOps{DrainAck: func(io.Writer) error { return nil }},
 		false, "/rig", &stdout, &stderr)
@@ -91,7 +96,7 @@ func TestDivergenceIsRecordedOnlyAfterTheDrainResult(t *testing.T) {
 func TestDivergenceIsNotRecordedForAClaimsErroredDrain(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	capture := captureDivergenceEmitter(t, &stdout)
-	opts := divergenceOptions(demandSpawnEnv("wb-1")...)
+	opts := divergenceOptions(demandSpawnEnv()...)
 
 	writeHookClaimNoWork(opts, hookClaimOps{DrainAck: func(io.Writer) error { return nil }},
 		true, "/rig", &stdout, &stderr)
@@ -130,8 +135,10 @@ func TestDivergenceClassification(t *testing.T) {
 		},
 		{
 			name: "open but held", triggerID: "wb-1",
-			bead: beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed,
-				Labels: []string{beadmeta.DispatchHoldLabels[0]}},
+			bead: beads.Bead{
+				ID: "wb-1", Status: "open", Type: "task", Metadata: routed,
+				Labels: []string{beadmeta.DispatchHoldLabels[0]},
+			},
 			wantClass: events.DemandClaimBenign, wantStat: "open",
 		},
 		{
@@ -165,9 +172,11 @@ func TestSiblingRaceLoserClassifiesBenign(t *testing.T) {
 	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
 	t.Cleanup(func() { demandDivergenceRecorder = prev })
 
-	opts := divergenceOptions(demandSpawnEnv("wb-1")...)
-	winner := beads.Bead{ID: "wb-1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}}
+	opts := divergenceOptions(demandSpawnEnv()...)
+	winner := beads.Bead{
+		ID: "wb-1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
 
 	var stderr bytes.Buffer
 	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner, nil), &stderr)
@@ -198,9 +207,11 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
 	t.Cleanup(func() { demandDivergenceRecorder = prev })
 
-	opts := divergenceOptions(demandSpawnEnv("wb-1")...)
-	stillThere := beads.Bead{ID: "wb-1", Status: "open", Type: "task",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}}
+	opts := divergenceOptions(demandSpawnEnv()...)
+	stillThere := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
 
 	var stderr bytes.Buffer
 	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
@@ -225,8 +236,10 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 	var stderr bytes.Buffer
 	// Same trigger id, no spawn-origin marker.
 	opts := divergenceOptions("GC_TRIGGER_WORK_BEAD_ID=wb-1")
-	stillThere := beads.Bead{ID: "wb-1", Status: "open", Type: "task",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}}
+	stillThere := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
 
 	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
 

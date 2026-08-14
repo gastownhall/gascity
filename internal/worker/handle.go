@@ -196,12 +196,12 @@ type NudgeResult struct {
 type NudgeUndeliveredReason string
 
 const (
-	// NudgeUndeliveredProviderUnsupported: this provider/transport cannot take
-	// a live wait-idle delivery at all, so the nudge can only be queued. It is
-	// a property of the runtime, not of the session's current state.
+	// NudgeUndeliveredProviderUnsupported means this provider/transport cannot
+	// take a live wait-idle delivery at all, so the nudge can only be queued. It
+	// is a property of the runtime, not of the session's current state.
 	NudgeUndeliveredProviderUnsupported NudgeUndeliveredReason = "live_delivery_unsupported"
-	// NudgeUndeliveredNoIdleBoundary: the provider CAN take live delivery but
-	// the session never reached the idle boundary within the wait window.
+	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
+	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
 )
 
