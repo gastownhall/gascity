@@ -240,15 +240,15 @@ func TestRetiredSessionSweepReleasesABindingResidentClaim(t *testing.T) {
 // a live worker, not as a strand.
 // SEAM PIN — DO NOT FOLD INTO AN END-TO-END TEST.
 //
-// Three independent defences keep a live holder's claim: this slice's close gate
+// Three independent defenses keep a live holder's claim: this slice's close gate
 // (the session is never retired), the widened ownership index (the release scan
-// owns the leg), and #5242's owner-store liveness probe. Defence in depth is
+// owns the leg), and #5242's owner-store liveness probe. Defense in depth is
 // what makes the system safe and is also what makes an end-to-end test blind:
 // remove any ONE of the three and a whole-tick test still passes, because the
 // other two cover for it. Only a seam-level pin can fail on a single removal.
 //
 // This test and TestOpenSessionStoreRefIndexOwnsTheLeadingArmForARigBoundHolder
-// are the only guards on the ownership-index defence. Deleting either, or
+// are the only guards on the ownership-index defense. Deleting either, or
 // rewriting it against the reconciler tick, silently retires the guard.
 //
 // The fixture is arranged so that ONLY the widened ownership index can save the
@@ -347,7 +347,7 @@ func TestCloseGateSeesALiveHoldersBindingResidentClaim(t *testing.T) {
 
 // SEAM PIN — DO NOT FOLD INTO AN END-TO-END TEST. See the note on
 // TestOrphanReleaseSparesALiveHoldersBindingResidentClaim: these two are the
-// only guards on the ownership-index defence, and defence in depth means a
+// only guards on the ownership-index defense, and defense in depth means a
 // whole-tick test cannot see the index being removed.
 //
 // The ownership index is the counterweight the row above rests on: a rig-scoped
