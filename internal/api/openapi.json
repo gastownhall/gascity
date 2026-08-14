@@ -1007,6 +1007,26 @@
         ],
         "type": "object"
       },
+      "BeadClaimReleasedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "assignee",
+          "reason"
+        ],
+        "type": "object"
+      },
       "BeadCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2398,6 +2418,9 @@
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
           },
           {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          {
             "$ref": "#/components/schemas/BeadDeadAssigneeReopenedPayload"
           },
           {
@@ -2423,6 +2446,9 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
           },
           {
             "$ref": "#/components/schemas/ExecutionStepStalledPayload"
@@ -2675,6 +2701,27 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionClaimWindowExpiredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "invocation_age_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "parent_alive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "bead_id",
+          "invocation_age_ms",
+          "parent_alive"
         ],
         "type": "object"
       },
@@ -11982,6 +12029,7 @@
           "mapping": {
             "backend.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
+            "bead.claim_released": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimReleased",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
@@ -12001,6 +12049,7 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepDefined",
             "execution.step_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepStalled",
@@ -12078,6 +12127,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimReleased"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed"
           },
           {
@@ -12133,6 +12185,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted"
@@ -12450,6 +12505,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadClaimReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.claim_released",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClosed": {
@@ -13428,11 +13540,13 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.claim_window_expired",
                 "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
@@ -13678,6 +13792,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionClaimWindowExpired": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_window_expired",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.claim_window_expired",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionStepCompleted": {
@@ -17448,6 +17619,7 @@
           "mapping": {
             "backend.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeBackendCredentialResolved",
             "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
+            "bead.claim_released": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimReleased",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
@@ -17467,6 +17639,7 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
             "execution.step_defined": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepDefined",
             "execution.step_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepStalled",
@@ -17544,6 +17717,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimReleased"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed"
           },
           {
@@ -17599,6 +17775,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted"
@@ -17924,6 +18103,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.claim_rejected",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadClaimReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadClaimReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.claim_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.claim_released",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClosed": {
@@ -18969,11 +19209,13 @@
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
+                "bead.claim_released",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.step_defined",
                 "execution.step_started",
                 "execution.step_completed",
+                "execution.claim_window_expired",
                 "execution.step_stalled",
                 "mail.sent",
                 "mail.read",
@@ -19232,6 +19474,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_window_expired",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.claim_window_expired",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionStepCompleted": {

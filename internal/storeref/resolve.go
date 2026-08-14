@@ -83,7 +83,50 @@ import (
 type Intent interface{ intent() }
 
 // ByID is one bead, read or write-after-read.
-type ByID struct{ ID string }
+type ByID struct {
+	ID string
+
+	// WorkAxis, when set, supplies the work legs for an id NO binding namespace
+	// claims — and is consulted for nothing else.
+	//
+	// This package models a PROBED work axis: the work ledger, then the work
+	// stores whose configured prefix also covers the id. internal/api's by-id
+	// surface has a ROUTED one instead — longest configured prefix, then a
+	// routes.jsonl lookup on disk, then a full scan of every work store — and
+	// that router's answer is a route, not a probe list. Replacing it with this
+	// package's rule would make a routes.jsonl-routed id and an id matching no
+	// configured prefix unreachable, and would put the city work store AHEAD of
+	// the rig store that actually mints the id, so a city-store outage would
+	// answer for reads the rig was serving. So the plane keeps its router and
+	// declares its answer here, and the resolver still owns the part that was
+	// blind: the binding legs.
+	//
+	// It is an interface rather than a plain []Leg because it must be LAZY, for
+	// a reason of correctness before cost. Inside a binding's reserved namespace
+	// the binding is the authority and the work axis is a probe list behind it;
+	// running the plane's router there would let a shadowing rig prefix capture
+	// an id the binding mints. That it also avoids a routes.jsonl disk read on
+	// every molecule-id read of a relocated city is the second reason, not the
+	// first.
+	//
+	// A router that returns no legs leaves this package's own rule in place, so
+	// the field is safe to set unconditionally.
+	WorkAxis WorkAxisRouter
+}
+
+// WorkAxisRouter answers "which work stores can hold this id, in what order"
+// for a plane whose by-id work axis is routed rather than probed.
+//
+// The first leg returned is the plan's RESIDUAL — returned unprobed by
+// ResolveOwner when it is also the last, which is what keeps a single-answer
+// route byte-identical to the caller reading its own store. Any further legs
+// are read in order, so a multi-leg answer proves absence rather than handing
+// back a residual.
+type WorkAxisRouter interface {
+	// WorkLegsForID returns the work legs for id, or nil to leave the
+	// resolver's own [work, covering-shadows] rule in place.
+	WorkLegsForID(id string) []Leg
+}
 
 // RoutedWork is the claimable/ready federation: `gc ready`, demand tiers.
 type RoutedWork struct{}
@@ -219,6 +262,14 @@ func planByID(in ByID, t Topology) (ResolvedPlan, error) {
 				continue
 			}
 			plan.Legs = append(plan.Legs, PlanLeg{Leg: b.Leg, Role: RoleResidenceProbe, OnError: PolicyRefusalTolerated})
+		}
+		// Outside every reserved namespace a plane with its own by-id router
+		// owns the work axis, and its answer REPLACES the probed tail below
+		// rather than joining it. Consulted only here: inside a namespace the
+		// binding is the authority and the tail is this package's probe list.
+		if routed := routedWorkLegs(in, id); len(routed) > 0 {
+			plan.Legs = append(plan.Legs, routed...)
+			return dedupeLegs(plan), nil
 		}
 	}
 
@@ -369,6 +420,32 @@ func bindingTailLegs(bindings []ClassBinding) []PlanLeg {
 	return out
 }
 
+// routedWorkLegs asks the intent's router for the work axis of an id no binding
+// namespace claims, and gives its answer the roles the executor reads.
+//
+// The FIRST leg is the residual, so a route that named exactly one store is
+// handed back unprobed and the caller's own read produces the caller's own
+// error message. The rest are Shadow legs — other work stores that can hold the
+// id, read behind it — so a multi-leg answer that misses everywhere is proven
+// absence. Every leg is Fatal: a work store that cannot be read has told the
+// resolution nothing, and reporting that as a missing bead is the shape this
+// package exists to prevent.
+func routedWorkLegs(in ByID, id string) []PlanLeg {
+	if in.WorkAxis == nil {
+		return nil
+	}
+	legs := in.WorkAxis.WorkLegsForID(id)
+	out := make([]PlanLeg, 0, len(legs))
+	for i, leg := range legs {
+		role := RoleShadow
+		if i == 0 {
+			role = RoleWorkFallback
+		}
+		out = append(out, PlanLeg{Leg: leg, Role: role, OnError: PolicyFatal})
+	}
+	return out
+}
+
 // shadowLegsCovering returns the work legs whose CONFIGURED prefix also covers
 // id, most specific (longest prefix) first so the narrowest declared owner is
 // probed before a broader one.
@@ -419,33 +496,70 @@ func dedupeLegs(p ResolvedPlan) ResolvedPlan {
 //     caller's own read produces its own error message byte-identically, which
 //     is what keeps such a city unchanged. A consumer gets a store back and
 //     discovers the miss from its OWN Get.
-//   - The plan ends in a SHADOW leg (an id covered by a rig's configured
-//     prefix) and every leg cleanly missed. There is no residual to hand back,
-//     so this returns (nil, "", beads.ErrNotFound).
+//   - The plan ends in a SHADOW leg — an id covered by a rig's configured
+//     prefix, or a further store a routed work axis named — and every leg
+//     cleanly missed. There is no residual to hand back, so this returns
+//     (nil, "", beads.ErrNotFound).
 //
 // So `err == nil` does not mean "the bead exists", and ErrNotFound is reachable
 // only for the second shape. A consumer that treats a nil store as impossible,
 // or that skips its own read because ResolveOwner "succeeded", is wrong on one
 // of the two.
+//
+// A consumer that is about to read the bead anyway should call ResolveOwnerRow,
+// which hands back the row a winning probe already read instead of making it
+// pay for the same read twice.
 func ResolveOwner(p ResolvedPlan, id string) (beads.Store, StoreRef, error) {
+	owner, err := ResolveOwnerRow(p, id)
+	return owner.Store, owner.Ref, err
+}
+
+// Owner is a by-id resolution: the store that holds the bead, and the row
+// itself when a probe already read it.
+type Owner struct {
+	// Store is the store to read and write the bead through.
+	Store beads.Store
+
+	// Ref names that store for a diagnostic or a persisted census row.
+	Ref StoreRef
+
+	// Bead is the row a probed leg returned. It is meaningful only when Read
+	// is true.
+	Bead beads.Bead
+
+	// Read reports whether Bead holds the row. It is FALSE for the work
+	// residual, which is handed back unprobed: the caller must perform its own
+	// read there, and letting the caller's own read produce the caller's own
+	// error message is what keeps a single-store city byte-identical.
+	Read bool
+}
+
+// ResolveOwnerRow is ResolveOwner, plus the row the winning probe already read.
+//
+// Every by-id surface reads the bead immediately after resolving it, and a
+// probe that answered has already paid for that read. Discarding it would
+// double the reads of every by-id operation against a relocated city's
+// binding — the hot path, and exactly the funnel cost the identity fast-path
+// exists to avoid.
+func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 	if p.Mode != ModeFirstOwner {
-		return nil, "", fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
+		return Owner{}, fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
 	}
 	id = strings.TrimSpace(id)
 	if p.ID != "" && p.ID != id {
-		return nil, "", fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
+		return Owner{}, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
 	}
 	if len(p.Legs) == 0 {
-		return nil, "", errors.New("storeref: plan has no legs")
+		return Owner{}, errors.New("storeref: plan has no legs")
 	}
 	for i, leg := range p.Legs {
 		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
-			return leg.Leg.Store, leg.Leg.Ref, nil
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, nil
 		}
-		_, err := leg.Leg.Store.Get(id)
+		b, err := leg.Leg.Store.Get(id)
 		switch {
 		case err == nil:
-			return leg.Leg.Store, leg.Leg.Ref, nil
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, nil
 		case errors.Is(err, beads.ErrNotFound):
 			continue
 		case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
@@ -453,10 +567,10 @@ func ResolveOwner(p ResolvedPlan, id string) (beads.Store, StoreRef, error) {
 			// residence probe for an id no relocated class could own.
 			continue
 		default:
-			return nil, leg.Leg.Ref, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
+			return Owner{Ref: leg.Leg.Ref}, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
 		}
 	}
-	return nil, "", beads.ErrNotFound
+	return Owner{}, beads.ErrNotFound
 }
 
 // LegError names a leg whose read failed and was tolerated as a partial

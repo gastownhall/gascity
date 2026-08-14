@@ -23,17 +23,99 @@ const hookClaimCommandName = "hook"
 
 // Drain-action reasons for the gc hook --claim result contract
 // (schemas/hook/result.schema.json). Every value here is a valid reason when
-// action is "drain": an idle store, an operational claim-write failure, or a
-// refused stale session.
+// action is "drain": an idle store, an operational claim-write failure, a
+// refused stale session, or a refused non-turn invocation.
 const (
-	hookClaimReasonNoWork        = "no_work"
-	hookClaimReasonClaimsErrored = "claims_errored"
-	hookClaimReasonStaleSession  = "stale_session"
+	hookClaimReasonNoWork         = "no_work"
+	hookClaimReasonClaimsErrored  = "claims_errored"
+	hookClaimReasonStaleSession   = "stale_session"
+	hookClaimReasonNonTurnContext = "non_turn_context"
+)
+
+// Reasons carried on a bead.claim_released event: which unwind gave the claim
+// back. Both describe a claim this process WON and could not hand to a live
+// consumer.
+const (
+	hookClaimReleaseReasonUndelivered = "result_undelivered"
+	hookClaimReleaseReasonStraddled   = "claim_window_straddled"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
 
+// hookClaimWindowDefault bounds how long after a `gc hook --claim` invocation
+// began a claim mutation may still run. Past it, the turn that invoked the
+// command is assumed gone and the claim would be born into nothing.
+//
+// 45s is chosen from both sides. An honest query-plus-claim finishes well inside
+// it even loaded — hookWorkQueryTimeout's 60s covers the WHOLE multi-tier probe,
+// and a probe that slow has already outlasted every provider's tool patience —
+// while 45s sits below any realistic provider tool timeout that could orphan the
+// process, and below idleClaimNudgeGrace (90s) so the backstop lane never
+// observes a half-open window.
+var hookClaimWindowDefault = 45 * time.Second
+
+// hookClaimNonTurnEnvMarkers are the environment markers that prove a
+// `gc hook --claim` process is a provider CALLBACK rather than an agent turn.
+// gc sets all three itself: GC_HOOK_CALLBACK_LANE on every child of the managed
+// `gc hook run` wrapper, and GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME on the
+// rendered per-provider hook commands (internal/hooks, and the pack overlays'
+// hooks.json). They are per-command prefixes on those callback lanes, never part
+// of a session's own turn environment, so a turn carries none of them.
+var hookClaimNonTurnEnvMarkers = []string{
+	"GC_HOOK_CALLBACK_LANE",
+	"GC_MANAGED_SESSION_HOOK",
+	"GC_HOOK_EVENT_NAME",
+}
+
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
+
+// hookClaimNonTurnMarker returns the first non-turn marker present in env, or ""
+// when this invocation looks like a real agent turn.
+//
+// An explicitly falsy value is not a marker: a shell that exports
+// GC_HOOK_CALLBACK_LANE=0 must not fence its own turn.
+func hookClaimNonTurnMarker(env []string) string {
+	for _, key := range hookClaimNonTurnEnvMarkers {
+		switch strings.ToLower(hookClaimEnvValue(env, key)) {
+		case "", "0", "false":
+			continue
+		default:
+			return key
+		}
+	}
+	return ""
+}
+
+// resolveHookClaimWindow returns this invocation's claim window, honoring the
+// GC_HOOK_CLAIM_WINDOW operator escape hatch (a Go duration). An unparseable or
+// non-positive override falls back to the default rather than disabling the
+// fence, which is the direction that stays safe.
+func resolveHookClaimWindow() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("GC_HOOK_CLAIM_WINDOW")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return hookClaimWindowDefault
+}
+
+// hookClaimWindowExpiry is the observation an expired claim window reports: how
+// old the invocation was, and whether its parent is still alive. A dead parent
+// (reparented to init) is the process-table signature of the orphaned tool call
+// this fence exists to stop.
+type hookClaimWindowExpiry struct {
+	BeadID        string
+	InvocationAge time.Duration
+	ParentAlive   bool
+}
+
+// hookClaimReleaseRecord is one claim given back because it could not be
+// delivered to a live consumer.
+type hookClaimReleaseRecord struct {
+	BeadID   string
+	Assignee string
+	Reason   string
+}
 
 type hookClaimOptions struct {
 	Assignee           string
@@ -69,7 +151,24 @@ type hookClaimOps struct {
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
-	Now           func() time.Time
+	// Release gives back a claim this invocation won but could not deliver. It
+	// is compare-and-swap on the assignee (release-if-current), so a claim that
+	// legitimately changed hands in the meantime is left alone. It reports
+	// whether the release actually landed.
+	Release hookClaimReleaseFunc
+	// EmitClaimWindowExpired and EmitClaimReleased publish the two turn-binding
+	// facts. Best-effort, like EmitClaimRejected.
+	EmitClaimWindowExpired func(hookClaimWindowExpiry)
+	EmitClaimReleased      func(hookClaimReleaseRecord)
+	Now                    func() time.Time
+	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
+	// is how long after it a claim mutation may still run. Together they are the
+	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
+	// outlived the turn that asked for it. applyDefaults fills both, once per
+	// invocation, so every federated leg shares ONE window rather than getting a
+	// fresh one each time the loop copies the ops.
+	InvokedAt   time.Time
+	ClaimWindow time.Duration
 	// ClassRoute is the relocated coordination-class binding these seams
 	// escalate to, or nil on a city that relocates nothing. It is not a seam:
 	// it is here so claimHookWorkWithRunner — the only caller that knows the
@@ -88,6 +187,7 @@ type (
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 )
 
 type hookClaimJSONResult struct {
@@ -155,9 +255,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
-	now := time.Now
-	if ops.Now != nil {
-		now = ops.Now
+	now := ops.Now
+
+	// F-A. A provider callback is not a turn: its stdout goes to the hook
+	// runner, not to a model, so a claim minted here is parked the instant it is
+	// won. Refuse before any mutation, and refuse WITHOUT consuming --drain-ack —
+	// a callback must never acknowledge the session's drain on the session's
+	// behalf. Exit 0 so the provider does not retry the refusal every prompt.
+	//
+	// Only --claim is fenced. A callback's read-only hook uses (--inject, plain
+	// discovery, nudge drain, mail check) never reach here.
+	if marker := hookClaimNonTurnMarker(opts.Env); marker != "" {
+		return hookClaimResult{terminal: true, code: writeHookClaimNonTurnDrain(marker, *opts, stdout, stderr)}
 	}
 
 	output, err := ops.Runner(workQuery, dir)
@@ -184,7 +293,8 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
+		// minted=false: adoption returns work this session already owned.
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
@@ -235,6 +345,110 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitExecutionStepStarted == nil {
 		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
 	}
+	if ops.Release == nil {
+		ops.Release = hookClaimReleaseWithBdStore
+	}
+	if ops.EmitClaimWindowExpired == nil {
+		ops.EmitClaimWindowExpired = hookEmitClaimWindowExpired
+	}
+	if ops.EmitClaimReleased == nil {
+		ops.EmitClaimReleased = hookEmitClaimReleased
+	}
+	if ops.Now == nil {
+		ops.Now = time.Now
+	}
+	// Stamped once per invocation and never refreshed: every federated leg the
+	// claim loop tries shares the window the FIRST one opened, which is what
+	// makes the fence bound the whole command rather than each attempt.
+	if ops.InvokedAt.IsZero() {
+		ops.InvokedAt = ops.Now()
+	}
+	if ops.ClaimWindow <= 0 {
+		ops.ClaimWindow = resolveHookClaimWindow()
+	}
+}
+
+// claimWindowSpent reports whether this invocation's claim window has elapsed.
+func (ops *hookClaimOps) claimWindowSpent() bool {
+	return ops.invocationAge() > ops.claimWindowOrDefault()
+}
+
+// invocationAge is how long this `gc hook --claim` invocation has been running.
+//
+// A zero InvokedAt means no invocation window was ever opened, which happens
+// only for a caller driving a claim tier directly rather than through
+// doHookClaim / claimHookWorkWithRunner (both of which stamp it in
+// applyDefaults). Such a caller has no turn for the claim to outlive, so it
+// reports age zero and the fence never fires — fail-open by construction, not
+// by accident.
+func (ops *hookClaimOps) invocationAge() time.Duration {
+	if ops.InvokedAt.IsZero() {
+		return 0
+	}
+	return ops.nowOrWallClock().Sub(ops.InvokedAt)
+}
+
+// nowOrWallClock is ops.Now with its production default applied inline, so a
+// direct-seam caller that never ran applyDefaults cannot nil-panic the fence.
+func (ops *hookClaimOps) nowOrWallClock() time.Time {
+	if ops.Now != nil {
+		return ops.Now()
+	}
+	return time.Now()
+}
+
+// claimWindowOrDefault is ops.ClaimWindow with its default applied inline, for
+// the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
+	if ops.ClaimWindow > 0 {
+		return ops.ClaimWindow
+	}
+	return resolveHookClaimWindow()
+}
+
+// claimMutationContext bounds a claim-write child by whichever is sooner: the
+// flat mutation timeout, or what remains of the claim window.
+//
+// Bounding by the window is half of F-B. The CAS runs in a bd child with its own
+// 120s ceiling (bdCommandTimeout), so without this a claim started at the last
+// second of the window keeps writing long past the fence — and a claim that
+// lands late is exactly the parked claim the fence exists to prevent.
+func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
+	budget := hookClaimMutationTimeout
+	if remaining := ops.claimWindowOrDefault() - ops.invocationAge(); remaining < budget {
+		budget = remaining
+	}
+	if budget <= 0 {
+		// Already spent. The tier's own fence refuses before using this, but an
+		// already-expired context keeps the contract honest for any path that
+		// does not.
+		budget = time.Nanosecond
+	}
+	return context.WithTimeout(context.Background(), budget)
+}
+
+// refuseExpiredHookClaimWindow reports the spent-window refusal and returns the
+// terminal result for it: exit 1, no claim, and deliberately NO drain record.
+//
+// A spent window is not an idle store. Writing a no-work drain here would tell
+// the caller the store was empty — the same laundering that makes a killed claim
+// command indistinguishable from a clean drain, which is the confusion this whole
+// fence exists to end. The read-error arm refuses for the same reason.
+func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr io.Writer) hookClaimResult {
+	age := ops.invocationAge()
+	parentAlive := os.Getppid() != 1
+	// The typed event is the durable record and the stderr line is commentary on
+	// it, so the event goes first — same rule as the unwind above, for the same
+	// reason: this path can be reached with a closed stderr.
+	ops.EmitClaimWindowExpired(hookClaimWindowExpiry{
+		BeadID:        candidateID,
+		InvocationAge: age,
+		ParentAlive:   parentAlive,
+	})
+	_, _ = fmt.Fprintf(stderr,
+		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
+		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive)
+	return hookClaimResult{terminal: true, code: 1}
 }
 
 // claimFirstReadyHookAssignment atomically promotes the first open candidate
@@ -249,7 +463,7 @@ func (ops *hookClaimOps) applyDefaults() {
 // error still fails closed: ownership is unresolved on a bead this session
 // already owns, and claiming unrelated fresh work would strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
-	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
 	for _, candidate := range candidates {
@@ -258,6 +472,13 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 			continue
+		}
+		// F-B. Promoting a ready assignment is a status CAS — a mutation — so it
+		// is fenced like a fresh claim. Adoption of an ALREADY in_progress bead
+		// runs earlier, in hookClaimExistingAssignment, and is deliberately
+		// exempt: it mints no new obligation.
+		if ops.claimWindowSpent() {
+			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
 		if ctx.Err() != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: ready assignment %s claim deadline exhausted: %v\n", candidate.ID, ctx.Err()) //nolint:errcheck
@@ -334,7 +555,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if result.Assignee == "" {
 			result.Assignee = claimActor
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
@@ -365,12 +586,17 @@ func hookClaimBeadIsElsewhere(err error) bool {
 // store before the shared no-work drain; the result's claimsErrored flag records
 // whether any skip was an error so that drain stays distinguishable from idle.
 func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
-	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
 	for _, candidate := range candidates {
 		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
 			continue
+		}
+		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
+		// so it is the one the turn-binding window most directly guards.
+		if ops.claimWindowSpent() {
+			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
 		if ctx.Err() != nil {
 			// The shared claim budget is spent (an earlier slow-failing claim
@@ -420,7 +646,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
@@ -494,7 +720,24 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }
 
-func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+// writeHookClaimWorkResultForBead stamps, correlates and reports one claimed or
+// adopted bead.
+//
+// minted distinguishes a claim this invocation WON from one it merely adopted,
+// and only a minted claim is unwound: adoption returns work the session already
+// owned, so releasing it on a delivery failure would give away a claim an earlier
+// turn legitimately made. A held claim that goes undelivered is re-served to the
+// next turn by the existing-assignment tier instead.
+func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
+	// the claim-write child carries its own ceiling, so a claim can commit after
+	// the invoking turn is already gone. That is the same parked claim by another
+	// route, so it takes the same unwind as an undelivered one.
+	if minted && ops.claimWindowSpent() {
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
+			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
+	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
@@ -508,15 +751,86 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return 1
 	}
 	result.ContinuationAssigned = assigned
-	if opts.JSON {
-		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
+	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
+		// F-C. The claim is won but its result never left the process — the
+		// orphaned tool call's signature is EPIPE on a stdout whose reader the
+		// provider already closed. A closed pipe cannot deliver, so nobody will
+		// execute this claim; give it back instead of parking it.
+		cause := fmt.Sprintf("writing result for %s: %v", bead.ID, writeErr)
+		if !minted {
+			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
 		}
-		return 0
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
 	}
-	fmt.Fprintln(stdout, result.BeadID) //nolint:errcheck
 	return 0
+}
+
+// writeHookClaimResultLine writes the one line that carries a claim result to
+// its consumer, and — unlike the plain-text path it replaces — reports whether
+// that write actually landed. The non-JSON form used to discard the error, which
+// is precisely the shape a dead tool pipe takes.
+func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout io.Writer) error {
+	if jsonOut {
+		return writeCLIJSONLine(stdout, result)
+	}
+	_, err := fmt.Fprintln(stdout, result.BeadID)
+	return err
+}
+
+// unwindUndeliveredHookClaim gives back a claim this invocation won but could
+// not hand to a live consumer, and returns the terminal exit code (always 1 —
+// the caller asked for work and is getting none).
+//
+// The release is compare-and-swap on the assignee through the same ops seam the
+// claim ran against, so it reaches the class binding on a split city exactly
+// where the claim landed, and a bead that legitimately changed hands in the
+// meantime is left alone. A release that fails or finds the bead already moved is
+// surfaced, never swallowed: the claim is then still parked and the operator must
+// be able to see the one residue this fence could not clear.
+//
+// Known residue: a claim carrying a continuation group has already preassigned
+// its open siblings by the time the result write fails (the assigned ids are part
+// of the result payload, so they cannot be computed after it). Those siblings
+// stay open and assigned, which is the dead-assignee release lane's shape, and
+// the next turn of the same session re-claims them.
+func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) int {
+	assignee := strings.TrimSpace(bead.Assignee)
+	if assignee == "" {
+		assignee = opts.Assignee
+	}
+	// This emits bead.claim_released for a bead that may ALREADY have an
+	// execution.step_started from this same invocation (the stamp runs before the
+	// result write). That pair is the compensation record: the step never
+	// executed, and a consumer reading the lifecycle as monotonic would otherwise
+	// leave it in flight forever. See the BeadClaimReleased constant.
+	//
+	// RELEASE FIRST, DIAGNOSE SECOND, and the order is load-bearing.
+	//
+	// This path runs precisely when a descriptor turned out to be unwritable, and
+	// stderr can be closed for the same reason stdout was. gc ignores SIGPIPE at
+	// startup so such a write returns EPIPE instead of killing the process
+	// (ignoreSIGPIPE) — but the release is the compensating action and the
+	// diagnostic is only commentary on it, so the compensation must never sit
+	// behind a write that can fail. If ignoreSIGPIPE ever regresses, this
+	// ordering still gets the claim back.
+	//
+	// Deliberately NOT the window-bounded context: in the straddle case the
+	// window is already spent, and the unwind must still be allowed to run.
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	released, err := ops.Release(ctx, dir, opts.Env, bead.ID, assignee)
+	if released && err == nil {
+		ops.EmitClaimReleased(hookClaimReleaseRecord{BeadID: bead.ID, Assignee: assignee, Reason: reason})
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: releasing undelivered claim %s: %v\n", bead.ID, err) //nolint:errcheck
+	case !released:
+		fmt.Fprintf(stderr, "gc hook --claim: undelivered claim %s was no longer ours to release\n", bead.ID) //nolint:errcheck
+	}
+	return 1
 }
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
@@ -541,6 +855,34 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 		hookRecordDemandClaimDivergence(reason, dir, opts, ops, stderr)
 	}
 	return code
+}
+
+// writeHookClaimNonTurnDrain emits the terminal result for a claim refused
+// because it was invoked from a provider callback lane rather than an agent turn
+// (F-A). marker names the environment marker that proved it.
+//
+// It deliberately does NOT take the shared writeHookClaimDrain exit contract:
+// --drain-ack is never consumed (a callback must not acknowledge the session's
+// drain on its behalf) and the exit code is 0 regardless, so a provider does not
+// retry the refusal on every prompt submit. Only a failed JSON write is an error.
+func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, stderr io.Writer) int {
+	_, _ = fmt.Fprintf(stderr,
+		"gc hook --claim: refusing to claim from a non-turn context (%s is set); a provider callback's result reaches no agent turn, so a claim minted here would be parked the instant it is won\n",
+		marker)
+	if !opts.JSON {
+		return 0
+	}
+	if err := writeCLIJSONLine(stdout, hookClaimJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Command:       hookClaimCommandName,
+		Action:        "drain",
+		Reason:        hookClaimReasonNonTurnContext,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	return 0
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
@@ -1306,6 +1648,62 @@ func hookResolveWorkBranch(dir string) string {
 		return ""
 	}
 	return branch
+}
+
+// hookClaimReleaseWithBdStore is the unrouted release: compare-and-swap on the
+// assignee through the agent's own work-directory bd context. It is the release
+// dual of hookClaimWithBdStore, and claim_class_route.go wraps it for a split
+// city so the release reaches the ledger the claim actually landed in.
+func hookClaimReleaseWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+	return hookClaimBdStoreContext(ctx, dir, env, assignee).ReleaseIfCurrent(beadID, assignee)
+}
+
+// hookEmitClaimWindowExpired publishes a best-effort
+// execution.claim_window_expired event so the fleet reports its own orphaned
+// claimers rather than leaving the class invisible.
+func hookEmitClaimWindowExpired(expiry hookClaimWindowExpiry) {
+	payload, err := json.Marshal(events.ExecutionClaimWindowExpiredPayload{
+		BeadID:          expiry.BeadID,
+		InvocationAgeMS: expiry.InvocationAge.Milliseconds(),
+		ParentAlive:     expiry.ParentAlive,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.ExecutionClaimWindowExpired,
+		Actor:   eventActor(),
+		Subject: expiry.BeadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+// hookEmitClaimReleased publishes a best-effort bead.claim_released event so an
+// unwound claim is observable rather than looking like a claim that never
+// happened.
+func hookEmitClaimReleased(release hookClaimReleaseRecord) {
+	payload, err := json.Marshal(events.BeadClaimReleasedPayload{
+		BeadID:   release.BeadID,
+		Assignee: release.Assignee,
+		Reason:   release.Reason,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.BeadClaimReleased,
+		Actor:   release.Assignee,
+		Subject: release.BeadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 // hookEmitClaimRejected publishes a best-effort bead.claim_rejected event to the

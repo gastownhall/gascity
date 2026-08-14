@@ -140,10 +140,13 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 // parityVariant binds an exported query kind's accessors to its frozen oracle.
 type parityVariant struct {
 	name string
-	// federates reports whether this kind's script contains a ready read the
-	// federation swap covers. The four that do are the four `bd ready` call
-	// sites; the rest are `bd list`/`bd query`/`bd update` and are
-	// topology-blind (TestQueryKindsWithoutAReadyReadAreTopologyBlind).
+	// federates reports whether this kind's script contains a read the
+	// federation swap covers. Four are the `bd ready` call sites; the fifth is
+	// the crash-recovery tier's `bd list --status in_progress`, which the
+	// residency fix moved onto `gc ready --status in_progress` so a session can
+	// see its OWN claim when that claim lives in a relocated class binding. The
+	// rest are `bd query`/`bd update` and stay topology-blind
+	// (TestQueryKindsWithoutAReadyReadAreTopologyBlind).
 	federates bool
 	plain     func(*Agent) string
 	forTopo   func(*Agent, QueryTopology) string
@@ -161,7 +164,7 @@ func onBootOverride(a *Agent) string     { return a.OnBoot }
 func parityVariants() []parityVariant {
 	return []parityVariant{
 		{"Work", true, (*Agent).EffectiveWorkQuery, (*Agent).EffectiveWorkQueryFor, oldEffectiveWorkQuery, workQueryOverride},
-		{"AssignedInProgress", false, (*Agent).EffectiveAssignedInProgressQuery, (*Agent).EffectiveAssignedInProgressQueryFor, oldEffectiveAssignedInProgressQuery, workQueryOverride},
+		{"AssignedInProgress", true, (*Agent).EffectiveAssignedInProgressQuery, (*Agent).EffectiveAssignedInProgressQueryFor, oldEffectiveAssignedInProgressQuery, workQueryOverride},
 		{"AssignedReady", true, (*Agent).EffectiveAssignedReadyQuery, (*Agent).EffectiveAssignedReadyQueryFor, oldEffectiveAssignedReadyQuery, workQueryOverride},
 		{"RoutedPool", true, (*Agent).EffectiveRoutedPoolQuery, (*Agent).EffectiveRoutedPoolQueryFor, oldEffectiveRoutedPoolQuery, workQueryOverride},
 		{"PoolDemand", true, (*Agent).EffectivePoolDemandQuery, (*Agent).EffectivePoolDemandQueryFor, oldEffectivePoolDemandQuery, scaleCheckOverride},
@@ -336,6 +339,54 @@ func TestFederationBlindOverridesNamesTheBlindKeys(t *testing.T) {
 	}
 }
 
+// singleQuoteEscaped rewrites a raw script fragment the way shellquote.Join
+// does when it embeds the generated script as a single-quoted sh -c argument.
+func singleQuoteEscaped(s string) string {
+	return strings.ReplaceAll(s, `'`, `'\''`)
+}
+
+// singleStoreReadCount counts the reads in a single-store command that the
+// federation swap replaces: the `bd ready` call sites plus the crash-recovery
+// tier's `bd list --status in_progress`.
+func singleStoreReadCount(command string) int {
+	return strings.Count(command, bdReadyCommand) +
+		strings.Count(command, bdListInProgressCommand)
+}
+
+// renormalizeFederatedCommand maps a federated command back onto the
+// single-store one by undoing ONLY the differences the swap is allowed to make:
+// the reader words, their failure clauses, and the crash-recovery tier's
+// presence-key prelude.
+//
+// The last one is undone by generating both forms from the production function
+// itself rather than by pasting its text here. That keeps the guard honest as
+// the enrichment evolves: a change INSIDE the enrichment renormalizes away (it
+// is by definition part of the sanctioned difference), while any change outside
+// the two generators still fails, which is the property this test exists for.
+func renormalizeFederatedCommand(federated string) string {
+	// The generated script is embedded in the final command by shellquote.Join,
+	// which wraps it in single quotes and rewrites every inner ' as '\''. The
+	// fragments below are generated raw, so they must be escaped the same way to
+	// match — the enrichment carries single-quoted jq programs, so this is not
+	// cosmetic.
+	replaceFragment := func(in, from, to string) string {
+		return strings.ReplaceAll(in, singleQuoteEscaped(from), singleQuoteEscaped(to))
+	}
+	federated = replaceFragment(federated,
+		inProgressBlockedByEnrichmentScript(true),
+		inProgressBlockedByEnrichmentScript(false))
+	for _, shellVar := range []string{"id", "cand"} {
+		federated = replaceFragment(federated,
+			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+	}
+	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
+	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
+	return federated
+}
+
 func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 	for _, shape := range parityAgentShapes() {
 		for _, v := range parityVariants() {
@@ -345,23 +396,22 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
 			single := v.forTopo(shape.agent, QueryTopology{Beads: bd105})
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
-			if n := strings.Count(single, bdReadyCommand); n == 0 {
-				t.Fatalf("%s/%s: single-store command contains no %q to swap", shape.name, v.name, bdReadyCommand)
+			if n := singleStoreReadCount(single); n == 0 {
+				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
 			} else if got := strings.Count(federated, gcReadyCommand); got != n {
-				t.Errorf("%s/%s: single-store command has %d %q, federated has %d %q", shape.name, v.name, n, bdReadyCommand, got, gcReadyCommand)
+				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, got, gcReadyCommand)
 			}
 			if strings.Contains(federated, bdReadyCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so that tier stays blind on a split city: %q", shape.name, v.name, bdReadyCommand, federated)
 			}
-			// Everything outside the reader word and its failure handling must be
-			// untouched. Normalizing the federated form back onto the single-store
-			// one is what proves it.
-			renormalized := strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
-			renormalized = strings.ReplaceAll(renormalized, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-			renormalized = strings.ReplaceAll(renormalized, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-			renormalized = strings.ReplaceAll(renormalized, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-			if renormalized != single {
-				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader and its failure clause\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
+			if strings.Contains(federated, bdListInProgressCommand) {
+				t.Errorf("%s/%s: federated command still shells %q, so a session stays blind to its OWN claim in a relocated binding: %q", shape.name, v.name, bdListInProgressCommand, federated)
+			}
+			// Everything outside the reader words, their failure handling, and the
+			// crash-recovery presence key must be untouched. Normalizing the
+			// federated form back onto the single-store one is what proves it.
+			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
+				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}
 		}
 	}

@@ -23,6 +23,47 @@ import (
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
 // GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
+//
+// # What the gate does NOT see: a close the by-ID class door served
+//
+// doBd runs the by-ID class door (cmd_bd_by_id.go maybeRouteBdByID) BEFORE this
+// gate, and a routed close returns from doBd without reaching it. So on a city
+// that relocates a coordination class, `gc bd close <id>` and `gc bd update
+// <id> --status closed` are gated only when they fall through to the bd
+// subprocess. This is a coverage boundary, and it is recorded here rather than
+// closed because closing it would mean re-deriving the gate against a store
+// this file does not resolve.
+//
+// It is narrower than it sounds, in three steps:
+//
+//   - This gate reads the PREFIX store (the caller's resolved work scope). A
+//     bead resident only in the class binding was never visible to it: the Get
+//     missed and the loop skipped the id. Routing those closes through the door
+//     removed nothing, because there was nothing to remove.
+//   - The canonical worker spelling was already outside. graph-worker.md renders
+//     `gc bd update <id> --set-metadata gc.outcome=pass --status closed`, and a
+//     served update on a class-owned bead has been answered by the door since
+//     that verb landed — well before close joined it.
+//   - What the door's close DOES take from the gate is the DUAL-RESIDENT case,
+//     and that population is real rather than hypothetical. `gc storage migrate`
+//     copies every non-work bead with its id preserved and keeps the source
+//     (readInfraSnapshot / infra_class_migrate.go), and coordclass.Classify
+//     routes ANY bead carrying gc.root_bead_id to ClassGraph
+//     (isWorkflowMetadata) — including a plain task-typed molecule work step
+//     with no gc.kind, which is exactly isWorkRecordGatedBead's population. On a
+//     migrated city those steps exist in both stores, and before the door served
+//     close, this gate evaluated them against the work store's RETAINED copy —
+//     the one frozen at migration time, not the one the close now writes. So the
+//     gate's pre-door verdict on a dual resident was already a verdict about a
+//     stale row.
+//
+// The drain path for that population is the sweep, not this gate. Both the CLI
+// door and the HTTP by-id lane now resolve a dual resident to the CLASS copy —
+// the door by its own residence probe, internal/api through the residency
+// resolver's ByID plan, which leads with the binding for exactly this reason —
+// so the two surfaces agree, and both write the row the controller reads. The
+// retained work copy stays reachable through raw bd against the work scope, and
+// it still has to be drained; that is the sweep's job, not this gate's.
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).

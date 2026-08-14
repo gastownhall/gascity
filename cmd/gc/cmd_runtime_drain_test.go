@@ -1409,6 +1409,14 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	drainAckPokeController = func(string) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
+	// drain-ack now reads the city store to release any in_progress claim the
+	// session is still holding, so this bare temp city needs the same store
+	// guards its siblings in this file use — otherwise the read provisions a
+	// managed Dolt server the test never tears down.
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

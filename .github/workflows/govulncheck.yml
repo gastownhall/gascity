@@ -49,7 +49,7 @@ env:
   # Pinned so a scanner release cannot change the verdict without a reviewed commit.
   # The vulnerability database is still fetched fresh on every run, so pinning the
   # binary does not stale the data.
-  GOVULNCHECK_VERSION: "v1.4.0"
+  GOVULNCHECK_VERSION: "v1.7.0"
 
 jobs:
   runner-policy:
