@@ -1007,14 +1007,21 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 // in (claim_class_route.go escalates off the work store), and a leg that
 // resolved back to the leading store is deduped rather than scanned twice.
 //
-// These sweeps are VOID and their callers have no error channel, so a leg that
-// fails is logged by visit and the pass continues — deliberately NOT the
+// These sweeps are VOID and their callers have no error channel, so a leg whose
+// read fails is logged by visit and the pass continues — deliberately NOT the
 // resolver's fail-loud policy, because the alternative on a best-effort
 // idempotent sweep is releasing less on this tick and no diagnosis at all. The
 // gates that DO have an error channel consume the policy
-// (assignedWorkScanComplete). The bool this returns lets a caller that reports
-// a result — the stranded-repair path reads unclaimResult.Failed — refuse to
-// call a repair clean when a leg was never read.
+// (assignedWorkScanComplete).
+//
+// So be precise about what the bool means: visit returns nothing, so the
+// executor never sees a leg error and res.Partial is always false here. It
+// reports only that the city HAD a resolvable leg set — false is the refused
+// city, where every infrastructure class answers with the refusal and a
+// work-only sweep would release from the wrong ledger. Per-leg read failures
+// are surfaced by visit's own stderr line and, for the one caller that reports
+// a result, by unclaimResult.Failed; that is what stops the stranded-repair
+// path from calling a repair clean.
 func sweepAssignedWorkLegs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, stderr io.Writer, visit func(index int, s beads.Store)) bool {
 	if store == nil {
 		return false
@@ -1360,7 +1367,7 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 		}
 	})
 	if !complete {
-		fmt.Fprintf(stderr, "session beads: the release sweep for retired session %s could not read every leg; not reporting a clean repair\n", retiredSession.ID) //nolint:errcheck
+		fmt.Fprintf(stderr, "session beads: the release sweep for retired session %s could not resolve this city's leg set; not reporting a clean repair\n", retiredSession.ID) //nolint:errcheck
 		res.Failed++
 	}
 	return res
@@ -1654,7 +1661,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSessionBeadIfUnassigned(store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
+			if closeSessionBeadIfUnassigned(cityPath, store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -1699,7 +1706,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
 				continue
 			}
-			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
+			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
 				blockedReconfiguredNamedIdentities[identity] = true
 				continue
 			}
@@ -1778,7 +1785,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSessionBeadIfUnassigned(store, rigStores, cfg, open, "duplicate", now, stderr) {
+					if closeSessionBeadIfUnassigned(cityPath, store, rigStores, cfg, open, "duplicate", now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}
@@ -2370,7 +2377,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			if configuredNames[sn] {
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "suspended", "suspended session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -2384,7 +2391,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 					}
 				}
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
+				if closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "orphaned", "orphaned session", now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -3039,6 +3046,7 @@ func sweepProcessTableOrphans(
 }
 
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
+	cityPath string,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sp runtime.Provider,
@@ -3052,7 +3060,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -3063,7 +3071,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
-	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false

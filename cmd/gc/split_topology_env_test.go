@@ -188,7 +188,7 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 	// storageBootGate opened, so both subtests answer residency from the routes
 	// the env decided rather than from a second funnel.
 	registerResidencyRoutes(cityPath, e.routes)
-	t.Cleanup(func() { unregisterResidencyRoutes(cityPath) })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, e.routes) })
 	if opts.rig {
 		e.attachRigLeg(t, rigPath)
 	}

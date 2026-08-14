@@ -360,12 +360,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The assigned-work spine's scans are free functions reached from both
-	// planes and carry no runtime, so they resolve this city's bindings by
-	// PATH. Registering the routes opened here is what keeps them off the
-	// one-shot funnel, which would open a second handle on the same binding
-	// root — a duplicate managed-Dolt server or a second sqlite writer.
-	registerResidencyRoutes(p.CityPath, routes)
+	// NOTE: the routes are NOT registered as this city's residency answer here.
+	// Construction happens before the supervisor knows whether it can take the
+	// controller lock, and a replacement that loses it would have repointed the
+	// live city's release sweeps at a binding it is about to close. The lock
+	// holder registers — see registerResidencyRoutes.
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
@@ -2452,6 +2451,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	} else {
 		phaseStart = time.Now()
 		if sweepUndesiredPoolSessionBeads(
+			cr.cityPath,
 			sessStore,
 			rigStores,
 			sessionBeads,
@@ -2956,6 +2956,7 @@ func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[str
 }
 
 func sweepUndesiredPoolSessionBeads(
+	cityPath string,
 	store beads.SessionStore,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
@@ -3064,7 +3065,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(GCSweepSessionBeads(store.Store, rigStores, candidates))
+	return len(GCSweepSessionBeads(cityPath, store.Store, rigStores, candidates))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
@@ -3862,7 +3863,9 @@ func (cr *CityRuntime) shutdown() {
 			// Stop naming these routes before closing them: a sweep that
 			// resolved its bindings from a closed handle would answer every leg
 			// with an error instead of falling back to the one-shot funnel.
-			unregisterResidencyRoutes(cr.cityPath)
+			// Passing our OWN routes is what keeps this from dropping a
+			// registration a live replacement already installed.
+			unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
 			if err := cr.storageRoutes.close(); err != nil {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}

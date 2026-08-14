@@ -57,13 +57,25 @@ import (
 //
 // Others pin behavior main HAS but should not keep. Those carry a KNOWN GAP
 // paragraph naming the divergence, the assertions that move when it closes, and
-// the slice that closes it — I1 and I2 (the HQ work store is in neither arm of
-// the controller's cross-store scan on a split city), I5 (the RELEASE tier does
-// not follow the now class-routed claim: crash recovery, on_death/on_boot and
-// the retired-session sweep are all still work-only) and I10 (the wake filter
-// has no coordination-class reachability arm). Leaving such a leg UNSEEDED is the
-// failure mode this convention exists to prevent: the invariant then reads as
-// coverage of a path it never touches.
+// the slice that closes it. Leaving such a leg UNSEEDED is the failure mode this
+// convention exists to prevent: the invariant then reads as coverage of a path
+// it never touches.
+//
+// The list, current as of the residency resolver's S2 slice:
+//
+//   - OPEN — I1 and I2: the HQ work store is in neither arm of the controller's
+//     cross-store scan on a split city. That is the census/demand side, and S3
+//     closes it (the D6 flip: the binding becomes a leg BESIDE the city work
+//     store instead of replacing it).
+//   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
+//     sweep, `gc session close` and drain-ack all resolve the same leg set from
+//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     released by the same pass that releases a work-store one. What remains
+//     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
+//     tiers are raw bd commands in a work directory and stay topology-blind.
+//   - CLOSED — I10's wake-filter gap (ga-whzrt, #5250) and its ownership-index
+//     half (ga-j4ob9, S2). Both mechanisms now resolve their refs from the
+//     city's residency topology, and I10 asserts they agree.
 //
 // # Which authority an invariant is pinning
 //

@@ -108,12 +108,27 @@ func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Stor
 }
 
 // registerResidencyRoutes records the routes a long-running runtime opened at
-// boot as this process's answer for cityPath. Wired into newCityRuntime, and
-// released by unregisterResidencyRoutes when the runtime closes them.
+// boot as this process's answer for cityPath.
 //
-// The one-shot memo for that city is dropped alongside, so a command that
-// already resolved the funnel in this process cannot keep answering from a
-// second set of handles.
+// # Call it only while holding the controller lock
+//
+// The lock is what makes "one registration per city" true. A supervisor builds
+// a replacement runtime — opening its own binding — BEFORE it learns whether the
+// predecessor has released the lock, so registering at construction time lets a
+// replacement that then LOSES the lock repoint a live city's release sweeps at a
+// handle it is about to close. Registering after the lock is taken means the
+// loser never registers at all, and the live runtime's registration stands
+// untouched. (`runController` already holds the lock before it constructs.)
+//
+// # What the memo drop does and does not do
+//
+// dropCLIResidencyBindings clears only the DERIVED per-city binding grouping
+// this file memoizes, so a later resolution re-reads the registry instead of a
+// pre-registration answer. It does NOT close or invalidate the one-shot
+// cliStorageRoutes funnel: a handle that funnel already opened in this process
+// stays open, and the 21 non-test sites that call cliStorageRoutes directly
+// keep using it. Neutralizing the funnel is not this slice's scope; keeping the spine off
+// it is.
 func registerResidencyRoutes(cityPath string, routes *storageRoutes) {
 	if cityPath == "" {
 		return
@@ -128,15 +143,27 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes) {
 	dropCLIResidencyBindings(key)
 }
 
-// unregisterResidencyRoutes drops a runtime's registration. The routes it named
-// are the runtime's to close; this only stops the spine from naming them.
-func unregisterResidencyRoutes(cityPath string) {
+// unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.
+// The routes it named are the runtime's to close; this just stops the spine from
+// naming them.
+//
+// routes is the caller's own *storageRoutes, and the delete is conditional on
+// the registry still holding exactly that pointer — the same
+// unlink-only-if-ours discipline the supervisor uses for its socket. A
+// delete-by-key would let a runtime that lost the controller lock remove a
+// registration a live one had already replaced it with, and the live city's
+// release sweeps would fall back to the one-shot funnel: a second handle on the
+// binding root, or on a city the funnel cannot resolve, a binding-blind release
+// sweep with ga-j4ob9 back and silent.
+func unregisterResidencyRoutes(cityPath string, routes *storageRoutes) {
 	if cityPath == "" {
 		return
 	}
 	key := filepath.Clean(cityPath)
 	residencyRoutesMu.Lock()
-	delete(residencyRoutesByCity, key)
+	if current, ok := residencyRoutesByCity[key]; ok && current == routes {
+		delete(residencyRoutesByCity, key)
+	}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
 }

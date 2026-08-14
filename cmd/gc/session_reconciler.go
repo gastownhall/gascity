@@ -2036,7 +2036,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(store, rigStores, infoByID[id], cfg)
+					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
 					if assignedErr != nil {
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
 						continue
@@ -2453,7 +2453,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				holdsClaim := false
 				claimKnown := true
 				if !exempt && (!floorExempt || claimHolderThreshold > 0) {
-					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, infoByID[id], cfg)
+					has, err := sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
 					if err != nil {
 						// Fail safe: an unreadable claim check must not recycle a
 						// session that may hold in-progress work. Mirrors the drain
@@ -3906,28 +3906,36 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
-// fallback identity strategy as sessionAssigneeMatches, but queries all known
-// stores instead of a single configured reachable store. Use this cross-store
-// query for cleanup-of-record paths that must not orphan work in any attached
-// store; callers preserve fail-closed behavior by refusing close decisions on
-// query errors.
-func sessionHasOpenAssignedWorkForConfig(store beads.Store, rigStores map[string]beads.Store, session beads.Bead, cfg *config.City) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg))
+// fallback identity strategy as sessionAssigneeMatches, but queries every store
+// the city serves instead of a single configured reachable store. Use this
+// cross-store query for cleanup-of-record paths that must not orphan work in any
+// attached store; callers preserve fail-closed behavior by refusing close
+// decisions on query errors.
+//
+// "Every store" is the residency resolver's answer, not a range over the rig
+// map. This gate sits on the CLOSE-then-release lane — it decides whether a
+// session bead may be retired, and the retired-session sweep releases whatever
+// that session still holds — so a leg it cannot see is a claim released under a
+// live worker. On a work-led plane the relocated binding was exactly such a leg
+// (ga-j4ob9), and this gate was invisible to the boundary census too, because it
+// ranged a map rather than calling a named enumerator.
+func sessionHasOpenAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) (bool, error) {
+	return sessionHasOpenAssignedWorkInStores(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg))
 }
 
 // sessionHasOpenAssignedWorkForConfigInfo is the session.Info form of
 // sessionHasOpenAssignedWorkForConfig for the reconciler forward pass (the raw
 // form stays for the repair/cleanup lanes that hold a raw bead). The work-store
 // probe stays bead-shaped; only the assignment-identifier derivation reads Info.
-func sessionHasOpenAssignedWorkForConfigInfo(store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info, cfg *config.City) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg))
+func sessionHasOpenAssignedWorkForConfigInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
+	return sessionHasOpenAssignedWorkInStores(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg))
 }
 
 // sessionHasInProgressAssignedWorkForConfig reports only claimed work for
 // progress-stall recycle. Open assigned work has not been claimed yet and must
 // not suppress claim-less parked-session recovery.
-func sessionHasInProgressAssignedWorkForConfig(store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info, cfg *config.City) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
+func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
@@ -4606,6 +4614,19 @@ func collectSessionAssignedWorkInfo(cityPath string, cfg *config.City, store bea
 					if sessionpkg.IsSessionBeadOrRepairable(item) {
 						continue
 					}
+					// FIRST LEG WINS, across legs — this key is the bare id, not
+					// (leg, id) like the release sweeps'. For a DUAL-RESIDENT id
+					// (the same id claimed in both the work ledger and the
+					// binding, which `gc storage migrate` preserving ids makes
+					// real) only the first leg's copy is collected, so a caller
+					// that mutates what this returns leaves the binding copy
+					// in_progress. That is the ga-dk345 dual-resident
+					// carry-forward, deliberately unresolved in S2: making it
+					// coherent is a placement question, not a lookup one, and it
+					// belongs with S5's create routing. Do not "fix" it by
+					// keying on (leg, id) here — this collector's consumers
+					// report ONE stranded bead per id, and a doubled list reads
+					// as double the strand.
 					if _, dup := seen[item.ID]; dup {
 						continue
 					}
@@ -4646,20 +4667,37 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 	return sessionHasOpenAssignedWorkInStoreByIdentifiers(store, sessionAssignmentIdentifiers(session))
 }
 
-func sessionHasOpenAssignedWorkInStores(store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(store, rigStores, identifiers, []string{"open", "in_progress"})
+func sessionHasOpenAssignedWorkInStores(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, identifiers, []string{"open", "in_progress"})
 }
 
-func sessionHasAssignedWorkInStoresForStatuses(store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string) (bool, error) {
-	if has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store, identifiers, statuses); err != nil || has {
-		return has, err
+// sessionHasAssignedWorkInStoresForStatuses is the cross-store existence probe:
+// the whole city's assigned-work leg set, read in plan order, stopping at the
+// first leg that answers. It fails CLOSED on a leg that went dark for the same
+// reason assignedWorkExistsForSession does — the callers are close decisions.
+func sessionHasAssignedWorkInStoresForStatuses(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string) (bool, error) {
+	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
+	if err != nil {
+		return false, err
 	}
-	for _, rs := range rigStores {
-		if has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(rs, identifiers, statuses); err != nil || has {
-			return has, err
+	var found bool
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(leg.Store, identifiers, statuses)
+		if err != nil {
+			return false, err
+		}
+		found = has
+		return has, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		if err := assignedWorkScanComplete(res); err != nil {
+			return false, err
 		}
 	}
-	return false, nil
+	return found, nil
 }
 
 func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {

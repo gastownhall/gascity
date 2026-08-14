@@ -2,6 +2,7 @@ package storeref
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -281,15 +282,21 @@ func TestSweepAndDemandReadTheSameStores(t *testing.T) {
 				t.Fatalf("the assigned-work sweep reads\n %s\nwhile demand reads\n %s\n— a claim on a leg only one of them has is invisible to the other", got, want)
 			}
 
-			// Claim escalation is the deliberate ASYMMETRY of the intent pair:
-			// the same leg set, the opposite order, so a co-resident id is
-			// claimed where the reader serves it. Same set, different string.
+			// Claim escalation reads the SAME legs in the SAME order as the
+			// sweep — work first, binding last — and only the mode differs
+			// (FirstOwner vs Union). That agreement is the point: a claim may
+			// only land where the sweep can see it, and it must land on the
+			// copy the sweep would attribute the row to.
+			//
+			// The documented ASYMMETRY of the intent pair is escalation vs
+			// ByID, not escalation vs sweep: ByID leads with the binding
+			// because it is the sole minter, escalation leads with work because
+			// the claim must land where the reader serves from. That row is
+			// pinned in TestReaderAgreement (2b), which is where it belongs —
+			// it needs a co-resident id to be meaningful.
 			escalation := mustPlan(t, AssignedWork{Purpose: AssignedWorkClaimEscalation}, f.topo)
-			if got, want := refSet(escalation), refSet(sweep); !equalStringSets(got, want) {
-				t.Fatalf("claim escalation reads legs %v and the sweep reads %v; a claim may only land where the sweep can see it", got, want)
-			}
-			if len(sweep.Legs) > 1 && escalation.String() == sweep.String() {
-				t.Fatal("claim escalation and the sweep render identically; the order asymmetry is a documented property of the pair and must stay visible")
+			if got, want := escalation.Refs(), sweep.Refs(); !slices.Equal(got, want) {
+				t.Fatalf("claim escalation reads legs %v and the sweep reads %v, in that order; a claim may only land where the sweep can see it", got, want)
 			}
 		})
 	}

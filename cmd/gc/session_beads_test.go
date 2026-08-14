@@ -2096,6 +2096,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfter
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
 	)
 
@@ -2139,6 +2140,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, nil, b, "orphaned", "orphaned session", now, &stderr,
 	)
 
@@ -2206,6 +2208,7 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassignedPreservesConfiguredNamedSe
 
 	var stderr bytes.Buffer
 	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
 		store, nil, sp, cfg, b, "suspended", "suspended session", now, &stderr,
 	)
 
@@ -8233,7 +8236,7 @@ func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionNam
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
-	if closeSessionBeadIfUnassigned(store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
+	if closeSessionBeadIfUnassigned("", store, map[string]beads.Store{"demo": rigStore}, nil, sessionBead, "stale-session", now, &stderr) {
 		t.Fatal("closeSessionBeadIfUnassigned returned true; want false because rig-store work is still assigned by session_name")
 	}
 	got, err := store.Get(sessionBead.ID)

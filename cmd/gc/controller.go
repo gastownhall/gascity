@@ -1380,6 +1380,12 @@ func runController(
 		return 1
 	}
 
+	// This process is the city's controller — the lock above says so — so its
+	// opened binding is the residency answer the assigned-work spine reads.
+	// Registered here rather than inside newCityRuntime because the supervisor
+	// path constructs a runtime before it knows whether it holds the lock.
+	registerResidencyRoutes(cityPath, cr.storageRoutes)
+
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
 	// session-bead sync and rig-scoped wake decisions.

@@ -2,7 +2,9 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -236,6 +238,19 @@ func TestRetiredSessionSweepReleasesABindingResidentClaim(t *testing.T) {
 // Release-side false positives are claim LOSS, so widening what the release path
 // can SEE may never widen what it releases. This row fails as a lost claim under
 // a live worker, not as a strand.
+// SEAM PIN — DO NOT FOLD INTO AN END-TO-END TEST.
+//
+// Three independent defences keep a live holder's claim: this slice's close gate
+// (the session is never retired), the widened ownership index (the release scan
+// owns the leg), and #5242's owner-store liveness probe. Defence in depth is
+// what makes the system safe and is also what makes an end-to-end test blind:
+// remove any ONE of the three and a whole-tick test still passes, because the
+// other two cover for it. Only a seam-level pin can fail on a single removal.
+//
+// This test and TestOpenSessionStoreRefIndexOwnsTheLeadingArmForARigBoundHolder
+// are the only guards on the ownership-index defence. Deleting either, or
+// rewriting it against the reconciler tick, silently retires the guard.
+//
 // The fixture is arranged so that ONLY the widened ownership index can save the
 // claim: the session bead is graph-resident (in the binding), while the claim
 // and both liveness probes' stores are the WORK ledger, so the #5242 primary and
@@ -330,6 +345,11 @@ func TestCloseGateSeesALiveHoldersBindingResidentClaim(t *testing.T) {
 	}
 }
 
+// SEAM PIN — DO NOT FOLD INTO AN END-TO-END TEST. See the note on
+// TestOrphanReleaseSparesALiveHoldersBindingResidentClaim: these two are the
+// only guards on the ownership-index defence, and defence in depth means a
+// whole-tick test cannot see the index being removed.
+//
 // The ownership index is the counterweight the row above rests on: a rig-scoped
 // holder now OWNS the leading arm for its own exact identities, so the release
 // path's widened view cannot reap it. This is the I10 assertion flip its own
@@ -401,8 +421,9 @@ func TestRegisteredControllerRoutesAnswerResidencyWithoutASecondOpen(t *testing.
 	cityPath := t.TempDir()
 	seedNoRoutes(t, cityPath) // the one-shot funnel says "no split"
 	binding := beads.NewMemStore()
-	registerResidencyRoutes(cityPath, splitRoutes(binding))
-	t.Cleanup(func() { unregisterResidencyRoutes(cityPath) })
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 
 	work := beads.NewMemStore()
 	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
@@ -413,13 +434,144 @@ func TestRegisteredControllerRoutesAnswerResidencyWithoutASecondOpen(t *testing.
 		t.Fatalf("sweep legs = %v, want the REGISTERED binding behind the work leg", got)
 	}
 
-	unregisterResidencyRoutes(cityPath)
+	unregisterResidencyRoutes(cityPath, routes)
 	plan, err = assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
 	if err != nil {
 		t.Fatalf("assignedWorkSweepPlan after unregister: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work) {
 		t.Fatalf("sweep legs after unregister = %v, want the one-shot funnel's answer back", got)
+	}
+}
+
+// OWNERSHIP-SAFE UNREGISTRATION. Registration is keyed by city path, and two
+// runtimes for one city overlap in production: the supervisor builds a
+// replacement runtime BEFORE it learns whether it can take the controller lock,
+// and a hung predecessor still holds both. A delete-by-key unregister lets the
+// loser's shutdown remove a registration that is no longer its own, and the
+// still-live winner's release sweeps then fall back to the one-shot funnel —
+// either a second handle on the same binding root or, on a city the funnel
+// cannot resolve, a binding-blind release sweep with ga-j4ob9 back and silent.
+//
+// Same shape as cmd_supervisor.go's unlink-only-if-ours socket removal.
+func TestUnregisterResidencyRoutesOnlyDropsItsOwnRegistration(t *testing.T) {
+	cityPath := t.TempDir()
+	seedNoRoutes(t, cityPath) // the funnel would answer "no split" — the fallback is visible
+	loser := splitRoutes(beads.NewMemStore())
+	winnerBinding := beads.NewMemStore()
+	winner := splitRoutes(winnerBinding)
+
+	registerResidencyRoutes(cityPath, loser)
+	registerResidencyRoutes(cityPath, winner)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, winner) })
+
+	// The loser's shutdown defer runs after the winner has registered.
+	unregisterResidencyRoutes(cityPath, loser)
+
+	work := beads.NewMemStore()
+	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	if err != nil {
+		t.Fatalf("assignedWorkSweepPlan: %v", err)
+	}
+	if got := planStores(t, plan); !sameStores(got, work, winnerBinding) {
+		t.Fatalf("sweep legs = %v, want [work, the WINNER's binding] — a losing runtime's shutdown dropped a registration that was not its own, and the live one's release sweep is now binding-blind", got)
+	}
+
+	// And the winner's own unregister still works: ownership-safety must not
+	// turn into a registration that can never be released.
+	unregisterResidencyRoutes(cityPath, winner)
+	plan, err = assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	if err != nil {
+		t.Fatalf("assignedWorkSweepPlan after the owner unregistered: %v", err)
+	}
+	if got := planStores(t, plan); !sameStores(got, work) {
+		t.Fatalf("sweep legs = %v, want the funnel's answer back after the owner released its registration", got)
+	}
+}
+
+// The other half of the blocker: registration must not happen before the
+// controller lock is taken, or a replacement that loses the lock has already
+// pointed the live predecessor's sweeps at a handle it is about to close.
+// Asserted at the source, because the ordering is the invariant and no unit
+// test can stage two supervisors.
+func TestResidencyRegistrationHappensUnderTheControllerLock(t *testing.T) {
+	root := repoRootForResidency(t)
+	for _, tt := range []struct {
+		file      string
+		mustHave  bool
+		rationale string
+	}{
+		{"cmd/gc/city_runtime.go", false, "newCityRuntime runs BEFORE the supervisor takes the controller lock; registering there hands a losing replacement the live city's spine"},
+		{"cmd/gc/cmd_supervisor.go", true, "the supervisor registers only after acquireControllerLock succeeds"},
+		{"cmd/gc/controller.go", true, "the standalone controller already holds the lock before it builds the runtime"},
+	} {
+		body, err := os.ReadFile(filepath.Join(root, tt.file))
+		if err != nil {
+			t.Fatalf("reading %s: %v", tt.file, err)
+		}
+		// A word boundary, so unregisterResidencyRoutes( is not a hit.
+		if got := regexp.MustCompile(`(^|[^A-Za-z0-9_])registerResidencyRoutes\(`).Match(body); got != tt.mustHave {
+			t.Errorf("%s calls registerResidencyRoutes = %v, want %v: %s", tt.file, got, tt.mustHave, tt.rationale)
+		}
+	}
+}
+
+func repoRootForResidency(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the test's working directory")
+		}
+		dir = parent
+	}
+}
+
+// FOLD-IN 4: the cross-store close gates (the cleanup-of-record lane) sit on the
+// same close-then-release path this slice widened, and they were binding-blind
+// on a work-led plane — invisible to the boundary census too, because they
+// range a rig map rather than calling a named enumerator. A session whose
+// binding-resident claim they cannot see is closed, and the retired-session
+// sweep this slice taught to read the binding then releases the claim it is
+// executing.
+func TestCrossStoreCloseGateSeesABindingResidentClaim(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
+	cfg := residencyTestConfig()
+
+	sessionBead := beads.Bead{
+		ID:       "gcs-1",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Metadata: map[string]string{"session_name": "test-city--worker-1"},
+	}
+	claim, err := binding.Create(beads.Bead{
+		Title:    "graph step the live worker is executing",
+		Type:     "task",
+		Assignee: "test-city--worker-1",
+	})
+	if err != nil {
+		t.Fatalf("seed the binding-resident claim: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := binding.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("claim it: %v", err)
+	}
+
+	has, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, beads.NewMemStore(), nil, sessionBead)
+	if err != nil {
+		t.Fatalf("cross-store close gate: %v", err)
+	}
+	if !has {
+		t.Fatal("the cross-store close gate reports a live claim-holder as holding nothing; it closes the session bead and the retired-session sweep releases the claim underneath the worker")
 	}
 }
 

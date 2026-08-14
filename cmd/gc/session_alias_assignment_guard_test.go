@@ -81,7 +81,7 @@ func TestDrainGuardsKeepPoolSessionClaimingUnderItsSessionName(t *testing.T) {
 	info := sessiontest.SeedBead(t, legacyAliasedPoolSessionBead("gcg-session-x", sessionName, "", ""))
 	mustCreateInProgressWork(t, store, sessionName)
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo(store, nil, info, aliasGuardConfig())
+	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 		mustCreateInProgressWork(t, store, assignee)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo(store, nil, info, aliasGuardConfig())
+	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
