@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -709,6 +711,17 @@ var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
 // signal the controller is waiting on.
 func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
 	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(sessionName) == "" {
+		return
+	}
+	// Only read a real city. A city is a directory holding city.toml, and
+	// opening a store somewhere that is not one does not find claims — it
+	// PROVISIONS a store (a managed Dolt server included) in whatever directory
+	// the caller happened to resolve. Drain-ack is reachable from contexts with
+	// no city at all (a bare `gc hook --claim --drain-ack`, a test harness), and
+	// before this release step it did no store I/O whatsoever, so the cost of
+	// getting that wrong is a data directory and a server process where neither
+	// belongs.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
 		return
 	}
 	store, err := openCityStoreAt(cityPath)
