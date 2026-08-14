@@ -88,9 +88,8 @@ cmd/gc/session_beads.go	workAssignmentStores	c:beads.Store-literal	1
 cmd/gc/session_reconciler.go	reachableStoresForSession	a:workAssignmentStores	1
 cmd/gc/session_reconciler.go	reachableStoresForSession	ast:returns-store-list	1
 cmd/gc/session_reconciler.go	reachableStoresForSession	c:beads.Store-literal	2
-cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	a:workAssignmentStores	1
+cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	a:workAssignmentStores	3
 cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	ast:returns-store-list	1
-cmd/gc/session_reconciler.go	reachableStoresForSessionInfo	c:beads.Store-literal	2
 internal/api/dashport_support.go	BeadStores	a:BeadStores	1
 internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1
