@@ -1169,7 +1169,7 @@ func releaseUnexecutedClaimsOnDrainAck(
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
 	deadline := time.Now().Add(budget)
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) { // residency:allow same leg set as unclaimWorkAssignedToRetiredSessionBead; resolving it separately would let the two release paths disagree
 		if time.Now().After(deadline) {
 			fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining legs are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
 			return
