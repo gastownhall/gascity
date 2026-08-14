@@ -4551,10 +4551,17 @@ func TestRouteMailPeek_SixRowMatrix(t *testing.T) {
 			wantReason: "conn-refused",
 		},
 		{
+			// Peek diverges from the shared matrix here BY DESIGN: the API
+			// serves the Get view, which hides archived mail, so a 404 is a
+			// cue to read through the archive locally (ArchivePeeker), not a
+			// final answer. The local fake has no such message either, so
+			// the exit is still 1 — but via the fallback route.
 			name:       "api-404-error",
 			handler:    mailProblemHandler(http.StatusNotFound, "not_found: no such message"),
 			wantExit:   1,
-			wantStderr: "not_found",
+			wantRoute:  "fallback",
+			wantReason: "peek-archived-readthrough",
+			wantStderr: "message not found",
 		},
 		{
 			name:         "controller-down",

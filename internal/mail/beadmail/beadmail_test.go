@@ -1042,6 +1042,45 @@ func TestArchive(t *testing.T) {
 	if b.Description != "dismiss me" {
 		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
 	}
+
+	// The archive stamp is what lets Peek distinguish "archived, body
+	// retained" from "removed/legacy-closed" — without it, archived
+	// never-read mail was irrecoverable through the mail layer while the
+	// body sat intact in the store.
+	if got := b.Metadata["close_reason"]; got != ArchiveCloseReason {
+		t.Errorf("close_reason = %q, want %q (peek discriminator)", got, ArchiveCloseReason)
+	}
+	// Conformance contract holds: archived mail is hidden from Get.
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get after Archive err = %v, want ErrNotFound (hidden from mail views)", err)
+	}
+	// Archive's advertised contract holds: Peek reads through the archive.
+	got, err := p.Peek(sent.ID)
+	if err != nil {
+		t.Fatalf("Peek after Archive: %v (contract: archived mail stays peek-retrievable)", err)
+	}
+	if got.Body != "dismiss me" {
+		t.Errorf("Peek body after Archive = %q, want \"dismiss me\"", got.Body)
+	}
+}
+
+// TestPeekHidesLegacyAndRemovedMail pins Peek's boundary: reading through
+// the archive must not resurrect truly removed mail — a legacy
+// closed-without-reason bead (old-release archive, treated as removed for
+// the upgrade path) stays ErrNotFound even for Peek.
+func TestPeekHidesLegacyAndRemovedMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	legacy, err := p.Send("alice", "bob", "legacy", "closed by an old release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Peek(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Peek(legacy closed-no-reason) err = %v, want ErrNotFound", err)
+	}
 }
 
 // TestLegacyClosedMessageBeadTreatedAsRemoved covers the upgrade path for a

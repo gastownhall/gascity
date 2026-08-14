@@ -282,6 +282,27 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	return beadToMessage(b), nil
 }
 
+// Peek retrieves a message by ID without mutating it, reading THROUGH the
+// archive: a message Archive closed (stamped [ArchiveCloseReason]) is
+// returned even though Get/Read/MarkRead answer ErrNotFound for it per the
+// removes-from-every-view conformance contract. Peek is the archeology verb
+// Archive's contract advertises ("retrievable via gc mail peek or bd show").
+// Truly removed mail — Delete-purged or legacy closed-without-reason beads —
+// stays ErrNotFound even here, preserving the upgrade-path contract.
+func (p *Provider) Peek(id string) (mail.Message, error) {
+	b, err := p.store.Get(id)
+	if err != nil {
+		return mail.Message{}, beadmailError("peek", err)
+	}
+	if b.Type != messageBeadType {
+		return mail.Message{}, fmt.Errorf("beadmail peek: bead %s is type %q, not message", id, b.Type)
+	}
+	if isRemovedMessageBead(b) && b.Metadata["close_reason"] != ArchiveCloseReason {
+		return mail.Message{}, beadmailError("peek", beads.ErrNotFound)
+	}
+	return beadToMessage(b), nil
+}
+
 // Read retrieves a message by ID and marks it as read (adds "read" label).
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
@@ -351,6 +372,14 @@ type ArchiveFilter struct {
 // gc mail peek or bd show. A closed message no longer appears in inbox views
 // (all listing paths filter Status != "open"). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
+//
+// The close_reason stamp is what keeps the retained body reachable: every
+// read path routes through isRemovedMessageBead, which treats a closed
+// message with an unrecognized close_reason as user-removed and answers
+// ErrNotFound. Archive without the stamp therefore silently broke its own
+// retrieval contract — the bead body sat intact in the store while peek,
+// Get, and MarkRead all reported the message gone. Stamp BEFORE Close so
+// any close-side validation and every subsequent reader observe it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
@@ -364,6 +393,12 @@ func (p *Provider) Archive(id string) error {
 	}
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
+	}
+	if err := p.store.SetMetadata(id, "close_reason", ArchiveCloseReason); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return mail.ErrAlreadyArchived
+		}
+		return fmt.Errorf("beadmail archive: stamping close_reason: %w", err)
 	}
 	if err := p.store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
@@ -876,6 +911,11 @@ func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads
 // closeReason, keeping the writer and the direct-ID reader in lockstep. The
 // 20-character floor satisfies validation.on-close=error.
 const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retention window"
+
+// ArchiveCloseReason is the close_reason Provider.Archive stamps so an
+// archived message stays addressable (peek/bd show) per Archive's contract,
+// instead of classifying as user-removed the moment it closes.
+const ArchiveCloseReason = "mail archived: retained for peek/bd show"
 
 // SweepReadMessagesBefore closes read message beads created before cutoff,
 // oldest first, stamping closeReason as "close_reason" metadata on each bead

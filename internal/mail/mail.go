@@ -151,3 +151,12 @@ type Provider interface {
 type MultiRecipientInboxer interface {
 	InboxRecipients(recipients []string) ([]Message, error)
 }
+
+// ArchivePeeker is an optional extension for providers that can read THROUGH
+// the archive: Peek returns a message that Archive has closed (hidden from
+// Get/Read and every inbox view) without resurrecting truly removed mail.
+// `gc mail peek` uses it when available so Archive's retained-body contract
+// is honored at the mail layer instead of requiring a raw store read.
+type ArchivePeeker interface {
+	Peek(id string) (Message, error)
+}
