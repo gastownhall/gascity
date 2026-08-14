@@ -26,25 +26,35 @@ you to is `execution.claim_window_expired` volume: a steady stream of them with
 fix the store), while `parent_alive=false` means the claimer was orphaned by a
 dead provider tool call, which is the fence working as intended.
 
-Keep it **below 90s** (`idleClaimNudgeGrace`). Above that the idle-claim
-backstop can re-nudge a seat whose claim is still running, and two live claim
-attempts for one seat is the state the window exists to prevent.
+Keep it **strictly below 90s** (`idleClaimNudgeGrace`, `cmd/gc/idle_nudge.go`).
+At or above that, the idle-claim backstop can re-nudge a seat whose claim is
+still running, and two live claim attempts for one seat is the state the window
+exists to prevent. 90s itself is not a legal value — the bound is exclusive.
 
 ### Deploy-lane override (interim)
 
-Cities whose observed claim latency runs 15–70s need more than 45s or the
-fence turns into fresh-claim starvation. Set it per agent class in `city.toml`:
+Cities whose observed claim latency runs 15–70s need more than the 45s default
+or the fence becomes fresh-claim starvation: honest claims are refused, seats
+exit 1, and the demand is re-served without ever being worked.
+
+**75s** is the value to use. It clears the top of the observed latency band with
+headroom and still leaves 15s below the backstop grace, so neither end of the
+range races.
 
 ```toml
 [[patches.agent]]
 name = "gc.run-operator"
-env = { GC_HOOK_CLAIM_WINDOW = "90s" }
+env = { GC_HOOK_CLAIM_WINDOW = "75s" }
 ```
 
-Repeat the stanza for each role agent of the same class. This is **interim**:
-it exists because claim latency is dominated by read convergence today, and it
-retires when the binding-first read lands (ga-4qdfn) and claim latency drops
-back under the default.
+Repeat the stanza for each role agent of the same class — the override is
+per-agent, and an unpatched sibling silently keeps the 45s default.
+
+This is **interim**. It exists because claim latency is currently dominated by
+read convergence, not by real work; it retires when the binding-first read lands
+(ga-4qdfn) and latency drops back under the default. Before removing it, check
+that `execution.claim_window_expired` with `parent_alive=true` is at zero for
+the class.
 
 ## Failure shape: a leaked marker fences the whole fleet
 
