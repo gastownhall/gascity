@@ -15,9 +15,14 @@ import (
 // markers. S19 Stage 2 is WRITE-ONLY: they are stamped/cleared but read by no
 // decision path (Stage 3 shadows them, Stage 4 acts on them).
 const (
-	// PrimedAtMetadataKey records when the startup prompt was confirmed
-	// delivered (RFC3339). Written only by CommitStartedPatch (and, from Stage 4,
-	// the post-Nudge stamp) — never a write-ahead attempt marker.
+	// PrimedAtMetadataKey records when the startup prompt's delivery to the
+	// runtime was confirmed (RFC3339) — the transport succeeded, not that the
+	// agent consumed or began acting on the prompt. A live worker can still be
+	// idle if the provider drops submission after this stamp; the durable
+	// signal that work actually began is the trigger bead becoming
+	// assigned/in-progress, not this key (gastownhall/gascity#5236). Written
+	// only by CommitStartedPatch (and, from Stage 4, the post-Nudge stamp) —
+	// never a write-ahead attempt marker.
 	PrimedAtMetadataKey = "primed_at"
 	// PrimingAttemptedAtMetadataKey is the write-ahead attempt marker. Defined
 	// (constant + clear sites) in Stage 2 but NEVER written here; its writer is
