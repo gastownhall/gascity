@@ -437,14 +437,17 @@ func (ops *hookClaimOps) claimMutationContext() (context.Context, context.Cancel
 func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr io.Writer) hookClaimResult {
 	age := ops.invocationAge()
 	parentAlive := os.Getppid() != 1
-	_, _ = fmt.Fprintf(stderr,
-		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
-		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive)
+	// The typed event is the durable record and the stderr line is commentary on
+	// it, so the event goes first — same rule as the unwind above, for the same
+	// reason: this path can be reached with a closed stderr.
 	ops.EmitClaimWindowExpired(hookClaimWindowExpiry{
 		BeadID:        candidateID,
 		InvocationAge: age,
 		ParentAlive:   parentAlive,
 	})
+	_, _ = fmt.Fprintf(stderr,
+		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
+		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive)
 	return hookClaimResult{terminal: true, code: 1}
 }
 
@@ -731,10 +734,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// the invoking turn is already gone. That is the same parked claim by another
 	// route, so it takes the same unwind as an undelivered one.
 	if minted && ops.claimWindowSpent() {
-		_, _ = fmt.Fprintf(stderr,
-			"gc hook --claim: claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it\n",
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
 			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
-		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, bead, opts, ops, dir, stderr)
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
@@ -754,11 +756,12 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// orphaned tool call's signature is EPIPE on a stdout whose reader the
 		// provider already closed. A closed pipe cannot deliver, so nobody will
 		// execute this claim; give it back instead of parking it.
-		fmt.Fprintf(stderr, "gc hook --claim: writing result for %s: %v\n", bead.ID, writeErr) //nolint:errcheck
+		cause := fmt.Sprintf("writing result for %s: %v", bead.ID, writeErr)
 		if !minted {
+			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
 		}
-		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, bead, opts, ops, dir, stderr)
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
 	}
 	return 0
 }
@@ -791,23 +794,41 @@ func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout i
 // of the result payload, so they cannot be computed after it). Those siblings
 // stay open and assigned, which is the dead-assignee release lane's shape, and
 // the next turn of the same session re-claims them.
-func unwindUndeliveredHookClaim(reason string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) int {
+func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) int {
 	assignee := strings.TrimSpace(bead.Assignee)
 	if assignee == "" {
 		assignee = opts.Assignee
 	}
+	// This emits bead.claim_released for a bead that may ALREADY have an
+	// execution.step_started from this same invocation (the stamp runs before the
+	// result write). That pair is the compensation record: the step never
+	// executed, and a consumer reading the lifecycle as monotonic would otherwise
+	// leave it in flight forever. See the BeadClaimReleased constant.
+	//
+	// RELEASE FIRST, DIAGNOSE SECOND, and the order is load-bearing.
+	//
+	// This path runs precisely when a descriptor turned out to be unwritable, and
+	// stderr can be closed for the same reason stdout was. gc ignores SIGPIPE at
+	// startup so such a write returns EPIPE instead of killing the process
+	// (ignoreSIGPIPE) — but the release is the compensating action and the
+	// diagnostic is only commentary on it, so the compensation must never sit
+	// behind a write that can fail. If ignoreSIGPIPE ever regresses, this
+	// ordering still gets the claim back.
+	//
 	// Deliberately NOT the window-bounded context: in the straddle case the
 	// window is already spent, and the unwind must still be allowed to run.
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	released, err := ops.Release(ctx, dir, opts.Env, bead.ID, assignee)
+	if released && err == nil {
+		ops.EmitClaimReleased(hookClaimReleaseRecord{BeadID: bead.ID, Assignee: assignee, Reason: reason})
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "gc hook --claim: releasing undelivered claim %s: %v\n", bead.ID, err) //nolint:errcheck
 	case !released:
 		fmt.Fprintf(stderr, "gc hook --claim: undelivered claim %s was no longer ours to release\n", bead.ID) //nolint:errcheck
-	default:
-		ops.EmitClaimReleased(hookClaimReleaseRecord{BeadID: bead.ID, Assignee: assignee, Reason: reason})
 	}
 	return 1
 }

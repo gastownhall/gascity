@@ -1150,10 +1150,13 @@ func unclaimWorkAssignedToRetiredSessionBead(
 // owns — today the relocated coordination-class binding, which claim-time
 // routing (claim_class_route.go) writes in_progress assignees into on a split
 // city. Without it a graph-resident claim would be released by nothing.
+// budget bounds the whole pass; see drainAckReleaseBudget for why drain-ack in
+// particular must not wait on a slow store.
 func releaseUnexecutedClaimsOnDrainAck(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBead beads.Bead,
+	budget time.Duration,
 	stderr io.Writer,
 	classStores ...beads.Store,
 ) {
@@ -1165,9 +1168,18 @@ func releaseUnexecutedClaimsOnDrainAck(
 	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
+	deadline := time.Now().Add(budget)
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) {
+		if time.Now().After(deadline) {
+			fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining legs are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+			return
+		}
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, assignee := range identifiers {
+			if time.Now().After(deadline) {
+				fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining identities are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+				return
+			}
 			work, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
 			if err != nil {
 				fmt.Fprintf(stderr, "session beads: listing in-progress work held by draining session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck

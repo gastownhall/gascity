@@ -168,6 +168,48 @@ func shellBlocksMentioningClaim(prompt string) []string {
 	return out
 }
 
+// TestNoShippedPromptAcquiresWorkThroughTheByIDClaimDoor keeps the `gc bd
+// update --claim` door from silently becoming a second, UNFENCED way to acquire
+// routed work.
+//
+// The door is genuinely worker-pull, so it is allowlisted for the claim CAS —
+// but it carries the identical orphaned-tool-call exposure as `gc hook --claim`
+// and has none of F-A/F-B/F-C. It is not fenced today because nothing needs it
+// to be: no shipped prompt or template tells a worker to acquire work with it
+// (the `gc agent script` deterministic executor claims through the raw `bd`
+// binary, not this door, and executes in-process immediately afterwards).
+//
+// That "nothing needs it" is the entire justification, and it is exactly the
+// kind of fact that quietly stops being true. If a prompt ever routes
+// acquisition through this door, this test fails and the choice becomes
+// explicit: fence the door, or don't ship the prompt. Releasing or updating a
+// bead the worker already holds is unaffected — only acquisition is pinned.
+func TestNoShippedPromptAcquiresWorkThroughTheByIDClaimDoor(t *testing.T) {
+	entries, err := os.ReadDir(shippedPromptRoot)
+	if err != nil {
+		t.Fatalf("reading %s: %v", shippedPromptRoot, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		path := filepath.Join(shippedPromptRoot, entry.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if !strings.Contains(line, "--claim") {
+				continue
+			}
+			if strings.Contains(line, "bd update") || strings.Contains(line, "bd  update") {
+				t.Errorf("%s tells a worker to acquire work through the unfenced by-id claim door, which has the same orphaned-tool-call exposure `gc hook --claim` was just fenced against:\n  %s",
+					path, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
 type renderedHookCommand struct {
 	file    string
 	command string

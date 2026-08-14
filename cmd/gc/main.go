@@ -29,6 +29,10 @@ import (
 )
 
 func main() {
+	// Before any dispatch: a closed stdout/stderr must surface as an EPIPE the
+	// command can handle, not as a signal that kills gc mid-write. The claim
+	// path's delivery unwind depends on surviving that write.
+	ignoreSIGPIPE()
 	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 }
 

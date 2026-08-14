@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), &stderr, binding)
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr, binding)
 
 	for _, tc := range []struct {
 		name  string
@@ -119,7 +120,7 @@ func TestDrainAckLeavesForeignClaimsAlone(t *testing.T) {
 	}, "in_progress", "worker-2")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), &stderr)
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, foreign.ID)
 	if status != "in_progress" || assignee != "worker-2" {
@@ -138,7 +139,7 @@ func TestDrainAckLeavesPreassignedOpenSiblingsAlone(t *testing.T) {
 	}, "open", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), &stderr)
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, sibling.ID)
 	if status != "open" || assignee != "worker-1" {
@@ -159,7 +160,7 @@ func TestDrainAckLeavesClosedWorkAlone(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), &stderr)
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	if status, _ := drainAckBeadStatus(t, work, done.ID); status != "closed" {
 		t.Fatalf("closed bead %s became status=%q after drain-ack, want it left closed", done.ID, status)
@@ -181,13 +182,58 @@ func TestDrainAckLeavesSessionAndMailBeadsAlone(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), &stderr)
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	for _, id := range []string{sessionRow.ID, message.ID} {
 		status, assignee := drainAckBeadStatus(t, work, id)
 		if status != "in_progress" || assignee != "worker-1" {
 			t.Errorf("non-work bead %s became status=%q assignee=%q, want it untouched", id, status, assignee)
 		}
+	}
+}
+
+// TestDrainAckReleaseHonorsItsBudget pins that the release pass is bounded.
+//
+// It runs BEFORE the ack — the signal the controller waits on to stop this
+// session — and fans out over every work leg × every identity with only
+// per-command ceilings underneath. Unbounded, a slow or contended store turns a
+// safety net into a stall on the exact path a draining worker needs to be fast.
+// Releasing some claims and acking beats releasing all of them late; the
+// remainder is the dead-assignee sweep's to collect.
+func TestDrainAckReleaseHonorsItsBudget(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	held := mustCreateDrainAckBead(t, work, beads.Bead{
+		Title: "held while the budget is already spent", Type: "task",
+	}, "in_progress", "worker-1")
+
+	var stderr bytes.Buffer
+	// A budget that cannot admit even the first leg.
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), -time.Second, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, work, held.ID)
+	if status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("bead %s became status=%q assignee=%q; a spent budget must stop the pass, not race it", held.ID, status, assignee)
+	}
+	if !strings.Contains(stderr.String(), "budget") {
+		t.Fatalf("stderr = %q, want the exhausted-budget diagnostic; a silent stop is indistinguishable from finding nothing", stderr.String())
+	}
+}
+
+// TestDrainAckReleaseWithinBudgetStillReleases is the control: the bound must
+// not disable the release. It is the same store and the same claim, with a
+// budget that comfortably admits the work.
+func TestDrainAckReleaseWithinBudgetStillReleases(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	held := mustCreateDrainAckBead(t, work, beads.Bead{
+		Title: "held with budget to spare", Type: "task",
+	}, "in_progress", "worker-1")
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsOnDrainAck(work, nil, drainAckSessionBead(), time.Minute, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, work, held.ID)
+	if status != "open" || assignee != "" {
+		t.Fatalf("bead %s is status=%q assignee=%q, want released; stderr=%s", held.ID, status, assignee, stderr.String())
 	}
 }
 

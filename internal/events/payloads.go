@@ -80,7 +80,9 @@ func (BeadClaimRejectedPayload) IsEventPayload() {}
 // BeadClaimReleasedPayload is the typed payload for bead.claim_released events.
 // Emitted when Assignee gives back a claim it had already won on BeadID because
 // the claim could not reach a live consumer. Reason names which unwind ran —
-// see the BeadClaimReleased constant for the two shapes.
+// see the BeadClaimReleased constant for the two shapes, and for why this event
+// following an execution.step_started on the same subject is a compensation
+// pair that a consumer must NOT read as a step still in flight.
 type BeadClaimReleasedPayload struct {
 	BeadID   string `json:"bead_id"`
 	Assignee string `json:"assignee"`

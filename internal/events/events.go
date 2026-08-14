@@ -40,6 +40,18 @@ const (
 	// compare-and-swap and this event records that it happened. It is the
 	// release dual of BeadClaimRejected: that one reports a claim we did not
 	// get, this one a claim we could not keep.
+	//
+	// COMPENSATION PAIR — read this before treating step lifecycle as monotonic.
+	// A bead.claim_released whose subject already has an execution.step_started
+	// is the second half of a compensating pair, not a step that ran and
+	// finished: the claim path emits step_started at claim time and only then
+	// discovers it cannot deliver the result (or that the CAS landed past its
+	// window), so the release UNDOES a step that never executed. An
+	// event-sourcing consumer — the runs view especially — must treat that pair
+	// as "no attempt happened" rather than leaving the step in-flight forever
+	// waiting for an execution.step_completed that is never coming. The pair is
+	// always same-subject and same-process, and the payload's reason names which
+	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a

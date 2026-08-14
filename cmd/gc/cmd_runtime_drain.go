@@ -722,6 +722,16 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 	// getting that wrong is a data directory and a server process where neither
 	// belongs.
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		// A runtime root carrying .gc/ but no city.toml is the legacy shape, and
+		// it is the one skip worth naming: it looks like a city to a human, a
+		// session really can hold claims there, and staying silent would make a
+		// release that never ran indistinguishable from one that found nothing.
+		// It is NOT auto-upgraded here — provisioning a store against a layout
+		// this function does not understand is the failure the city.toml gate
+		// exists to prevent.
+		if _, gcErr := os.Stat(filepath.Join(cityPath, ".gc")); gcErr == nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %s has .gc/ but no city.toml; skipping the held-claim release for this legacy runtime root (run `gc doctor` to check the layout)\n", cityPath) //nolint:errcheck
+		}
 		return
 	}
 	store, err := openCityStoreAt(cityPath)
@@ -747,8 +757,19 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 	if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
 		classStores = append(classStores, binding)
 	}
-	releaseUnexecutedClaimsOnDrainAck(store, rigStores, sessionBead, stderr, classStores...)
+	releaseUnexecutedClaimsOnDrainAck(store, rigStores, sessionBead, drainAckReleaseBudget, stderr, classStores...)
 }
+
+// drainAckReleaseBudget bounds the whole held-claim release pass.
+//
+// The pass runs BEFORE the ack, which is the signal the controller waits on to
+// stop this session, and it fans out over every work leg × every identity with
+// only per-command ceilings underneath it. A slow or contended store would
+// therefore make drain-ack hang for the product of those, turning a safety net
+// into a stall on the exact path a draining worker needs to be fast. Releasing
+// SOME claims and acking is strictly better than releasing all of them late:
+// whatever this budget leaves behind is the dead-assignee lane's to collect.
+const drainAckReleaseBudget = 15 * time.Second
 
 // doRuntimeDrainAck releases any unexecuted claim the session still holds, sets
 // the drain-ack flag, then pokes the controller so the reconciler observes the
