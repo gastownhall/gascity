@@ -289,12 +289,33 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	var bestRank hookCandidateRank
 	haveBest := false
 
+	// When the federated reader is pinned to the primary leg, that leg is the
+	// only one whose answer covers the whole city; the extras run the
+	// single-store form and are structurally blind to the relocated binding. So
+	// a primary error is not one leg's bad luck — it is the loss of the
+	// federation itself, and the extras must not answer for it. See the
+	// federatedPrimaryFailed handling below.
+	federationPinnedToPrimary := hookFederationPinnedToPrimary(stores, primary)
+	federatedPrimaryFailed := false
+
 	now := time.Now()
 	for _, st := range stores {
 		out, err := run(hookStoreCommand(st, command), st.dir, st.env)
 		if err != nil {
 			if sameHookStore(st, primary) {
 				ownStoreOut, ownStoreErr = out, err
+				federatedPrimaryFailed = federationPinnedToPrimary
+			}
+			continue
+		}
+		if federatedPrimaryFailed {
+			// Everything after a failed federated primary is a partial view. The
+			// ONE exception is this session's own in-progress work: a resume row
+			// is already claimed by this identity, so no federated view could
+			// overturn it, and refusing it would regress crash recovery whenever
+			// the primary is down. Take it and stop; discard every other answer.
+			if resumeOut, ok := hookOwnResumeAnswer(out, now); ok {
+				return resumeOut, st, nil
 			}
 			continue
 		}
@@ -320,6 +341,15 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		}
 	}
 
+	// A failed federated primary is terminal for the invocation: the surviving
+	// legs' single-store answers are a partial view of the city, and the worst of
+	// them — a nil-error empty — would be written out as a no_work drain-ack,
+	// reaping a seat whose demand still exists. A visible failure is better than
+	// a confident wrong answer, and the caller's bounded retry gets first refusal
+	// on it.
+	if federatedPrimaryFailed {
+		return ownStoreOut, hookStore{}, ownStoreErr
+	}
 	if unrankable && firstHit {
 		return firstHitOut, firstHitStore, nil
 	}
@@ -333,6 +363,43 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	return lastOut, hookStore{}, nil
+}
+
+// hookFederationPinnedToPrimary reports whether this store set is the shape
+// scopeFederatedHookStores produces: the primary runs the city-wide federated
+// command and every extra carries its own single-store override. That is exactly
+// when a primary failure costs the federation rather than one leg, so it is read
+// off the store set rather than passed down as a flag.
+func hookFederationPinnedToPrimary(stores []hookStore, primary hookStore) bool {
+	if len(stores) < 2 {
+		return false
+	}
+	for _, st := range stores {
+		if sameHookStore(st, primary) {
+			continue
+		}
+		if strings.TrimSpace(st.command) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hookOwnResumeAnswer returns out when it carries this session's own in-progress
+// work — the crash-recovery resume tier. Every query in the fan-out matches this
+// agent's own identity (see the tier constants), so an in_progress row in any leg
+// is a row this session already owns; nothing a wider read could say would change
+// that. It is the only answer trusted from a leg that is blind to the federation.
+func hookOwnResumeAnswer(out string, now time.Time) (string, bool) {
+	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), now)
+	if !workQueryHasReadyWork(ready) {
+		return "", false
+	}
+	rank, ok := bestHookCandidateRank(ready)
+	if !ok || rank.tier != hookTierInProgress {
+		return "", false
+	}
+	return out, true
 }
 
 // Work-query tiers, ordered most-urgent first. They mirror the three tiers of

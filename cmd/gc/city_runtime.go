@@ -2600,6 +2600,27 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.stdout,
 		)
+		// The claim-without-execution lane. Both backstops above end at the
+		// claim; this one starts there. It reads the UNFILTERED assigned-work
+		// triple, which is the only index-aligned (bead, store, ref) view in the
+		// tick — the release filter above rewrites beads and refs but not stores
+		// — and re-checks ownership against each session's own identities anyway,
+		// so a released bead (whose assignee resolves to no live session by
+		// construction) cannot match a running one.
+		nudgeStalledPoolExecution(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.AssignedWorkBeads,
+			result.AssignedWorkStores,
+			result.AssignedWorkStoreRefs,
+			result.StoreQueryPartial || result.SessionQueryPartial,
+			time.Now(),
+			cr.rec,
+			cr.requestExecutionStalledDrain,
+			cr.stdout,
+		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
@@ -3540,11 +3561,31 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	return scaleCheckDemandMinInterval
 }
 
+// readyDemandSnapshotFingerprint hashes the ready sets of every store the
+// demand probe reads, so a write anywhere in that set invalidates the cached
+// demand snapshot instead of letting it be reused for up to its max age.
+//
+// "Every store the probe reads" is the load-bearing part. The fingerprint hashed
+// the work store and the rigs; the probe's LEADING leg is the sessions-class
+// store, which on a converged split city is the graph binding — the store that
+// holds every routed graph step. So a step claimed or closed in the binding
+// changed nothing the fingerprint could see, and the controller went on
+// asserting demand for it for the rest of the snapshot window: phantom demand,
+// spawning seats for work that was already taken.
 func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 	stores := []struct {
 		ref   string
 		store beads.Store
 	}{{ref: cr.cityName, store: cr.cityBeadStore()}}
+	// The demand probe's leading leg. Deduped by store identity: on a city that
+	// relocates nothing this IS the work store already hashed above, and hashing
+	// it twice would only double the read.
+	if sessions := cr.sessionsBeadStore().Store; !sameFingerprintStore(sessions, stores[0].store) {
+		stores = append(stores, struct {
+			ref   string
+			store beads.Store
+		}{ref: "class:sessions", store: sessions})
+	}
 	rigStores := cr.rigBeadStores()
 	refs := make([]string, 0, len(rigStores))
 	for ref := range rigStores {
@@ -3583,6 +3624,21 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 		}
 	}
 	return fmt.Sprintf("%x", h.Sum64())
+}
+
+// sameFingerprintStore reports whether two store handles are the same underlying
+// store, so the demand fingerprint reads each distinct store exactly once. It is
+// pointer identity — the same question workAssignmentStoresHave asks — because a
+// city that relocates nothing serves several coordination classes from one store
+// value, and a city that relocates them serves the sessions class from a
+// genuinely different one.
+func sameFingerprintStore(a, b beads.Store) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	aKey, aOK := storePointerKey(a)
+	bKey, bOK := storePointerKey(b)
+	return aOK && bOK && aKey == bKey
 }
 
 func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {

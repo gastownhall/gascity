@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -753,6 +752,13 @@ func buildDesiredStateWithSessionBeads(
 		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cfg, store, rigStores, suspendedRigPaths, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		// Same pass, same reason, different legacy form: a route stamped at a
+		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
+		// — the generated query's --metadata-field, the claim's string compare —
+		// treats as a different target entirely. Collapsing it here, before
+		// demand is counted below, is what makes the row both countable and
+		// claimable in the same tick instead of neither.
+		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
@@ -1636,11 +1642,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 		}
 		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
-				continue
-			}
-			template := controllerDemandRouteTarget(cfg, b, group.templates)
-			if _, ok := group.templates[template]; !ok {
+			// AGREEMENT: count only rows a T-worker's own query would serve it.
+			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
+			// is not capacity demand — it is a seat that spawns, reads empty and
+			// drains, every tick, forever. See demand_serve_predicate.go.
+			template, servable := demandServableForTemplates(cfg, b, group.templates)
+			if !servable {
 				continue
 			}
 			seen := countedBeads[template]
@@ -1797,27 +1804,6 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 		}
 	}
 	return demand, partialTemplates, errs
-}
-
-// controllerDemandRouteTarget matches a work bead's routed-to candidates
-// against the pool's template set. Candidates are normalized through
-// agentutil.NormalizePoolRouteTarget before the membership check so a
-// gc.routed_to value stamped with a live instance suffix (e.g.
-// "hello-world/polecat-1") — whether written by gc sling's own write-side
-// normalization or by any other writer, such as a direct
-// `bd update --set-metadata` — still counts as demand for the base template.
-// Without this, an unnormalized instance-suffixed candidate never matches
-// group.templates (keyed by base template names) and the demand is silently
-// dropped, so the pool never scales up. The returned value is the normalized
-// template name, since callers use it as the counts/demand map key.
-func controllerDemandRouteTarget(cfg *config.City, b beads.Bead, templates map[string]struct{}) string {
-	for _, candidate := range controllerDemandRouteCandidates(b) {
-		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
-		if _, ok := templates[normalized]; ok {
-			return normalized
-		}
-	}
-	return ""
 }
 
 // controllerDemandRouteCandidates keeps controller-side readers compatible
@@ -2207,6 +2193,20 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bea
 	if liveErr != nil && !beads.IsPartialResult(liveErr) {
 		liveRows = nil
 	}
+	// Backfill: a failed or partial live read is topped up from the cached
+	// snapshot rather than reported as an absence of work.
+	//
+	// This is a DELIBERATE asymmetry with the worker, and naming it here is the
+	// point. The worker's own read is live-only and fails whole (`gc ready`
+	// aborts on any bad leg), so a row merged in from cache can be up to one tick
+	// stale relative to what that worker will see: the controller can count
+	// demand for a row a fresh read no longer serves. Accepted, in this direction
+	// only — the alternative is reporting zero demand from a store hiccup and
+	// draining a live pool, which is the correctness-over-latency contract this
+	// cache exists to honor. It self-heals on the next tick, and a seat spawned
+	// against a stale row now drains cleanly (no_work, ack, reaped) rather than
+	// being re-counted forever, because the permanent divergence classes are
+	// closed at their source (demand_serve_predicate.go).
 	rows = mergeReadyRowsByID(rows, liveRows)
 	if joined := errors.Join(err, liveErr); joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
 		return rows, &beads.PartialResultError{Op: "controller ready demand", Err: joined}
@@ -3298,6 +3298,13 @@ func resolveTemplateForSessionBeadInfo(
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
+		// A POOL-LEVEL marker, presence only: this seat exists because the
+		// controller counted demand. Nothing on the claim path may read the
+		// trigger id to decide what to claim — the pool is pull, and the
+		// controller does not choose the bead — but a seat that drains no_work
+		// is worth telling apart from one started for any other reason, which is
+		// what the divergence diagnostics key on (demand_divergence.go).
+		tp.Env["GC_SPAWN_ORIGIN"] = "demand"
 		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
 		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
 		if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {

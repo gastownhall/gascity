@@ -27,11 +27,24 @@ func sessionInfosFromBeads(bs []beads.Bead) []sessionpkg.Info {
 	return infos
 }
 
+// TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources
+// pins the store scoping of the wake filter for a rig-scoped session.
+//
+// Two arms are reachable and one is not. Its OWN rig store is reachable, as it
+// always was; the LEADING arm (ref "") is now reachable too, because that is
+// where claim-time class routing writes an assignee on a split city and where
+// the agent's own hook fan-out reads even on a single-store one
+// (appendCityHookStore) — dropping a claim the session holds there is what left
+// a live worker with no wake reason at all (ga-whzrt). Another rig's store stays
+// unreachable, which is what keeps this a scoping rule rather than
+// cross-store-for-everyone.
 func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(t *testing.T) {
 	cityPath := t.TempDir()
-	rigPath := filepath.Join(cityPath, "riga")
 	cfg := &config.City{
-		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigb")},
+		},
 		Agents: []config.Agent{{
 			Name: "worker",
 			Dir:  "riga",
@@ -57,20 +70,34 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 		{ID: "rig-named", Status: "open", Assignee: "riga/worker"},
 		{ID: "city-session", Status: "in_progress", Assignee: "session-1"},
 		{ID: "rig-session", Status: "in_progress", Assignee: "session-1"},
+		{ID: "other-rig-session", Status: "in_progress", Assignee: "session-1"},
+		{ID: "other-rig-named", Status: "open", Assignee: "riga/worker"},
 	}
-	storeRefs := []string{"", "riga", "", "riga"}
+	storeRefs := []string{"", "riga", "", "riga", "rigb", "rigb"}
 
 	got, gotRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, sessionInfosFromBeads(sessions), work, storeRefs)
 
-	if len(got) != 2 {
-		t.Fatalf("filtered work length = %d, want 2: %#v", len(got), got)
+	wantIDs := []string{"city-named", "rig-named", "city-session", "rig-session"}
+	wantRefs := []string{"", "riga", "", "riga"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("filtered work length = %d, want %d: %#v", len(got), len(wantIDs), got)
 	}
-	if got[0].ID != "rig-named" || got[1].ID != "rig-session" {
-		t.Fatalf("filtered work IDs = [%s %s], want [rig-named rig-session]", got[0].ID, got[1].ID)
+	for i, want := range wantIDs {
+		if got[i].ID != want {
+			t.Fatalf("filtered work IDs = %v, want %v", assignedWorkIDs(got), wantIDs)
+		}
+		if gotRefs[i] != wantRefs[i] {
+			t.Fatalf("filtered store refs = %#v, want %#v aligned with beads", gotRefs, wantRefs)
+		}
 	}
-	if len(gotRefs) != len(got) || gotRefs[0] != "riga" || gotRefs[1] != "riga" {
-		t.Fatalf("filtered store refs = %#v, want [riga riga] aligned with beads", gotRefs)
+}
+
+func assignedWorkIDs(work []beads.Bead) []string {
+	ids := make([]string, 0, len(work))
+	for _, wb := range work {
+		ids = append(ids, wb.ID)
 	}
+	return ids
 }
 
 func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligible(t *testing.T) {

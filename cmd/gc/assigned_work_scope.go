@@ -9,6 +9,22 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// classBindingAssignedWorkStoreRef names the store-ref the assigned-work
+// collection records for its LEADING arm — the store the controller reconciler
+// leads with, which on a converged split city IS the relocated
+// coordination-class binding (coordClassStoreCandidates, called with an empty
+// cityRef from collectAssignedWorkBeadsWithStores).
+//
+// The VALUE must stay empty. It is not a label chosen for this arm; it is the
+// same empty string assignedWorkStoreRefForAgent returns for every agent with no
+// configured rig, and the two are compared to each other here, in
+// assignedWorkIndexReachableFromAgent, and in openSessionOwnsWork. Renaming it
+// (to, say, "class:sessions") would make a rig-less agent stop matching its own
+// city-store work in all three places — a wake/demand regression far larger than
+// the trace clarity it would buy. The constant exists so the arm can be NAMED at
+// the sites that reason about it, without changing what it is.
+const classBindingAssignedWorkStoreRef = ""
+
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
 	if cfg == nil || agentCfg == nil {
 		return ""
@@ -234,6 +250,22 @@ func filterAssignedWorkBeadsForSessionWake(
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			add(id, storeRef)
+			// A claim this session HOLDS can also live on the leading
+			// class-binding arm, whatever the owning agent's rig scope: on a
+			// split city that is where claim-time class routing writes the
+			// assignee (claim_class_route.go), and even on a single-store city
+			// the agent's own hook fan-out reaches the city store
+			// (appendCityHookStore) — so a bead it can claim was being dropped
+			// here for a store it demonstrably reads. Dropping it is what left a
+			// claim-holder with AwakeDecision{Reason:""} and drained it down the
+			// no-wake-reason arm while it owned in-progress work (ga-whzrt).
+			//
+			// This widens COLLECTION only. The match is still this session's own
+			// exact assignee identity, so no bead belonging to anyone else
+			// becomes visible; the template key below deliberately does NOT get
+			// the extra arm, because a template match is a scope statement
+			// rather than an ownership one.
+			add(id, classBindingAssignedWorkStoreRef)
 		}
 		add(template, storeRef)
 	}
