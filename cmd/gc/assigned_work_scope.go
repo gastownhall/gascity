@@ -109,12 +109,20 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 
 // filterAssignedWorkBeadsForPoolDemand resolves work through the routed
 // backing template because pool scale decisions are per agent template.
+// readyAssignedFlags, when non-nil, must be index-aligned with
+// assignedWorkBeads (see readyAssignedFlagsForBeads): a false entry marks a
+// bead the open-routed orphan-release pass (appendOpenRoutedWorkUnique)
+// captured without ever verifying it against readyExcludeTypes or blocking
+// dependencies, so it must not generate pool demand. A nil slice (test call
+// sites that build assignedWorkBeads by hand, bypassing
+// collectAssignedWorkBeadsWithStores) skips this gate entirely.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
+	readyAssignedFlags []bool,
 ) []beads.Bead {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
 		return assignedWorkBeads
@@ -139,8 +147,12 @@ func filterAssignedWorkBeadsForPoolDemand(
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
+	deadAssigneeTemplates := confirmedDeadAssigneeTemplates(cfg, sessionInfos)
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
+		if readyAssignedFlags != nil && i < len(readyAssignedFlags) && !readyAssignedFlags[i] {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
@@ -149,6 +161,12 @@ func filterAssignedWorkBeadsForPoolDemand(
 					template = cfg.Agents[0].QualifiedName()
 				}
 			}
+		}
+		if template == "" {
+			// Owning session confirmed-exited (FR-1): fall back to the
+			// resolved dead-assignee template (FR-2) instead of dropping
+			// this stranded work from pool-demand scope entirely.
+			template = deadAssigneeTemplates[strings.TrimSpace(wb.Assignee)]
 		}
 		if template == "" {
 			continue

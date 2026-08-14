@@ -163,6 +163,11 @@ type defaultScaleCheckTarget struct {
 	storeKey string
 	store    beads.Store
 	err      error
+	// deadAssigneeTemplates maps confirmed-dead assignee identities (FR-1) to
+	// the pool template their stranded work should count against (FR-2).
+	// Populated once per tick and attached to every target; nil is the
+	// common case (see confirmedDeadAssigneeTemplates).
+	deadAssigneeTemplates map[string]string
 }
 
 type scaleCheckDemand struct {
@@ -413,6 +418,24 @@ func buildDesiredStateWithSessionBeads(
 	if openSessionBeadsErr != nil {
 		fmt.Fprintf(stderr, "collectAllOpenSessionInfos: PARTIAL — %v (cold-pool detection may undercount running sessions)\n", openSessionBeadsErr) //nolint:errcheck
 	}
+
+	// Collect closed session Infos too, so stranded assigned-work beads whose
+	// owning session has exited (FR-1 confirmed-dead) can still be mapped to
+	// pool demand instead of silently going uncounted. A partial/failed
+	// collection is logged, not swallowed, but never blocks the tick — worst
+	// case some confirmed-dead assignees are missed this cycle and pool
+	// demand undercounts by the same beads that were already undercounted
+	// before this fallback existed.
+	subPhaseStart = time.Now()
+	allClosedSessionInfos, closedSessionBeadsErr := collectAllClosedSessionInfos(cfg, store, rigStores, suspendedRigPaths)
+	recordDemandSubPhase(trace, "demand_snapshot.collect_closed_session_beads", subPhaseStart, map[string]any{
+		"beads":   len(allClosedSessionInfos),
+		"partial": closedSessionBeadsErr != nil,
+	})
+	if closedSessionBeadsErr != nil {
+		fmt.Fprintf(stderr, "collectAllClosedSessionInfos: PARTIAL — %v (dead-assignee pool-wake fallback may miss stranded work)\n", closedSessionBeadsErr) //nolint:errcheck
+	}
+	deadAssigneeTemplates := confirmedDeadAssigneeTemplates(cfg, allClosedSessionInfos)
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
@@ -772,6 +795,9 @@ func buildDesiredStateWithSessionBeads(
 			"pools": len(pendingPools),
 		})
 		if len(defaultScaleTargets) > 0 {
+			for i := range defaultScaleTargets {
+				defaultScaleTargets[i].deadAssigneeTemplates = deadAssigneeTemplates
+			}
 			subPhaseStart = time.Now()
 			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
@@ -853,11 +879,18 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		// Open sessions drive resume/wake-known-identity tiers; closed sessions
+		// are only consulted for confirmed-dead assignee resolution (FR-1/FR-2)
+		// inside filterAssignedWorkBeadsForPoolDemand and computePoolDesiredStates
+		// — both already ignore the other bucket, so passing the union is safe.
+		poolDemandSessionInfos := make([]session.Info, 0, len(sessionBeads.OpenInfos())+len(allClosedSessionInfos))
+		poolDemandSessionInfos = append(poolDemandSessionInfos, sessionBeads.OpenInfos()...)
+		poolDemandSessionInfos = append(poolDemandSessionInfos, allClosedSessionInfos...)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, poolDemandSessionInfos, assignedWorkBeads, assignedWorkStoreRefs, readyAssignedFlagsForBeads(readyAssigned, assignedWorkBeads, assignedWorkStoreRefs))
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, poolDemandSessionInfos, scaleCheckCounts, scaleCheckDemandByTemplate, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1103,11 +1136,12 @@ func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string
 // .Closed true). Partial-result errors still contribute their partial slice and
 // join into the returned error; any hard error is returned with an empty slice
 // for that store.
-func collectAllOpenSessionInfos(
+func collectAllSessionInfosMatching(
 	cfg *config.City,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
+	keep func(session.Info) bool,
 ) ([]session.Info, error) {
 	// Sessions arm of the reconciler frame: iterate the session-class candidate
 	// fan-out (city + non-suspended rigs). CachingStore-wrapped stores are used
@@ -1131,7 +1165,12 @@ func collectAllOpenSessionInfos(
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
 			// still returned alongside the error, so the fold below preserves them.
-			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
+			// IncludeClosed must be true here: the keep predicate (not this query)
+			// is what discriminates open vs. closed, and collectAllClosedSessionInfos
+			// needs closed rows to reach it at all — ListAll's default IncludeClosed
+			// is false, which would otherwise drop every closed session bead before
+			// keep ever saw it.
+			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{IncludeClosed: true})
 			results[idx] = storeResult{infos: infos, err: err}
 		}()
 	}
@@ -1144,7 +1183,7 @@ func collectAllOpenSessionInfos(
 			errs = append(errs, r.err)
 			if beads.IsPartialResult(r.err) {
 				for _, info := range r.infos {
-					if !info.Closed {
+					if keep(info) {
 						allInfos = append(allInfos, info)
 					}
 				}
@@ -1152,7 +1191,7 @@ func collectAllOpenSessionInfos(
 			continue
 		}
 		for _, info := range r.infos {
-			if !info.Closed {
+			if keep(info) {
 				allInfos = append(allInfos, info)
 			}
 		}
@@ -1161,6 +1200,31 @@ func collectAllOpenSessionInfos(
 		return allInfos, errors.Join(errs...)
 	}
 	return allInfos, nil
+}
+
+func collectAllOpenSessionInfos(
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]session.Info, error) {
+	return collectAllSessionInfosMatching(cfg, cityStore, rigStores, suspendedRigPaths, func(info session.Info) bool {
+		return !info.Closed
+	})
+}
+
+// collectAllClosedSessionInfos mirrors collectAllOpenSessionInfos but keeps
+// closed sessions instead. It feeds confirmedDeadAssigneeTemplates, which
+// resolves stranded assigned-work beads whose owning session has exited.
+func collectAllClosedSessionInfos(
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]session.Info, error) {
+	return collectAllSessionInfosMatching(cfg, cityStore, rigStores, suspendedRigPaths, func(info session.Info) bool {
+		return info.Closed
+	})
 }
 
 func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {
@@ -1575,9 +1639,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 
 	type scaleStoreGroup struct {
-		store     beads.Store
-		storeKey  string
-		templates map[string]struct{}
+		store                 beads.Store
+		storeKey              string
+		templates             map[string]struct{}
+		deadAssigneeTemplates map[string]string
 	}
 	groups := make(map[string]*scaleStoreGroup)
 	var errs []error
@@ -1609,6 +1674,14 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			groups[key] = group
 		}
 		group.templates[template] = struct{}{}
+		for assignee, deadTemplate := range target.deadAssigneeTemplates {
+			if group.deadAssigneeTemplates == nil {
+				group.deadAssigneeTemplates = make(map[string]string, len(target.deadAssigneeTemplates))
+			}
+			if _, exists := group.deadAssigneeTemplates[assignee]; !exists {
+				group.deadAssigneeTemplates[assignee] = deadTemplate
+			}
+		}
 	}
 
 	// countedBeads dedups counted bead IDs per template ACROSS store groups.
@@ -1636,10 +1709,22 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 		}
 		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
-				continue
+			var template string
+			if assignee := strings.TrimSpace(b.Assignee); assignee != "" {
+				// Assigned work only counts as pool demand when the assignee
+				// is a confirmed-dead identity (FR-1) — an open/idle/asleep
+				// or unresolvable assignee's work stays with its owner.
+				deadTemplate, confirmedDead := group.deadAssigneeTemplates[assignee]
+				if !confirmedDead {
+					continue
+				}
+				template = controllerDemandRouteTarget(cfg, b, group.templates)
+				if template == "" {
+					template = deadTemplate
+				}
+			} else {
+				template = controllerDemandRouteTarget(cfg, b, group.templates)
 			}
-			template := controllerDemandRouteTarget(cfg, b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
