@@ -58,14 +58,18 @@ const (
 	RoleAuthority Role = iota
 
 	// RoleWorkFallback is the work ledger as the RESIDUAL answer of a by-id
-	// plan. When it is the last leg it is returned UNPROBED: it is the
-	// caller's own store, and letting the caller's own read produce its own
-	// error message is what keeps a single-store city byte-identical.
+	// plan — or, on a plane with a routed work axis (ByID.WorkAxis), the store
+	// that plane's router pinned. When it is the last leg it is returned
+	// UNPROBED: it is the caller's own store, and letting the caller's own read
+	// produce its own error message is what keeps a single-store city
+	// byte-identical.
 	RoleWorkFallback
 
-	// RoleShadow is a work store whose CONFIGURED prefix also covers the id.
-	// A reserved class prefix is only advisory on work stores, so one can
-	// legitimately hold an id inside a relocated class's namespace.
+	// RoleShadow is another work store that can hold the id, read BEHIND the
+	// residual: one whose CONFIGURED prefix also covers it — a reserved class
+	// prefix is only advisory on work stores, so a work store can legitimately
+	// hold an id inside a relocated class's namespace — or one a routed work
+	// axis listed behind the store it pinned.
 	//
 	// A consumer whose pre-resolver list did not include the rig stores must
 	// not gain them silently: it either resolves over a rig-less Topology or
