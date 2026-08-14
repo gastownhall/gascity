@@ -370,12 +370,40 @@ func (ops *hookClaimOps) applyDefaults() {
 
 // claimWindowSpent reports whether this invocation's claim window has elapsed.
 func (ops *hookClaimOps) claimWindowSpent() bool {
-	return ops.invocationAge() > ops.ClaimWindow
+	return ops.invocationAge() > ops.claimWindowOrDefault()
 }
 
 // invocationAge is how long this `gc hook --claim` invocation has been running.
+//
+// A zero InvokedAt means no invocation window was ever opened, which happens
+// only for a caller driving a claim tier directly rather than through
+// doHookClaim / claimHookWorkWithRunner (both of which stamp it in
+// applyDefaults). Such a caller has no turn for the claim to outlive, so it
+// reports age zero and the fence never fires — fail-open by construction, not
+// by accident.
 func (ops *hookClaimOps) invocationAge() time.Duration {
-	return ops.Now().Sub(ops.InvokedAt)
+	if ops.InvokedAt.IsZero() {
+		return 0
+	}
+	return ops.nowOrWallClock().Sub(ops.InvokedAt)
+}
+
+// nowOrWallClock is ops.Now with its production default applied inline, so a
+// direct-seam caller that never ran applyDefaults cannot nil-panic the fence.
+func (ops *hookClaimOps) nowOrWallClock() time.Time {
+	if ops.Now != nil {
+		return ops.Now()
+	}
+	return time.Now()
+}
+
+// claimWindowOrDefault is ops.ClaimWindow with its default applied inline, for
+// the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
+	if ops.ClaimWindow > 0 {
+		return ops.ClaimWindow
+	}
+	return resolveHookClaimWindow()
 }
 
 // claimMutationContext bounds a claim-write child by whichever is sooner: the
@@ -387,7 +415,7 @@ func (ops *hookClaimOps) invocationAge() time.Duration {
 // lands late is exactly the parked claim the fence exists to prevent.
 func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
 	budget := hookClaimMutationTimeout
-	if remaining := ops.ClaimWindow - ops.invocationAge(); remaining < budget {
+	if remaining := ops.claimWindowOrDefault() - ops.invocationAge(); remaining < budget {
 		budget = remaining
 	}
 	if budget <= 0 {
@@ -411,7 +439,7 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 	parentAlive := os.Getppid() != 1
 	fmt.Fprintf(stderr,
 		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
-		candidateID, ops.ClaimWindow, age.Round(time.Millisecond), parentAlive) //nolint:errcheck
+		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive) //nolint:errcheck
 	ops.EmitClaimWindowExpired(hookClaimWindowExpiry{
 		BeadID:        candidateID,
 		InvocationAge: age,
@@ -705,7 +733,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if minted && ops.claimWindowSpent() {
 		fmt.Fprintf(stderr,
 			"gc hook --claim: claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it\n",
-			bead.ID, ops.ClaimWindow, ops.invocationAge().Round(time.Millisecond)) //nolint:errcheck
+			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond)) //nolint:errcheck
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])

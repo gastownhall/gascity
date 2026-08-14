@@ -114,6 +114,13 @@ func TestNonTurnHookInvocationCannotMintExecution(t *testing.T) {
 			if nonTurnProbeClaimed(t, argvLog) {
 				t.Fatalf("a %s callback lane ran a claim mutation; bd argv log:\n%s", marker.key, readFileForTest(t, argvLog))
 			}
+			// The refusal must also be CHEAP. A provider callback's whole budget
+			// is 15s (defaultHookRunTimeout) while the work query alone is
+			// bounded at 60s (hookWorkQueryTimeout), so a fence that refuses only
+			// after the query is a fence whose answer the provider never sees.
+			if readFileForTest(t, argvLog) != "<absent>" {
+				t.Fatalf("a %s callback lane ran the work query before refusing; bd argv log:\n%s", marker.key, readFileForTest(t, argvLog))
+			}
 			if got := nonTurnStepStartedCount(t, cityDir); got != 0 {
 				t.Fatalf("execution.step_started count = %d, want 0 from a non-turn invocation", got)
 			}

@@ -105,6 +105,25 @@
       },
       "is_blocked": {
         "type": "boolean"
+      },
+      "blocked_by": {
+        "type": "array",
+        "description": "Blocking dependencies of this row, each carrying the blocker's status. Populated only on the --status in_progress (crash-recovery) arm; absent elsewhere, which consumers read as not-blocked.",
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "status"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "additionalProperties": false
