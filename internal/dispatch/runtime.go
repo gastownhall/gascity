@@ -851,14 +851,20 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
-	// A terminal root makes every still-open generated member non-executable.
-	// Close the remainder as one ordered, idempotent batch before completing
-	// the finalizer. This also repairs partially materialized workflows whose
-	// unused steps were never reached by ordinary dependency progression.
-	if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+	// A terminal root makes every still-open generated member non-executable —
+	// except the teardown tail, which is executable precisely because the root
+	// is now terminal. Close the remainder as one ordered, idempotent batch
+	// before completing the finalizer. This also repairs partially materialized
+	// workflows whose unused steps were never reached by ordinary dependency
+	// progression.
+	excludeTeardown, err := teardownTailExclusion(store, rootID)
+	if err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
+	}
+	if _, err := molecule.CloseSubtreeWithMetadataExcept(store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	}); err != nil {
+	}, excludeTeardown); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
@@ -883,6 +889,41 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	}
 
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+// teardownTailExclusion builds the predicate that keeps the teardown tail out
+// of the terminal sweep. Teardown work runs after the root settles by contract
+// (its pass condition may branch on the run outcome), so force-closing it at
+// settlement would skip the very step that releases the workflow's resources.
+//
+// The tail is the teardown-scoped members plus every attempt of the same step:
+// retry expansion strips gc.scope_role from the first attempt, leaving gc.step_id
+// as the only durable link back to the teardown step.
+func teardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) bool, error) {
+	members, err := molecule.ListSubtree(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	teardownStepIDs := make(map[string]struct{})
+	for _, member := range members {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
+			continue
+		}
+		if stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey]); stepID != "" {
+			teardownStepIDs[stepID] = struct{}{}
+		}
+	}
+	return func(member beads.Bead) bool {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
+			return true
+		}
+		stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey])
+		if stepID == "" {
+			return false
+		}
+		_, ok := teardownStepIDs[stepID]
+		return ok
+	}, nil
 }
 
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {

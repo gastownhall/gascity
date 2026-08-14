@@ -180,6 +180,17 @@ func graphSinkStepIDs(steps []*Step) []string {
 		if step == nil {
 			continue
 		}
+		// Teardown-scoped work is post-settlement by contract: its pass
+		// condition may (and for worktree cleanup does) branch on the root
+		// outcome that only workflow-finalize produces. Sinking it here closes
+		// that loop into a settlement deadlock — finalize waits on the
+		// teardown, the teardown waits on the outcome finalize would have
+		// written. Retry/ralph controls minted from a teardown step retain
+		// gc.scope_role=teardown, so one predicate covers the raw step and
+		// every control shape derived from it.
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
+			continue
+		}
 		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "workflow-finalize", "spec":
 			continue
