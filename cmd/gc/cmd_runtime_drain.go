@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -692,10 +693,58 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
-// doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
-// controller so the reconciler observes the drained state immediately instead
-// of waiting for its next patrol tick.
+// drainAckReleaseHeldClaims is a mutable global test seam over
+// releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
+// Tests that swap it MUST NOT call t.Parallel().
+var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
+
+// releaseUnexecutedClaimsForSession resolves this city's residency-correct work
+// legs and gives back every in_progress claim the draining session still holds.
+//
+// The leg set mirrors `gc session close`, which leads with the WORK store and
+// hands in the relocated graph binding as a class leg: a claim that claim-time
+// routing left in the binding is invisible to a work-led scan, and would be
+// released by nothing. Best-effort throughout — a city that cannot be resolved
+// or a store that cannot be opened must never block the ack itself, which is the
+// signal the controller is waiting on.
+func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
+	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(sessionName) == "" {
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil || store == nil {
+		if err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: opening store to release held claims: %v\n", err) //nolint:errcheck
+		}
+		return
+	}
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: resolving session %q to release held claims: %v\n", sessionName, err) //nolint:errcheck
+		return
+	}
+	var rigStores map[string]beads.Store
+	if cfg != nil {
+		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	}
+	var classStores []beads.Store
+	if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
+		classStores = append(classStores, binding)
+	}
+	releaseUnexecutedClaimsOnDrainAck(store, rigStores, sessionBead, stderr, classStores...)
+}
+
+// doRuntimeDrainAck releases any unexecuted claim the session still holds, sets
+// the drain-ack flag, then pokes the controller so the reconciler observes the
+// drained state immediately instead of waiting for its next patrol tick.
+//
+// The release runs BEFORE the ack, and the order is load-bearing: the ack is what
+// tells the controller it may stop this session, so acknowledging first opens a
+// window in which the session dies still holding exactly the claim this release
+// exists to clear.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

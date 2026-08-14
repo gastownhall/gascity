@@ -32,6 +32,22 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// BeadClaimReleased fires when a claim this process WON is given back
+	// because it could not be delivered to a live consumer: the worker's result
+	// write failed (the provider closed the tool pipe), or the CAS landed after
+	// the invoking turn's claim window was already spent. Both shapes produce an
+	// in_progress bead nobody will ever execute, so the claim is released
+	// compare-and-swap and this event records that it happened. It is the
+	// release dual of BeadClaimRejected: that one reports a claim we did not
+	// get, this one a claim we could not keep.
+	BeadClaimReleased = "bead.claim_released"
+	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
+	// mutation after its invocation window has elapsed — the signature of a
+	// claim command that outlived the agent turn that invoked it (an abandoned
+	// or killed provider tool call). No claim is minted. The payload's
+	// invocation_age_ms and parent_alive let the fleet distinguish honest slow
+	// stores from orphaned claimers reparented to init.
+	ExecutionClaimWindowExpired = "execution.claim_window_expired"
 	// ExecutionWorkAssociated records an authoritative association between a
 	// graph.v2 workflow run and one physical input work bead. Subject carries
 	// the work bead and RunID carries the workflow root.
@@ -283,9 +299,10 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
-	BeadClaimRejected,
+	BeadClaimRejected, BeadClaimReleased,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionClaimWindowExpired,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

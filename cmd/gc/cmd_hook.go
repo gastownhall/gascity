@@ -119,6 +119,15 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// Mark the child as a provider CALLBACK lane. gc hook run is the managed
+	// wrapper every rendered provider hook command flows through, and it runs
+	// arbitrary gc argv verbatim — nothing stops `hook --claim` appearing there,
+	// today by operator edit and tomorrow by a new overlay. A callback's stdout
+	// goes to the hook runner, never to a model, so a claim minted in one is
+	// parked the instant it is won; the claim path refuses on this marker (F-A,
+	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
+	// --inject, nudge drain, mail check — is read-only and unaffected.
+	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on

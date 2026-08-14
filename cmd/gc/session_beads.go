@@ -1127,6 +1127,73 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	}
 }
 
+// releaseUnexecutedClaimsOnDrainAck gives back every in_progress WORK bead this
+// session still holds when it acknowledges drain.
+//
+// Drain-ack means "I am done and I hold nothing." A session that reaches it
+// still holding an in_progress claim never executed that claim — the correct
+// worker contract orders drain-ack strictly after `gc bd close` — so the claim is
+// parked work no one will run. Releasing it here makes "a session ends its last
+// turn holding an unexecuted claim" structurally unrepresentable at the one place
+// every ephemeral worker already terminates.
+//
+// It differs from unclaimWorkAssignedToRetiredSessionBead in exactly one way,
+// and the difference is load-bearing: only in_progress is swept. Continuation
+// preassignment writes an assignee onto OPEN siblings so they stay with the live
+// context, and sweeping those would undo the preassignment the session's own
+// claim just made. Everything else — the residency-correct leg set, the CAS,
+// the session/mail exclusions — is deliberately the same machinery, because a
+// second implementation of "release this session's work" is a second chance to
+// disagree with the first.
+//
+// classStores are the non-work ledgers that can also hold work this session
+// owns — today the relocated coordination-class binding, which claim-time
+// routing (claim_class_route.go) writes in_progress assignees into on a split
+// city. Without it a graph-resident claim would be released by nothing.
+func releaseUnexecutedClaimsOnDrainAck(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBead beads.Bead,
+	stderr io.Writer,
+	classStores ...beads.Store,
+) {
+	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	identifiers := sessionAssignmentIdentifiers(sessionBead)
+	seen := make(map[string]struct{})
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) {
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
+		for _, assignee := range identifiers {
+			work, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
+			if err != nil {
+				fmt.Fprintf(stderr, "session beads: listing in-progress work held by draining session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
+				continue
+			}
+			for _, item := range work {
+				if session.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				key := strconv.Itoa(storeIndex) + "\x00" + item.ID
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				// No fallback route: a bead released here keeps whatever routing
+				// it already carried, exactly as the close-release path does.
+				// ReleaseWorkBead is compare-and-swap on the assignee, so a bead
+				// that legitimately changed hands since the list is left alone.
+				if err := wa.ReleaseWorkBead(item, ""); err != nil {
+					fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by draining session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+				}
+			}
+		}
+	}
+}
+
 func reassignWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
