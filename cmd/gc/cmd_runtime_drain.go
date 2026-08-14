@@ -713,15 +713,17 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil || store == nil {
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: opening store to release held claims: %v\n", err) //nolint:errcheck
-		}
 		return
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: resolving session %q to release held claims: %v\n", sessionName, err) //nolint:errcheck
+		// A session that cannot be resolved holds nothing this pass can find, so
+		// there is nothing to report. Both arms above are deliberately silent for
+		// the same reason: the ack is the signal the controller is waiting on, and
+		// a release that could not even begin must not decorate a successful ack
+		// with a warning an operator can do nothing about. A claim genuinely left
+		// behind here is still caught by the dead-assignee release lane.
 		return
 	}
 	var rigStores map[string]beads.Store
