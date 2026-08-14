@@ -838,7 +838,15 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // check) and does not enclose this work query. The package-level var lets us
 // lower it again once the probe's round-trip count is reduced and the slow
 // per-rig `bd ready`/`gc ready` paths are optimized.
-var hookWorkQueryTimeout = 60 * time.Second
+//
+// 2026-08-14: raised 60s -> 150s. Measured on a loaded six-rig city: each
+// `gc ready` leg of the default probe costs 10-14s (~4s process start + a
+// 6-leg federated read), and the five sequential reads put the pool-demand
+// payoff call at t=60s exactly — 850+ session.work_query_failed events with
+// every hook starved while `gc ready` run standalone returned the routed
+// rows. 150s covers the measured worst case (~70s) with margin for load;
+// the real cure remains ga-4qdfn (fewer round-trips, faster reader).
+var hookWorkQueryTimeout = 150 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
